@@ -122,12 +122,21 @@ function AgingSection({ label, report }: { label: string; report: AgingReport })
         <span className="text-xs text-ink-faint">{report.documents.length}</span>
       </div>
 
-      <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-        {AGING_BUCKETS.map((bucket) => (
-          <BucketStat key={bucket} label={bucket} value={report.totalsByBucket[bucket] ?? 0} />
-        ))}
-        <BucketStat label="Total open" value={report.totalOpen} accent />
-      </div>
+      {report.currency !== null || report.totalsByCurrency === undefined ? (
+        <>
+          {report.currency === null && report.documents.length > 0 && (
+            <p className="mb-2 text-xs text-amber-700">
+              These documents are in more than one currency and this server does not total them per currency,
+              so the figures below add amounts in different currencies together.
+            </p>
+          )}
+          <BucketRow totals={report} currency={report.currency} />
+        </>
+      ) : (
+        Object.entries(report.totalsByCurrency).map(([currency, totals]) => (
+          <BucketRow key={currency} totals={totals} currency={currency} />
+        ))
+      )}
 
       {empty ? (
         <div className="rounded-xl border border-line bg-surface-soft px-4 py-8 text-center text-sm text-ink-muted">
@@ -158,7 +167,7 @@ function AgingSection({ label, report }: { label: string; report: AgingReport })
                       {row.bucket}
                     </span>
                   </td>
-                  <td className="px-4 py-2.5 text-right font-medium text-ink">{formatCell(row.open, "money")}</td>
+                  <td className="px-4 py-2.5 text-right font-medium text-ink">{formatCell(row.open, "money", row.currency)}</td>
                 </tr>
               ))}
             </tbody>
@@ -169,12 +178,40 @@ function AgingSection({ label, report }: { label: string; report: AgingReport })
   );
 }
 
-function BucketStat({ label, value, accent }: { label: string; value: number; accent?: boolean }) {
+/** One currency's bucket totals. Totals in different currencies are never added together. */
+function BucketRow({
+  totals,
+  currency,
+}: {
+  totals: { readonly totalsByBucket: Record<string, number>; readonly totalOpen: number };
+  currency: string | null;
+}) {
+  return (
+    <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+      {AGING_BUCKETS.map((bucket) => (
+        <BucketStat key={bucket} label={bucket} value={totals.totalsByBucket[bucket] ?? 0} currency={currency} />
+      ))}
+      <BucketStat label={currency === null ? "Total open" : `Total open · ${currency}`} value={totals.totalOpen} currency={currency} accent />
+    </div>
+  );
+}
+
+function BucketStat({
+  label,
+  value,
+  currency,
+  accent,
+}: {
+  label: string;
+  value: number;
+  currency: string | null;
+  accent?: boolean;
+}) {
   return (
     <div className={`card p-3 ${accent ? "ring-1 ring-brand/20" : ""}`}>
       <div className="text-xs font-medium uppercase tracking-wide text-ink-faint">{label}</div>
       <div className={`mt-1 text-base font-bold ${accent ? "text-brand" : "text-ink"}`}>
-        {formatCell(value, "money")}
+        {formatCell(value, "money", currency)}
       </div>
     </div>
   );

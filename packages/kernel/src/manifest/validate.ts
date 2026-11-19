@@ -7,7 +7,7 @@ import {
   type RbacGrant,
   type RoleDefinition,
 } from "@crossengin/auth";
-import type { DataClassification } from "@crossengin/types/meta-schema";
+import type { DataClassification, Entity, Trait } from "@crossengin/types/meta-schema";
 import { requiresAuditTrail } from "@crossengin/types/meta-schema";
 import type { FileTypeDeclaration } from "@crossengin/files";
 import { FileTypeIdSchema } from "@crossengin/files";
@@ -27,7 +27,18 @@ import {
 } from "@crossengin/views";
 import type { SearchManifest } from "@crossengin/search";
 import { BUILT_IN_TRAIT_FIELDS } from "../ddl/built-in-traits.js";
+import { columnNameForField } from "../ddl/column.js";
 import { expressionDefaultRefusal } from "../ddl/expression-default.js";
+import {
+  foreignKeyBaseName,
+  joinTableColumns,
+  joinTableName,
+  POSTGRES_IDENTIFIER_MAX_BYTES,
+  tenantIndexName,
+  toTableName,
+  trigramIndexBaseName,
+  uniqueIndexBaseName,
+} from "../ddl/identifiers.js";
 import {
   RESERVED_ENTITY_FIELD_NAMES,
   reservedFieldNameReason,
@@ -37,9 +48,11 @@ import {
 import { WorkflowValidationError } from "../workflow/errors.js";
 import { validateWorkflow } from "../workflow/validate.js";
 import { ManifestValidationError } from "./errors.js";
+import { checkManifestLimits, MANIFEST_LIMITS } from "./limits.js";
 import type { Manifest } from "./types.js";
 
 export function validateManifest(manifest: Manifest): void {
+  checkManifestLimits(manifest);
   const { entityNames, fieldsByEntity, requiredFieldsByEntity } =
     validateEntitiesTraitsRelations(manifest);
   const rolesMap = validateRoles(manifest);
@@ -261,6 +274,8 @@ function validateEntitiesTraitsRelations(manifest: Manifest): EntityIndex {
     }
   }
 
+  checkTraitFieldCollisions(entities, traits);
+
   // Only now that every trait an entity names is known to exist can its fields be resolved.
   const fieldsByEntity = new Map<string, ReadonlySet<string>>();
   const requiredFieldsByEntity = new Map<string, ReadonlySet<string>>();
@@ -384,7 +399,235 @@ function validateEntitiesTraitsRelations(manifest: Manifest): EntityIndex {
     }
   }
 
+  checkPhysicalNames(entities, traits, relations);
+
   return { entityNames, fieldsByEntity, requiredFieldsByEntity };
+}
+
+/**
+ * Refuses an own field that a trait the entity carries also supplies, and two traits supplying one
+ * name. `resolvedFields` keeps the first and drops the rest, so the served table had one column and
+ * the manifest two declarations of it — the own field's type and classification silently winning
+ * over the trait's (or the reverse for two traits, by the order they are listed). Only the
+ * reviewer's diff path refused it (`checkEntityFieldNames`), so on a deployment not requiring design
+ * review the collision reached the schema.
+ */
+function checkTraitFieldCollisions(entities: readonly Entity[], traits: readonly Trait[]): void {
+  const customByName = new Map(traits.map((t) => [t.name, t]));
+  for (const [i, entity] of entities.entries()) {
+    const own = new Set(entity.fields.map((f) => f.name));
+    const suppliedBy = new Map<string, string>();
+    for (const traitName of entity.traits ?? []) {
+      const fields =
+        BUILT_IN_TRAIT_FIELDS.get(traitName) ?? customByName.get(traitName)?.fields ?? [];
+      for (const field of fields) {
+        if (own.has(field.name)) {
+          throw new ManifestValidationError(
+            `entities[${i}].fields`,
+            `field '${entity.name}.${field.name}' is declared on the entity and supplied by its trait ` +
+              `'${traitName}'; one table column cannot be both — rename the field or drop the trait`,
+          );
+        }
+        const earlier = suppliedBy.get(field.name);
+        if (earlier !== undefined) {
+          throw new ManifestValidationError(
+            `entities[${i}].traits`,
+            `traits '${earlier}' and '${traitName}' both supply field '${field.name}' to '${entity.name}'`,
+          );
+        }
+        suppliedBy.set(field.name, traitName);
+      }
+    }
+  }
+}
+
+const encoder = new TextEncoder();
+
+function identifierTooLong(name: string): boolean {
+  return encoder.encode(name).length > POSTGRES_IDENTIFIER_MAX_BYTES;
+}
+
+/** The two columns the entity DDL writes on every table, whatever the manifest declares. */
+const SYSTEM_COLUMNS = ["id", "tenant_id"] as const;
+
+/**
+ * Refuses two declarations that the emitter would map to **one** physical name: an entity table,
+ * a join table or a column. Each is a silent merge, not an error, at DDL time:
+ *
+ * - `toTableName` folds case runs, so `ABTest` and `AbTest` are both `ab_test`.
+ * - A many-to-many join table is `<left>_<right>`, so it can equal an entity's table
+ *   (`Order` ↔ `Line` against `OrderLine`) or another pair's (`A` ↔ `BC` against `AB` ↔ `C`) — and
+ *   the column store emits a join table once per name, so the second relation shared the first's.
+ * - A reference field `owner` is stored in column `owner_id`, so a scalar `owner_id` beside it is
+ *   the same column, and a reference `tenant` is the system `tenant_id`.
+ * - A name past 63 bytes is truncated by Postgres, so two long names can become one.
+ * - The index and foreign-key names derived from a table and a column (`uniqueIndexBaseName` and its
+ *   siblings) share Postgres's per-schema relation namespace with every table, and the DDL creating
+ *   them is idempotent, so a collision or a truncation there skips an index or drops a foreign key
+ *   with no error. The check asks about every column, not only the ones that will be unique or
+ *   text — a derived name that cannot collide for one reason today would for another tomorrow, and
+ *   no shipped pack comes near either limit (longest derived name 43 bytes, no collision).
+ */
+function checkPhysicalNames(
+  entities: readonly Entity[],
+  traits: readonly Trait[],
+  relations: readonly NonNullable<Manifest["relations"]>[number][],
+): void {
+  const tableOwner = new Map<string, string>();
+  for (const [i, entity] of entities.entries()) {
+    const table = toTableName(entity.name);
+    if (identifierTooLong(table)) {
+      throw new ManifestValidationError(
+        `entities[${i}].name`,
+        `entity '${entity.name}' maps to table '${table}', longer than ` +
+          `${POSTGRES_IDENTIFIER_MAX_BYTES.toString()} bytes, which Postgres truncates silently`,
+      );
+    }
+    const earlier = tableOwner.get(table);
+    if (earlier !== undefined) {
+      throw new ManifestValidationError(
+        `entities[${i}].name`,
+        `${earlier} and entity '${entity.name}' both map to table '${table}'; rename one`,
+      );
+    }
+    tableOwner.set(table, `entity '${entity.name}'`);
+
+    const fields = resolvedFields(entity, traits);
+    if (fields.length > MANIFEST_LIMITS.fieldsPerEntity) {
+      throw new ManifestValidationError(
+        `entities[${i}].fields`,
+        `entity '${entity.name}' resolves to ${fields.length.toString()} fields; the ceiling is ` +
+          `${MANIFEST_LIMITS.fieldsPerEntity.toString()}`,
+      );
+    }
+    const columnOwner = new Map<string, string>(
+      SYSTEM_COLUMNS.map((c) => [c, "the system column"]),
+    );
+    for (const field of fields) {
+      const column = columnNameForField(field);
+      if (identifierTooLong(column)) {
+        throw new ManifestValidationError(
+          `entities[${i}].fields`,
+          `field '${entity.name}.${field.name}' maps to column '${column}', longer than ` +
+            `${POSTGRES_IDENTIFIER_MAX_BYTES.toString()} bytes, which Postgres truncates silently`,
+        );
+      }
+      const holder = columnOwner.get(column);
+      if (holder !== undefined) {
+        throw new ManifestValidationError(
+          `entities[${i}].fields`,
+          `field '${entity.name}.${field.name}' is stored in column '${column}', which ${holder} ` +
+            `already occupies — a reference field '<x>' is stored in '<x>_id'; rename one`,
+        );
+      }
+      columnOwner.set(column, `field '${field.name}'`);
+    }
+  }
+
+  checkDerivedNames(entities, traits, relations, tableOwner);
+
+  const pairOfJoinTable = new Map<string, string>();
+  for (const [i, rel] of relations.entries()) {
+    if (rel.kind !== "many_to_many") continue;
+    const table = joinTableName(rel.left, rel.right);
+    const pair = `${rel.left} <-> ${rel.right}`;
+    if (identifierTooLong(table)) {
+      throw new ManifestValidationError(
+        `relations[${i}]`,
+        `many-to-many ${pair} maps to join table '${table}', longer than ` +
+          `${POSTGRES_IDENTIFIER_MAX_BYTES.toString()} bytes, which Postgres truncates silently`,
+      );
+    }
+    const entityHolder = tableOwner.get(table);
+    if (entityHolder !== undefined) {
+      throw new ManifestValidationError(
+        `relations[${i}]`,
+        `many-to-many ${pair} maps to join table '${table}', which is ${entityHolder}'s table`,
+      );
+    }
+    // The same pair declared twice is one join table on purpose; a different pair is a merge.
+    const earlierPair = pairOfJoinTable.get(table);
+    if (earlierPair !== undefined && earlierPair !== pair) {
+      throw new ManifestValidationError(
+        `relations[${i}]`,
+        `many-to-many ${pair} and ${earlierPair} both map to join table '${table}'`,
+      );
+    }
+    pairOfJoinTable.set(table, pair);
+  }
+}
+
+function checkDerivedNames(
+  entities: readonly Entity[],
+  traits: readonly Trait[],
+  relations: readonly NonNullable<Manifest["relations"]>[number][],
+  tableOwner: ReadonlyMap<string, string>,
+): void {
+  const relationOwner = new Map<string, string>(tableOwner);
+  for (const rel of relations) {
+    if (rel.kind === "many_to_many")
+      relationOwner.set(
+        joinTableName(rel.left, rel.right),
+        `join table of ${rel.left} <-> ${rel.right}`,
+      );
+  }
+  const claim = (path: string, name: string, what: string): void => {
+    if (identifierTooLong(name)) {
+      throw new ManifestValidationError(
+        path,
+        `${what} would be named '${name}', longer than ${POSTGRES_IDENTIFIER_MAX_BYTES.toString()} bytes, ` +
+          `which Postgres truncates silently — shorten the entity or field name`,
+      );
+    }
+    const holder = relationOwner.get(name);
+    if (holder !== undefined) {
+      throw new ManifestValidationError(
+        path,
+        `${what} would be named '${name}', which ${holder} already is — the second would be skipped ` +
+          `without an error; rename one`,
+      );
+    }
+    relationOwner.set(name, what);
+  };
+  for (const [i, entity] of entities.entries()) {
+    const table = toTableName(entity.name);
+    claim(`entities[${i}].name`, tenantIndexName(table), `the tenant index of '${entity.name}'`);
+    for (const field of resolvedFields(entity, traits)) {
+      const column = columnNameForField(field);
+      const owner = `'${entity.name}.${field.name}'`;
+      claim(
+        `entities[${i}].fields`,
+        uniqueIndexBaseName(table, column),
+        `a unique index on ${owner}`,
+      );
+      claim(
+        `entities[${i}].fields`,
+        trigramIndexBaseName(table, column),
+        `a search index on ${owner}`,
+      );
+      // An entity's foreign-key name, `fk_<table>_<column>`, is per table and is never longer than
+      // the search index's `<table>_<column>_utrgm`, so the length refusal above already covers it.
+    }
+  }
+  // A join table has no search index, so its two foreign keys are checked here. Truncated onto one
+  // name, the second `DROP CONSTRAINT IF EXISTS` would drop the first.
+  for (const [i, rel] of relations.entries()) {
+    if (rel.kind !== "many_to_many") continue;
+    const table = joinTableName(rel.left, rel.right);
+    const { left, right } = joinTableColumns(rel.left, rel.right);
+    const columns = [left, right];
+    for (const column of columns) {
+      const fk = foreignKeyBaseName(table, column);
+      if (identifierTooLong(fk)) {
+        throw new ManifestValidationError(
+          `relations[${i}]`,
+          `the foreign key of many-to-many ${rel.left} <-> ${rel.right} would be named '${fk}', longer ` +
+            `than ${POSTGRES_IDENTIFIER_MAX_BYTES.toString()} bytes, which Postgres truncates silently — ` +
+            `shorten an entity name`,
+        );
+      }
+    }
+  }
 }
 
 function validateRoles(manifest: Manifest): Map<string, RoleDefinition> {

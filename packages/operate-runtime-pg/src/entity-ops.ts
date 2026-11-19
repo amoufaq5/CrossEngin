@@ -4,6 +4,7 @@ import {
   keysetOf,
   ListSurfaceUnserveable,
   preconditionHolds,
+  withoutNullFields,
   type ConditionalRemove,
   type ConditionalUpdate,
   type EntityRecord,
@@ -24,7 +25,7 @@ import {
 } from "./list-sql.js";
 import { rawFoldCall } from "./search-function.js";
 import { guardedTimestamptzCast } from "./temporal-sql.js";
-import { mergeRecord, resolveRecordId, type DocumentRow } from "./records.js";
+import { documentRecord, mergeRecord, resolveRecordId, type DocumentRow } from "./records.js";
 import {
   checkReferences,
   removeWithReferences,
@@ -51,7 +52,7 @@ export async function listOp(
     `SELECT document FROM ${table} WHERE tenant_id = $1 AND entity = $2 ORDER BY created_at, record_id`,
     [tenantId, entity],
   );
-  return res.rows.map((r) => r.document);
+  return res.rows.map((r) => documentRecord(r.document));
 }
 
 export async function listPageOp(
@@ -135,7 +136,7 @@ export async function listPageOp(
     `SELECT document FROM ${table} WHERE ${where} ORDER BY ${orderBy} LIMIT ${limitParam}`,
     params,
   );
-  const rows = res.rows.map((r) => r.document);
+  const rows = res.rows.map((r) => documentRecord(r.document));
   const hasMore = rows.length > query.limit;
   const records = hasMore ? rows.slice(0, query.limit) : rows;
   const last = records[records.length - 1];
@@ -154,7 +155,8 @@ export async function getOp(
     `SELECT document FROM ${table} WHERE tenant_id = $1 AND entity = $2 AND record_id = $3 LIMIT 1`,
     [tenantId, entity, id],
   );
-  return res.rows[0]?.document ?? null;
+  const document = res.rows[0]?.document;
+  return document === undefined ? null : documentRecord(document);
 }
 
 /**
@@ -180,7 +182,8 @@ export async function getLockedOp(
     `SELECT document FROM ${table} WHERE tenant_id = $1 AND entity = $2 AND record_id = $3 ${ROW_LOCK_CLAUSE[lock]}`,
     [tenantId, entity, id],
   );
-  return res.rows[0]?.document ?? null;
+  const document = res.rows[0]?.document;
+  return document === undefined ? null : documentRecord(document);
 }
 
 export async function createOp(
@@ -192,7 +195,7 @@ export async function createOp(
   integrity: DocumentIntegrityPlan | null = null,
 ): Promise<EntityRecord> {
   const id = resolveRecordId(record);
-  const stored: EntityRecord = { ...record, id };
+  const stored: EntityRecord = withoutNullFields({ ...record, id });
   await checkReferences(tx, table, integrity, tenantId, entity, stored, null);
   try {
     await tx.query(

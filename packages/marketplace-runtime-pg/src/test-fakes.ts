@@ -125,8 +125,8 @@ export function fakePackVersion(overrides: Partial<PackVersionRecord> = {}): Pac
 }
 
 /**
- * A fake PgConnection for the platform-wide `pack_versions` table: an in-memory
- * row map keyed by `(pack_id, version)` that honors the UPSERT + the SELECT reads,
+ * A fake PgConnection for the platform-wide `pack_versions` table: an in-memory row map keyed by
+ * `(pack_id, version)` that honors the insert's `DO NOTHING`, the guarded `UPDATE` and the reads,
  * capturing every `{sql, params}`.
  */
 export function fakeVersionPg(): {
@@ -162,7 +162,31 @@ export function fakeVersionPg(): {
         security_reviewed_at: p[17] ?? null,
         security_reviewer: p[18] ?? null,
       };
-      rows.set(`${String(p[0])}|${String(p[1])}`, row);
+      const key = `${String(p[0])}|${String(p[1])}`;
+      if (rows.has(key) && sql.includes("DO NOTHING")) return { rows: [], rowCount: 0 };
+      rows.set(key, row);
+      return { rows: [], rowCount: 1 };
+    }
+    if (sql.startsWith("UPDATE")) {
+      const key = `${String(p[0])}|${String(p[1])}`;
+      const row = rows.get(key);
+      if (row === undefined || row["status"] !== p[13] || row["security_review_status"] !== p[14]) {
+        return { rows: [], rowCount: 0 };
+      }
+      rows.set(key, {
+        ...row,
+        status: p[2],
+        published_at: p[3] ?? null,
+        published_by: p[4] ?? null,
+        deprecated_at: p[5] ?? null,
+        deprecated_reason: p[6] ?? null,
+        withdrawn_at: p[7] ?? null,
+        withdrawn_reason: p[8] ?? null,
+        superseded_by: p[9] ?? null,
+        security_review_status: p[10],
+        security_reviewed_at: p[11] ?? null,
+        security_reviewer: p[12] ?? null,
+      });
       return { rows: [], rowCount: 1 };
     }
     if (sql.includes("SELECT")) {

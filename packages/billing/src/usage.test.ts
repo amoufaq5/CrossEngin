@@ -18,34 +18,27 @@ describe("UsagePeriodSchema", () => {
 });
 
 describe("buildIdempotencyKey", () => {
-  it("produces a stable per-tenant per-meter per-day key", () => {
-    const a = buildIdempotencyKey({
-      tenantId: "t_1",
-      meter: "ai_call",
-      periodStart: "2026-05-13T10:00:00.000Z",
-    });
-    const b = buildIdempotencyKey({
-      tenantId: "t_1",
-      meter: "ai_call",
-      periodStart: "2026-05-13T23:59:59.000Z",
-    });
+  const base = { tenantId: "t_1", subscriptionId: "sub_1", meter: "ai_call" as const };
+
+  it("is stable for one window and names tenant, subscription, meter and start", () => {
+    const a = buildIdempotencyKey({ ...base, periodStart: "2026-05-13T10:00:00.000Z" });
+    const b = buildIdempotencyKey({ ...base, periodStart: "2026-05-13T10:00:00Z" });
     expect(a).toBe(b);
     expect(a).toContain("tenant=t_1");
+    expect(a).toContain("subscription=sub_1");
     expect(a).toContain("meter=ai_call");
-    expect(a).toContain("day=2026-05-13");
+    expect(a).toContain("start=2026-05-13T10:00:00.000Z");
   });
 
-  it("changes when the day rolls over", () => {
-    const a = buildIdempotencyKey({
-      tenantId: "t_1",
-      meter: "ai_call",
-      periodStart: "2026-05-13T00:00:00.000Z",
-    });
-    const b = buildIdempotencyKey({
-      tenantId: "t_1",
-      meter: "ai_call",
-      periodStart: "2026-05-14T00:00:00.000Z",
-    });
+  it("separates two windows that open on the same day — the overwrite this key used to cause", () => {
+    const a = buildIdempotencyKey({ ...base, periodStart: "2026-05-13T10:00:00.000Z" });
+    const b = buildIdempotencyKey({ ...base, periodStart: "2026-05-13T23:59:59.000Z" });
+    expect(a).not.toBe(b);
+  });
+
+  it("separates two subscriptions of one tenant on one meter and window", () => {
+    const a = buildIdempotencyKey({ ...base, periodStart: "2026-05-13T00:00:00.000Z" });
+    const b = buildIdempotencyKey({ ...base, subscriptionId: "sub_2", periodStart: "2026-05-13T00:00:00.000Z" });
     expect(a).not.toBe(b);
   });
 });

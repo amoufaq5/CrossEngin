@@ -3,6 +3,7 @@ import type { PgConnection, PgQueryResult } from "./connection.js";
 import {
   DEFAULT_COLUMN_KEY_REF,
   OLD_COLUMN_KEY_REF,
+  PGP_SYM_ENCRYPT_OPTIONS,
   type EncryptedColumnRow,
 } from "./encryption.js";
 import {
@@ -51,7 +52,7 @@ describe("reencryptColumnSql", () => {
 
   it("decrypts with the old key and re-encrypts with the new key", () => {
     expect(unscoped.sql).toBe(
-      `UPDATE "t_clinic"."patient" SET "mrn" = pgp_sym_encrypt(pgp_sym_decrypt("mrn", ${OLD_KEY}), ${NEW_KEY}) WHERE "mrn" IS NOT NULL;`,
+      `UPDATE "t_clinic"."patient" SET "mrn" = pgp_sym_encrypt(pgp_sym_decrypt("mrn", ${OLD_KEY}), ${NEW_KEY}, '${PGP_SYM_ENCRYPT_OPTIONS}') WHERE "mrn" IS NOT NULL;`,
     );
   });
 
@@ -279,13 +280,13 @@ describe("emitEncryptingViewTriggersSql", () => {
   it("encrypts the encrypted column on INSERT and passes plaintext columns through", () => {
     const fn = sql[1]!;
     expect(fn).toContain(
-      `INSERT INTO "t_clinic"."patient" ("tenant_id", "id", "mrn", "status") VALUES (NEW."tenant_id", NEW."id", CASE WHEN NEW."mrn" IS NULL THEN NULL ELSE pgp_sym_encrypt(NEW."mrn"::text, ${NEW_KEY}) END, NEW."status");`,
+      `INSERT INTO "t_clinic"."patient" ("tenant_id", "id", "mrn", "status") VALUES (NEW."tenant_id", NEW."id", CASE WHEN NEW."mrn" IS NULL THEN NULL ELSE pgp_sym_encrypt(NEW."mrn"::text, ${NEW_KEY}, '${PGP_SYM_ENCRYPT_OPTIONS}') END, NEW."status");`,
     );
   });
 
   it("encrypts on UPDATE and matches the row by its key columns", () => {
     const fn = sql[1]!;
-    expect(fn).toContain(`"mrn" = CASE WHEN NEW."mrn" IS NULL THEN NULL ELSE pgp_sym_encrypt(NEW."mrn"::text, ${NEW_KEY}) END`);
+    expect(fn).toContain(`"mrn" = CASE WHEN NEW."mrn" IS NULL THEN NULL ELSE pgp_sym_encrypt(NEW."mrn"::text, ${NEW_KEY}, '${PGP_SYM_ENCRYPT_OPTIONS}') END`);
     expect(fn).toContain(`WHERE "tenant_id" = OLD."tenant_id" AND "id" = OLD."id"`);
   });
 

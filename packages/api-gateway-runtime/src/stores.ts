@@ -8,11 +8,27 @@ import type {
   RouteDefinition,
 } from "@crossengin/api-gateway";
 
+/**
+ * The verified bearer token a `bearer_jwt` credential arrived as: which key verified it and the
+ * claims it carried. Absent for every other scheme.
+ *
+ * A resolver needs it for two questions the four fields beside it cannot answer: *was this token
+ * minted by this deployment* (only the verifying key id can say — a foreign IdP's scopes and this
+ * deployment's own login are otherwise indistinguishable) and *which claims beyond the four did it
+ * carry* (a session epoch, say). Handed over only **after** the signature and every required-claim
+ * check passed, so nothing here is caller-controlled beyond what a key this deployment trusts signed.
+ */
+export interface VerifiedBearerToken {
+  readonly kid: string;
+  readonly claims: Readonly<Record<string, unknown>>;
+}
+
 export interface PrincipalResolverInput {
   readonly tenantId: string | null;
   readonly principalRef: string;
   readonly scopes: readonly string[];
   readonly authScheme: string;
+  readonly bearer?: VerifiedBearerToken;
 }
 
 export interface PrincipalResolver {
@@ -25,10 +41,52 @@ export interface PrincipalResolver {
   resolve(input: PrincipalResolverInput): Promise<ResolvedPrincipal | PrincipalRefused | null>;
 }
 
+/**
+ * The response a completed keyed mutation produced, as a replay hands it back.
+ *
+ * Absent on a lookup means *not retained* — the body exceeded the gateway's cap, or the row predates
+ * retention — and a replay then says so in a header rather than answering an empty body as though
+ * the handler had produced one.
+ */
+export interface StoredIdempotentResponse {
+  /** The handler's own headers (content type, location), without `content-length`. */
+  readonly responseHeaders: Readonly<Record<string, string>>;
+  readonly responseBody: Uint8Array | null;
+}
+
+export type IdempotencyLookup = IdempotencyRecord & {
+  readonly replay?: StoredIdempotentResponse;
+};
+
+/**
+ * `reserved` is the one answer that admits the handler. Anything else carries the live row that
+ * held the key, which the caller evaluates again — it may have completed since the first read.
+ */
+export type IdempotencyReservation =
+  | { readonly reserved: true }
+  | { readonly reserved: false; readonly existing: IdempotencyLookup };
+
 export interface IdempotencyStore {
-  get(input: { readonly tenantId: string; readonly key: string }): Promise<IdempotencyRecord | null>;
+  get(input: { readonly tenantId: string; readonly key: string }): Promise<IdempotencyLookup | null>;
   put(input: { readonly tenantId: string; readonly record: IdempotencyRecord }): Promise<void>;
   update(input: { readonly tenantId: string; readonly key: string; readonly mutate: (rec: IdempotencyRecord) => IdempotencyRecord }): Promise<IdempotencyRecord>;
+  /**
+   * Claims the key with an `in_progress` row **atomically**, so of two concurrent requests carrying
+   * one key exactly one executes. A row whose `expiresAt` has passed — a completed record past its
+   * TTL, or a reservation whose holder died before finishing — is replaced rather than honoured.
+   */
+  reserve(input: { readonly tenantId: string; readonly record: IdempotencyRecord }): Promise<IdempotencyReservation>;
+  /** Turns this request's reservation into the completed record, with the response to replay. */
+  complete(input: {
+    readonly tenantId: string;
+    readonly record: IdempotencyRecord;
+    readonly replay: StoredIdempotentResponse | null;
+  }): Promise<void>;
+  /**
+   * Drops this request's reservation, so a retry executes. Matched on the request hash as well as
+   * the key, so a request cannot release a reservation another request holds.
+   */
+  release(input: { readonly tenantId: string; readonly key: string; readonly requestHashSha256: string }): Promise<void>;
 }
 
 export interface RateLimitDecision {
@@ -84,14 +142,48 @@ export class InMemoryPrincipalResolver implements PrincipalResolver {
 }
 
 export class InMemoryIdempotencyStore implements IdempotencyStore {
-  private readonly records: Map<string, IdempotencyRecord> = new Map();
+  private readonly records: Map<string, IdempotencyLookup> = new Map();
 
   private keyFor(tenantId: string, key: string): string {
     return `${tenantId}|${key}`;
   }
 
-  async get(input: { tenantId: string; key: string }): Promise<IdempotencyRecord | null> {
+  async get(input: { tenantId: string; key: string }): Promise<IdempotencyLookup | null> {
     return this.records.get(this.keyFor(input.tenantId, input.key)) ?? null;
+  }
+
+  // Atomic by construction: nothing between the read and the write yields the event loop.
+  async reserve(input: { tenantId: string; record: IdempotencyRecord }): Promise<IdempotencyReservation> {
+    const k = this.keyFor(input.tenantId, input.record.idempotencyKey);
+    const existing = this.records.get(k);
+    if (existing !== undefined && Date.parse(existing.expiresAt) > Date.parse(input.record.receivedAt)) {
+      return { reserved: false, existing };
+    }
+    this.records.set(k, input.record);
+    return { reserved: true };
+  }
+
+  async complete(input: {
+    tenantId: string;
+    record: IdempotencyRecord;
+    replay: StoredIdempotentResponse | null;
+  }): Promise<void> {
+    const k = this.keyFor(input.tenantId, input.record.idempotencyKey);
+    const existing = this.records.get(k);
+    if (existing !== undefined && existing.requestHashSha256 !== input.record.requestHashSha256) return;
+    this.records.set(k, input.replay === null ? input.record : { ...input.record, replay: input.replay });
+  }
+
+  async release(input: { tenantId: string; key: string; requestHashSha256: string }): Promise<void> {
+    const k = this.keyFor(input.tenantId, input.key);
+    const existing = this.records.get(k);
+    if (
+      existing !== undefined &&
+      existing.status === "in_progress" &&
+      existing.requestHashSha256 === input.requestHashSha256
+    ) {
+      this.records.delete(k);
+    }
   }
 
   async put(input: { tenantId: string; record: IdempotencyRecord }): Promise<void> {

@@ -94,6 +94,14 @@ export interface ListQuery {
 export interface ListPage {
   readonly records: readonly EntityRecord[];
   readonly nextCursor: string | null;
+  /**
+   * The searchable fields a `?q=` was answered **without**, because this store cannot express
+   * them (an `encryptAtRest` column is ciphertext). Absent when nothing was left out. The rows are
+   * all genuine matches; what a caller cannot otherwise tell is that a match in one of these
+   * fields was not looked for — a clinician searching an MRN gets an empty page that means
+   * "not searched", not "no such patient".
+   */
+  readonly searchNarrowedBy?: readonly string[];
 }
 
 /** Which surface of a list query a store could not express, and the field that made it so. */
@@ -285,6 +293,23 @@ export type ConditionalUpdate =
   | { readonly kind: "updated"; readonly record: EntityRecord }
   | { readonly kind: "not_found" }
   | { readonly kind: "precondition_failed" };
+
+/**
+ * A record with every top-level `null` field removed. All three entity stores answer a field with
+ * no value as **absent** (ADR-0414 Q4): the column store cannot answer anything else, because a
+ * NULL column does not say whether the field was omitted or written `null`, and before this the
+ * document and in-memory stores handed a written `null` back while the column store handed back
+ * nothing — one request, two shapes. A `null` *inside* a value (a `json` field's `{a: null}`) is
+ * part of that value and is kept. A patch's `null` still clears the field, by removing it.
+ */
+export function withoutNullFields(record: EntityRecord): EntityRecord {
+  if (!Object.values(record).includes(null)) return record;
+  const out: EntityRecord = {};
+  for (const [field, value] of Object.entries(record)) {
+    if (value !== null) out[field] = value;
+  }
+  return out;
+}
 
 /**
  * Whether `record` still holds every value `expected` names. One definition for every store that
@@ -669,7 +694,7 @@ export class InMemoryEntityStore implements EntityStore {
 
   async create(tenantId: string, entity: string, record: EntityRecord): Promise<EntityRecord> {
     const id = typeof record["id"] === "string" ? (record["id"] as string) : nextId();
-    const stored: EntityRecord = { ...record, id };
+    const stored: EntityRecord = withoutNullFields({ ...record, id });
     this.bucket(tenantId, entity).set(id, stored);
     return stored;
   }
@@ -683,7 +708,7 @@ export class InMemoryEntityStore implements EntityStore {
     const bucket = this.bucket(tenantId, entity);
     const existing = bucket.get(id);
     if (existing === undefined) return null;
-    const merged: EntityRecord = { ...existing, ...patch, id };
+    const merged: EntityRecord = withoutNullFields({ ...existing, ...patch, id });
     bucket.set(id, merged);
     return merged;
   }
@@ -701,7 +726,7 @@ export class InMemoryEntityStore implements EntityStore {
     const existing = bucket.get(id);
     if (existing === undefined) return { kind: "not_found" };
     if (!preconditionHolds(existing, expected)) return { kind: "precondition_failed" };
-    const merged: EntityRecord = { ...existing, ...patch, id };
+    const merged: EntityRecord = withoutNullFields({ ...existing, ...patch, id });
     bucket.set(id, merged);
     return { kind: "updated", record: merged };
   }

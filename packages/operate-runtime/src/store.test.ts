@@ -9,6 +9,7 @@ import {
   matchesFilter,
   preconditionHolds,
   projectRecord,
+  withoutNullFields,
   type EntityRecord,
   type ListPage,
   type ListQuery,
@@ -514,5 +515,39 @@ describe("preconditionHolds", () => {
     expect(preconditionHolds({ state: "draft" }, { state: "posted" })).toBe(false);
     expect(preconditionHolds({ q: Number.NaN }, { q: "NaN" })).toBe(false);
     expect(preconditionHolds({}, { q: "0" })).toBe(false);
+  });
+});
+
+describe("a field with no value is absent on every binding (ADR-0414 Q4)", () => {
+  it("withoutNullFields drops a top-level null and keeps a null inside a value", () => {
+    expect(withoutNullFields({ id: "a", x: null, y: 0, z: "", j: { k: null }, l: [null] })).toEqual({
+      id: "a",
+      y: 0,
+      z: "",
+      j: { k: null },
+      l: [null],
+    });
+  });
+
+  it("withoutNullFields returns the same object when there is nothing to drop", () => {
+    const record = { id: "a", x: 1 };
+    expect(withoutNullFields(record)).toBe(record);
+  });
+
+  it("does not store a null written on create", async () => {
+    const store = new InMemoryEntityStore();
+    const created = await store.create(TENANT, "Thing", { id: "a", note: null, n: 1 });
+    expect(created).toEqual({ id: "a", n: 1 });
+    expect(await store.get(TENANT, "Thing", "a")).toEqual({ id: "a", n: 1 });
+  });
+
+  it("clears a field when a patch writes null, on update and updateIf alike", async () => {
+    const store = new InMemoryEntityStore();
+    await store.create(TENANT, "Thing", { id: "a", note: "x", n: 1 });
+    expect(await store.update(TENANT, "Thing", "a", { note: null })).toEqual({ id: "a", n: 1 });
+    await store.update(TENANT, "Thing", "a", { note: "y" });
+    const outcome = await store.updateIf(TENANT, "Thing", "a", { note: null }, { n: 1 });
+    expect(outcome).toEqual({ kind: "updated", record: { id: "a", n: 1 } });
+    expect(await store.get(TENANT, "Thing", "a")).toEqual({ id: "a", n: 1 });
   });
 });

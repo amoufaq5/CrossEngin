@@ -16,11 +16,20 @@ export interface AgingRow {
   readonly bucket: string;
 }
 
+export interface AgingCurrencyTotals {
+  readonly totalsByBucket: Record<string, number>;
+  readonly totalOpen: number;
+}
+
 export interface AgingReport {
   readonly asOf: string;
+  /** The one currency every document is in, or null when they are in several (or none). */
   readonly currency: string | null;
+  /** Summed across currencies — a figure only when `currency` is non-null. */
   readonly totalOpen: number;
   readonly totalsByBucket: Record<string, number>;
+  /** The same totals per currency. Optional because a server older than this field does not send it. */
+  readonly totalsByCurrency?: Record<string, AgingCurrencyTotals>;
   readonly documents: readonly AgingRow[];
 }
 

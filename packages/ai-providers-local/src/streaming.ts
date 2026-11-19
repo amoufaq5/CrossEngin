@@ -170,18 +170,25 @@ export async function* readSseStream(
   const reader = body.getReader();
   const state = newState();
   let buffer = "";
-  while (true) {
-    const { value, done } = await reader.read();
-    if (value !== undefined) {
-      buffer += decoder.decode(value, { stream: true });
-      const splitIdx = buffer.lastIndexOf("\n\n");
-      if (splitIdx >= 0) {
-        const complete = buffer.slice(0, splitIdx + 2);
-        buffer = buffer.slice(splitIdx + 2);
-        for (const chunk of processSsePayloads(complete, state)) yield chunk;
+  let finished = false;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (value !== undefined) {
+        buffer += decoder.decode(value, { stream: true });
+        const splitIdx = buffer.lastIndexOf("\n\n");
+        if (splitIdx >= 0) {
+          const complete = buffer.slice(0, splitIdx + 2);
+          buffer = buffer.slice(splitIdx + 2);
+          for (const chunk of processSsePayloads(complete, state)) yield chunk;
+        }
       }
+      if (done) break;
     }
-    if (done) break;
+    finished = true;
+  } finally {
+    // A consumer that stops iterating early leaves the body unread; release the connection.
+    if (!finished) await reader.cancel().catch(() => undefined);
   }
   if (buffer.trim().length > 0) {
     for (const chunk of processSsePayloads(buffer, state)) yield chunk;

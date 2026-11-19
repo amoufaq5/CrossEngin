@@ -122,6 +122,18 @@ describe("UNSERVEABLE_SURFACE_REFUSES", () => {
     expect(r.unserveable).toEqual([]);
     expect(r.where).toContain("ILIKE");
     expect(r.where).not.toContain("unknown");
+    // Narrowing is not widening, and it is still not silent: the field left out is returned so the
+    // response can say a match there was not looked for.
+    expect(r.searchNarrowedBy).toEqual(["unknown"]);
+  });
+
+  it("names no narrowed field for a fully-expressible search, or for one that refuses", () => {
+    expect(
+      buildListSql(query({ search: { term: "x", fields: ["name", "notes"] } }), adapter, [], []).searchNarrowedBy,
+    ).toEqual([]);
+    expect(
+      buildListSql(query({ search: { term: "x", fields: ["unknown"] } }), adapter, [], []).searchNarrowedBy,
+    ).toEqual([]);
   });
 
   it("reports nothing at all for a query it can express in full", () => {

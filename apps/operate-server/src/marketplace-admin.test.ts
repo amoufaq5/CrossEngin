@@ -2,7 +2,13 @@ import type { PgConnection } from "@crossengin/kernel-pg";
 import type { ResolvedPrincipal } from "@crossengin/api-gateway";
 import type { HandlerInput, HandlerOutput } from "@crossengin/api-gateway-runtime";
 import { generateEd25519Keypair } from "@crossengin/crypto";
-import { PackManifestSchema, signPackManifest } from "@crossengin/marketplace";
+import {
+  PackManifestSchema,
+  PackPublisherRegistry,
+  parsePackPublisherSpec,
+  signPackManifest,
+  type TenantContext,
+} from "@crossengin/marketplace";
 import { PersistentMarketplaceInstallEngine, PostgresInstallationStore } from "@crossengin/marketplace-runtime-pg";
 import { describe, expect, it } from "vitest";
 
@@ -13,6 +19,7 @@ import {
   buildPackListHandler,
   buildPackUninstallHandler,
   loadPackCatalog,
+  surveyPackCatalog,
   type MarketplaceAdminContext,
   type PackCatalogEntry,
 } from "./marketplace-admin.js";
@@ -63,7 +70,19 @@ function fakePg(): PgConnection {
   return conn;
 }
 
-function catalogEntry(overrides: Record<string, unknown> = {}): PackCatalogEntry {
+const KEY = generateEd25519Keypair();
+const PUBLISHERS = new PackPublisherRegistry([
+  parsePackPublisherSpec(`com.crossengin:crossengin_official:${KEY.publicKeyBase64}`),
+]);
+const KNOWN: TenantContext = {
+  platformVersion: "1.2.0",
+  region: "us-east",
+  planTier: "professional",
+  compliancePacks: [],
+  isDedicatedTenant: false,
+};
+
+function catalogEntry(overrides: Record<string, unknown> = {}, kp = KEY): PackCatalogEntry {
   const pack = PackManifestSchema.parse({
     id: "com.crossengin.example",
     name: "Example Pack",
@@ -74,28 +93,30 @@ function catalogEntry(overrides: Record<string, unknown> = {}): PackCatalogEntry
     minPlatformVersion: "1.0.0",
     ...overrides,
   });
-  const kp = generateEd25519Keypair();
   const signature = signPackManifest({ manifest: pack, privateKeyBase64: kp.privateKeyBase64, publicKeyBase64: kp.publicKeyBase64, signedAt: "2026-05-16T12:00:00.000Z" });
   return {
     pack,
     version: "1.0.0",
     signature,
-    publisherPublicKeyBase64: kp.publicKeyBase64,
     compatibility: { minPlatformVersion: "1.0.0", allowedRegions: [], blockedRegions: [], requiredCompliancePacks: [], requiresDedicatedTenant: false },
     securityReviewStatus: "passed",
   };
 }
 
-function makeCtx(entries: readonly PackCatalogEntry[]): MarketplaceAdminContext {
+function makeCtx(
+  entries: readonly PackCatalogEntry[],
+  tenantContext: (tenantId: string) => Promise<TenantContext> = async () => KNOWN,
+): MarketplaceAdminContext {
   const conn = fakePg();
   const store = new PostgresInstallationStore(conn);
   return {
     engine: new PersistentMarketplaceInstallEngine(store),
     store,
     catalog: new InMemoryPackCatalog(entries),
+    publishers: PUBLISHERS,
     principalRoles: (p: ResolvedPrincipal | null) => ({ primaryRole: p?.grantedScopes[0] ?? "anon" }),
     adminRoles: new Set(["erp_admin"]),
-    tenantContext: { platformVersion: "1.2.0", region: "us-east", planTier: "professional", compliancePacks: [], isDedicatedTenant: false },
+    tenantContext,
   };
 }
 
@@ -122,6 +143,22 @@ describe("loadPackCatalog", () => {
   });
   it("rejects a malformed catalog", () => {
     expect(() => loadPackCatalog(JSON.stringify({ packs: [{ pack: {} }] }))).toThrow();
+  });
+  it("loads a catalog written before the registry when its stated key did produce the signature", () => {
+    const legacy = { ...catalogEntry(), publisherPublicKeyBase64: KEY.publicKeyBase64 };
+    expect(loadPackCatalog(JSON.stringify({ packs: [legacy] })).list()).toHaveLength(1);
+  });
+  it("refuses a catalog entry stating a key other than the one that signed it", () => {
+    const wrong = { ...catalogEntry(), publisherPublicKeyBase64: generateEd25519Keypair().publicKeyBase64 };
+    expect(() => loadPackCatalog(JSON.stringify({ packs: [wrong] }))).toThrow(/did not produce its signature/);
+  });
+});
+
+describe("surveyPackCatalog", () => {
+  it("names the entries the registry will refuse, and only those", () => {
+    const stranger = catalogEntry({ id: "com.crossengin.other" }, generateEd25519Keypair());
+    const findings = surveyPackCatalog(new InMemoryPackCatalog([catalogEntry(), stranger]), PUBLISHERS);
+    expect(findings.map((f) => [f.packId, f.refusal])).toEqual([["com.crossengin.other", "publisher_unregistered"]]);
   });
 });
 
@@ -150,6 +187,8 @@ describe("buildPackInstallHandler", () => {
     const out = await buildPackInstallHandler(ctx)(input("erp_admin", { packId: "com.crossengin.example", version: "1.0.0" }));
     expect(out.status).toBe(201);
     expect(bodyOf(out).status).toBe("admitted");
+    // The response says what an install is here, so it cannot be read as more.
+    expect(bodyOf(out).effect).toMatchObject({ executesPack: false, grantsConsulted: false });
     // persisted + visible via the list route
     const list = await buildPackListHandler(ctx)(input("erp_admin"));
     expect((bodyOf(list).data as unknown[])).toHaveLength(1);
@@ -161,6 +200,55 @@ describe("buildPackInstallHandler", () => {
     const second = await buildPackInstallHandler(ctx)(input("erp_admin", { packId: "com.crossengin.example", version: "1.0.0" }));
     expect(second.status).toBe(409);
     expect(bodyOf(second).reason).toBe("already_installed");
+  });
+
+  it("refuses a pack whose signer is not a registered publisher, however valid its signature", async () => {
+    const stranger = catalogEntry({}, generateEd25519Keypair());
+    const out = await buildPackInstallHandler(makeCtx([stranger]))(
+      input("erp_admin", { packId: "com.crossengin.example", version: "1.0.0" }),
+    );
+    expect(out.status).toBe(409);
+    expect(bodyOf(out).reason).toBe("publisher_unregistered");
+  });
+
+  it("asks the caller's own tenant's facts, so a region-blocked pack is refused for an EU tenant", async () => {
+    const asked: string[] = [];
+    const euBlocked = {
+      ...catalogEntry(),
+      compatibility: {
+        minPlatformVersion: "1.0.0",
+        allowedRegions: [],
+        blockedRegions: ["eu-central" as const],
+        requiredCompliancePacks: [],
+        requiresDedicatedTenant: false,
+      },
+    };
+    const ctx = makeCtx([euBlocked], async (tenantId) => {
+      asked.push(tenantId);
+      return { ...KNOWN, region: "eu-central" };
+    });
+    const out = await buildPackInstallHandler(ctx)(input("erp_admin", { packId: "com.crossengin.example", version: "1.0.0" }));
+    expect(asked).toEqual([TENANT]);
+    expect(out.status).toBe(409);
+    expect(bodyOf(out).reason).toBe("incompatible");
+    expect(bodyOf(out).reasons).toEqual(["region 'eu-central' is blocked"]);
+  });
+
+  it("refuses a region-blocked pack when the tenant's region is unknown, rather than guessing one", async () => {
+    const euBlocked = {
+      ...catalogEntry(),
+      compatibility: {
+        minPlatformVersion: "1.0.0",
+        allowedRegions: [],
+        blockedRegions: ["eu-central" as const],
+        requiredCompliancePacks: [],
+        requiresDedicatedTenant: false,
+      },
+    };
+    const ctx = makeCtx([euBlocked], async () => ({ ...KNOWN, region: null }));
+    const out = await buildPackInstallHandler(ctx)(input("erp_admin", { packId: "com.crossengin.example", version: "1.0.0" }));
+    expect(out.status).toBe(409);
+    expect(bodyOf(out).reason).toBe("incompatible");
   });
 });
 
@@ -180,10 +268,25 @@ describe("buildPackUninstallHandler", () => {
     expect(bodyOf(out).status).toBe("uninstalled");
   });
 
-  it("409 when uninstalling a pack mid-install (installing → uninstall not allowed)", async () => {
+  it("uninstalls a recorded install no installer completed, and the pack can then be installed again", async () => {
+    // This pinned a 409 before: an admitted install sits in `installing` and nothing here runs a
+    // pack, so the route that could only uninstall from `installed` left every install stuck and
+    // every reinstall `already_installed`.
     const ctx = makeCtx([catalogEntry()]);
     const installed = await buildPackInstallHandler(ctx)(input("erp_admin", { packId: "com.crossengin.example", version: "1.0.0" }));
     const id = (bodyOf(installed).installation as { id: string }).id;
+    const out = await buildPackUninstallHandler(ctx)(input("erp_admin", undefined, { id }));
+    expect(out.status).toBe(200);
+    expect(bodyOf(out).status).toBe("uninstalled");
+    const again = await buildPackInstallHandler(ctx)(input("erp_admin", { packId: "com.crossengin.example", version: "1.0.0" }));
+    expect(again.status).toBe(201);
+  });
+
+  it("409 for uninstalling what is already uninstalled", async () => {
+    const ctx = makeCtx([catalogEntry()]);
+    const installed = await buildPackInstallHandler(ctx)(input("erp_admin", { packId: "com.crossengin.example", version: "1.0.0" }));
+    const id = (bodyOf(installed).installation as { id: string }).id;
+    await buildPackUninstallHandler(ctx)(input("erp_admin", undefined, { id }));
     const out = await buildPackUninstallHandler(ctx)(input("erp_admin", undefined, { id }));
     expect(out.status).toBe(409);
     expect(bodyOf(out).error).toBe("invalid_transition");

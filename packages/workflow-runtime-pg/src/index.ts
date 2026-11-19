@@ -11,6 +11,7 @@ export * from "./job-handlers.js";
 export * from "./job-worker.js";
 export * from "./definition-authoring.js";
 export * from "./definition-store.js";
+export * from "./engine-reach.js";
 export * from "./manifest-workflows.js";
 export * from "./event-log.js";
 export * from "./id-mapping.js";

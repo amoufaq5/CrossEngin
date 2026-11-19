@@ -1,3 +1,9 @@
+import {
+  ProviderInactivityTimeout,
+  resolveInactivityTimeoutMs,
+  startInactivityWatchdog,
+  type InactivityWatchdog,
+} from "@crossengin/ai-providers";
 import type {
   CompletionChunk,
   CompletionRequest,
@@ -73,6 +79,14 @@ export interface OpenAiProviderOptions {
   readonly project?: string;
   readonly residency?: readonly Region[];
   readonly fetch?: FetchLike;
+  /** Abort a call the endpoint sends nothing for this long (`startInactivityWatchdog`). */
+  readonly inactivityTimeoutMs?: number;
+  /**
+   * The price of the default chat model, in place of the catalogue's. The only way an
+   * OpenAI-compatible endpoint's model is charged anything at all: the catalogue describes
+   * `api.openai.com`, so without a declaration such a model costs 0.
+   */
+  readonly pricingOverride?: OpenAiModelPricing;
 }
 
 interface OpenAiEmbeddingApiResponse {
@@ -107,6 +121,8 @@ export class OpenAiProvider implements LlmProvider {
   private readonly organization: string | undefined;
   private readonly project: string | undefined;
   private readonly fetchImpl: FetchLike;
+  private readonly inactivityTimeoutMs: number;
+  private readonly pricingOverride: OpenAiModelPricing | undefined;
 
   constructor(opts: OpenAiProviderOptions) {
     if (opts.apiKey.length === 0) {
@@ -127,12 +143,15 @@ export class OpenAiProvider implements LlmProvider {
     this.organization = opts.organization;
     this.project = opts.project;
     this.fetchImpl = opts.fetch ?? (globalThis.fetch as FetchLike);
+    this.inactivityTimeoutMs = resolveInactivityTimeoutMs(opts.inactivityTimeoutMs);
+    this.pricingOverride = opts.pricingOverride;
     const catalogue = Object.keys(OPENAI_PRICING);
     this.models = catalogue.includes(this.defaultModel)
       ? catalogue
       : [this.defaultModel, ...catalogue];
     this.residency = opts.residency ?? ["us", "eu"];
-    const defaultPricing = openAiPricingFor(this.defaultModel) ?? UNKNOWN_MODEL_PRICING;
+    const defaultPricing =
+      opts.pricingOverride ?? openAiPricingFor(this.defaultModel) ?? UNKNOWN_MODEL_PRICING;
     this.pricing = {
       inputPerMillionTokens: defaultPricing.inputUsdPerMillion,
       outputPerMillionTokens: defaultPricing.outputUsdPerMillion,
@@ -154,47 +173,29 @@ export class OpenAiProvider implements LlmProvider {
       defaultMaxTokens: this.defaultMaxTokens,
       stream: true,
     });
-    let response;
+    const watchdog = startInactivityWatchdog(this.inactivityTimeoutMs);
     try {
-      response = await this.fetchImpl(this.url("/v1/chat/completions"), {
-        method: "POST",
-        headers: this.headers({ stream: true }),
-        body: JSON.stringify(built),
-      });
+      const response = await this.send(watchdog, "/v1/chat/completions", built, true);
+      if (response.body === null) {
+        throw new OpenAiError({
+          kind: "server_error",
+          message: "OpenAI streaming response had no body",
+          status: response.status,
+        });
+      }
+      // The stream reader only carries the model id into `computeUsageCost`, which
+      // is total over arbitrary ids, so a non-catalogue id is safe here.
+      yield* readSseStream(watchdog.watch(response.body), model as OpenAiModel, this.pricingFor(model));
     } catch (err) {
-      throw fromNetworkError(err);
+      throw asTimeout(err);
+    } finally {
+      watchdog.dispose();
     }
-    if (!response.ok) {
-      throw fromHttpResponse({ status: response.status, body: await response.text() });
-    }
-    if (response.body === null) {
-      throw new OpenAiError({
-        kind: "server_error",
-        message: "OpenAI streaming response had no body",
-        status: response.status,
-      });
-    }
-    // The stream reader only carries the model id into `computeUsageCost`, which
-    // is total over arbitrary ids, so a non-catalogue id is safe here.
-    yield* readSseStream(response.body, model as OpenAiModel);
   }
 
   async embed(req: EmbeddingRequest): Promise<EmbeddingResponse> {
     const model = this.resolveEmbeddingModel(req.model);
-    let response;
-    try {
-      response = await this.fetchImpl(this.url("/v1/embeddings"), {
-        method: "POST",
-        headers: this.headers({ stream: false }),
-        body: JSON.stringify({ model, input: req.texts }),
-      });
-    } catch (err) {
-      throw fromNetworkError(err);
-    }
-    if (!response.ok) {
-      throw fromHttpResponse({ status: response.status, body: await response.text() });
-    }
-    const text = await response.text();
+    const { response, text } = await this.sendForText("/v1/embeddings", { model, input: req.texts });
     let parsed: OpenAiEmbeddingApiResponse;
     try {
       parsed = JSON.parse(text) as OpenAiEmbeddingApiResponse;
@@ -227,20 +228,7 @@ export class OpenAiProvider implements LlmProvider {
       defaultMaxTokens: this.defaultMaxTokens,
       stream: false,
     });
-    let response;
-    try {
-      response = await this.fetchImpl(this.url("/v1/chat/completions"), {
-        method: "POST",
-        headers: this.headers({ stream: false }),
-        body: JSON.stringify(built),
-      });
-    } catch (err) {
-      throw fromNetworkError(err);
-    }
-    if (!response.ok) {
-      throw fromHttpResponse({ status: response.status, body: await response.text() });
-    }
-    const text = await response.text();
+    const { response, text } = await this.sendForText("/v1/chat/completions", built);
     try {
       return JSON.parse(text) as OpenAiResponse;
     } catch (err) {
@@ -278,6 +266,53 @@ export class OpenAiProvider implements LlmProvider {
     return requested;
   }
 
+  /** The declared price applies to the model it was declared for — the default — and no other. */
+  private pricingFor(model: string): OpenAiModelPricing | undefined {
+    return model === this.defaultModel ? this.pricingOverride : undefined;
+  }
+
+  /** POST under `watchdog`; a non-2xx is thrown as an `OpenAiError`. */
+  private async send(
+    watchdog: InactivityWatchdog,
+    path: string,
+    body: unknown,
+    stream: boolean,
+  ): ReturnType<FetchLike> {
+    let response;
+    try {
+      response = await watchdog.guard(
+        this.fetchImpl(this.url(path), {
+          method: "POST",
+          headers: this.headers({ stream }),
+          body: JSON.stringify(body),
+          signal: watchdog.signal,
+        }),
+      );
+    } catch (err) {
+      if (err instanceof ProviderInactivityTimeout) throw err;
+      throw fromNetworkError(err);
+    }
+    if (!response.ok) {
+      throw fromHttpResponse({ status: response.status, body: await watchdog.guard(response.text()) });
+    }
+    return response;
+  }
+
+  private async sendForText(
+    path: string,
+    body: unknown,
+  ): Promise<{ response: Awaited<ReturnType<FetchLike>>; text: string }> {
+    const watchdog = startInactivityWatchdog(this.inactivityTimeoutMs);
+    try {
+      const response = await this.send(watchdog, path, body, false);
+      return { response, text: await watchdog.guard(response.text()) };
+    } catch (err) {
+      throw asTimeout(err);
+    } finally {
+      watchdog.dispose();
+    }
+  }
+
   private url(path: string): string {
     return `${this.baseUrl}${path}`;
   }
@@ -291,6 +326,12 @@ export class OpenAiProvider implements LlmProvider {
     if (this.project !== undefined) headers["openai-project"] = this.project;
     return headers;
   }
+}
+
+function asTimeout(err: unknown): unknown {
+  return err instanceof ProviderInactivityTimeout
+    ? new OpenAiError({ kind: "timeout_error", message: err.message })
+    : err;
 }
 
 export function summarizeResponse(response: OpenAiResponse, model: OpenAiChatModel) {

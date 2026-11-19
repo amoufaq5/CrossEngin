@@ -121,8 +121,14 @@ export function verifyCertificationReportSeal(
 export function formatCertificationReport(report: CertificationReport): string {
   const lines: string[] = [];
   const c = report.assessment.counts;
+  // Not "CERTIFIABLE" (H-19): `certifiable` is true when every automated control this deployment
+  // evaluates is satisfied, which is readiness evidence over a handful of controls and never a
+  // certification — a framework is certified by an auditor over far more than these.
   lines.push(
-    `Certification: ${report.framework} — ${report.certifiable ? "CERTIFIABLE" : "NOT CERTIFIABLE"}`,
+    `Control readiness: ${report.framework} — ${report.certifiable ? "every automated control satisfied" : "NOT READY"}`,
+  );
+  lines.push(
+    `  scope: automated evidence over ${c.total.toString()} control(s); this is not a certification or an auditor's opinion`,
   );
   lines.push(
     `  controls: ${c.total.toString()} (satisfied ${c.satisfied.toString()}, deficient ${c.deficient.toString()}, not assessed ${c.notAssessed.toString()})`,

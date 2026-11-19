@@ -1,4 +1,5 @@
-import { isPrincipalRefused, type IncomingRequest } from "@crossengin/api-gateway";
+import { isPrincipalRefused, type IncomingRequest, type ResolvedPrincipal } from "@crossengin/api-gateway";
+import type { PrincipalResolver, PrincipalResolverInput } from "@crossengin/api-gateway-runtime";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -7,6 +8,7 @@ import {
   formatScopeRoleReading,
   parseApiKeySpec,
   principalRolesFromScopes,
+  withForeignPlatformRolesDropped,
 } from "./principals.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
@@ -27,6 +29,23 @@ describe("parseApiKeySpec", () => {
   it("rejects a malformed spec", () => {
     expect(() => parseApiKeySpec("k1:cashier")).toThrow(/invalid --api-key/);
     expect(() => parseApiKeySpec("::")).toThrow(/empty field/);
+  });
+
+  it("never quotes the token of a malformed spec, and still quotes the rest of it", () => {
+    const token = ["tok", "en", "Secret", "Value"].join("_");
+    for (const raw of [`${token}:cashier`, `${token}:cashier:${TENANT}:a:b`, token, `${token}::${TENANT}`]) {
+      let message = "";
+      try {
+        parseApiKeySpec(raw);
+      } catch (err) {
+        message = (err as Error).message;
+      }
+      expect(message).toMatch(/invalid --api-key/);
+      expect(message).not.toContain(token);
+      expect(message).toContain("<token>");
+    }
+    // The non-secret halves survive, which is what lets an operator find the line they mistyped.
+    expect(() => parseApiKeySpec(`${token}:cashier`)).toThrow(/"<token>:cashier"/);
   });
 
   it("records whether the principal was named, rather than leaving it to be guessed", () => {
@@ -144,38 +163,91 @@ describe("formatScopeRoleReading", () => {
     // An api-key-only deployment reads one scope and always did, so there is no change to report
     // and no survey to run. Deliberately not an affirmative line: a census of which memberships
     // grant a secondary role is the unscoped read ADR-0365 refused by measurement.
-    expect(formatScopeRoleReading({ credentialLogin: false, externalJwks: false })).toBeNull();
+    expect(formatScopeRoleReading({ credentialLogin: false, externalJwks: false, idpPlatformRoles: false })).toBeNull();
   });
 
   it("names the membership's list for a deployment that mints its own tokens", () => {
-    const read = formatScopeRoleReading({ credentialLogin: true, externalJwks: false });
+    const read = formatScopeRoleReading({ credentialLogin: true, externalJwks: false, idpPlatformRoles: false });
     expect(read?.message).toContain("every role its membership grants");
     expect(read?.message).toContain("primary role first");
     // Not a warning: this clause is the capability, not the widening.
     expect(read?.level).toBe("info");
   });
 
-  it("names the one behaviour change for a deployment trusting a foreign token", () => {
-    // The increment's only change on a configuration that worked before it: such a token had its
-    // first scope read as the role and the rest ignored. Reported, never refused — a refusal would
-    // refuse a deployment that works, and an undeclared scope grants nothing anywhere.
-    const read = formatScopeRoleReading({ credentialLogin: false, externalJwks: true });
+  it("says a foreign token's platform roles are removed, at info level, by default (H-04)", () => {
+    // This line used to WARN that a foreign token's scopes reached --platform-admin-role and could
+    // only report it, because the resolver did not know which key verified the token. It does now,
+    // so the platform roles are removed and the line says so rather than warning about a widening
+    // that no longer happens.
+    const read = formatScopeRoleReading({ credentialLogin: false, externalJwks: true, idpPlatformRoles: false });
     expect(read?.message).toContain("did not mint");
-    expect(read?.message).toContain("scopes past the FIRST");
-    // The stake, which the first draft of this line got wrong in the reassuring direction: the
-    // platform gates test CLI-supplied role sets and `platform_admin` is not a manifest role, so
-    // the dangerous case is the one the old reasoning called safe.
+    expect(read?.message).toContain("EXCEPT a platform role");
+    expect(read?.message).toContain("--idp-platform-roles");
+    expect(read?.level).toBe("info");
+  });
+
+  it("warns when --idp-platform-roles lets an IdP grant a platform role", () => {
+    const read = formatScopeRoleReading({ credentialLogin: false, externalJwks: true, idpPlatformRoles: true });
     expect(read?.message).toContain("--platform-admin-role");
+    expect(read?.message).toContain("provision and delete tenants");
     expect(read?.level).toBe("warn");
   });
 
   it("says both when both are configured, because both are true", () => {
     // Reachable: `--credential-login` refuses `--jwks-url` at parse, so the combination is this
     // deployment's own key beside a foreign `--jwks-key`/`--jwks-file` entry.
-    const read = formatScopeRoleReading({ credentialLogin: true, externalJwks: true });
+    const read = formatScopeRoleReading({ credentialLogin: true, externalJwks: true, idpPlatformRoles: true });
     expect(read?.message).toContain("every role its membership grants");
     expect(read?.message).toContain("did not mint");
     // The widening decides the level wherever it is present.
     expect(read?.level).toBe("warn");
+  });
+});
+
+describe("withForeignPlatformRolesDropped (H-04)", () => {
+  const base: ResolvedPrincipal = {
+    principalId: "22222222-2222-4222-8222-222222222222",
+    tenantId: "11111111-1111-4111-8111-111111111111",
+    principalKind: "user",
+    authScheme: "bearer_jwt",
+    grantedScopes: ["erp_admin", "platform_admin"],
+    mfaProofAgeSeconds: null,
+    resolvedAt: "2026-11-18T00:00:00.000Z",
+  };
+  const inner = (p: ResolvedPrincipal): PrincipalResolver => ({ resolve: async () => p });
+  const input = (kid: string | undefined, authScheme: PrincipalResolverInput["authScheme"] = "bearer_jwt"): PrincipalResolverInput => ({
+    tenantId: base.tenantId,
+    principalRef: base.principalId,
+    scopes: base.grantedScopes,
+    authScheme,
+    ...(kid !== undefined ? { bearer: { kid, claims: {} } } : {}),
+  });
+  const policy = { trustedKid: "login-v1", platformRoles: new Set(["platform_admin"]) };
+
+  it("removes a platform role from a token another key signed, and reports it", async () => {
+    const seen: [string, readonly string[]][] = [];
+    const r = withForeignPlatformRolesDropped(inner(base), { ...policy, onDropped: (k, rs) => seen.push([k, rs]) });
+    const out = await r.resolve(input("idp-1"));
+    expect(out !== null && !("refusedAs" in out) ? out.grantedScopes : null).toEqual(["erp_admin"]);
+    expect(seen).toEqual([["idp-1", ["platform_admin"]]]);
+  });
+
+  it("removes it as the PRIMARY role too, since a foreign scope list is a set", async () => {
+    const r = withForeignPlatformRolesDropped(inner({ ...base, grantedScopes: ["platform_admin"] }), policy);
+    const out = await r.resolve(input("idp-1"));
+    expect(out !== null && !("refusedAs" in out) ? out.grantedScopes : null).toEqual([]);
+  });
+
+  it("leaves a token the deployment's own key signed, and a non-bearer credential, untouched", async () => {
+    const r = withForeignPlatformRolesDropped(inner(base), policy);
+    expect(await r.resolve(input("login-v1"))).toEqual(base);
+    const apiKey = { ...base, authScheme: "api_key_header" as const };
+    expect(await withForeignPlatformRolesDropped(inner(apiKey), policy).resolve(input(undefined, "api_key_header"))).toEqual(apiKey);
+  });
+
+  it("treats every bearer token as foreign when the deployment mints none", async () => {
+    const r = withForeignPlatformRolesDropped(inner(base), { trustedKid: null, platformRoles: new Set(["platform_admin"]) });
+    const out = await r.resolve(input("login-v1"));
+    expect(out !== null && !("refusedAs" in out) ? out.grantedScopes : null).toEqual(["erp_admin"]);
   });
 });

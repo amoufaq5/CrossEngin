@@ -447,6 +447,54 @@ export function daysUntilDeadline(
   return Math.floor(ms / 1000 / 86_400);
 }
 
+/**
+ * How long a verified request waits before the runner may execute it, by default.
+ *
+ * Verification is one human act, and on `--deletion-subject-scope tenant` what it releases is the
+ * destruction of every subject's data in the tenant. Between verify and run the tenant is
+ * `pending_deletion` — read-only — so a grace window is the one interval in which a wrongly verified
+ * request is *visible* to the people it would harm, and `POST …/reject` cancels it and restores the
+ * tenant. Seven days, because a working week contains a working day whichever day a verify lands,
+ * so a business tenant's staff meet the read-only state at least once before anything is destroyed;
+ * and because Article 12(3)'s default month leaves more than three weeks after it. A starting point
+ * a deployment overrides with `--deletion-grace-days`, never a `z.default()`.
+ */
+export const DEFAULT_DELETION_GRACE_DAYS = 7;
+
+/**
+ * How far ahead of its Article 12(3) deadline a request becomes executable regardless of grace.
+ *
+ * The grace is the platform's own policy and the deadline is the law's, so where the two collide the
+ * deadline wins: a request verified late gets less grace, never a later answer. One day because it
+ * is the unit Article 12(3) counts in and it leaves the runner a day of ticks to claim the request;
+ * the stated cost is that a runner interval longer than a day can still finish late, which the
+ * deadline sweep reports.
+ */
+export const GRACE_YIELDS_TO_DEADLINE_MS = 86_400_000;
+
+/**
+ * The earliest instant the runner may execute a verified request: `verifiedAt + grace`, pulled in to
+ * one day before the deadline when the two collide, and never before `verifiedAt`.
+ *
+ * `null` for a request that has not been verified — there is nothing to execute. The store's
+ * `dueForExecution` predicate is this function in SQL. No offline test can compare the two (a fake
+ * connection does not evaluate SQL); they were compared once against PG 16 over 4,000 random
+ * instants with zero disagreements, and the store's test pins the predicate's text.
+ */
+export function deletionExecuteNotBefore(
+  request: Pick<GdprDeletionRequest, "verifiedAt" | "deadlineAt">,
+  graceMs: number,
+): string | null {
+  if (request.verifiedAt === null) return null;
+  if (!Number.isFinite(graceMs) || graceMs < 0) {
+    throw new Error(`deletion grace must be a non-negative number of ms, got ${String(graceMs)}`);
+  }
+  const verifiedMs = new Date(request.verifiedAt).getTime();
+  const graceEnd = verifiedMs + graceMs;
+  const deadlineLead = new Date(request.deadlineAt).getTime() - GRACE_YIELDS_TO_DEADLINE_MS;
+  return new Date(Math.max(verifiedMs, Math.min(graceEnd, deadlineLead))).toISOString();
+}
+
 export function hasRetainedData(request: GdprDeletionRequest): boolean {
   return request.retainedDataCategories.length > 0;
 }

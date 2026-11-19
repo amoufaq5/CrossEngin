@@ -1,4 +1,4 @@
-import { qualifyTable, quoteIdent } from "@crossengin/kernel/ddl";
+import { foreignKeyBaseName, qualifyTable, quoteIdent } from "@crossengin/kernel/ddl";
 import type { Manifest } from "@crossengin/kernel/manifest";
 import {
   ensurePgcryptoExtension,
@@ -67,11 +67,47 @@ import {
 } from "./entity-ddl.js";
 import { resolveRecordId } from "./records.js";
 import {
+  applyBootStatement,
+  indexValidity,
+  renderMillisecondNowDefault,
+  renderTenantIsolationQual,
+  type BootDdlOptions,
+} from "./boot-ddl.js";
+import {
+  ensureDeclaredIndexes,
+  planColumnStoreIndexes,
+  type DeclaredIndexPlan,
+} from "./declared-indexes.js";
+import {
   SEARCH_FUNCTION_ADMITS_INDEX,
   ensureSearchFunction,
   searchFunctionLine,
 } from "./search-function.js";
 import { withTenantContext } from "./tenant-context.js";
+import {
+  ColumnSchemaNotProvisioned,
+  columnSchemaGrantSql,
+  probeColumnSchemaAuthority,
+  verifyColumnSchema,
+  verifyUniqueIndexes,
+  type UniqueIndexShortfall,
+} from "./column-schema-provisioning.js";
+
+/**
+ * What `ensureSchema` did: applied the DDL (this session may), or verified a schema an owner had
+ * already provisioned (this session may not, and the schema passed). `role` is the verifying role
+ * and `null` on the applying arm, which reads no role.
+ */
+export interface ColumnSchemaEnsured {
+  readonly mode: "applied" | "verified";
+  readonly role: string | null;
+  readonly schema: string | null;
+  /**
+   * On the verifying arm, the declared unique indexes the schema lacks or holds invalid; always empty
+   * on the applying arm, whose refusals reach `onUniqueIndexRefused` as they happen.
+   */
+  readonly uniqueIndexes: readonly UniqueIndexShortfall[];
+}
 
 /**
  * Provisions the database-wide extensions this store's DDL depends on: `pgcrypto`
@@ -172,6 +208,50 @@ export class ColumnEncryptionUnavailable extends Error {
   }
 }
 
+/**
+ * Raised by `ensureSchema` when a column the plan encrypts at rest already exists with another
+ * type — a field reclassified `phi`/`regulated` after its table was created.
+ *
+ * `ADD COLUMN IF NOT EXISTS` leaves such a column as it was, so the plan says `BYTEA` and the
+ * database says `TEXT`: every write stores the ciphertext's text rendering and every read raises
+ * `function pgp_sym_decrypt(text, text) does not exist`, a 500 per request on that entity. Refused
+ * at boot by name, ADR-0334's conversion, because no per-request answer can be right.
+ *
+ * The remedy is stated narrowly because the obvious one is wrong: `crossengin-pg encrypt` rewrites
+ * a whole column under **one** key with no tenant predicate, while this store reads each tenant's
+ * rows under that tenant's own derived key — so it is correct only for a table every row of which
+ * belongs to the one tenant whose key it is given. No per-tenant conversion ships.
+ */
+export class EncryptedColumnNotCiphertext extends Error {
+  /** `schema.table.column (type)` for each column the plan encrypts and the database does not. */
+  readonly columns: readonly string[];
+
+  constructor(columns: readonly string[]) {
+    super(
+      `${columns.length.toString()} column(s) this manifest encrypts at rest are not BYTEA in the ` +
+        `database, so their entity cannot be read or written: ${columns.join(", ")}. The field was ` +
+        "classified phi/regulated after its column was created, and an additive migration does not " +
+        "change a column's type. A column holding no rows can be converted with ALTER TABLE … " +
+        "ALTER COLUMN … TYPE bytea USING NULL; a populated one must be re-encrypted per tenant under " +
+        "that tenant's own key, which no shipped command does (crossengin-pg encrypt uses one key " +
+        "for every row, so it is correct only where every row belongs to one tenant).",
+    );
+    this.name = "EncryptedColumnNotCiphertext";
+    this.columns = columns;
+  }
+}
+
+/**
+ * The catalog read behind `EncryptedColumnNotCiphertext`. Exported so a fake can recognise it.
+ * `pg_catalog` is readable by every role, so a non-owner serving session answers it too.
+ */
+export const ENCRYPTED_COLUMN_TYPE_SQL =
+  "SELECT c.relname AS table_name, a.attname AS column_name, " +
+  "format_type(a.atttypid, a.atttypmod) AS column_type " +
+  "FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid " +
+  "JOIN pg_namespace n ON n.oid = c.relnamespace " +
+  "WHERE n.nspname = $1 AND c.relname = ANY($2::text[]) AND a.attnum > 0 AND NOT a.attisdropped";
+
 /** Postgres's unique-violation SQLSTATE. One spelling, named rather than inline. */
 const PG_UNIQUE_VIOLATION = "23505";
 /** Postgres's foreign-key-violation SQLSTATE: a dangling reference on write, a referenced row on delete. */
@@ -197,6 +277,14 @@ export interface ColumnMappedEntityStoreOptions {
    * the boot goes on. Absent, a failure is swallowed, which is why `node.ts` always supplies it.
    */
   readonly onUniqueIndexRefused?: (entity: string, sql: string, detail: string) => void;
+  /**
+   * Called once per declared lookup index `ensureSchema` could not build. A lookup index changes
+   * how fast a query is answered and never what it answers, so a failure is reported and the boot
+   * goes on — the same trade as a refused unique index, for a weaker reason to stop.
+   */
+  readonly onLookupIndexRefused?: (entity: string, sql: string, detail: string) => void;
+  /** Lock and statement bounds for the DDL `ensureSchema` applies; `kernel-pg`'s defaults if absent. */
+  readonly ddl?: BootDdlOptions;
 }
 
 /**
@@ -222,25 +310,32 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
   private readonly deletePolicies: ReadonlyMap<string, OnDelete>;
   private readonly joinPlans: readonly JoinTablePlan[];
   private readonly joinIndex: ReadonlyMap<string, JoinTablePlan>;
-  private readonly onUniqueIndexRefused: ((entity: string, sql: string, detail: string) => void) | null;
+  private readonly onUniqueIndexRefused:
+    | ((entity: string, sql: string, detail: string) => void)
+    | null;
+  private readonly onLookupIndexRefused:
+    | ((entity: string, sql: string, detail: string) => void)
+    | null;
+  private readonly declaredIndexes: DeclaredIndexPlan;
+  private readonly ddl: BootDdlOptions;
 
-  constructor(
-    conn: PgConnection,
-    manifest: Manifest,
-    opts: ColumnMappedEntityStoreOptions = {},
-  ) {
+  constructor(conn: PgConnection, manifest: Manifest, opts: ColumnMappedEntityStoreOptions = {}) {
     this.conn = conn;
     const schema = opts.schema ?? "public";
     this.plans = columnPlansForManifest(manifest, { schema });
     this.deletePolicies = relationDeleteIndex(manifest);
     this.joinPlans = joinTablePlansForManifest(manifest, { schema });
     this.joinIndex = new Map(this.joinPlans.map((p) => [`${p.leftEntity}|${p.rightEntity}`, p]));
+    this.declaredIndexes = planColumnStoreIndexes(manifest, this.plans);
+    this.ddl = opts.ddl ?? {};
     const keyRef = opts.encryptionKeyRef ?? DEFAULT_ENCRYPTION_KEY_REF;
-    if (keyRef.trim().length === 0) throw new Error("encryptionKeyRef must be a non-empty SQL reference");
+    if (keyRef.trim().length === 0)
+      throw new Error("encryptionKeyRef must be a non-empty SQL reference");
     this.keyRef = keyRef;
     this.encryptionKey = opts.encryptionKey ?? null;
     this.encryptsAtRest = plansRequirePgcrypto(this.plans);
     this.onUniqueIndexRefused = opts.onUniqueIndexRefused ?? null;
+    this.onLookupIndexRefused = opts.onLookupIndexRefused ?? null;
     // A caller that supplied its own *reference* is arranging the key by a route this store cannot
     // see — a session-level GUC set by a pooler, a `pgp_sym_encrypt` wrapper function, a literal in
     // a test — so it is taking responsibility and is not refused. The exemption is exactly that
@@ -325,14 +420,34 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
    * two call sites, one order, so a tenant-owned table cannot drift from a
    * shared one.
    */
-  async ensureSchema(): Promise<void> {
-    const schema = [...this.plans.values()][0]?.schema;
+  async ensureSchema(): Promise<ColumnSchemaEnsured> {
+    const schema = [...this.plans.values()][0]?.schema ?? this.joinPlans[0]?.schema;
     if (schema !== undefined) {
+      // A session that cannot apply this DDL verifies instead, and refuses by name when the schema
+      // is not the one this manifest plans — see `column-schema-provisioning.ts` for the measurement
+      // that rules out skipping the already-satisfied statements.
+      const probe = await probeColumnSchemaAuthority(this.conn, schema);
+      await this.refuseUnencryptedColumns(schema);
+      if (probe.authority === "verifies") {
+        const shortfalls = await verifyColumnSchema(this.conn, this.plans, this.joinPlans);
+        if (shortfalls.length > 0) throw new ColumnSchemaNotProvisioned(probe, schema, shortfalls);
+        const uniqueIndexes = await verifyUniqueIndexes(this.conn, this.plans);
+        return { mode: "verified", role: probe.role, schema, uniqueIndexes };
+      }
       await this.conn.query(`CREATE SCHEMA IF NOT EXISTS ${quoteIdent(schema)};`);
     }
     await ensureColumnStoreExtensions(this.conn, plansRequirePgcrypto(this.plans));
-    for (const stmt of emitManifestSchemaDdl(this.plans, this.joinPlans, this.deletePolicies)) {
-      await this.conn.query(stmt);
+    // Asked once, so each table's policy is replaced only when it differs from what this server
+    // would write — see `isolationPolicyStmt`. `null` (no TEMP privilege) replaces every policy.
+    const isolationQualRendering = await renderTenantIsolationQual(this.conn);
+    // And every statement that would change nothing is guarded by the catalog, so a boot over an
+    // unchanged schema takes no table lock at all — see `SchemaDdlOptions.catalogGuards`.
+    const catalogGuards = { millisecondNowRendering: await renderMillisecondNowDefault(this.conn) };
+    for (const stmt of emitManifestSchemaDdl(this.plans, this.joinPlans, this.deletePolicies, {
+      isolationQualRendering,
+      catalogGuards,
+    })) {
+      await applyBootStatement(this.conn, stmt, this.ddl);
     }
     // Last, and each in its own try, because this is the only statement class here whose outcome
     // depends on existing **data**: a unique index over a populated table holding duplicates raises
@@ -341,9 +456,15 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
     // serving without until now — so the failure is reported and the remaining indexes are still
     // attempted, which is `kernel-pg`'s continue-past-a-failure rule (ADR-0295) for the same reason.
     for (const plan of this.plans.values()) {
-      for (const stmt of emitUniqueIndexDdl(plan)) {
+      // Zipped by position: both read `enforceableUniqueColumns` in one order.
+      const names = [...uniqueIndexFields(plan).keys()];
+      for (const [i, stmt] of emitUniqueIndexDdl(plan).entries()) {
         try {
-          await this.conn.query(stmt);
+          // A valid index of this name is left alone without the `CREATE`, which would take a
+          // `SHARE` lock on the table before deciding it had nothing to do.
+          const qualifiedIndex = `${quoteIdent(plan.schema)}.${quoteIdent(names[i]!)}`;
+          if ((await indexValidity(this.conn, qualifiedIndex)) === true) continue;
+          await applyBootStatement(this.conn, stmt, this.ddl);
         } catch (err) {
           this.onUniqueIndexRefused?.(
             plan.entity,
@@ -353,6 +474,56 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
         }
       }
     }
+    // After the unique indexes, because the plan drops a lookup a unique index already serves.
+    // `CONCURRENTLY`, so a table already holding rows keeps taking writes while each one builds.
+    for (const r of await ensureDeclaredIndexes(this.conn, this.declaredIndexes.indexes, { build: true })) {
+      if (r.outcome === "built" || r.outcome === "present") continue;
+      this.onLookupIndexRefused?.(r.index.entity, r.index.sql, r.detail ?? r.outcome);
+    }
+    return { mode: "applied", role: null, schema: schema ?? null, uniqueIndexes: [] };
+  }
+
+  /** The manifest's declared lookup indexes this store builds, and those it does not, with why. */
+  declaredIndexPlan(): DeclaredIndexPlan {
+    return this.declaredIndexes;
+  }
+
+  /**
+   * Refuses when a column the plan encrypts exists with a non-`BYTEA` type. Asked before either
+   * arm of `ensureSchema`, because neither the applying DDL (additive) nor the verifying probe
+   * (presence only) looks at a column's type. No query at all when nothing is encrypted.
+   */
+  private async refuseUnencryptedColumns(schema: string): Promise<void> {
+    const encrypted = new Map<string, Set<string>>();
+    for (const plan of this.plans.values()) {
+      const cols = plan.columns.filter((c) => c.encryptAtRest).map((c) => c.column);
+      if (cols.length > 0) encrypted.set(plan.table, new Set(cols));
+    }
+    if (encrypted.size === 0) return;
+    const res = await this.conn.query<{
+      table_name: unknown;
+      column_name: unknown;
+      column_type: unknown;
+    }>(ENCRYPTED_COLUMN_TYPE_SQL, [schema, [...encrypted.keys()]]);
+    const wrong: string[] = [];
+    for (const row of res.rows) {
+      const table = String(row.table_name);
+      const column = String(row.column_name);
+      if (encrypted.get(table)?.has(column) !== true) continue;
+      if (row.column_type === "bytea") continue;
+      wrong.push(`${schema}.${table}.${column} (${String(row.column_type)})`);
+    }
+    if (wrong.length > 0) throw new EncryptedColumnNotCiphertext(wrong.sort());
+  }
+
+  /**
+   * Grants a serving role the DML this store issues over every table it plans, for the owner's
+   * one-shot to run after `ensureSchema` has applied the DDL. Returns the statements it ran.
+   */
+  async grantServingRole(role: string): Promise<readonly string[]> {
+    const statements = columnSchemaGrantSql(this.plans, this.joinPlans, role);
+    for (const stmt of statements) await this.conn.query(stmt);
+    return statements;
   }
 
   /**
@@ -402,7 +573,7 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
     for (const plan of this.plans.values()) {
       for (const col of plan.columns) {
         if (col.referenceTarget === null) continue;
-        if (`fk_${plan.table}_${col.column}`.slice(0, 63) === constraint) {
+        if (foreignKeyBaseName(plan.table, col.column).slice(0, 63) === constraint) {
           return { entity: plan.entity, field: col.field, target: col.referenceTarget };
         }
       }
@@ -422,7 +593,12 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
   }
 
   async list(tenantId: string, entity: string): Promise<readonly EntityRecord[]> {
-    const page = await this.listPage(tenantId, entity, { limit: 1_000_000, cursor: null, sort: [], filters: [] });
+    const page = await this.listPage(tenantId, entity, {
+      limit: 1_000_000,
+      cursor: null,
+      sort: [],
+      filters: [],
+    });
     return page.records;
   }
 
@@ -474,7 +650,7 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
       comparableValue: (field, text) => columnComparableValue(idx.get(field), text),
       idExpr: quoteIdent("id"),
     };
-    const { where, orderBy, unserveable } = buildListSql(
+    const { where, orderBy, unserveable, searchNarrowedBy } = buildListSql(
       query,
       adapter,
       [`${quoteIdent("tenant_id")} = $1`],
@@ -518,7 +694,9 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
             ),
           )
         : null;
-    return { records, nextCursor };
+    return searchNarrowedBy.length > 0
+      ? { records, nextCursor, searchNarrowedBy }
+      : { records, nextCursor };
   }
 
   async listPage(tenantId: string, entity: string, query: ListQuery): Promise<ListPage> {
@@ -550,7 +728,12 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
   }
 
   /** Outside `withTransaction` the lock ends with this call's own transaction. */
-  async getLocked(tenantId: string, entity: string, id: string, lock: RowLock): Promise<EntityRecord | null> {
+  async getLocked(
+    tenantId: string,
+    entity: string,
+    id: string,
+    lock: RowLock,
+  ): Promise<EntityRecord | null> {
     return this.scoped(tenantId, (tx) => this.getOn(tx, tenantId, entity, id, lock));
   }
 
@@ -574,8 +757,9 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
       placeholders.push(this.writePlaceholder(mapping, v, values));
       // The echo goes through the same reader a SELECT does. `create` does not round-trip the
       // row, so returning `v` verbatim made this store disagree with *itself*: a create answered
-      // `price: 10.25` and the following `get` answered `"10.25"`.
-      stored[mapping.field] = readColumn(mapping, v);
+      // `price: 10.25` and the following `get` answered `"10.25"`. A `null` is bound and not
+      // echoed, for the same reason: the row holds SQL NULL, which `rowToRecord` reads as absent.
+      if (v !== null) stored[mapping.field] = readColumn(mapping, v);
     }
     try {
       await tx.query(
@@ -646,7 +830,9 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
     for (const [field, value] of Object.entries(expected)) {
       const mapping = idx.get(field);
       if (mapping === undefined) {
-        throw new Error(`cannot compare '${entity}.${field}' in a conditional update: it has no column`);
+        throw new Error(
+          `cannot compare '${entity}.${field}' in a conditional update: it has no column`,
+        );
       }
       if (mapping.encryptAtRest) {
         throw new Error(
@@ -672,7 +858,9 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
         clauses.push(`${column} IS NOT DISTINCT FROM $${params.length.toString()}::${json.cast}`);
       } else {
         params.push(bound);
-        clauses.push(`${column} IS NOT DISTINCT FROM $${params.length.toString()}::${mapping.sqlType}`);
+        clauses.push(
+          `${column} IS NOT DISTINCT FROM $${params.length.toString()}::${mapping.sqlType}`,
+        );
       }
     }
     return clauses;
@@ -740,11 +928,23 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
     patch: EntityRecord,
     expected: UpdatePrecondition,
   ): Promise<ConditionalUpdate> {
-    return this.scoped(tenantId, (tx) => this.updateIfOn(tx, tenantId, entity, id, patch, expected));
+    return this.scoped(tenantId, (tx) =>
+      this.updateIfOn(tx, tenantId, entity, id, patch, expected),
+    );
   }
 
-  private async removeOn(tx: PgConnection, tenantId: string, entity: string, id: string): Promise<boolean> {
-    return this.removeWhere(tx, entity, [`${quoteIdent("tenant_id")} = $1`, `${quoteIdent("id")} = $2`], [tenantId, id]);
+  private async removeOn(
+    tx: PgConnection,
+    tenantId: string,
+    entity: string,
+    id: string,
+  ): Promise<boolean> {
+    return this.removeWhere(
+      tx,
+      entity,
+      [`${quoteIdent("tenant_id")} = $1`, `${quoteIdent("id")} = $2`],
+      [tenantId, id],
+    );
   }
 
   private async removeWhere(
@@ -788,7 +988,11 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
   ): Promise<ConditionalRemove> {
     const plan = this.planFor(entity);
     const params: unknown[] = [tenantId, id];
-    const where = [`${quoteIdent("tenant_id")} = $1`, `${quoteIdent("id")} = $2`, ...this.preconditionClauses(entity, expected, params)];
+    const where = [
+      `${quoteIdent("tenant_id")} = $1`,
+      `${quoteIdent("id")} = $2`,
+      ...this.preconditionClauses(entity, expected, params),
+    ];
     const removed = await this.removeWhere(tx, entity, where, params);
     if (removed) return { kind: "removed" };
     const exists = await tx.query(
@@ -816,12 +1020,18 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
   withTransaction<T>(tenantId: string, fn: (tx: EntityStore) => Promise<T>): Promise<T> {
     return this.scoped(tenantId, (tx) => {
       const assertTenant = (t: string): void => {
-        if (t !== tenantId) throw new Error("cross-tenant access inside a transaction is not allowed");
+        if (t !== tenantId)
+          throw new Error("cross-tenant access inside a transaction is not allowed");
       };
       const bound: EntityStore = {
         list: (t, entity) => {
           assertTenant(t);
-          return this.listPageOn(tx, t, entity, { limit: 1_000_000, cursor: null, sort: [], filters: [] }).then((p) => p.records);
+          return this.listPageOn(tx, t, entity, {
+            limit: 1_000_000,
+            cursor: null,
+            sort: [],
+            filters: [],
+          }).then((p) => p.records);
         },
         listPage: (t, entity, query) => {
           assertTenant(t);
@@ -965,7 +1175,10 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
           ORDER BY ${quoteIdent("created_at")}, left_id, right_id`,
         params,
       );
-      return res.rows.map((r) => ({ leftId: String(r["left_id"]), rightId: String(r["right_id"]) }));
+      return res.rows.map((r) => ({
+        leftId: String(r["left_id"]),
+        rightId: String(r["right_id"]),
+      }));
     });
   }
 
@@ -1055,7 +1268,7 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
     // through `numeric` on the way out.
     const bound = readColumn(mapping, value);
     if (mapping.encryptAtRest) {
-      params.push(String(bound));
+      params.push(encryptedPlaintext(mapping, bound));
       return pgpSymEncryptExpr(`$${params.length.toString()}::text`, this.keyRef);
     }
     const json = jsonbBinding(mapping, bound);
@@ -1095,6 +1308,51 @@ function jsonbBinding(
 
 /** The SQL type the kernel's `fieldTypeToPostgresType` emits for `json`, `file` and `currency_amount`. */
 const JSONB_SQL_TYPE = "JSONB";
+
+/**
+ * Whether an encrypted column's plaintext travels as JSON text. Ciphertext is `pgp_sym_encrypt` over
+ * TEXT, so the value has to become one string and come back as the value it was. `String()` is
+ * invertible for every scalar column type except these: `String({a: 1})` is `"[object Object]"`,
+ * `String(["x"])` is `"x"` and `String(7)` reads back as `"7"` (ADR-0414 Q1, measured live). For a
+ * JSONB kind or an array the text is JSON; for the scalar types it stays `String()`, which is what
+ * every ciphertext already stored was written as — so no stored text changes meaning.
+ */
+function encryptsAsJson(mapping: ColumnMapping): boolean {
+  return mapping.sqlType === JSONB_SQL_TYPE || mapping.sqlType.endsWith("[]");
+}
+
+/**
+ * The text an encrypted column's value is encrypted as — see `encryptsAsJson`. A field with no value
+ * binds SQL NULL, which `pgp_sym_encrypt` (a strict function) keeps NULL: encrypting the text
+ * `"null"` instead stored a ciphertext that read back as a value — the string `"null"` on a text
+ * field, a JSON `null` on a json one — where every other column reads as absent.
+ */
+function encryptedPlaintext(mapping: ColumnMapping, bound: unknown): string | null {
+  if (bound === null || bound === undefined) return null;
+  return encryptsAsJson(mapping) ? JSON.stringify(bound) : String(bound);
+}
+
+/**
+ * A decrypted column's text back as the value `encryptedPlaintext` was given. `INTEGER` and
+ * `BOOLEAN` are rebuilt from their `String()` form, which is what the plaintext column store hands
+ * back for them. Text that does not parse — a value an earlier binary encrypted with `String()`,
+ * such as `"[object Object]"` — is returned as the text it is: the value it stood for is not
+ * recoverable from it, and inventing one would be worse than showing what is stored.
+ */
+function decryptedValue(mapping: ColumnMapping, text: unknown): unknown {
+  if (typeof text !== "string") return text;
+  if (encryptsAsJson(mapping)) {
+    try {
+      return JSON.parse(text) as unknown;
+    } catch {
+      return text;
+    }
+  }
+  if (mapping.sqlType === "INTEGER" && /^-?\d+$/.test(text)) return Number(text);
+  if (mapping.sqlType === "BOOLEAN" && (text === "true" || text === "false"))
+    return text === "true";
+  return text;
+}
 
 /**
  * `Entity.field (classification)` for every planned column stored as ciphertext,
@@ -1287,7 +1545,6 @@ function columnComparableValue(mapping: ColumnMapping | undefined, text: string)
   return true;
 }
 
-
 /**
  * The temporal SQL types this store emits, keyed by the `sqlType` string `castSuffix` already
  * casts with — one source for "which columns are temporal", so a filter cast and a read conversion
@@ -1355,12 +1612,19 @@ function convertDecimal(value: unknown, spec: DecimalSpec, isArray: boolean): un
   return isArray && Array.isArray(value) ? value.map(one) : one(value);
 }
 
-/** Reconstructs an `EntityRecord` from a DB row, mapping each column back to its field (nulls omitted). */
+/**
+ * Reconstructs an `EntityRecord` from a DB row, mapping each column back to its field. A NULL
+ * column is **absent**, not `null`: a column cannot tell a field nobody wrote from one written
+ * `null`, so a contract promising that distinction would be false on this store. The document and
+ * in-memory stores drop a written `null` for the same reason, so all three answer one shape.
+ */
 function rowToRecord(plan: EntityTablePlan, row: Record<string, unknown>): EntityRecord {
   const out: EntityRecord = { id: row["id"] };
   for (const mapping of plan.columns) {
     const v = row[mapping.column];
-    if (v !== undefined && v !== null) out[mapping.field] = readColumn(mapping, v);
+    if (v === undefined || v === null) continue;
+    const value = mapping.encryptAtRest ? decryptedValue(mapping, v) : v;
+    if (value !== null) out[mapping.field] = readColumn(mapping, value);
   }
   return out;
 }

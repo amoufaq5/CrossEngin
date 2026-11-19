@@ -1,6 +1,6 @@
-import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
+import { tenantScopedConnection, type StatementHandler } from "./test-fakes.js";
 import { PostgresArchitectProposalStore } from "./proposal-store.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
@@ -8,15 +8,8 @@ const SESSION = "00000000-0000-4000-8000-000000000002";
 const HASH = "a".repeat(64);
 const TS = "2026-05-17T12:00:00.000Z";
 
-function mockConnection(
-  handler: (sql: string, params: readonly unknown[] | undefined) => PgQueryResult<Record<string, unknown>>,
-): PgConnection {
-  return {
-    query: vi.fn(async (sql: string, params?: readonly unknown[]) => handler(sql, params)) as PgConnection["query"],
-    transaction: vi.fn() as PgConnection["transaction"],
-    withAdvisoryLock: vi.fn() as PgConnection["withAdvisoryLock"],
-    close: vi.fn() as PgConnection["close"],
-  };
+function mockConnection(handler: StatementHandler): ReturnType<typeof tenantScopedConnection> {
+  return tenantScopedConnection(handler);
 }
 
 function proposalRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -67,6 +60,8 @@ describe("PostgresArchitectProposalStore.append", () => {
     });
     expect(record.decision).toBe("interactive_approved");
     expect(record.applied).toBe(true);
+    // The insert ran inside a transaction that set the row's own tenant first (M-17).
+    expect(conn.statements.map((st) => st.tenant)).toEqual([TENANT]);
     expect(record.decidedAt).toBe(TS);
   });
 
@@ -113,8 +108,19 @@ describe("PostgresArchitectProposalStore.listForSession", () => {
       };
     });
     const store = new PostgresArchitectProposalStore(conn);
-    const list = await store.listForSession(SESSION);
+    const list = await store.listForSession(TENANT, SESSION);
     expect(list).toHaveLength(2);
     expect(list[1]?.targetPath).toBe("/tmp/other.json");
+  });
+});
+
+describe("PostgresArchitectProposalStore runs every statement under the row's tenant (M-17)", () => {
+  it("scopes the read by predicate as well as by context", async () => {
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
+    await new PostgresArchitectProposalStore(conn).listForSession(TENANT, SESSION);
+    expect(conn.statements).toHaveLength(1);
+    expect(conn.statements[0]?.tenant).toBe(TENANT);
+    expect(conn.statements[0]?.sql).toContain("session_id = $1 AND tenant_id = $2");
+    expect(conn.statements[0]?.params).toEqual([SESSION, TENANT]);
   });
 });

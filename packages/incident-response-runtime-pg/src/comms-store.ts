@@ -42,6 +42,7 @@ export const COMMS_COLUMN_NAMES: readonly string[] = Object.freeze([
   "retracted_at",
   "retracted_reason",
   "breach_notification_deadline_at",
+  "breach_notification_delay_reason",
   "revision",
   "updated_at",
 ]);
@@ -105,6 +106,7 @@ export function commsRowValues(
     valid.retractedAt,
     valid.retractedReason ?? null,
     valid.breachNotificationDeadlineAt ?? null,
+    valid.breachNotificationDelayReason ?? null,
     revision,
     updatedAt,
   ];
@@ -182,6 +184,10 @@ export function rowToComms(row: Record<string, unknown>): StoredComms {
     ...maybe(
       "breachNotificationDeadlineAt",
       asNullableIso(row["breach_notification_deadline_at"]),
+    ),
+    ...maybe(
+      "breachNotificationDelayReason",
+      asNullableString(row["breach_notification_delay_reason"]),
     ),
   });
   return {

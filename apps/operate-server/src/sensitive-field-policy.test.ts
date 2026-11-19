@@ -575,13 +575,15 @@ describe("the real packs", () => {
     ).toEqual(["gov_admin", "case_worker"]);
   });
 
-  it("counts 46 sensitive-classified fields across the seven packs", () => {
+  it("counts 53 sensitive-classified fields across the seven packs", () => {
     // A **tripwire on the packs**, not a property of this module: the figure measured for this
-    // increment is 24 pii + 17 commercial_sensitive + 4 phi + 1 regulated, and it is what makes
+    // increment was 24 pii + 17 commercial_sensitive + 4 phi + 1 regulated = 46, and 53 since
+    // ADR-0443 (M-26) classified seven more personal fields and moved six `Patient` fields from
+    // `pii` to `phi`. It is what makes
     // the read/write asymmetry's scale concrete. If a pack gains or loses a classified field this
     // number moves, and whoever moved it should see this test and re-read the survey it feeds.
     const total = SEVEN_PACKS.reduce((n, m) => n + survey({ manifest: m }).totalSensitive, 0);
-    expect(total).toBe(46);
+    expect(total).toBe(53);
   });
 
   it("counts no uncreatable field across the seven packs, where there were 12", () => {

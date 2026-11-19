@@ -120,8 +120,9 @@ const REFUSAL_SENTENCE: Readonly<Record<string, string>> = Object.freeze({
     "Too many failed attempts, so this account is locked for a while. Nothing was changed. The " +
     "lock lapses on its own — wait and try again, or ask an operator to set a new password, which " +
     "clears it immediately.",
-  // 403, and the one that is not about the password at all: a session minted before a suspension
-  // stays valid until it expires, so this form is reachable by someone who can no longer sign in.
+  // 403, and the one that is not about the password at all: the API refuses a suspended person's
+  // session per request, but only once its short cache has turned over, so inside that window this
+  // form is reachable by someone who can no longer sign in.
   user_not_active:
     "This account is not active, so its password cannot be changed here. An operator can set one " +
     "for a suspended account, and reactivating it is what restores sign-in.",
@@ -304,14 +305,13 @@ export default function AccountPage() {
           {result && (
             <div className="mt-4 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
               <p className="font-medium">Password changed.</p>
-              {/* The server's own sentence, verbatim: it says the existing sessions remain valid,
-                  which is the opposite of what a reader assumes a password change does. Rendered
-                  rather than paraphrased, and the line below reads the field rather than restating
-                  it, so a deployment that ever does revoke sessions says so here without an edit. */}
+              {/* The server's own sentence, verbatim, and the line below reads the field rather than
+                  restating it: a server that ends sessions on a password change (every one since
+                  the session generation) says so, and an older one that does not says that. */}
               <p className="mt-1 text-xs">{result.detail}</p>
               <p className="mt-1 text-xs">
                 {result.sessionsRevoked
-                  ? "Existing sessions were revoked."
+                  ? "Every session for this account has ended, including this one — sign in again with the new password."
                   : "Existing sessions were not revoked — including any you have open elsewhere. Each stays valid until it expires."}
               </p>
             </div>

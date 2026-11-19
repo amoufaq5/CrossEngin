@@ -146,10 +146,25 @@ export function evaluationRecordFromVerdict(
   });
 }
 
+/**
+ * What a decision's pages actually reached: the number of channels that accepted the page. It is
+ * what `paged` and `pageChannelCount` are written from (ADR-0415's open end), because both are past
+ * tense — they used to be written from the *plan*, before anything had attempted delivery, so a row
+ * reading `paged: true` was a statement about a page nobody had yet tried to send.
+ */
+export interface PageDeliveryTally {
+  readonly deliveredChannels: number;
+}
+
 export interface EnforcementActionInput {
   readonly decision: EnforcementDecision | LatencyEnforcementDecision;
   readonly tenantId: string | null;
   readonly occurredAt: string;
+  /**
+   * What this writer's delivery reached. Null — no deliverer was wired, or the decision carries no
+   * page — records `paged: false`, because nothing was delivered by the time the row was written.
+   */
+  readonly pageDelivery: PageDeliveryTally | null;
   readonly signal?: SloSignal;
   readonly thresholdId?: string | null;
   readonly actionId?: string;
@@ -170,12 +185,13 @@ export function enforcementActionFromDecision(
     thresholdId: input.thresholdId ?? null,
     closeOut: null,
   };
+  const delivered = input.pageDelivery?.deliveredChannels ?? 0;
+  if (!Number.isInteger(delivered) || delivered < 0) {
+    throw new Error(`a page delivery tally must be a non-negative integer, got ${String(delivered)}`);
+  }
+  const pageFields = { paged: delivered > 0, pageChannelCount: delivered };
 
   if (decision.kind === "breach_opened") {
-    const channelCount = decision.plan.pages.reduce(
-      (sum, page) => sum + page.channels.length,
-      0,
-    );
     return SloEnforcementActionRecordSchema.parse({
       ...base,
       severity: decision.severity,
@@ -185,9 +201,24 @@ export function enforcementActionFromDecision(
       // the row says which flag the registration wanted a kill switch for, and that none exists.
       flagId:
         decision.plan.killSwitch?.flagId ?? decision.plan.killSwitchUnrecorded?.flagId ?? null,
-      paged: decision.plan.pages.length > 0,
-      pageChannelCount: channelCount,
+      ...pageFields,
       thresholdId: input.thresholdId ?? decision.verdict.worstThresholdId,
+    });
+  }
+
+  // An escalation is stored as an ongoing action carrying the new grade and its re-page: the
+  // catalog's decision CHECK names three kinds, and an ongoing row with a severity is unambiguous —
+  // `breach_ongoing` carries none otherwise. Widening the CHECK is the cleaner record and is a
+  // migration this writer does not need to make the escalation legible.
+  if (decision.kind === "breach_escalated") {
+    return SloEnforcementActionRecordSchema.parse({
+      ...base,
+      decision: "breach_ongoing",
+      severity: decision.severity,
+      incidentId: decision.incidentId,
+      killSwitchId: null,
+      flagId: null,
+      ...pageFields,
     });
   }
 

@@ -45,6 +45,31 @@ const CHANNEL_DISPATCH_PRODUCERS: Readonly<
   voice_call: [],
 };
 
+/**
+ * Where the drain takes each channel's recipient address from (`addressFor` in
+ * `delivery-drain.ts`, which this mirrors and which a test holds to it). `null` is the claim that
+ * no address source exists: a recipient on that channel is recorded `dropped` with
+ * `recipient_unaddressable` rather than handed to a provider. Before, sms and voice were handed the
+ * recipient's email and push the user's id.
+ */
+export const CHANNEL_ADDRESS_SOURCE: Readonly<Record<NotificationChannel, string | null>> = {
+  in_app: "the user id",
+  email: "meta.users.email",
+  sms: "meta.users.phone_e164",
+  voice_call: "meta.users.phone_e164",
+  push_mobile: null,
+  webhook: null,
+};
+
+const NO_ADDRESS_REASON: Readonly<Record<NotificationChannel, string>> = {
+  in_app: "",
+  email: "",
+  sms: "",
+  voice_call: "",
+  push_mobile: "no device-token table exists, so no push recipient has an address",
+  webhook: "no per-recipient webhook endpoint is modelled",
+};
+
 export type NotificationChannelVerdict =
   | "delivers"
   | "no_durable_store"
@@ -93,6 +118,8 @@ export interface NotificationChannelSurveyInput {
 export interface NotificationChannelReach {
   readonly channel: NotificationChannel;
   readonly verdict: NotificationChannelVerdict;
+  /** Whether a sender is registered, which the verdict does not always say. */
+  readonly registered: boolean;
 }
 
 export interface NotificationChannelSurvey {
@@ -126,6 +153,7 @@ export function surveyNotificationChannels(
     channels: NOTIFICATION_CHANNELS.map((channel) => ({
       channel,
       verdict: verdictFor(channel, input, registered),
+      registered: registered.has(channel),
     })),
   };
 }
@@ -193,6 +221,19 @@ export function formatNotificationChannelSurvey(
       line:
         `[notify] ${idle.join(", ")}: a sender is registered and no message will ever be sent on ` +
         `${idle.length === 1 ? "it" : "them"} — ${reach}. No flag or environment variable changes that.`,
+    });
+  }
+
+  const unaddressable = survey.channels
+    .filter((c) => c.registered && CHANNEL_ADDRESS_SOURCE[c.channel] === null)
+    .map((c) => c.channel);
+  if (unaddressable.length > 0) {
+    lines.push({
+      level: "warn",
+      line:
+        `[notify] ${unaddressable.join(", ")}: ` +
+        unaddressable.map((c) => NO_ADDRESS_REASON[c]).join("; ") +
+        " — a recipient there is recorded dropped (recipient_unaddressable), never sent.",
     });
   }
 

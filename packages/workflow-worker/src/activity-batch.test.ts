@@ -54,6 +54,27 @@ describe("processActivityBatch", () => {
     expect(released).toEqual(["b"]); // handed back for retry
   });
 
+  it("releases under the claimed activity's own tenant", async () => {
+    const seen: string[] = [];
+    const claimer: ActivityClaimer = {
+      claim: async () => [
+        activity("a"),
+        { ...activity("b"), tenantId: "00000000-0000-4000-8000-000000000002" },
+      ],
+      release: async ({ activityId, tenantId }) => void seen.push(`${activityId}@${tenantId}`),
+    };
+    const processor: ActivityProcessor = {
+      process: async () => {
+        throw new Error("boom");
+      },
+    };
+    await processActivityBatch(claimer, processor, OPTS);
+    expect(seen).toEqual([
+      "a@00000000-0000-4000-8000-000000000001",
+      "b@00000000-0000-4000-8000-000000000002",
+    ]);
+  });
+
   it("swallows a release failure (the lease recovers the activity anyway)", async () => {
     const processor: ActivityProcessor = { process: async () => Promise.reject(new Error("boom")) };
     const result = await processActivityBatch(claimerOf([activity("a")], [], true), processor, OPTS);
@@ -98,5 +119,21 @@ describe("processActivityBatch", () => {
       },
     );
     expect(seen).toEqual(["a:worker_stopping"]);
+  });
+});
+
+describe("processActivityBatch — each activity's claim is reaffirmed before it executes", () => {
+  it("executes an activity it still holds and skips one whose claim was taken", async () => {
+    const processed: string[] = [];
+    const released: string[] = [];
+    const result = await processActivityBatch(
+      claimerOf([activity("a"), activity("b")], released),
+      { process: async (a) => void processed.push(a.activityId) },
+      OPTS,
+      { claimRenewer: { renew: async (o) => o.timerId === "a" } },
+    );
+    expect(processed).toEqual(["a"]);
+    expect(result.skipped).toEqual([{ activityId: "b", reason: "lease_lost" }]);
+    expect(released).toEqual([]);
   });
 });

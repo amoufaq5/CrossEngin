@@ -16,12 +16,17 @@ export type ReviewItemStatus = (typeof REVIEW_ITEM_STATUSES)[number];
 export const REVIEW_ITEM_TRANSITIONS: Readonly<
   Record<ReviewItemStatus, readonly ReviewItemStatus[]>
 > = {
-  pending: ["in_review", "deferred_to_next_campaign", "withdrawn"],
+  // `auto_revoked` from `pending` and `in_review` (H-19): those are the two commonest unattested
+  // states at a deadline, and the runtime's revocation planner has always treated them as
+  // revocable. With the map refusing the edge, the planner recorded a revoke decision for an item
+  // it could never move, so the item stayed unattested and the next tick recorded another.
+  pending: ["in_review", "deferred_to_next_campaign", "withdrawn", "auto_revoked"],
   in_review: [
     "decided",
     "escalated",
     "exception_pending",
     "deferred_to_next_campaign",
+    "auto_revoked",
   ],
   escalated: ["decided", "auto_revoked", "exception_pending"],
   exception_pending: ["decided", "auto_revoked"],

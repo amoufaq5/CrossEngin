@@ -197,10 +197,9 @@ describe("applyTenantManifestSchema", () => {
     const all = cap.sql();
     const begin = all.indexOf("BEGIN");
     const commit = all.indexOf("COMMIT");
-    const drop = all.findIndex((s) => s.startsWith("DROP POLICY"));
-    const policy = all.findIndex((s) => s.startsWith("CREATE POLICY"));
+    const policy = all.findIndex((s) => s.includes("CREATE POLICY"));
     expect(begin).toBeGreaterThanOrEqual(0);
-    expect(drop).toBeGreaterThan(begin);
+    expect(policy).toBeGreaterThan(begin);
     expect(policy).toBeLessThan(commit);
     expect(sqls).not.toBe(all);
   });
@@ -261,16 +260,21 @@ describe("applyTenantManifestSchema", () => {
     expect(b.changes).toEqual([]);
     expect(b.statements).toEqual(a.statements);
     // Every CREATE is guarded, and the two that are not (`CREATE POLICY`,
-    // `ADD CONSTRAINT`) are each preceded by their own `DROP … IF EXISTS`.
+    // `ADD CONSTRAINT`) each sit in one `DO` block behind their own `DROP … IF EXISTS`, so the
+    // pair is one statement and never two.
     for (const stmt of b.statements) {
       if (/^CREATE (SCHEMA|TABLE|INDEX)\b/.test(stmt) || stmt.includes("ADD COLUMN")) {
         expect(stmt, stmt).toContain("IF NOT EXISTS");
       }
     }
-    for (const [i, stmt] of b.statements.entries()) {
-      if (/^CREATE POLICY\b/.test(stmt)) expect(b.statements[i - 1]).toMatch(/^DROP POLICY IF EXISTS/);
+    for (const stmt of b.statements) {
+      if (stmt.includes("CREATE POLICY")) {
+        expect(stmt).toMatch(/^DO \$ce_policy\$/);
+        expect(stmt.indexOf("DROP POLICY IF EXISTS")).toBeLessThan(stmt.indexOf("CREATE POLICY"));
+      }
       if (stmt.includes("ADD CONSTRAINT")) {
-        expect(b.statements[i - 1]).toMatch(/DROP CONSTRAINT IF EXISTS/);
+        expect(stmt).toMatch(/^DO \$ce_fk\$/);
+        expect(stmt.indexOf("DROP CONSTRAINT IF EXISTS")).toBeLessThan(stmt.indexOf("ADD CONSTRAINT"));
       }
     }
   });
@@ -418,7 +422,7 @@ describe("applyTenantManifestSchema — declared uniqueness", () => {
     // field added by a later manifest gets its column from the additive pass, so an index issued
     // before that pass would name a column that does not exist yet.
     const lastAddColumn = all.map((s) => s.includes("ADD COLUMN")).lastIndexOf(true);
-    const lastPolicy = all.map((s) => s.startsWith("CREATE POLICY")).lastIndexOf(true);
+    const lastPolicy = all.map((s) => s.includes("CREATE POLICY")).lastIndexOf(true);
     const firstUnique = all.findIndex((s) => s.startsWith("CREATE UNIQUE INDEX"));
     expect(lastAddColumn).toBeGreaterThanOrEqual(0);
     expect(firstUnique).toBeGreaterThan(lastAddColumn);

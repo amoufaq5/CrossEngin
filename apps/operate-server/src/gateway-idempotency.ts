@@ -1,5 +1,10 @@
 import type { IdempotencyRecord } from "@crossengin/api-gateway";
-import type { IdempotencyStore } from "@crossengin/api-gateway-runtime";
+import type {
+  IdempotencyLookup,
+  IdempotencyReservation,
+  IdempotencyStore,
+  StoredIdempotentResponse,
+} from "@crossengin/api-gateway-runtime";
 import type { PostgresIdempotencyStore } from "@crossengin/api-gateway-pg";
 
 import type { ActiveTenantSource } from "./checkpoint-scheduler.js";
@@ -22,8 +27,10 @@ import type { IntervalHandle, IntervalScheduler } from "./jwks.js";
  *   this request is a replay, and the fail-closed answer to that is to not execute: the throw
  *   propagates, the request is refused, and nothing has happened. Exactly `processJobBatch`'s
  *   `cancellation_unknown` — nothing is done yet, so deferring costs nothing.
- * - `put` runs *after* `dispatch_handler` has returned and the handler's own transaction has
- *   committed. A throw there turns a 2xx into a 500 for work that succeeded, and a client that
+ * - `reserve` runs at stage 10 too, and propagates for the same reason: a reservation that could
+ *   not be established is a request this gateway cannot run exactly once.
+ * - `complete` (and `put`) run *after* `dispatch_handler` has returned and the handler's own
+ *   transaction has committed. A throw there turns a 2xx into a 500 for work that succeeded, and a client that
  *   retries a 500 gets the second execution — with no record to stop it, because the record is the
  *   thing that failed to write. Throwing therefore **causes** the harm it would be protecting
  *   against, so the failure is reported and swallowed: ADR-0333's rule, where the chain entry has
@@ -33,9 +40,19 @@ import type { IntervalHandle, IntervalScheduler } from "./jwks.js";
  * full, every one is counted, and `report()` is what a shutdown or a health line prints. A silent
  * swallow would be the surface-reports-success-and-records-nothing class this exists to close.
  */
+/**
+ * Which call failed. A lost `release` and a lost record are different facts with different
+ * consequences — the first answers the next retry 409 until the lease lapses, the second lets it
+ * re-execute — so a reporter has to be told which it is to say the right one.
+ */
+export type IdempotencyPersistOperation = "reserve" | "complete" | "release" | "put";
+
 export interface ReportingIdempotencyStoreOptions {
   /** Receives every persist failure. The first is logged in full by the default wiring. */
-  readonly onPersistError?: (err: unknown, input: { readonly tenantId: string; readonly key: string }) => void;
+  readonly onPersistError?: (
+    err: unknown,
+    input: { readonly tenantId: string; readonly key: string; readonly operation: IdempotencyPersistOperation },
+  ) => void;
 }
 
 export interface IdempotencyPersistReport {
@@ -43,13 +60,22 @@ export interface IdempotencyPersistReport {
   readonly persisted: number;
   /** Mutations whose dedup record could not be stored — each one a retry that would re-execute. */
   readonly failed: number;
+  /**
+   * Reservations that could not be given back. Not in `failed`: nothing re-executes because of one,
+   * the key answers in progress until its lease lapses. Releases that succeed are counted nowhere,
+   * because a release stores no record and `persisted` is a count of records.
+   */
+  readonly releaseFailed: number;
   /** The first failure's message, kept because a count alone does not say what went wrong. */
   readonly firstFailure: string | null;
 }
 
+const FOREIGN_KEY_VIOLATION = "23503";
+
 export class ReportingIdempotencyStore implements IdempotencyStore {
   private persisted = 0;
   private failed = 0;
+  private releaseFailed = 0;
   private firstFailure: string | null = null;
 
   constructor(
@@ -58,8 +84,72 @@ export class ReportingIdempotencyStore implements IdempotencyStore {
   ) {}
 
   /** Propagates. Not knowing whether this is a replay must not admit the request. */
-  async get(input: { readonly tenantId: string; readonly key: string }): Promise<IdempotencyRecord | null> {
+  async get(input: { readonly tenantId: string; readonly key: string }): Promise<IdempotencyLookup | null> {
     return this.inner.get(input);
+  }
+
+  /**
+   * Propagates, for `get`'s reason: no reservation means no guarantee, so the request is refused —
+   * with one exception. A foreign-key refusal says the tenant has no `meta.tenants` row, so no
+   * record for it can ever exist and refusing would turn every keyed request from that tenant into
+   * a 500 ahead of the tenant-status gate's named 403 (measured live). That request proceeds
+   * unguarded and reported, which is exactly what it was before reservations existed; the gate,
+   * on by default, refuses it a stage later.
+   */
+  async reserve(input: {
+    readonly tenantId: string;
+    readonly record: IdempotencyRecord;
+  }): Promise<IdempotencyReservation> {
+    try {
+      return await this.inner.reserve(input);
+    } catch (err) {
+      if ((err as { code?: unknown } | null)?.code !== FOREIGN_KEY_VIOLATION) throw err;
+      this.failed += 1;
+      this.firstFailure ??= err instanceof Error ? err.message : String(err);
+      this.opts.onPersistError?.(err, {
+        tenantId: input.tenantId,
+        key: input.record.idempotencyKey,
+        operation: "reserve",
+      });
+      return { reserved: true };
+    }
+  }
+
+  /** Reported and swallowed, for `put`'s reason: the handler has committed. */
+  async complete(input: {
+    readonly tenantId: string;
+    readonly record: IdempotencyRecord;
+    readonly replay: StoredIdempotentResponse | null;
+  }): Promise<void> {
+    try {
+      await this.inner.complete(input);
+      this.persisted += 1;
+    } catch (err) {
+      this.failed += 1;
+      this.firstFailure ??= err instanceof Error ? err.message : String(err);
+      this.opts.onPersistError?.(err, {
+        tenantId: input.tenantId,
+        key: input.record.idempotencyKey,
+        operation: "complete",
+      });
+    }
+  }
+
+  /**
+   * Reported and swallowed. A release follows a request that changed nothing, so a lost one costs
+   * the next retry a 409 until the reservation's lease lapses — never a second execution.
+   */
+  async release(input: {
+    readonly tenantId: string;
+    readonly key: string;
+    readonly requestHashSha256: string;
+  }): Promise<void> {
+    try {
+      await this.inner.release(input);
+    } catch (err) {
+      this.releaseFailed += 1;
+      this.opts.onPersistError?.(err, { tenantId: input.tenantId, key: input.key, operation: "release" });
+    }
   }
 
   async put(input: { readonly tenantId: string; readonly record: IdempotencyRecord }): Promise<void> {
@@ -74,15 +164,15 @@ export class ReportingIdempotencyStore implements IdempotencyStore {
       this.opts.onPersistError?.(err, {
         tenantId: input.tenantId,
         key: input.record.idempotencyKey,
+        operation: "put",
       });
     }
   }
 
   /**
-   * Delegated unchanged, failure included. `GatewayRuntime` never calls it — `persistIdempotency`
-   * only ever `put`s a terminal record, and nothing in this binary reserves an `in_progress` one —
-   * so applying `put`'s post-effect reasoning here would be inventing a policy for a call that is
-   * not made. A caller that appears later should decide for itself.
+   * Delegated unchanged, failure included. `GatewayRuntime` never calls it — it reserves, completes
+   * and releases — so applying `put`'s post-effect reasoning here would be inventing a policy for a
+   * call that is not made. A caller that appears later should decide for itself.
    */
   async update(input: {
     readonly tenantId: string;
@@ -93,22 +183,27 @@ export class ReportingIdempotencyStore implements IdempotencyStore {
   }
 
   report(): IdempotencyPersistReport {
-    return { persisted: this.persisted, failed: this.failed, firstFailure: this.firstFailure };
+    return {
+      persisted: this.persisted,
+      failed: this.failed,
+      releaseFailed: this.releaseFailed,
+      firstFailure: this.firstFailure,
+    };
   }
 }
 
 /**
  * What this store does and does not guarantee, as one sentence a boot line can print.
  *
- * Worth saying because the guarantee is **weaker than "exactly once"** in a way no amount of
- * durability fixes here: `stageCheckIdempotency` reads and `persistIdempotency` writes, with the
- * handler between them in its own transaction and no row reserved in advance. So two *concurrent*
- * retries of one key both read "unseen" and both execute — the same race the in-memory store has
- * within a process. What the Postgres store buys is the *sequential* case, which is the one clients
- * actually produce: a timeout, then a retry seconds later, landing anywhere in the fleet.
+ * It used to be weaker: the gateway read the key, ran the handler, and only then wrote a record, so
+ * two *concurrent* retries both read "unseen" and both executed. The gateway now reserves the key in
+ * one conditional upsert before the handler runs, so the second concurrent retry is answered
+ * `409` in progress. What it still is not is exactly-once under a lapsed lease: a handler that runs
+ * past the reservation's lease lets a retry take the key over, and an unanchored release that is
+ * lost leaves the key answering in progress until that lease lapses.
  */
 export const IDEMPOTENCY_GUARANTEE =
-  "deduplicates a sequential retry across replicas and restarts; two concurrent retries of one key can still both execute";
+  "deduplicates retries across replicas and restarts and answers a concurrent retry 409 in progress; a handler outliving its 300 s lease can be re-executed by a retry";
 
 /**
  * `meta.gateway_idempotency_records.tenant_id` is `NOT NULL` and references `meta.tenants`, exactly
@@ -128,7 +223,7 @@ export const IDEMPOTENCY_GUARANTEE =
  * this flag.
  */
 export const IDEMPOTENCY_FK_HINT =
-  "meta.gateway_idempotency_records.tenant_id references meta.tenants: an --api-key tenant with no tenants row stores no record, so a retry re-executes";
+  "meta.gateway_idempotency_records.tenant_id references meta.tenants: an --api-key tenant with no tenants row cannot reserve a key, so its requests run unguarded (and the tenant-status gate refuses them)";
 
 export interface IdempotencyPruneResult {
   readonly tenantsSwept: number;

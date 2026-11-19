@@ -3,7 +3,9 @@
 import {
   CliUsageError,
   helpText,
+  columnSchemaHelpText,
   documentIndexesHelpText,
+  parseColumnSchemaArgs,
   parseDocumentIndexesArgs,
   parsePruneArgs,
   parseServeArgs,
@@ -26,6 +28,7 @@ import {
   verificationExaminedNothing,
 } from "../src/anchor-audit.js";
 import {
+  runColumnSchema,
   runDocumentIndexes,
   runPruneLinks,
   runRekey,
@@ -34,7 +37,12 @@ import {
   serve,
 } from "../src/node.js";
 import { formatReplayReport } from "../src/replay.js";
-import { formatRekeyResult, formatRekeySurvey } from "../src/rekey.js";
+import { resolveHttpListenerSettings } from "../src/http-listener.js";
+import { installProcessLifecycle } from "../src/process-lifecycle.js";
+
+/** The time a shutdown may spend past the listener's grace on the drains and the pool's close. */
+const SHUTDOWN_DRAIN_ALLOWANCE_MS = 2_000;
+import { formatRekeyResult, formatRekeySurvey, formatRewrapKek } from "../src/rekey.js";
 import { formatSetCredentialReport, runSetCredential } from "../src/set-credential.js";
 
 const CLI_VERSION = "0.0.0";
@@ -106,6 +114,39 @@ async function runDocIndexes(argv: readonly string[]): Promise<number> {
       ` ${report.results.filter((r) => r.outcome === "enforced").length.toString()} enforced\n`,
   );
   return fatal === 0 ? 0 : 1;
+}
+
+/**
+ * `column-schema`: the owner's one-shot that applies --store pg-columns' tables and grants the
+ * serving role its DML, which the API cannot do as a role that owns nothing. A failed statement or
+ * grant throws (exit 1); a unique index blocked by existing duplicates is printed and does not.
+ */
+async function runColumnSchemaCommand(argv: readonly string[]): Promise<number> {
+  let options;
+  try {
+    options = parseColumnSchemaArgs(argv);
+  } catch (err) {
+    if (err instanceof CliUsageError) {
+      process.stderr.write(`error: ${err.message}\n\n${columnSchemaHelpText}`);
+      return 2;
+    }
+    throw err;
+  }
+  if (options.help) {
+    process.stdout.write(columnSchemaHelpText);
+    return 0;
+  }
+  const report = await runColumnSchema(options);
+  for (const r of report.uniqueIndexRefusals) {
+    process.stderr.write(
+      `[column-schema] ${r.entity}: a declared unique field is NOT enforced (${r.detail}). Deduplicate, then run: ${r.sql}\n`,
+    );
+  }
+  process.stdout.write(
+    `[column-schema] schema '${report.schema ?? "(none)"}' applied; ${report.grants.length.toString()} grant statement(s)` +
+      `${options.grantTo.length > 0 ? ` to ${options.grantTo.join(", ")}` : ""}\n`,
+  );
+  return 0;
 }
 
 async function runVerify(argv: readonly string[]): Promise<number> {
@@ -230,7 +271,11 @@ async function runRekeyCommand(argv: readonly string[]): Promise<number> {
   } else {
     // The survey either way, including after a completed rekey: it is what names the columns and
     // the row counts, and a result printed alone would not say what was examined.
-    process.stdout.write(`${formatRekeySurvey(report.survey, report.writeStatus)}\n`);
+    if (report.rewrap !== null) {
+      process.stdout.write(`${formatRewrapKek(report.rewrap, options.plan)}\n`);
+    } else if (report.survey !== null && report.writeStatus !== null) {
+      process.stdout.write(`${formatRekeySurvey(report.survey, report.writeStatus)}\n`);
+    }
     if (report.result !== null) {
       process.stdout.write(`\n${formatRekeyResult(report.result, report.staleKeyWindowMs, report.staleKeyWindowStated)}\n`);
     }
@@ -269,6 +314,9 @@ async function main(): Promise<number> {
   const argv = process.argv.slice(2);
   if (argv[0] === "document-indexes") {
     return runDocIndexes(argv.slice(1));
+  }
+  if (argv[0] === "column-schema") {
+    return runColumnSchemaCommand(argv.slice(1));
   }
   if (argv[0] === "prune-links") {
     return runPrune(argv.slice(1));
@@ -312,11 +360,11 @@ async function main(): Promise<number> {
     `operate-server listening on http://localhost:${running.port.toString()} (${source}, store=${options.store})\n`,
   );
 
-  const shutdown = (): void => {
-    void running.close().then(() => process.exit(0));
-  };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  installProcessLifecycle(process, {
+    close: () => running.close(),
+    log: (line) => process.stderr.write(`${line}\n`),
+    deadlineMs: resolveHttpListenerSettings(options.httpListener).shutdownGraceMs + SHUTDOWN_DRAIN_ALLOWANCE_MS,
+  });
   return -1; // keep the process alive; the server holds the event loop
 }
 

@@ -164,12 +164,15 @@ describe("TENANT_WRITE_STATUS_DETAIL", () => {
   it("does not claim blocks_writes is enforced on a deployment that lacks the gate", () => {
     // This was the one load-bearing safety claim in the subcommand and it was false on the
     // documented compose path: `meta.tenants.status` is enforced on the request path only by
-    // `--tenant-status-gate`, which is opt-in and off by default, so on a default deployment a
-    // `suspended` tenant goes on accepting writes — and a rekey "safely" performed in that state
-    // is exactly the split-across-two-keys outcome the status was supposed to prevent.
+    // the tenant-status gate, which a deployment can turn off (`--no-tenant-status-gate`) and the
+    // memory store never has — so there a `suspended` tenant goes on accepting writes, and a rekey
+    // "safely" performed in that state is exactly the split-across-two-keys outcome the status was
+    // supposed to prevent. The gate became on-by-default on a Postgres store; this sentence used to
+    // call it opt-in, which was then the one false clause in it.
     const detail = TENANT_WRITE_STATUS_DETAIL.blocks_writes;
-    expect(detail).toContain("--tenant-status-gate");
-    expect(detail).toContain("OPT-IN and off by default");
+    expect(detail).toContain("tenant-status gate");
+    expect(detail).toContain("--no-tenant-status-gate");
+    expect(detail).not.toContain("OPT-IN");
     expect(detail).toContain("advisory");
     // And the remedy that holds whatever the deployment is configured to do, which is the sentence
     // a conditional enforcement claim has to be paired with.

@@ -8,6 +8,7 @@ import {
   EXPECTED_PLATFORM_RECORD_TABLES,
   EXPECTED_STATUTORY_RETENTION_TABLES,
   RECORD_RETENTION_FINDING_KINDS,
+  TENANT_UNDELETABLE_TABLES,
   auditRecordRetention,
   cascadeConstantTargetsAreUnfenced,
   readCascadingTenantTables,
@@ -16,10 +17,13 @@ import {
   readProtectedTables,
   readRetainedTables,
   readStatutoryRetentionTables,
+  readUndeletableTables,
+  undeletableTablesWithDeleteWriters,
 } from "./pg-record-retention.js";
+import { scanWorkspaceSql } from "./workspace-sql-scan.js";
 
 describe("RECORD_RETENTION_FINDING_KINDS", () => {
-  it("names the seven ways the four halves of the rule can disagree", () => {
+  it("names the ten ways the five halves of the rule can disagree", () => {
     expect(RECORD_RETENTION_FINDING_KINDS).toEqual([
       "protected_table_cascades",
       "protected_table_not_in_catalog",
@@ -28,12 +32,15 @@ describe("RECORD_RETENTION_FINDING_KINDS", () => {
       "protected_table_unfenced",
       "fenced_table_not_protected",
       "fenced_table_cascade_parent_unfenced",
+      "undeletable_table_undeclared_here",
+      "declared_undeletable_unfenced",
+      "undeletable_table_is_retained",
     ]);
   });
 });
 
 describe("the DELETE fence half (ADR-0400, widened in ADR-0401)", () => {
-  it("reads the fenced set from the catalog source, and it is the whole retention union", () => {
+  it("reads the fenced set from the catalog source: the retention union plus the declared undeletable set", () => {
     const fenced = readDeleteFencedTables();
     // An equality rather than a floor, unlike the two reads below: this set is small, it is the
     // whole subject of the fence, and a nineteenth entry is the regression — a denial on a table
@@ -44,9 +51,13 @@ describe("the DELETE fence half (ADR-0400, widened in ADR-0401)", () => {
     // `EXPECTED_PLATFORM_RECORD_TABLES` alone, which passed while the two statutory tables were
     // exposed — and worse, the right-to-left arm it paired with would have *refused* fencing them.
     expect([...fenced].sort()).toEqual(
-      [...EXPECTED_PLATFORM_RECORD_TABLES, ...EXPECTED_STATUTORY_RETENTION_TABLES].sort(),
+      [
+        ...EXPECTED_PLATFORM_RECORD_TABLES,
+        ...EXPECTED_STATUTORY_RETENTION_TABLES,
+        ...TENANT_UNDELETABLE_TABLES.map((d) => d.table),
+      ].sort(),
     );
-    expect(fenced).toHaveLength(18);
+    expect(fenced).toHaveLength(24);
     // The halves are disjoint and both non-empty, so the union is not one of them wearing the
     // other's name — which is what would make the equality above look stronger than it is.
     expect(
@@ -197,6 +208,8 @@ describe("the DELETE fence half (ADR-0400, widened in ADR-0401)", () => {
         "expected_protection_absent",
         "protected_table_unfenced",
         "fenced_table_not_protected",
+        // The real declared-undeletable set names tables this fixture's catalog does not fence.
+        "declared_undeletable_unfenced",
       ]),
     );
   });
@@ -265,5 +278,69 @@ describe("the platform's record outlives the tenant", () => {
     const protectedTables = new Set(readProtectedTables());
     const offenders = [...protectedTables].filter((t) => cascading.has(t));
     expect(offenders).toEqual(["audit_log"]);
+  });
+});
+
+describe("the declared-undeletable half (M-01 slice)", () => {
+  it("declares six tables, each with a non-empty reason, none of them retained", () => {
+    expect(TENANT_UNDELETABLE_TABLES.map((d) => d.table).sort()).toEqual(
+      [...readUndeletableTables()].sort(),
+    );
+    expect(TENANT_UNDELETABLE_TABLES).toHaveLength(6);
+    const retained = new Set(readRetainedTables());
+    for (const d of TENANT_UNDELETABLE_TABLES) {
+      expect(d.reason.trim().length, d.table).toBeGreaterThan(20);
+      expect(retained.has(d.table), d.table).toBe(false);
+    }
+  });
+
+  it("finds no DELETE writer for any declared table, and the scan does see DELETEs", () => {
+    expect(undeletableTablesWithDeleteWriters()).toEqual([]);
+    // Non-vacuity: the scan records DELETE references at all, so an empty answer is about these
+    // six tables and not about a scan that stopped seeing the verb.
+    expect(scanWorkspaceSql().references.filter((r) => r.via === "delete").length).toBeGreaterThan(5);
+  });
+
+  it("reports an undeclared fence, a declaration with no fence, and a retained declaration", () => {
+    const root = mkdtempSync(join(tmpdir(), "undeletable-audit-"));
+    const kdir = join(root, "packages", "kernel", "src", "bootstrap");
+    const edir = join(root, "packages", "tenant-lifecycle-pg", "src");
+    mkdirSync(kdir, { recursive: true });
+    mkdirSync(edir, { recursive: true });
+    writeFileSync(
+      join(kdir, "meta-schema.ts"),
+      "function retainedRecordNoTenantDelete(t: string) { return t; }\n" +
+        "function tenantUndeletableRecord(t: string) { return t; }\n" +
+        '  name: "audit_log",\n' +
+        '    { name: "tenant_id", type: "UUID" },\n' +
+        '      retainedRecordNoTenantDelete("audit_log"),\n' +
+        '      tenantUndeletableRecord("job_runs"),\n' +
+        '      tenantUndeletableRecord("crypto_audit"),\n' +
+        '  name: "some_unfenced_child",\n' +
+        "    {\n" +
+        '      name: "audit_log_id",\n' +
+        "      references: {\n" +
+        '        schema: "meta",\n' +
+        '        table: "audit_log",\n' +
+        '        onDelete: "CASCADE",\n' +
+        "      },\n" +
+        "    },\n",
+    );
+    writeFileSync(
+      join(edir, "shared-table-erasure.ts"),
+      "export const PLATFORM_RECORD_TABLES: readonly string[] = Object.freeze(\n" +
+        '  ["audit_log", "slo_enforcement_actions"],\n);\n' +
+        "export const STATUTORY_RETENTION_TABLES: readonly StatutoryRetention[] = Object.freeze([\n" +
+        '  Object.freeze({ table: "invoices", obligation: "tax_records_7y" as const }),\n' +
+        "]);\n",
+    );
+    const kinds = auditRecordRetention(root).map((f) => `${f.kind}:${f.table}`);
+    expect(kinds).toContain("undeletable_table_undeclared_here:job_runs");
+    // `job_runs` is fenced, not retained and not declared: the old arm still fires for it.
+    expect(kinds).toContain("fenced_table_not_protected:job_runs");
+    expect(kinds).toContain("declared_undeletable_unfenced:dr_drill_executions");
+    expect(kinds).toContain("undeletable_table_is_retained:slo_enforcement_actions");
+    // `crypto_audit` is declared and fenced, so neither the undeclared nor the unfenced arm names it.
+    expect(kinds.filter((k) => k.endsWith(":crypto_audit"))).toEqual([]);
   });
 });

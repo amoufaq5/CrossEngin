@@ -21,6 +21,7 @@ import {
   pgpSymDecryptExpr,
   pgpSymEncryptExpr,
   pgpSymEncryptLiteral,
+  PGP_SYM_ENCRYPT_OPTIONS,
   resolveColumnEncryptionKey,
   summarizeEncryptionCoverage,
   type EncryptedColumn,
@@ -299,12 +300,31 @@ describe("resolveColumnEncryptionKey", () => {
 
 describe("pgcrypto expression builders", () => {
   it("builds symmetric encrypt/decrypt expressions with a key reference", () => {
-    expect(pgpSymEncryptExpr(`"mrn"`, "$1")).toBe(`pgp_sym_encrypt("mrn", $1)`);
+    expect(pgpSymEncryptExpr(`"mrn"`, "$1")).toBe(
+      `pgp_sym_encrypt("mrn", $1, 'cipher-algo=aes256, s2k-digest-algo=sha256')`,
+    );
     expect(pgpSymDecryptExpr(`"mrn"`, "$1")).toBe(`pgp_sym_decrypt("mrn", $1)`);
   });
 
+  it("writes AES-256 with a SHA-256 S2K and touches nothing else pgcrypto defaults safely", () => {
+    const opts = new Map(
+      PGP_SYM_ENCRYPT_OPTIONS.split(",").map((o) => o.trim().split("=") as [string, string]),
+    );
+    expect(opts.get("cipher-algo")).toBe("aes256");
+    expect(opts.get("s2k-digest-algo")).toBe("sha256");
+    // Absent on purpose: the defaults are iterated S2K, no compression and an MDC, and overriding
+    // any of them weakens something (a passphrase key, a length oracle, integrity).
+    for (const untouched of ["s2k-mode", "s2k-count", "compress-algo", "disable-mdc", "sess-key"]) {
+      expect(opts.has(untouched)).toBe(false);
+    }
+    // A literal, so the options can never be a bind parameter a caller supplies.
+    expect(PGP_SYM_ENCRYPT_OPTIONS).not.toMatch(/['$]/);
+  });
+
   it("escapes a plaintext literal", () => {
-    expect(pgpSymEncryptLiteral("O'Hara", "$1")).toBe(`pgp_sym_encrypt('O''Hara', $1)`);
+    expect(pgpSymEncryptLiteral("O'Hara", "$1")).toBe(
+      `pgp_sym_encrypt('O''Hara', $1, '${PGP_SYM_ENCRYPT_OPTIONS}')`,
+    );
   });
 });
 

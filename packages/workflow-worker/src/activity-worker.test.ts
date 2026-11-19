@@ -30,6 +30,7 @@ describe("WorkflowActivityWorker.runOnce", () => {
     };
     const processed: string[] = [];
     const worker = new WorkflowActivityWorker({
+      claimRenewer: null,
       workerId: "worker-A",
       claimer,
       processor: { process: async (a) => void processed.push(a.activityId) },
@@ -41,6 +42,55 @@ describe("WorkflowActivityWorker.runOnce", () => {
     expect(seen).toEqual({ workerId: "worker-A", now: "2026-05-17T12:00:00.000Z", limit: 7, leaseMs: 15_000 });
     expect(processed).toEqual(["a"]);
     expect(result.succeeded).toEqual(["a"]);
+  });
+});
+
+describe("WorkflowActivityWorker — per-item reaffirm and the poll gate", () => {
+  it("passes its claim renewer to the batch, so a queued activity is reaffirmed before it runs", async () => {
+    const asked: string[] = [];
+    const ran: string[] = [];
+    const worker = new WorkflowActivityWorker({
+      claimRenewer: {
+        renew: async (o) => {
+          asked.push(o.timerId);
+          return false;
+        },
+      },
+      workerId: "w",
+      claimer: { claim: async () => [activity("a")], release: async () => undefined },
+      processor: { process: async (a) => void ran.push(a.activityId) },
+    });
+    const result = await worker.runOnce();
+    expect(asked).toEqual(["a"]);
+    expect(ran).toEqual([]);
+    expect(result.skipped).toEqual([{ activityId: "a", reason: "lease_lost" }]);
+  });
+
+  it("backs off to the idle delay after a batch that claimed activities and finished none of them", async () => {
+    const sleeps: number[] = [];
+    let resolveDone!: () => void;
+    const done = new Promise<void>((r) => (resolveDone = r));
+    const worker = new WorkflowActivityWorker({
+      claimRenewer: null,
+      workerId: "w",
+      claimer: { claim: async () => [activity("poison")], release: async () => undefined },
+      processor: {
+        process: async () => {
+          throw new Error("deterministic bug");
+        },
+      },
+      idlePollMs: 1_000,
+      activePollMs: 0,
+      now: () => new Date("2026-01-01T00:00:00.000Z"),
+      sleep: async (ms) => {
+        sleeps.push(ms);
+        if (sleeps.length === 2) resolveDone();
+      },
+    });
+    worker.start();
+    await done;
+    await worker.stop();
+    expect(sleeps).toEqual([1_000, 1_000]);
   });
 });
 
@@ -59,6 +109,7 @@ describe("WorkflowActivityWorker loop", () => {
     const done = new Promise<void>((r) => (resolveDone = r));
 
     const worker = new WorkflowActivityWorker({
+      claimRenewer: null,
       workerId: "w",
       claimer,
       processor: { process: async (a) => void processed.push(a.activityId) },
@@ -96,6 +147,7 @@ describe("WorkflowActivityWorker loop", () => {
       release: async () => undefined,
     };
     const worker = new WorkflowActivityWorker({
+      claimRenewer: null,
       workerId: "w",
       claimer,
       processor: noopProcessor,
@@ -116,6 +168,7 @@ describe("WorkflowActivityWorker loop", () => {
 
   it("start() is idempotent and stop() is safe when never started", async () => {
     const worker = new WorkflowActivityWorker({
+      claimRenewer: null,
       workerId: "w",
       claimer: { claim: async () => [], release: async () => undefined },
       processor: noopProcessor,
@@ -133,6 +186,7 @@ describe("WorkflowActivityWorker loop", () => {
     let finishFirst!: () => void;
     const held = new Promise<void>((r) => (finishFirst = r));
     const worker = new WorkflowActivityWorker({
+      claimRenewer: null,
       workerId: "w",
       claimer: {
         claim: async () => [activity("a"), activity("b")],

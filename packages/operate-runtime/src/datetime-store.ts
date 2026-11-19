@@ -128,10 +128,7 @@ export function withDatetimeWireType<S extends EntityStore>(store: S, index: Tem
     },
     async listPage(tenantId, entity, query: ListQuery): Promise<ListPage> {
       const page = await store.listPage(tenantId, entity, query);
-      return {
-        records: page.records.map((r) => map(entity, r, "stored")),
-        nextCursor: page.nextCursor,
-      };
+      return { ...page, records: page.records.map((r) => map(entity, r, "stored")) };
     },
     async get(tenantId, entity, id) {
       const record = await store.get(tenantId, entity, id);

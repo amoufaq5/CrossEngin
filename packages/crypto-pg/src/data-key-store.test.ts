@@ -5,6 +5,9 @@ import { DATA_KEY_BYTES, generateDataKey } from "@crossengin/crypto";
 import {
   DATA_KEY_LOCK_SQL,
   DATA_KEY_PROVENANCES,
+  DATA_KEY_SHARED_LOCK_SQL,
+  DATA_KEY_TRY_LOCK_SQL,
+  DataKeyKekUnavailable,
   DataKeyUnwrapFailed,
   PostgresDataKeyStore,
 } from "./data-key-store.js";
@@ -855,5 +858,206 @@ describe("rekeyWithin", () => {
     ]) {
       for (const c of fake.captured) expect(c.sql).not.toContain(secret);
     }
+  });
+});
+
+/** Two KEK generations, as a deployment that rotated its secret holds them. */
+const KEK_GEN1 = new Uint8Array(32).fill(7);
+const KEK_GEN2 = new Uint8Array(32).fill(9);
+const ringFor = (_tenantId: string, kekGeneration: number): Uint8Array => {
+  if (kekGeneration === 1) return KEK_GEN1;
+  if (kekGeneration === 2) return KEK_GEN2;
+  throw new Error(`no secret for key-encryption-key generation ${kekGeneration.toString()}`);
+};
+
+describe("the lock family", () => {
+  it("shares the exclusive lock's key, so a rekey and a writer serialise on one key", () => {
+    const key = "hashtext('crypto_tenant_data_key'), hashtext($1)";
+    expect(DATA_KEY_LOCK_SQL).toContain(key);
+    expect(DATA_KEY_SHARED_LOCK_SQL).toContain(key);
+    expect(DATA_KEY_TRY_LOCK_SQL).toContain(key);
+    expect(DATA_KEY_SHARED_LOCK_SQL).toContain("pg_advisory_xact_lock_shared(");
+    expect(DATA_KEY_TRY_LOCK_SQL).toContain("pg_try_advisory_xact_lock(");
+  });
+});
+
+describe("opening a row under the KEK generation it records", () => {
+  it("opens a row wrapped under an older KEK while writing under the newer one", async () => {
+    const dek = generateDataKey();
+    const fake = fakeDataKeysPg({
+      seedRows: [storedDataKeyRow(KEK_GEN1, TENANT_A, dek, { kekGeneration: 1 })],
+    });
+    const store = new PostgresDataKeyStore(fake.conn, ringFor, { kekGeneration: 2 });
+    const loaded = await store.load(TENANT_A);
+    expect(loaded?.kekGeneration).toBe(1);
+    expect(Buffer.from(loaded?.dek ?? new Uint8Array()).equals(Buffer.from(dek))).toBe(true);
+  });
+
+  it("refuses by name a row whose KEK generation this deployment holds no secret for", async () => {
+    const fake = fakeDataKeysPg({
+      seedRows: [storedDataKeyRow(KEK_GEN1, TENANT_A, generateDataKey(), { kekGeneration: 5 })],
+    });
+    const store = new PostgresDataKeyStore(fake.conn, ringFor, { kekGeneration: 2 });
+    const err = await store.load(TENANT_A).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DataKeyKekUnavailable);
+    expect((err as DataKeyKekUnavailable).kekGeneration).toBe(5);
+    expect(String((err as Error).message)).toMatch(/holds no secret for/);
+  });
+
+  it("still reads a mislabelled row as corrupt rather than as unavailable", async () => {
+    // Wrapped under generation 2's KEK and labelled 1: the resolver can answer, so the failure is
+    // the unwrap's, and the two refusals must not be confused.
+    const fake = fakeDataKeysPg({
+      seedRows: [storedDataKeyRow(KEK_GEN2, TENANT_A, generateDataKey(), { kekGeneration: 1 })],
+    });
+    const store = new PostgresDataKeyStore(fake.conn, ringFor, { kekGeneration: 2 });
+    await expect(store.load(TENANT_A)).rejects.toBeInstanceOf(DataKeyUnwrapFailed);
+  });
+});
+
+describe("rewrap", () => {
+  it("re-wraps the current row under the store's KEK and leaves the data key unchanged", async () => {
+    const dek = generateDataKey();
+    const fake = fakeDataKeysPg({
+      seedRows: [storedDataKeyRow(KEK_GEN1, TENANT_A, dek, { generation: 3, kekGeneration: 1 })],
+    });
+    const store = new PostgresDataKeyStore(fake.conn, ringFor, { kekGeneration: 2 });
+    const result = await store.rewrap(TENANT_A);
+    expect(result).toEqual({
+      tenantId: TENANT_A,
+      generation: 3,
+      fromKekGeneration: 1,
+      toKekGeneration: 2,
+      outcome: "rewrapped",
+    });
+    expect(fake.rows[0]?.["kek_generation"]).toBe(2);
+    expect(fake.rows[0]?.["generation"]).toBe(3);
+
+    // Opened by a store that holds only the new secret: the old KEK is no longer needed.
+    const onlyNew = new PostgresDataKeyStore(
+      fake.conn,
+      (_t: string, g: number) => {
+        if (g !== 2) throw new Error("retired");
+        return KEK_GEN2;
+      },
+      { kekGeneration: 2 },
+    );
+    const reread = await onlyNew.load(TENANT_A);
+    expect(Buffer.from(reread?.dek ?? new Uint8Array()).equals(Buffer.from(dek))).toBe(true);
+  });
+
+  it("takes the exclusive lock before the read, inside the transaction", async () => {
+    const fake = fakeDataKeysPg({
+      seedRows: [storedDataKeyRow(KEK_GEN1, TENANT_A, generateDataKey(), { kekGeneration: 1 })],
+    });
+    await new PostgresDataKeyStore(fake.conn, ringFor, { kekGeneration: 2 }).rewrap(TENANT_A);
+    const sqls = sqlOf(fake.captured);
+    const lock = sqls.indexOf(DATA_KEY_LOCK_SQL);
+    const read = sqls.findIndex(isTableRead);
+    const write = sqls.findIndex((q) => /^\s*UPDATE\b/.test(q));
+    expect(lock).toBeGreaterThanOrEqual(0);
+    expect(lock).toBeLessThan(read);
+    expect(read).toBeLessThan(write);
+    expect(fake.captured[lock]?.inTx).toBe(true);
+  });
+
+  it("answers already_current and writes nothing when the row is under the store's KEK", async () => {
+    const fake = fakeDataKeysPg({
+      seedRows: [storedDataKeyRow(KEK_GEN2, TENANT_A, generateDataKey(), { kekGeneration: 2 })],
+    });
+    const result = await new PostgresDataKeyStore(fake.conn, ringFor, {
+      kekGeneration: 2,
+    }).rewrap(TENANT_A);
+    expect(result.outcome).toBe("already_current");
+    expect(sqlOf(fake.captured).some((q) => /^\s*UPDATE\b/.test(q))).toBe(false);
+  });
+
+  it("answers no_data_key_row for a tenant with no row", async () => {
+    const fake = fakeDataKeysPg();
+    const result = await new PostgresDataKeyStore(fake.conn, ringFor, {
+      kekGeneration: 2,
+    }).rewrap(TENANT_A);
+    expect(result.outcome).toBe("no_data_key_row");
+    expect(result.generation).toBeNull();
+  });
+
+  it("opportunistically tries the lock and answers lock_busy without reading when it is held", async () => {
+    const fake = fakeDataKeysPg({
+      tryLockGranted: false,
+      seedRows: [storedDataKeyRow(KEK_GEN1, TENANT_A, generateDataKey(), { kekGeneration: 1 })],
+    });
+    const result = await new PostgresDataKeyStore(fake.conn, ringFor, {
+      kekGeneration: 2,
+    }).rewrap(TENANT_A, { opportunistic: true });
+    expect(result.outcome).toBe("lock_busy");
+    const sqls = sqlOf(fake.captured);
+    expect(sqls).toContain(DATA_KEY_TRY_LOCK_SQL);
+    expect(sqls).not.toContain(DATA_KEY_LOCK_SQL);
+    expect(sqls.some(isTableRead)).toBe(false);
+    expect(fake.rows[0]?.["kek_generation"]).toBe(1);
+  });
+
+  it("opportunistically re-wraps when the try-lock is granted", async () => {
+    const fake = fakeDataKeysPg({
+      seedRows: [storedDataKeyRow(KEK_GEN1, TENANT_A, generateDataKey(), { kekGeneration: 1 })],
+    });
+    const result = await new PostgresDataKeyStore(fake.conn, ringFor, {
+      kekGeneration: 2,
+    }).rewrap(TENANT_A, { opportunistic: true });
+    expect(result.outcome).toBe("rewrapped");
+  });
+
+  it("throws rather than reporting a re-wrap that matched no row", async () => {
+    const fake = fakeDataKeysPg({
+      seedRows: [storedDataKeyRow(KEK_GEN1, TENANT_A, generateDataKey(), { kekGeneration: 1 })],
+      // A concurrent writer that defeated the lock: the UPDATE's guards then match nothing.
+      answer: (sql) => (/^\s*UPDATE\b/.test(sql) ? { rows: [], rowCount: 0 } : null),
+    });
+    await expect(
+      new PostgresDataKeyStore(fake.conn, ringFor, { kekGeneration: 2 }).rewrap(TENANT_A),
+    ).rejects.toThrow(/must not report a re-wrap/);
+  });
+
+  it("pins both generations in the UPDATE and touches no other tenant's row", async () => {
+    const fake = fakeDataKeysPg({
+      owner: true,
+      seedRows: [
+        storedDataKeyRow(KEK_GEN1, TENANT_A, generateDataKey(), { kekGeneration: 1 }),
+        storedDataKeyRow(KEK_GEN1, TENANT_B, generateDataKey(), { kekGeneration: 1 }),
+      ],
+    });
+    await new PostgresDataKeyStore(fake.conn, ringFor, { kekGeneration: 2 }).rewrap(TENANT_A);
+    const update = fake.captured.find((c) => /^\s*UPDATE\b/.test(c.sql));
+    expect(update?.sql).toMatch(/AND generation = \$\d+/);
+    expect(update?.sql).toMatch(/AND kek_generation = \$\d+/);
+    expect(fake.rows.find((r) => r["tenant_id"] === TENANT_B)?.["kek_generation"]).toBe(1);
+  });
+});
+
+describe("currentGenerationWithin", () => {
+  it("answers the highest generation without unwrapping", async () => {
+    const fake = fakeDataKeysPg({
+      seedRows: [
+        storedDataKeyRow(KEK_GEN1, TENANT_A, generateDataKey(), { generation: 2, kekGeneration: 9 }),
+        storedDataKeyRow(KEK_GEN1, TENANT_A, generateDataKey(), { generation: 4, kekGeneration: 9 }),
+      ],
+    });
+    // Generation 9 has no secret: answering at all proves nothing was unwrapped.
+    const store = new PostgresDataKeyStore(fake.conn, ringFor, { kekGeneration: 2 });
+    const generation = await fake.conn.transaction(async (tx) => {
+      await tx.query(SET_TENANT_CONTEXT_SQL, [TENANT_A]);
+      return store.currentGenerationWithin(tx, TENANT_A);
+    });
+    expect(generation).toBe(4);
+  });
+
+  it("answers null for a tenant with no row", async () => {
+    const fake = fakeDataKeysPg();
+    const store = new PostgresDataKeyStore(fake.conn, ringFor);
+    const generation = await fake.conn.transaction(async (tx) => {
+      await tx.query(SET_TENANT_CONTEXT_SQL, [TENANT_A]);
+      return store.currentGenerationWithin(tx, TENANT_A);
+    });
+    expect(generation).toBeNull();
   });
 });

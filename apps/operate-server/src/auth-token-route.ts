@@ -2,6 +2,7 @@ import {
   PASSWORD_OUTCOME_ADMITS,
   PASSWORD_SCRYPT_DEFAULTS,
   type PasswordScryptParams,
+  type PepperSource,
   type PasswordVerifyOutcome,
   hashPassword,
   parsePasswordHash,
@@ -154,9 +155,12 @@ export type LoginOutcome =
       /**
        * A hash re-derived under the deployment's current parameters, when the stored one was
        * produced under weaker ones -- `null` when there is nothing to upgrade. The caller stores
-       * it; see `verifyLogin` for why this is a correctness fix and not an optimisation.
+       * it; see `verifyLogin` for why this is a correctness fix and not an optimisation. `from` is
+       * the hash it replaces, so the store can refuse to overwrite a password changed in between.
        */
-      readonly rehashTo: string | null;
+      readonly rehash: { readonly from: string; readonly to: string } | null;
+      /** The session generation the row held when this login read it; the token carries it. */
+      readonly sessionEpoch: number;
     }
   | {
       readonly ok: false;
@@ -236,7 +240,8 @@ export type MembershipRoleResolver = (
 export interface VerifyLoginInput {
   readonly request: AuthTokenRequest;
   readonly store: PostgresCredentialStore;
-  readonly pepper: string;
+  /** The current pepper and any retired ones a stored hash may still be keyed with. */
+  readonly pepper: PepperSource;
   readonly roleFor: MembershipRoleResolver;
   readonly lockout: LoginLockoutPolicy;
   readonly now: Date;
@@ -434,8 +439,11 @@ export async function verifyLogin(input: VerifyLoginInput): Promise<LoginOutcome
     // than an unknown email does -- an enumeration oracle that appears the moment an operator
     // raises `n` and widens with every account that has not logged in since. Re-hashing on
     // success is what makes the equaliser's assumption true over time.
-    rehashTo: passwordHashIsStale(record.credentialHash, params)
-      ? await hashPassword(password, input.pepper, { params })
+    sessionEpoch: record.sessionEpoch,
+    // Stale on parameters **or** on the pepper: a hash keyed with a retired pepper is re-keyed here,
+    // which is what lets a rotation drain without asking anybody to change a password.
+    rehash: passwordHashIsStale(record.credentialHash, params, input.pepper)
+      ? { from: record.credentialHash, to: await hashPassword(password, input.pepper, { params }) }
       : null,
   };
 }
@@ -501,11 +509,14 @@ export interface AuthTokenRouteContext {
   readonly verify: (request: AuthTokenRequest) => Promise<LoginOutcome>;
   readonly mint: (outcome: Extract<LoginOutcome, { ok: true }>) => MintedToken;
   /**
-   * Clears the attempt counter, stamps `last_login_at`, and -- when `rehashTo` is non-null --
-   * replaces the stored hash. One call rather than two, so a caller cannot reset the counter and
+   * Clears the attempt counter, stamps `last_login_at`, and -- when `rehash` is non-null --
+   * replaces the stored hash (conditionally on it still being `rehash.from`). One call rather than two, so a caller cannot reset the counter and
    * forget the upgrade.
    */
-  readonly onSuccess: (userId: string, rehashTo: string | null) => Promise<void>;
+  readonly onSuccess: (
+    userId: string,
+    rehash: { readonly from: string; readonly to: string } | null,
+  ) => Promise<void>;
   /**
    * Bounds how many verifications run at once, before any of them starts. **Required**: an optional
    * cap defaulting to none is the pre-auth CPU exhaustion this exists to close, restated as a
@@ -701,7 +712,7 @@ export function buildAuthTokenInterceptor(
       }
     }
     try {
-      await ctx.onSuccess(outcome.userId, outcome.rehashTo);
+      await ctx.onSuccess(outcome.userId, outcome.rehash);
     } catch (err) {
       // Also swallowed, and this is the sharper of the two: the password was correct, so refusing
       // now would deny a legitimate login to protect a counter reset and a `last_login_at` stamp.

@@ -308,6 +308,13 @@ environment. Tenant admins then get **/setup** in the UI — describe the busine
 review the AI-generated system, activate it as that tenant's live schema
 (per-tenant manifests, served immediately).
 
+With `OPENAI_BASE_URL` set, the model has no catalogue price, so the API **refuses
+to boot** until you say what a token costs: `--ai-model-price <input>:<output>`
+(USD per million tokens — `0:0` is an honest answer for a server you run yourself,
+and the boot line then says the ceilings bound nothing), or
+`--ai-allow-unpriced-model` to accept an unbounded spend. An unpriced model used to
+be priced at $0 silently, which made both ceilings below admit every request.
+
 Two flags worth setting on a real deployment:
 
 | Flag | Why |

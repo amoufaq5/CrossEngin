@@ -125,7 +125,9 @@ export const listQueryParameters = (
     fixed(
       "q",
       { type: "string" },
-      `Matches any of: ${config.searchableFields.join(", ")}.`,
+      `Matches any of: ${config.searchableFields.join(", ")} — except a field this deployment ` +
+        "stores encrypted, which is not searched; the response's `page.searchNarrowedBy` names any " +
+        "such field the search left out.",
     );
   }
   if (config.fields.length > 0) {

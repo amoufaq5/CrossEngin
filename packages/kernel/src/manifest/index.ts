@@ -1,6 +1,7 @@
 export * from "./errors.js";
 export * from "./types.js";
 export * from "./validate.js";
+export * from "./limits.js";
 export * from "./diff.js";
 export * from "./sections.js";
 export * from "./change-detail.js";

@@ -527,6 +527,20 @@ describe("tenant RLS context", () => {
     expect([onRequest, onObserve, onFinalize]).toEqual([[], [], []]);
   });
 
+  it("confines the reaper to one tenant when asked, sets no context itself, and refuses a bad id", async () => {
+    const capture: Capture[] = [];
+    await reapCancelledJobRuns(scripted([rows()], capture), { now: NOW, tenantId: TENANT });
+    expect(capture[0]!.sql).toContain("AND tenant_id = $3::uuid");
+    expect(capture[0]!.sql.indexOf("tenant_id = $3")).toBeLessThan(capture[0]!.sql.indexOf("LIMIT $2"));
+    expect(capture[0]!.params).toEqual([NOW, 50, TENANT]);
+    // The caller's transaction owns the context (`claimDueJobsPerTenant`); a second one here would
+    // be a nested statement the caller never asked for.
+    expect(contexts(capture)).toEqual([]);
+    await expect(reapCancelledJobRuns(scripted([]), { now: NOW, tenantId: "x y" })).rejects.toThrow(
+      /invalid tenantId/,
+    );
+  });
+
   it("establishes NO context for reapCancelledJobRuns, which is cross-tenant by design", async () => {
     const capture: Capture[] = [];
     // A negative control, so a later "complete the sweep" edit that wraps the reaper fails here

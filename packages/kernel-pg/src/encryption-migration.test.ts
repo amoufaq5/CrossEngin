@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { PgConnection, PgQueryResult } from "./connection.js";
 import type { EncryptedColumnRow } from "./encryption.js";
-import { DEFAULT_COLUMN_KEY_REF } from "./encryption.js";
+import { DEFAULT_COLUMN_KEY_REF, PGP_SYM_ENCRYPT_OPTIONS } from "./encryption.js";
 import {
   EncryptionMigrator,
   emitDecryptingViewSql,
@@ -32,7 +32,7 @@ describe("emitEncryptColumnSql", () => {
 
   it("encrypts existing values via pgp_sym_encrypt, preserving NULLs", () => {
     expect(sql[1]).toBe(
-      `UPDATE "t_clinic"."patient" SET "mrn__enc" = CASE WHEN "mrn" IS NULL THEN NULL ELSE pgp_sym_encrypt("mrn"::text, ${KEY_REF}) END;`,
+      `UPDATE "t_clinic"."patient" SET "mrn__enc" = CASE WHEN "mrn" IS NULL THEN NULL ELSE pgp_sym_encrypt("mrn"::text, ${KEY_REF}, '${PGP_SYM_ENCRYPT_OPTIONS}') END;`,
     );
   });
 
@@ -54,7 +54,7 @@ describe("emitEncryptColumnSql", () => {
       keyRef: KEY_REF,
       plaintextCast: "::text",
     });
-    expect(s[1]).toContain(`pgp_sym_encrypt("dob"::text, ${KEY_REF})`);
+    expect(s[1]).toContain(`pgp_sym_encrypt("dob"::text, ${KEY_REF}, '${PGP_SYM_ENCRYPT_OPTIONS}')`);
   });
 });
 

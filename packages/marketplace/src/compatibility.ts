@@ -91,13 +91,28 @@ export const PackCompatibilitySchema = z
   });
 export type PackCompatibility = z.infer<typeof PackCompatibilitySchema>;
 
+/**
+ * What a deployment knows about the installing tenant. Every fact is nullable and `null` means *this
+ * deployment does not know*, which is a different statement from any value: a fabricated default is
+ * the defect this shape exists to make unrepresentable, because a guessed `region` or `planTier`
+ * admits an install the real value would refuse.
+ */
 export interface TenantContext {
-  readonly platformVersion: string;
-  readonly region: Region;
-  readonly planTier: PlanTier;
-  readonly compliancePacks: readonly CompliancePackId[];
-  readonly isDedicatedTenant: boolean;
+  readonly platformVersion: string | null;
+  readonly region: Region | null;
+  readonly planTier: PlanTier | null;
+  readonly compliancePacks: readonly CompliancePackId[] | null;
+  readonly isDedicatedTenant: boolean | null;
 }
+
+export const TENANT_FACTS = [
+  "platformVersion",
+  "region",
+  "planTier",
+  "compliancePacks",
+  "isDedicatedTenant",
+] as const;
+export type TenantFact = (typeof TENANT_FACTS)[number];
 
 export const PLAN_TIER_RANK: Readonly<Record<PlanTier, number>> = Object.freeze({
   trial: 0,
@@ -110,6 +125,25 @@ export const PLAN_TIER_RANK: Readonly<Record<PlanTier, number>> = Object.freeze(
 export interface CompatibilityResult {
   readonly compatible: boolean;
   readonly reasons: readonly string[];
+  /** Facts the pack constrains and the deployment could not supply; each is also a reason. */
+  readonly undetermined: readonly TenantFact[];
+}
+
+/**
+ * Whether a pack's envelope constrains each fact at all. An unknown fact refuses only where it is
+ * constrained, so a pack that names no region installs on a deployment with no region, and one that
+ * blocks a region does not install on a deployment that cannot say which region it is.
+ */
+function constrainedFacts(compat: PackCompatibility): ReadonlySet<TenantFact> {
+  const out = new Set<TenantFact>();
+  if (compareSemver(compat.minPlatformVersion, "0.0.0") > 0 || compat.maxPlatformVersion !== undefined) {
+    out.add("platformVersion");
+  }
+  if (compat.allowedRegions.length > 0 || compat.blockedRegions.length > 0) out.add("region");
+  if (compat.requiredPlanTier !== undefined && PLAN_TIER_RANK[compat.requiredPlanTier] > 0) out.add("planTier");
+  if (compat.requiredCompliancePacks.length > 0) out.add("compliancePacks");
+  if (compat.requiresDedicatedTenant) out.add("isDedicatedTenant");
+  return out;
 }
 
 export function checkCompatibility(
@@ -117,46 +151,60 @@ export function checkCompatibility(
   context: TenantContext,
 ): CompatibilityResult {
   const reasons: string[] = [];
-  if (compareSemver(context.platformVersion, compat.minPlatformVersion) < 0) {
-    reasons.push(
-      `platform version ${context.platformVersion} is below minPlatformVersion ${compat.minPlatformVersion}`,
-    );
+  const undetermined: TenantFact[] = [];
+  const constrained = constrainedFacts(compat);
+  for (const fact of TENANT_FACTS) {
+    if (context[fact] === null && constrained.has(fact)) {
+      undetermined.push(fact);
+      reasons.push(`the pack constrains ${fact}, which this deployment does not know for the tenant`);
+    }
   }
-  if (
-    compat.maxPlatformVersion !== undefined &&
-    compareSemver(context.platformVersion, compat.maxPlatformVersion) > 0
-  ) {
-    reasons.push(
-      `platform version ${context.platformVersion} exceeds maxPlatformVersion ${compat.maxPlatformVersion}`,
-    );
-  }
-  if (compat.blockedRegions.includes(context.region)) {
-    reasons.push(`region '${context.region}' is blocked`);
-  }
-  if (compat.allowedRegions.length > 0 && !compat.allowedRegions.includes(context.region)) {
-    reasons.push(`region '${context.region}' is not in allowedRegions`);
-  }
-  if (compat.requiredPlanTier !== undefined) {
-    const required = PLAN_TIER_RANK[compat.requiredPlanTier];
-    const have = PLAN_TIER_RANK[context.planTier];
-    if (have < required) {
+  const { platformVersion, region, planTier, compliancePacks, isDedicatedTenant } = context;
+  if (platformVersion !== null) {
+    if (compareSemver(platformVersion, compat.minPlatformVersion) < 0) {
       reasons.push(
-        `plan tier '${context.planTier}' is below required '${compat.requiredPlanTier}'`,
+        `platform version ${platformVersion} is below minPlatformVersion ${compat.minPlatformVersion}`,
+      );
+    }
+    if (
+      compat.maxPlatformVersion !== undefined &&
+      compareSemver(platformVersion, compat.maxPlatformVersion) > 0
+    ) {
+      reasons.push(
+        `platform version ${platformVersion} exceeds maxPlatformVersion ${compat.maxPlatformVersion}`,
       );
     }
   }
-  const installedCompliance = new Set(context.compliancePacks);
-  for (const c of compat.requiredCompliancePacks) {
-    if (!installedCompliance.has(c)) {
-      reasons.push(`compliance pack '${c}' is required but not installed`);
+  if (region !== null) {
+    if (compat.blockedRegions.includes(region)) {
+      reasons.push(`region '${region}' is blocked`);
+    }
+    if (compat.allowedRegions.length > 0 && !compat.allowedRegions.includes(region)) {
+      reasons.push(`region '${region}' is not in allowedRegions`);
     }
   }
-  if (compat.requiresDedicatedTenant && !context.isDedicatedTenant) {
+  if (compat.requiredPlanTier !== undefined && planTier !== null) {
+    const required = PLAN_TIER_RANK[compat.requiredPlanTier];
+    const have = PLAN_TIER_RANK[planTier];
+    if (have < required) {
+      reasons.push(`plan tier '${planTier}' is below required '${compat.requiredPlanTier}'`);
+    }
+  }
+  if (compliancePacks !== null) {
+    const installedCompliance = new Set(compliancePacks);
+    for (const c of compat.requiredCompliancePacks) {
+      if (!installedCompliance.has(c)) {
+        reasons.push(`compliance pack '${c}' is required but not installed`);
+      }
+    }
+  }
+  if (compat.requiresDedicatedTenant && isDedicatedTenant === false) {
     reasons.push("pack requires a dedicated tenant (single-tenant deployment)");
   }
   return {
     compatible: reasons.length === 0,
     reasons,
+    undetermined,
   };
 }
 

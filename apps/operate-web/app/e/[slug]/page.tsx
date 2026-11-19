@@ -9,7 +9,8 @@ import { FieldInput } from "@/components/FieldInput";
 import { ReferenceLabel } from "@/components/ReferenceLabel";
 import { Topbar } from "@/components/Topbar";
 import { createRecord, deleteRecord, listRecords, runTransition, type ListResult } from "@/lib/api";
-import { formatCell } from "@/lib/format";
+import { toCsv } from "@/lib/csv";
+import { formatCell, isMoneyField, moneyFieldCurrency } from "@/lib/format";
 import { invalidateReferenceCache } from "@/lib/reference-cache";
 import {
   canAccess,
@@ -29,7 +30,7 @@ function cellKind(field: UiFieldSchema | undefined): string | undefined {
   if (field === undefined) return undefined;
   if (field.input === "select") return "badge";
   if (field.input === "date" || field.input === "datetime") return "date";
-  if (field.input === "number" && /(total|amount|price|cost|subtotal|tax|budget|salary)/.test(field.name)) return "money";
+  if (isMoneyField(field)) return "money";
   if (field.input === "email") return "email";
   return undefined;
 }
@@ -86,22 +87,6 @@ const LIST_PAGE_SIZE = 50;
  */
 function csvFilename(slug: string, rows: number, truncated: boolean): string {
   return truncated ? `${slug}-truncated-${rows.toString()}-rows.csv` : `${slug}.csv`;
-}
-
-function csvCell(value: unknown): string {
-  if (value === null || value === undefined) return "";
-  const s = typeof value === "boolean" ? (value ? "true" : "false") : String(value);
-  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-}
-
-/** Serializes rows to CSV (CRLF line endings, RFC-4180 quoting) over the given columns. */
-function toCsv(
-  rows: ReadonlyArray<Record<string, unknown>>,
-  columns: ReadonlyArray<{ key: string; label: string }>,
-): string {
-  const header = columns.map((c) => csvCell(c.label)).join(",");
-  const body = rows.map((r) => columns.map((c) => csvCell(r[c.key])).join(",")).join("\r\n");
-  return body === "" ? header : `${header}\r\n${body}`;
 }
 
 /** Moves keyboard focus to the first invalid input inside a container, scrolling it into view. */
@@ -646,7 +631,7 @@ function EntityList({ entity }: { entity: UiEntitySchema }) {
                     </td>
                     {visibleColumns.map((c) => (
                       <td key={c} className="px-4 py-2.5 text-ink">
-                        <Cell field={fieldByName.get(c)} value={row[c]} schema={schema} />
+                        <Cell field={fieldByName.get(c)} value={row[c]} currency={moneyFieldCurrency(c, row["currency"])} schema={schema} />
                       </td>
                     ))}
                     <td className="px-4 py-2.5 text-right">
@@ -684,10 +669,13 @@ function EntityList({ entity }: { entity: UiEntitySchema }) {
 function Cell({
   field,
   value,
+  currency,
   schema,
 }: {
   field: UiFieldSchema | undefined;
   value: unknown;
+  /** The currency the value is stated in (`moneyFieldCurrency`), never the tenant's by default. */
+  currency: string | null;
   schema: ReturnType<typeof useSchema>["schema"];
 }) {
   if (value === null || value === undefined || value === "") return <span className="text-ink-faint">—</span>;
@@ -703,7 +691,7 @@ function Cell({
       );
     }
   }
-  return <span>{formatCell(value, kind)}</span>;
+  return <span>{formatCell(value, kind, currency)}</span>;
 }
 
 function FilterControl({

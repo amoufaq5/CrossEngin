@@ -3,6 +3,7 @@ import { NotificationDispatchSchema, type DeliveryAttempt } from "@crossengin/no
 import { describe, expect, it } from "vitest";
 
 import {
+  DEFAULT_RETRY_LEASE_MS,
   PostgresDeliveryStore,
   SUPERSEDED_ERROR_MESSAGE,
   dispatchFromRow,
@@ -156,8 +157,12 @@ function fakeDeliveryDb(): {
         .split(",")
         .map((c) => c.trim());
       const limit = Number(p[1]);
+      const leaseMs = Number(p[2]);
+      const lapsed = (r: Row): boolean =>
+        r["status"] === "rendering" &&
+        (r["started_at"] == null || toMillis(r["started_at"]) < Date.now() - leaseMs);
       const matched = dispatches
-        .filter((r) => visible(r) && r["status"] === "queued")
+        .filter((r) => visible(r) && (r["status"] === "queued" || lapsed(r)))
         .sort((a, b) => {
           const pr = priorityRank(String(a["priority"])) - priorityRank(String(b["priority"]));
           if (pr !== 0) return pr;
@@ -173,6 +178,81 @@ function fakeDeliveryDb(): {
           return projected;
         });
       return { rows: matched, rowCount: matched.length };
+    }
+
+    const isLatest = (d: Row): boolean =>
+      !deliveries.some(
+        (w) =>
+          w["tenant_id"] === d["tenant_id"] &&
+          w["dispatch_id"] === d["dispatch_id"] &&
+          w["recipient_address_sha256"] === d["recipient_address_sha256"] &&
+          Number(w["attempt_number"]) > Number(d["attempt_number"]),
+      );
+
+    if (sql.startsWith("WITH due AS")) {
+      const retryable = new Set(["deferred", "bounced_soft", "failed", "rate_limited"]);
+      const cutoff = toMillis(p[1]);
+      const limit = Number(p[2]);
+      const leased = deliveries
+        .filter((d) => visible(d))
+        .filter((d) => d["next_retry_at"] != null && toMillis(d["next_retry_at"]) <= cutoff)
+        .filter((d) => retryable.has(String(d["outcome"])))
+        .filter((d) => isLatest(d))
+        .map((d) => ({
+          delivery: d,
+          parent: dispatches.find(
+            (r) => r["id"] === d["dispatch_id"] && r["tenant_id"] === d["tenant_id"],
+          ),
+        }))
+        .filter((pair) => pair.parent !== undefined && pair.parent["status"] === "sending")
+        .sort((a, b) => toMillis(a.delivery["next_retry_at"]) - toMillis(b.delivery["next_retry_at"]))
+        .slice(0, limit);
+      for (const pair of leased) pair.delivery["next_retry_at"] = p[3];
+      const rows = leased
+        .sort((a, b) =>
+          String(a.delivery["delivery_id"]).localeCompare(String(b.delivery["delivery_id"])),
+        )
+        .map((pair) => ({
+          ...(pair.parent as Row),
+          recipient_address_sha256: pair.delivery["recipient_address_sha256"],
+          attempt_number: pair.delivery["attempt_number"],
+        }));
+      return { rows, rowCount: rows.length };
+    }
+
+    if (sql.startsWith("SELECT DISTINCT recipient_address_sha256")) {
+      const rows = deliveries
+        .filter((d) => visible(d) && d["dispatch_id"] === String(p[1]))
+        .map((d) => d["recipient_address_sha256"])
+        .filter((v, i, all) => all.indexOf(v) === i)
+        .map((v) => ({ recipient_address_sha256: v }));
+      return { rows, rowCount: rows.length };
+    }
+
+    if (sql.startsWith("SELECT d.id FROM")) {
+      const rows = dispatches
+        .filter((r) => visible(r) && r["status"] === "sending")
+        .filter(
+          (r) =>
+            !deliveries.some(
+              (d) => d["dispatch_id"] === r["id"] && d["next_retry_at"] != null && isLatest(d),
+            ),
+        )
+        .slice(0, Number(p[1]))
+        .map((r) => ({ id: r["id"] }));
+      return { rows, rowCount: rows.length };
+    }
+
+    if (sql.startsWith("UPDATE") && sql.includes("SET status = 'sending'")) {
+      const target = dispatches.find(
+        (r) =>
+          visible(r) &&
+          r["id"] === String(p[1]) &&
+          (r["status"] === "rendering" || r["status"] === "rendered"),
+      );
+      if (target === undefined) return { rows: [], rowCount: 0 };
+      target["status"] = "sending";
+      return { rows: [], rowCount: 1 };
     }
 
     if (sql.includes("ROW_NUMBER() OVER (PARTITION BY recipient_address_sha256")) {
@@ -270,6 +350,7 @@ function fakeDeliveryDb(): {
       for (const row of dispatches) {
         if (visible(row) && ids.includes(String(row["id"]))) {
           row["status"] = "rendering";
+          row["started_at"] = new Date().toISOString();
           n += 1;
         }
       }
@@ -414,7 +495,7 @@ describe("delivery-store — claimQueued", () => {
     await store.claimQueued(TENANT_A, noUnreadable);
     const select = captured.find((c) => isSelect(c));
     expect(select?.sql).toContain("FOR UPDATE SKIP LOCKED");
-    expect(select?.sql).toContain("WHERE tenant_id = $1 AND status = 'queued'");
+    expect(select?.sql).toContain("WHERE tenant_id = $1 AND (status = 'queued'");
     expect(select?.inTx).toBe(true);
   });
 
@@ -830,9 +911,17 @@ describe("delivery-store — dueRetries", () => {
     const store = new PostgresDeliveryStore(conn);
     const now = new Date("2026-08-01T00:10:00.000Z");
     await store.dueRetries(TENANT_A, now, noUnreadable, 7);
-    const select = captured.find((c) => isSelect(c));
-    expect(select?.sql).toContain("v.next_retry_at IS NOT NULL AND v.next_retry_at <= $2");
-    expect(select?.params).toEqual([TENANT_A, now, 7]);
+    // The retries are leased in the statement that selects them, so no plain SELECT is issued.
+    expect(captured.find((c) => isSelect(c))).toBeUndefined();
+    const lease = captured.find((c) => c.sql.startsWith("WITH due AS"));
+    expect(lease?.sql).toContain("v.next_retry_at IS NOT NULL AND v.next_retry_at <= $2");
+    expect(lease?.params).toEqual([
+      TENANT_A,
+      now,
+      7,
+      new Date(now.getTime() + DEFAULT_RETRY_LEASE_MS),
+    ]);
+    const select = lease;
     expect(select?.sql).not.toContain("2026-08-01");
     expect(select?.sql).toContain(
       "v.outcome IN ('deferred', 'bounced_soft', 'failed', 'rate_limited')",
@@ -841,6 +930,9 @@ describe("delivery-store — dueRetries", () => {
     expect(select?.sql).toContain(
       "JOIN meta.notification_dispatches d ON d.id = v.dispatch_id AND d.tenant_id = v.tenant_id",
     );
+    // The fake above answers latest-only whatever the statement says, so the statement has to be
+    // asserted to ask it: without the clause every superseded attempt is due again on every tick.
+    expect(select?.sql).toMatch(/AND NOT EXISTS \(SELECT 1 FROM \S+ w WHERE w\.tenant_id = v\.tenant_id AND w\.dispatch_id = v\.dispatch_id AND w\.recipient_address_sha256 = v\.recipient_address_sha256 AND w\.attempt_number > v\.attempt_number\)/);
   });
 
   it("never returns another tenant's due retries", async () => {
@@ -1535,5 +1627,106 @@ describe("delivery-store — identifier + parameter discipline", () => {
     expect(captured.filter((c) => c.sql.includes("set_config"))).toHaveLength(5);
     expect(captured.every((c) => c.inTx)).toBe(true);
     for (const c of captured) expect(c.params[0]).toBe(TENANT_A);
+  });
+});
+
+describe("delivery-store — crash recovery and retry leases (H-31)", () => {
+  it("reclaims a dispatch whose claim lapsed and leaves a freshly claimed one alone", async () => {
+    const { conn, dispatches } = fakeDeliveryDb();
+    const lapsed = dispatchRow({ status: "rendering", started_at: "2020-01-01T00:00:00.000Z" });
+    const fresh = dispatchRow({ status: "rendering", started_at: new Date().toISOString() });
+    const unstamped = dispatchRow({ status: "rendering", started_at: null });
+    dispatches.push(lapsed, fresh, unstamped);
+    const store = new PostgresDeliveryStore(conn);
+    const claimed = await store.claimQueued(TENANT_A, noUnreadable);
+    expect(claimed.map((c) => c.rowId).sort()).toEqual(
+      [String(lapsed["id"]), String(unstamped["id"])].sort(),
+    );
+    expect(toMillis(lapsed["started_at"])).toBeGreaterThan(Date.parse("2020-01-02T00:00:00Z"));
+  });
+
+  it("stamps started_at in the claim so the lease can lapse", async () => {
+    const { conn, captured, dispatches } = fakeDeliveryDb();
+    dispatches.push(dispatchRow());
+    const store = new PostgresDeliveryStore(conn, { claimLeaseMs: 60_000 });
+    await store.claimQueued(TENANT_A, noUnreadable);
+    const select = captured.find((c) => c.sql.includes("FOR UPDATE SKIP LOCKED"));
+    expect(select?.params).toEqual([TENANT_A, 25, 60_000]);
+    const update = captured.find((c) => c.sql.includes("ANY($2::uuid[])"));
+    expect(update?.sql).toContain("SET status = 'rendering', started_at = now()");
+  });
+
+  it("refuses a lease shorter than a second", () => {
+    const { conn } = fakeDeliveryDb();
+    expect(() => new PostgresDeliveryStore(conn, { claimLeaseMs: 10 })).toThrow();
+    expect(() => new PostgresDeliveryStore(conn, { retryLeaseMs: 0 })).toThrow();
+  });
+
+  it("returns a due retry once, then not again until its lease lapses", async () => {
+    const { conn, dispatches, deliveries } = fakeDeliveryDb();
+    const parent = dispatchRow({ status: "sending" });
+    dispatches.push(parent);
+    deliveries.push(deliveryRow(parent, { outcome: "failed" }));
+    const store = new PostgresDeliveryStore(conn);
+    const now = new Date("2026-08-01T00:10:00.000Z");
+    expect(await store.dueRetries(TENANT_A, now, noUnreadable)).toHaveLength(1);
+    expect(await store.dueRetries(TENANT_A, now, noUnreadable)).toEqual([]);
+    const later = new Date(now.getTime() + DEFAULT_RETRY_LEASE_MS + 1);
+    expect(await store.dueRetries(TENANT_A, later, noUnreadable)).toHaveLength(1);
+  });
+
+  it("never returns a superseded attempt once a later attempt for that recipient exists", async () => {
+    const { conn, captured, dispatches, deliveries } = fakeDeliveryDb();
+    const parent = dispatchRow({ status: "sending" });
+    dispatches.push(parent);
+    deliveries.push(
+      deliveryRow(parent, { outcome: "failed", attempt_number: 1 }),
+      deliveryRow(parent, { outcome: "delivered", attempt_number: 2, next_retry_at: null }),
+    );
+    const store = new PostgresDeliveryStore(conn);
+    expect(
+      await store.dueRetries(TENANT_A, new Date("2026-08-01T00:10:00.000Z"), noUnreadable),
+    ).toEqual([]);
+    const sql = captured.find((c) => c.sql.startsWith("WITH due AS"))?.sql ?? "";
+    expect(sql).toContain("AND w.attempt_number > v.attempt_number");
+    expect(sql).toContain("FOR UPDATE OF v SKIP LOCKED");
+  });
+
+  it("moves a reclaimed dispatch with an outstanding retry to sending, so its retry is selectable", async () => {
+    const { conn, dispatches, deliveries } = fakeDeliveryDb();
+    const parent = dispatchRow({ status: "rendering" });
+    dispatches.push(parent);
+    deliveries.push(deliveryRow(parent));
+    const store = new PostgresDeliveryStore(conn);
+    const result = await store.reconcile(TENANT_A, String(parent["id"]), AT);
+    expect(result).toMatchObject({ status: "sending", changed: true, pending: 1 });
+    expect(parent["status"]).toBe("sending");
+  });
+
+  it("names the recipients a dispatch already attempted", async () => {
+    const { conn, dispatches, deliveries } = fakeDeliveryDb();
+    const parent = dispatchRow({ status: "rendering" });
+    dispatches.push(parent);
+    deliveries.push(
+      deliveryRow(parent),
+      deliveryRow(parent, { recipient_address_sha256: "c".repeat(64), attempt_number: 2 }),
+    );
+    const store = new PostgresDeliveryStore(conn);
+    const seen = await store.attemptedRecipients(TENANT_A, String(parent["id"]));
+    expect([...seen].sort()).toEqual([RECIPIENT_SHA, "c".repeat(64)].sort());
+  });
+
+  it("lists sending dispatches with nothing pending, and only those", async () => {
+    const { conn, dispatches, deliveries } = fakeDeliveryDb();
+    const settled = dispatchRow({ status: "sending" });
+    const waiting = dispatchRow({ status: "sending" });
+    dispatches.push(settled, waiting);
+    deliveries.push(
+      deliveryRow(settled, { attempt_number: 1 }),
+      deliveryRow(settled, { attempt_number: 2, outcome: "delivered", next_retry_at: null }),
+      deliveryRow(waiting),
+    );
+    const store = new PostgresDeliveryStore(conn);
+    expect(await store.unsettledSending(TENANT_A)).toEqual([String(settled["id"])]);
   });
 });

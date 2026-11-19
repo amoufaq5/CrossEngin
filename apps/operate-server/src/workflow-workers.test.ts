@@ -31,10 +31,21 @@ type Responder = (sql: string, params: readonly unknown[]) => readonly Record<st
 /** A fake `PgConnection` that records every `{sql, params}` and answers from a per-test responder. */
 function fakeConn(respond: Responder): { conn: PgConnection; calls: Recorded[] } {
   const calls: Recorded[] = [];
+  const renewed = new Set<unknown>();
   const conn: PgConnection = {
     query: async <T>(sql: string, params?: readonly unknown[]): Promise<PgQueryResult<T>> => {
       calls.push({ sql, params: params ?? [] });
       const rows = respond(sql, params ?? []);
+      // The pre-start reaffirmation renews the claim this fake handed out, which is still this
+      // worker's — once. Every later renew of the same id answers *lease lost*, which ends the
+      // in-flight heartbeat: with the tests' immediate `sleep`, a heartbeat whose every renew
+      // succeeded would spin for as long as the item is held, and one test holds it for ever.
+      if (sql.includes("SET claim_expires_at = $3") && rows.length === 0) {
+        const id = params?.[0];
+        if (renewed.has(id)) return { rows: [], rowCount: 0 };
+        renewed.add(id);
+        return { rows: [], rowCount: 1 };
+      }
       return { rows: rows as readonly T[], rowCount: rows.length };
     },
     transaction: async <T>(fn: (tx: PgConnection) => Promise<T>): Promise<T> => fn(conn),
@@ -408,6 +419,34 @@ describe("WorkflowWorkerSupervisor.pollOnce (timer)", () => {
     expect(log.filter((l) => l.startsWith("no-progress"))).toEqual([]);
   });
 
+  it("reaffirms each claim before starting it and skips one another worker took", async () => {
+    const base = fakeConn((sql) =>
+      sql.includes("workflow_timers") && sql.includes("SET claimed_by = $3") ? [timerRow("wft_a")] : [],
+    );
+    // The lease lapsed while the item waited and another worker now holds it: the renew, fenced on
+    // `claimed_by`, matches nothing.
+    const conn: PgConnection = {
+      ...base.conn,
+      query: (async (sql: string, params?: readonly unknown[]) =>
+        sql.includes("SET claim_expires_at = $3")
+          ? (base.calls.push({ sql, params: params ?? [] }), { rows: [], rowCount: 0 })
+          : base.conn.query(sql, params)) as PgConnection["query"],
+      // The renew runs inside the row's tenant context, so the transaction must hand back this
+      // connection and not the one it was spread from.
+      transaction: (async <T,>(fn: (tx: PgConnection) => Promise<T>): Promise<T> =>
+        fn(conn)) as PgConnection["transaction"],
+    };
+    const { engine, firedFor } = fakeEngine({ fired: () => ["wft_a"] });
+    const supervisor = buildWorkflowWorkerSupervisor({ ...BASE, conn, engine });
+    const result = await supervisor.pollOnce("timer");
+    expect(result).toEqual({ kind: "timer", claimed: 1, succeeded: 0, failed: 0, skipped: 1 });
+    expect(firedFor).toEqual([]);
+    const renew = base.calls.find((c) => c.sql.includes("SET claim_expires_at = $3"));
+    expect(renew?.params.slice(0, 2)).toEqual(["wft_a", "operate-server-1"]);
+    // Not released: the claim is somebody else's now.
+    expect(base.calls.some((c) => c.sql.includes("SET claimed_by = NULL"))).toBe(false);
+  });
+
   it("answers null for a worker this deployment does not run", async () => {
     const { conn } = fakeConn(() => []);
     const { engine } = fakeEngine();
@@ -478,7 +517,8 @@ describe("WorkflowWorkerSupervisor.pollOnce (timer)", () => {
     expect(result?.failed).toBe(1);
     expect(log).toContain("failed:timer:wft_a:sequence collision");
     const release = calls.find((c) => c.sql.includes("SET claimed_by = NULL"));
-    expect(release?.params).toEqual(["wft_a", "operate-server-1"]);
+    // The release names the row's tenant, so a confined serving role can see the row it releases.
+    expect(release?.params).toEqual(["wft_a", "operate-server-1", TENANT]);
   });
 
   it("warns when a claim comes back full: the queue is deeper than one poll", async () => {
@@ -571,7 +611,118 @@ describe("WorkflowWorkerSupervisor.pollOnce (activity)", () => {
   });
 });
 
+/** A connection on which every claim renew matches nothing: another worker took the lease. */
+function leaseTakenConn(base: { conn: PgConnection; calls: Recorded[] }): PgConnection {
+  const conn: PgConnection = {
+    ...base.conn,
+    query: (async (sql: string, params?: readonly unknown[]) =>
+      sql.includes("SET claim_expires_at = $3")
+        ? (base.calls.push({ sql, params: params ?? [] }), { rows: [], rowCount: 0 })
+        : base.conn.query(sql, params)) as PgConnection["query"],
+    transaction: (async <T,>(fn: (tx: PgConnection) => Promise<T>): Promise<T> =>
+      fn(conn)) as PgConnection["transaction"],
+  };
+  return conn;
+}
+
+describe("WorkflowWorkerSupervisor.pollOnce — each kind reaffirms its claims", () => {
+  it("skips an activity whose claim another worker took, without executing or releasing it", async () => {
+    const base = fakeConn((sql) =>
+      sql.includes("workflow_activities") && sql.includes("SET claimed_by = $3") ? [activityRow("wfa_a")] : [],
+    );
+    const { engine, executedFor } = fakeEngine({ executed: true });
+    const supervisor = buildWorkflowWorkerSupervisor({ ...BASE, conn: leaseTakenConn(base), engine });
+    const result = await supervisor.pollOnce("activity");
+    expect(result).toEqual({ kind: "activity", claimed: 1, succeeded: 0, failed: 0, skipped: 1 });
+    expect(executedFor).toEqual([]);
+    const renew = base.calls.find(
+      (c) => c.sql.includes("workflow_activities") && c.sql.includes("SET claim_expires_at = $3"),
+    );
+    expect(renew?.params.slice(0, 2)).toEqual(["wfa_a", "operate-server-1"]);
+    expect(base.calls.some((c) => c.sql.includes("SET claimed_by = NULL"))).toBe(false);
+  });
+
+  it("skips a job run whose claim another worker took, without executing it", async () => {
+    const base = fakeConn((sql) =>
+      sql.includes(".tenants WHERE status")
+        ? [{ id: TENANT }]
+        : sql.includes("job_runs") && sql.includes("SET claimed_by = $3")
+          ? [
+              {
+                run_id: "run-1",
+                tenant_id: TENANT,
+                job_id: "nightly_close",
+                job_kind: "scheduled",
+                attempts: 1,
+                claim_expires_at: "2026-10-05T12:00:30.000Z",
+              },
+            ]
+          : [],
+    );
+    const { engine } = fakeEngine();
+    const executed: string[] = [];
+    const supervisor = buildWorkflowWorkerSupervisor({
+      ...BASE,
+      conn: leaseTakenConn(base),
+      engine,
+      jobEngine: {
+        executeJobRun: async (runId) => {
+          executed.push(runId);
+          return { runId, executed: true, disposition: "completed" };
+        },
+      },
+    });
+    const result = await supervisor.pollOnce("job");
+    expect(result).toEqual({ kind: "job", claimed: 1, succeeded: 0, failed: 0, skipped: 1 });
+    expect(executed).toEqual([]);
+    const renew = base.calls.find((c) => c.sql.includes("job_runs") && c.sql.includes("SET claim_expires_at = $3"));
+    expect(renew?.params.slice(0, 2)).toEqual(["run-1", "operate-server-1"]);
+  });
+
+  it("executes a job run fenced on this worker's claim", async () => {
+    const { conn } = fakeConn((sql) =>
+      sql.includes(".tenants WHERE status")
+        ? [{ id: TENANT }]
+        : sql.includes("job_runs") && sql.includes("SET claimed_by = $3")
+          ? [
+              {
+                run_id: "run-1",
+                tenant_id: TENANT,
+                job_id: "nightly_close",
+                job_kind: "scheduled",
+                attempts: 1,
+                claim_expires_at: "2026-10-05T12:00:30.000Z",
+              },
+            ]
+          : [],
+    );
+    const { engine } = fakeEngine();
+    const fences: Array<string | null> = [];
+    const supervisor = buildWorkflowWorkerSupervisor({
+      ...BASE,
+      conn,
+      engine,
+      jobEngine: {
+        executeJobRun: async (runId, _tenantId, options) => {
+          fences.push(options.claimedBy);
+          return { runId, executed: true, disposition: "completed" };
+        },
+      },
+    });
+    await supervisor.pollOnce("job");
+    expect(fences).toEqual(["operate-server-1"]);
+  });
+});
+
 describe("WorkflowWorkerSupervisor.pollOnce (job)", () => {
+  /**
+   * The job claim visits tenants one at a time — the list comes from `meta.tenants`, which carries
+   * no row-level security — so a fake answering the claim must answer that list first.
+   */
+  function withTenants(respond: Responder): Responder {
+    return (sql, params) => (sql.includes(".tenants WHERE status") ? [{ id: TENANT }] : respond(sql, params));
+  }
+
   function jobRow(runId: string): Record<string, unknown> {
     return {
       run_id: runId,
@@ -584,8 +735,8 @@ describe("WorkflowWorkerSupervisor.pollOnce (job)", () => {
   }
 
   it("claims pending runs and executes each through the job engine", async () => {
-    const { conn, calls } = fakeConn((sql) =>
-      sql.includes("job_runs") && sql.includes("SET claimed_by = $3") ? [jobRow("run-1")] : [],
+    const { conn, calls } = fakeConn(
+      withTenants((sql) => (sql.includes("job_runs") && sql.includes("SET claimed_by = $3") ? [jobRow("run-1")] : [])),
     );
     const { engine } = fakeEngine();
     const executed: string[] = [];
@@ -605,13 +756,14 @@ describe("WorkflowWorkerSupervisor.pollOnce (job)", () => {
     const result = await supervisor.pollOnce("job");
     expect(result).toEqual({ kind: "job", claimed: 1, succeeded: 1, failed: 0, skipped: 0 });
     expect(executed).toEqual([`run-1@${TENANT}`]);
-    expect(calls[0]?.sql).toContain("cancel_requested_at IS NULL");
+    const claim = calls.find((c) => c.sql.includes("job_runs") && c.sql.includes("SET claimed_by = $3"));
+    expect(claim?.sql).toContain("cancel_requested_at IS NULL");
     expect(log).toContain("progress:job:1/1/0/0");
   });
 
   it("does not read the cancellation columns unless cancellation is enabled", async () => {
-    const { conn, calls } = fakeConn((sql) =>
-      sql.includes("job_runs") && sql.includes("SET claimed_by = $3") ? [jobRow("run-1")] : [],
+    const { conn, calls } = fakeConn(
+      withTenants((sql) => (sql.includes("job_runs") && sql.includes("SET claimed_by = $3") ? [jobRow("run-1")] : [])),
     );
     const { engine } = fakeEngine();
     const supervisor = buildWorkflowWorkerSupervisor({
@@ -627,14 +779,14 @@ describe("WorkflowWorkerSupervisor.pollOnce (job)", () => {
 
   it("clears each run against the database before starting it when cancellation is on", async () => {
     const probes: string[] = [];
-    const { conn } = fakeConn((sql, params) => {
+    const { conn } = fakeConn(withTenants((sql, params) => {
       if (sql.includes("job_runs") && sql.includes("SET claimed_by = $3")) return [jobRow("run-1")];
       if (sql.includes("cancel_requested_at") && sql.includes("SELECT")) {
         probes.push(String(params[0]));
         return [{ cancel_requested_at: "2026-10-05T11:00:00.000Z", status: "pending" }];
       }
       return [];
-    });
+    }));
     const { engine } = fakeEngine();
     const started: string[] = [];
     const supervisor = buildWorkflowWorkerSupervisor({

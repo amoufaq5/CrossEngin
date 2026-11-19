@@ -1,9 +1,11 @@
+import { checkServerIdentity, type PeerCertificate } from "node:tls";
+
 import pg from "pg";
 
 import {
   UNBOUNDED_POOL_SETTINGS,
   pgSessionParameters,
-  sslModeRequiresTls,
+  sslModeChecksHostname,
   sslModeValidatesCertificate,
   type ConnectionFactory,
   type PgConfig,
@@ -12,13 +14,18 @@ import {
   type PgQueryResult,
 } from "./connection.js";
 
-const { Pool } = pg;
+const { Pool, Client } = pg;
 
 interface PgPoolClient {
   query(sql: string, params?: readonly unknown[]): Promise<{ rows: unknown[]; rowCount: number | null }>;
   release(err?: Error): void;
   on(event: "error", listener: (err: Error) => void): unknown;
   removeListener(event: "error", listener: (err: Error) => void): unknown;
+}
+
+interface PgProbeClient {
+  connect(): Promise<unknown>;
+  end(): Promise<void>;
 }
 
 interface PgPool {
@@ -55,6 +62,8 @@ export interface NodePgConnectionOptions {
   readonly pool?: PgPoolSettings;
   /** Defaults to one `console.error` line per event. Must not throw. */
   readonly onPoolEvent?: (event: PgPoolEvent) => void;
+  /** How `allow`/`prefer` came out. Defaults to one `console.info` line. Must not throw. */
+  readonly onTlsNegotiated?: (negotiation: PgTlsNegotiation) => void;
 }
 
 function defaultPoolEventReporter(event: PgPoolEvent): void {
@@ -151,31 +160,97 @@ function wrapClient(client: PgPoolClient): PgConnection {
   };
 }
 
+/** The TLS options node's stack is handed: `ssl` on a pool or a client. */
+export interface PgTlsOptions {
+  readonly rejectUnauthorized: boolean;
+  /** The roots to trust **instead of** node's bundled store — `PGSSLROOTCERT`'s file. */
+  readonly ca?: string;
+  /**
+   * Whose name the certificate must carry. Always supplied when the chain is checked: under
+   * `verify-ca` it answers nothing, and under `verify-full` it checks against `PGHOST` itself,
+   * because node-postgres passes TLS a `servername` only for a host that is not an IP address,
+   * and node's own check then compares the certificate to `localhost` — so `PGHOST=127.0.0.1`
+   * accepted a certificate naming only `localhost` (measured), where libpq refuses it.
+   */
+  readonly checkServerIdentity?: (hostname: string, cert: PeerCertificate) => Error | undefined;
+}
+
+export type PgSslSetting = false | PgTlsOptions;
+
+/**
+ * What this binding asks of node-postgres for one configuration.
+ *
+ * Always an explicit value and never `undefined`: given `undefined`, node-postgres reads
+ * `process.env.PGSSLMODE` itself and maps `prefer` to `true` — **mandatory TLS with full
+ * verification** — while `allow` and an unset variable map to no TLS at all. So before this, an
+ * operator who wrote `PGSSLMODE=prefer` got the strictest mode and one who left it unset (libpq's
+ * `prefer` too) got the weakest, with the boot line describing neither.
+ *
+ * `allow` and `prefer` are **negotiated**, because node-postgres has no fallback of its own: it
+ * sends `SSLRequest` only when `ssl` is set, and an `N` answer is an error rather than a retry.
+ * The negotiation is libpq's order (`prefer` tries TLS first, `allow` the clear first) made once
+ * per pool by a probe connection, and the answer is held for the pool's life — libpq decides per
+ * connection, which matters only for a server whose TLS configuration changes while this process
+ * runs.
+ */
+export type PgTlsPlan =
+  | { readonly kind: "fixed"; readonly ssl: PgSslSetting }
+  | { readonly kind: "negotiated"; readonly first: PgSslSetting; readonly fallback: PgSslSetting };
+
+const UNVERIFIED_TLS: PgTlsOptions = Object.freeze({ rejectUnauthorized: false });
+
+export function pgTlsPlan(config: Pick<PgConfig, "ssl" | "sslRootCert" | "host">): PgTlsPlan {
+  switch (config.ssl) {
+    case "disable":
+      return { kind: "fixed", ssl: false };
+    case "allow":
+      return { kind: "negotiated", first: false, fallback: UNVERIFIED_TLS };
+    case "prefer":
+      return { kind: "negotiated", first: UNVERIFIED_TLS, fallback: false };
+    case "require":
+    case "verify-ca":
+    case "verify-full": {
+      const validates = sslModeValidatesCertificate(config.ssl);
+      const root = config.sslRootCert;
+      return {
+        kind: "fixed",
+        ssl: {
+          rejectUnauthorized: validates,
+          ...(validates && root?.kind === "file" ? { ca: root.pem } : {}),
+          ...(validates
+            ? {
+                checkServerIdentity: sslModeChecksHostname(config.ssl)
+                  ? (_hostname: string, cert: PeerCertificate) => checkServerIdentity(config.host, cert)
+                  : () => undefined,
+              }
+            : {}),
+        },
+      };
+    }
+  }
+}
+
+/** How a negotiated mode came out, reported once when the pool is first used. */
+export interface PgTlsNegotiation {
+  readonly mode: "allow" | "prefer";
+  readonly encrypted: boolean;
+  /** Why the first attempt was abandoned, or `null` when it succeeded. */
+  readonly firstAttemptError: string | null;
+}
+
+function defaultNegotiationReporter(n: PgTlsNegotiation): void {
+  const how = n.encrypted ? "TLS (server identity unverified)" : "the clear (no TLS)";
+  const why = n.firstAttemptError === null ? "" : ` after the first attempt failed: ${n.firstAttemptError}`;
+  console.info(`[pg] PGSSLMODE=${n.mode} negotiated ${how}${why}; held for this pool's life`);
+}
+
 export function createNodePgConnection(
   config: PgConfig,
   options: NodePgConnectionOptions = {},
 ): PgConnection {
   const settings = options.pool ?? UNBOUNDED_POOL_SETTINGS;
   const report = options.onPoolEvent ?? defaultPoolEventReporter;
-  // Two of the three judgements here were spellings of maps in `connection.ts`, and both are read
-  // from them now rather than restated as mode-name comparisons — which is where those two
-  // predicates came from: a judgement written here *and* there can disagree about one mode with
-  // nothing noticing, and here it gates what node asks of its TLS stack while there it gates what
-  // an operator is told at boot.
-  //
-  //   - *must there be TLS at all* → `sslModeRequiresTls`, the complement of `plaintext_possible`.
-  //   - *is the peer checked* → `sslModeValidatesCertificate`, `verify-full` and nothing else.
-  //
-  // The one mode comparison that stays is `disable`, and it has to: `disable`, `allow` and `prefer`
-  // share one assurance (the channel may be plaintext) and differ only in *who declines* — so
-  // `disable` passes `ssl: false` and the other two pass nothing and let the server decide, which
-  // is the one distinction the assurance deliberately does not carry.
-  const sslOption =
-    config.ssl === "disable"
-      ? false
-      : sslModeRequiresTls(config.ssl)
-        ? { rejectUnauthorized: sslModeValidatesCertificate(config.ssl) }
-        : undefined;
+  const tlsPlan = pgTlsPlan(config);
   // The session limits are set by a statement on each new connection rather than as startup
   // parameters: a connection pooler between this process and Postgres (PgBouncer, Supabase's
   // session pooler) may refuse a startup parameter it does not track, which would fail every
@@ -215,36 +290,97 @@ export function createNodePgConnection(
             },
           );
         };
-  const pool = new Pool({
+  const base = {
     host: config.host,
     port: config.port,
     user: config.user,
     password: config.password,
     database: config.database,
     application_name: config.applicationName,
-    max: settings.maxConnections,
-    connectionTimeoutMillis: settings.connectTimeoutMs,
-    idleTimeoutMillis: settings.idleTimeoutMs,
-    ...(sslOption !== undefined ? { ssl: sslOption } : {}),
-    ...(verify !== undefined ? { verify } : {}),
-  }) as unknown as PgPool;
-
-  // An idle pooled client whose connection drops is emitted here, and an `error` event with no
-  // listener exits the process — reproduced on PG 16 by terminating an idle backend. The pool has
-  // already removed and closed the client by the time this fires, so there is nothing to do but say
-  // so; the next query opens a fresh connection.
-  pool.on("error", (err) => {
-    report({ kind: "idle_client_lost", message: err.message });
-  });
+  };
+  const buildPool = (ssl: PgSslSetting): PgPool => {
+    const built = new Pool({
+      ...base,
+      max: settings.maxConnections,
+      connectionTimeoutMillis: settings.connectTimeoutMs,
+      idleTimeoutMillis: settings.idleTimeoutMs,
+      ssl,
+      ...(verify !== undefined ? { verify } : {}),
+    }) as unknown as PgPool;
+    // An idle pooled client whose connection drops is emitted here, and an `error` event with no
+    // listener exits the process — reproduced on PG 16 by terminating an idle backend. The pool has
+    // already removed and closed the client by the time this fires, so there is nothing to do but
+    // say so; the next query opens a fresh connection.
+    built.on("error", (err) => {
+      report({ kind: "idle_client_lost", message: err.message });
+    });
+    return built;
+  };
+  const probe = async (ssl: PgSslSetting): Promise<void> => {
+    const client = new Client({
+      ...base,
+      connectionTimeoutMillis: settings.connectTimeoutMs,
+      ssl,
+    }) as unknown as PgProbeClient;
+    try {
+      await client.connect();
+    } finally {
+      await client.end().catch(() => undefined);
+    }
+  };
+  const reportNegotiation = options.onTlsNegotiated ?? defaultNegotiationReporter;
+  let ready: PgPool | null = tlsPlan.kind === "fixed" ? buildPool(tlsPlan.ssl) : null;
+  let negotiating: Promise<PgPool> | null = null;
+  const negotiate = async (
+    plan: Extract<PgTlsPlan, { kind: "negotiated" }>,
+  ): Promise<PgPool> => {
+    const mode = config.ssl === "allow" ? "allow" : "prefer";
+    let firstAttemptError: string | null = null;
+    let chosen = plan.first;
+    try {
+      await probe(plan.first);
+    } catch (err) {
+      firstAttemptError = messageOf(err);
+      try {
+        await probe(plan.fallback);
+      } catch (fallbackErr) {
+        // Not remembered: a database that is not up yet at boot must not settle the answer for the
+        // pool's life, so the next statement asks again.
+        throw new Error(
+          `PGSSLMODE=${mode}: neither attempt connected (${firstAttemptError}; then ` +
+            `${messageOf(fallbackErr)})`,
+        );
+      }
+      chosen = plan.fallback;
+    }
+    reportNegotiation({ mode, encrypted: chosen !== false, firstAttemptError });
+    return buildPool(chosen);
+  };
+  const poolFor = async (): Promise<PgPool> => {
+    if (ready !== null) return ready;
+    if (tlsPlan.kind === "fixed") throw new Error("unreachable: a fixed plan builds its pool eagerly");
+    negotiating ??= negotiate(tlsPlan).then(
+      (built) => {
+        ready = built;
+        return built;
+      },
+      (err: unknown) => {
+        negotiating = null;
+        throw err;
+      },
+    );
+    return negotiating;
+  };
 
   const connection: PgConnection = {
     async query<T>(sql: string, params?: readonly unknown[]) {
+      const pool = await poolFor();
       return rowsResult<T>(
         await pool.query(sql, params === undefined ? undefined : Array.from(params)),
       );
     },
     async transaction<T>(fn: (tx: PgConnection) => Promise<T>): Promise<T> {
-      const client = await pool.connect();
+      const client = await (await poolFor()).connect();
       const watch = watchCheckedOut(client, report);
       let discard: unknown = null;
       try {
@@ -268,7 +404,7 @@ export function createNodePgConnection(
       }
     },
     async withAdvisoryLock<T>(lockKey: bigint, fn: () => Promise<T>): Promise<T> {
-      const client = await pool.connect();
+      const client = await (await poolFor()).connect();
       const watch = watchCheckedOut(client, report);
       let discard: unknown = null;
       try {
@@ -292,7 +428,8 @@ export function createNodePgConnection(
       }
     },
     async close() {
-      await pool.end();
+      const pool = ready ?? (negotiating === null ? null : await negotiating.catch(() => null));
+      if (pool !== null) await pool.end();
     },
   };
 

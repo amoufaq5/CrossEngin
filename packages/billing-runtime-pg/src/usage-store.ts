@@ -12,7 +12,7 @@ import {
   type UnreadableRowReporter,
 } from "@crossengin/kernel-pg";
 
-import { withTenantContext } from "./tenant-context.js";
+import { setTenantContextWithin, withTenantContext } from "./tenant-context.js";
 
 const SCHEMA = "meta";
 const TABLE = "billing_usage_records";
@@ -46,18 +46,44 @@ function usageIdentity(row: UsageRow): string | null {
 }
 
 /**
- * Persists rolled-up `UsageRecord`s into `meta.billing_usage_records`, keyed by
- * the record's period idempotency key: re-closing a period `UPSERT`s the same
- * row (quantity + document refreshed) rather than duplicating. Every op runs in
- * the tenant RLS context.
+ * A usage record was already reported to Stripe and a later write for the same key carries a
+ * different quantity. Overwriting it would leave the difference reported nowhere, so the write is
+ * refused by name instead.
+ */
+export class UsageAlreadyReported extends Error {
+  constructor(readonly idempotencyKey: string) {
+    super(`usage record ${idempotencyKey} was already reported to Stripe with a different quantity`);
+    this.name = "UsageAlreadyReported";
+  }
+}
+
+/** `markSynced` named a key no row carries. */
+export class UsageRecordAbsent extends Error {
+  constructor(readonly idempotencyKey: string) {
+    super(`no usage record carries idempotency key ${idempotencyKey}`);
+    this.name = "UsageRecordAbsent";
+  }
+}
+
+/**
+ * Persists rolled-up `UsageRecord`s into `meta.billing_usage_records`, keyed by the record's
+ * idempotency key. Every op runs in the tenant RLS context.
  */
 export class PostgresUsageRecordStore {
   constructor(private readonly conn: PgConnection) {}
 
+  /**
+   * Re-closing a period refreshes the row's quantity **while it is unreported**. Two things this did
+   * wrong before: the conflict arm rewrote `record` with the *new* caller's id while the row kept the
+   * old one, so the id `listUnsynced` handed back named no row and `markSynced` matched nothing —
+   * every sync re-sent the record to Stripe as a fresh increment; and it overwrote a row Stripe had
+   * already been told about, leaving the difference reported nowhere. The document's id is pinned to
+   * the row's now, and a reported row is refused unless the quantity is unchanged.
+   */
   async record(usage: UsageRecord): Promise<void> {
     const valid = UsageRecordSchema.parse(usage);
     await withTenantContext(this.conn, valid.tenantId, async (tx) => {
-      await tx.query(
+      const written = await tx.query(
         `INSERT INTO ${SCHEMA}.${TABLE} (
            id, tenant_id, subscription_id, meter, period_start, period_end,
            quantity, source, recorded_at, idempotency_key, record
@@ -67,7 +93,9 @@ export class PostgresUsageRecordStore {
            quantity = EXCLUDED.quantity,
            period_end = EXCLUDED.period_end,
            recorded_at = EXCLUDED.recorded_at,
-           record = EXCLUDED.record`,
+           record = jsonb_set(EXCLUDED.record, '{id}', to_jsonb(${TABLE}.id::text))
+         WHERE ${TABLE}.synced_to_stripe_at IS NULL
+         RETURNING id`,
         [
           valid.id,
           valid.tenantId,
@@ -82,6 +110,56 @@ export class PostgresUsageRecordStore {
           JSON.stringify(valid),
         ],
       );
+      if (written.rowCount > 0) return;
+      const existing = await tx.query<{ quantity: string }>(
+        `SELECT quantity::TEXT AS quantity FROM ${SCHEMA}.${TABLE} WHERE idempotency_key = $1`,
+        [valid.idempotencyKey],
+      );
+      const stored = existing.rows[0]?.quantity;
+      if (stored === undefined || Number.parseFloat(stored) !== valid.quantity) {
+        throw new UsageAlreadyReported(valid.idempotencyKey);
+      }
+    });
+  }
+
+  /**
+   * Writes one flush window's records **in one transaction**, each under its own tenant's context,
+   * and never updates: a record is immutable once written, so a retry of the same window — the same
+   * records, the same keys — is a no-op rather than an overwrite. All-or-nothing is the point: a flush
+   * that wrote some subscriptions and failed on the next would otherwise leave the caller unable to
+   * tell which half to retry.
+   */
+  async recordWindow(records: readonly UsageRecord[]): Promise<number> {
+    if (records.length === 0) return 0;
+    const valid = records.map((r) => UsageRecordSchema.parse(r));
+    return this.conn.transaction(async (tx) => {
+      let inserted = 0;
+      for (const record of valid) {
+        await setTenantContextWithin(tx, record.tenantId);
+        const result = await tx.query(
+          `INSERT INTO ${SCHEMA}.${TABLE} (
+             id, tenant_id, subscription_id, meter, period_start, period_end,
+             quantity, source, recorded_at, idempotency_key, record
+           )
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
+           ON CONFLICT (idempotency_key) DO NOTHING`,
+          [
+            record.id,
+            record.tenantId,
+            record.subscriptionId,
+            record.meter,
+            record.period.start,
+            record.period.end,
+            record.quantity,
+            record.source,
+            record.recordedAt,
+            record.idempotencyKey,
+            JSON.stringify(record),
+          ],
+        );
+        inserted += result.rowCount;
+      }
+      return inserted;
     });
   }
 
@@ -143,20 +221,28 @@ export class PostgresUsageRecordStore {
     });
   }
 
-  /** Marks a usage record as reported to Stripe (idempotent — a re-mark is a no-op UPDATE). */
+  /**
+   * Marks a usage record as reported to Stripe, by its **idempotency key** — the natural key the row
+   * and the document always agree on, where the document's `id` was not guaranteed to name the row.
+   * A re-mark keeps the first report; a key no row carries throws, because a sync that silently
+   * marked nothing would re-send the record on the next pass.
+   */
   async markSynced(
     tenantId: string,
-    recordId: string,
+    idempotencyKey: string,
     stripeUsageRecordId: string,
     syncedAt: string,
   ): Promise<void> {
     await withTenantContext(this.conn, tenantId, async (tx) => {
-      await tx.query(
+      const result = await tx.query(
         `UPDATE ${SCHEMA}.${TABLE}
-         SET synced_to_stripe_at = $2, stripe_usage_record_id = $3
-         WHERE id = $1 AND synced_to_stripe_at IS NULL`,
-        [recordId, syncedAt, stripeUsageRecordId],
+         SET synced_to_stripe_at = COALESCE(synced_to_stripe_at, $2),
+             stripe_usage_record_id = COALESCE(stripe_usage_record_id, $3)
+         WHERE idempotency_key = $1
+         RETURNING id`,
+        [idempotencyKey, syncedAt, stripeUsageRecordId],
       );
+      if (result.rowCount === 0) throw new UsageRecordAbsent(idempotencyKey);
     });
   }
 

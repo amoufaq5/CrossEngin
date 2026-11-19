@@ -2,7 +2,14 @@ import type { PgConnection } from "@crossengin/kernel-pg";
 import type { ResolvedPrincipal } from "@crossengin/api-gateway";
 import type { HandlerInput, HandlerOutput } from "@crossengin/api-gateway-runtime";
 import { generateEd25519Keypair } from "@crossengin/crypto";
-import { PackManifestSchema, signPackManifest, type PackManifest } from "@crossengin/marketplace";
+import {
+  packManifestDigest,
+  PackManifestSchema,
+  PackPublisherRegistry,
+  parsePackPublisherSpec,
+  signPackManifest,
+  type PackManifest,
+} from "@crossengin/marketplace";
 import {
   PostgresPackVersionStore,
   buildPersistentPackSubmissionEngine,
@@ -26,11 +33,26 @@ function fakePg(): PgConnection {
   const run = async (sql: string, params?: readonly unknown[]) => {
     const p = params ?? [];
     if (sql.includes("INSERT INTO")) {
+      if (sql.includes("DO NOTHING") && rows.has(`${String(p[0])}|${String(p[1])}`)) return { rows: [], rowCount: 0 };
       rows.set(`${String(p[0])}|${String(p[1])}`, {
         pack_id: p[0], version: p[1], status: p[2], channel: p[3], bundle_sha256: p[4], bundle_size_bytes: p[5],
         manifest_sha256: p[6], signature: p[7], changelog: p[8], published_at: p[9] ?? null, published_by: p[10] ?? null,
         deprecated_at: p[11] ?? null, deprecated_reason: p[12] ?? null, withdrawn_at: p[13] ?? null, withdrawn_reason: p[14] ?? null,
         superseded_by: p[15] ?? null, security_review_status: p[16], security_reviewed_at: p[17] ?? null, security_reviewer: p[18] ?? null,
+      });
+      return { rows: [], rowCount: 1 };
+    }
+    if (sql.startsWith("UPDATE")) {
+      const key = `${String(p[0])}|${String(p[1])}`;
+      const row = rows.get(key);
+      if (row === undefined || row["status"] !== p[13] || row["security_review_status"] !== p[14]) {
+        return { rows: [], rowCount: 0 };
+      }
+      rows.set(key, {
+        ...row, status: p[2], published_at: p[3] ?? null, published_by: p[4] ?? null, deprecated_at: p[5] ?? null,
+        deprecated_reason: p[6] ?? null, withdrawn_at: p[7] ?? null, withdrawn_reason: p[8] ?? null,
+        superseded_by: p[9] ?? null, security_review_status: p[10], security_reviewed_at: p[11] ?? null,
+        security_reviewer: p[12] ?? null,
       });
       return { rows: [], rowCount: 1 };
     }
@@ -51,10 +73,12 @@ function fakePg(): PgConnection {
   return conn;
 }
 
+const PUBLISHERS = new PackPublisherRegistry([parsePackPublisherSpec(`com.acme:community:${keypair.publicKeyBase64}`)]);
+
 function makeCtx(): MarketplaceAuthoringContext {
   const conn = fakePg();
   return {
-    engine: buildPersistentPackSubmissionEngine(conn),
+    engine: buildPersistentPackSubmissionEngine(conn, { publishers: PUBLISHERS }),
     store: new PostgresPackVersionStore(conn),
     principalRoles: (p: ResolvedPrincipal | null) => ({ primaryRole: p?.grantedScopes[0] ?? "anon" }),
     authorRoles: new Set(["pack_author"]),
@@ -87,7 +111,7 @@ function manifest(overrides: Partial<PackManifest> = {}): PackManifest {
   });
 }
 
-function submitBody(m: PackManifest, channel = "beta"): Record<string, unknown> {
+function submitBody(m: PackManifest, channel = "beta", signer = keypair): Record<string, unknown> {
   return {
     packId: "com.acme.loyalty",
     version: "1.0.0",
@@ -95,9 +119,8 @@ function submitBody(m: PackManifest, channel = "beta"): Record<string, unknown> 
     channel,
     bundleSha256: SHA,
     bundleSizeBytes: 4096,
-    manifestSha256: SHA,
-    signature: signPackManifest({ manifest: m, privateKeyBase64: keypair.privateKeyBase64, publicKeyBase64: keypair.publicKeyBase64, signedAt: "2026-06-01T00:00:00.000Z" }),
-    publicKeyBase64: keypair.publicKeyBase64,
+    manifestSha256: packManifestDigest(m),
+    signature: signPackManifest({ manifest: m, privateKeyBase64: signer.privateKeyBase64, publicKeyBase64: signer.publicKeyBase64, signedAt: "2026-06-01T00:00:00.000Z" }),
     changelog: "Initial release",
   };
 }
@@ -125,11 +148,36 @@ describe("authoring — submit", () => {
     expect(((await submit(input("cashier", submitBody(manifest())))) as HandlerOutput).status).toBe(403);
   });
 
-  it("400s a submission whose signature does not verify", async () => {
+  it("403s a submission signed by a key the platform did not register, however valid", async () => {
     const submit = buildSubmitHandler(makeCtx());
-    const wrong = generateEd25519Keypair();
-    const body = { ...submitBody(manifest()), publicKeyBase64: wrong.publicKeyBase64 };
+    const out = (await submit(input("pack_author", submitBody(manifest(), "beta", generateEd25519Keypair())))) as HandlerOutput & {
+      body: { reason: string };
+    };
+    expect(out.status).toBe(403);
+    expect(out.body.reason).toBe("publisher_unregistered");
+  });
+
+  it("400s a body that still carries a self-asserted key, rather than ignoring it", async () => {
+    const submit = buildSubmitHandler(makeCtx());
+    const body = { ...submitBody(manifest()), publicKeyBase64: keypair.publicKeyBase64 };
     expect(((await submit(input("pack_author", body))) as HandlerOutput).status).toBe(400);
+  });
+
+  it("409s re-submitting an existing version, and the stored version keeps its original bytes", async () => {
+    const ctx = makeCtx();
+    const submit = buildSubmitHandler(ctx);
+    expect(((await submit(input("pack_author", submitBody(manifest())))) as HandlerOutput).status).toBe(201);
+    const again = { ...submitBody(manifest()), bundleSha256: "b".repeat(64) };
+    const out = (await submit(input("pack_author", again))) as HandlerOutput & { body: { reason: string } };
+    expect(out.status).toBe(409);
+    expect(out.body.reason).toBe("version_exists");
+    expect((await ctx.store.getByPackVersion("com.acme.loyalty", "1.0.0"))?.bundleSha256).toBe(SHA);
+  });
+
+  it("propagates a failure that is not a refusal instead of reporting it as one", async () => {
+    const ctx = makeCtx();
+    ctx.engine.submit = async () => Promise.reject(new Error("connection reset"));
+    await expect(buildSubmitHandler(ctx)(input("pack_author", submitBody(manifest())))).rejects.toThrow(/connection reset/);
   });
 });
 
@@ -177,5 +225,25 @@ describe("authoring — reads", () => {
     expect(get.body.version.version).toBe("1.0.0");
     const list = (await findHandler(ctx, "authoring.packs.list")(input("pack_author", undefined, { packId: "com.acme.loyalty" }))) as HandlerOutput & { body: { data: unknown[] } };
     expect(list.body.data).toHaveLength(1);
+  });
+});
+
+describe("authoring — a caller's malformed input is a refusal, never a 500", () => {
+  it("400s a version that is not semver instead of throwing past the refusal map", async () => {
+    const submit = buildSubmitHandler(makeCtx());
+    const out = (await submit(input("pack_author", { ...submitBody(manifest()), version: "latest" }))) as HandlerOutput;
+    expect(out.status).toBe(400);
+  });
+
+  it("409s publishing a failed review on a non-stable channel", async () => {
+    const ctx = makeCtx();
+    await findHandler(ctx, "authoring.packs.submit")(input("pack_author", submitBody(manifest(), "beta")));
+    await findHandler(ctx, "authoring.packs.submitForReview")(input("pack_author", undefined, params));
+    await findHandler(ctx, "authoring.packs.review")(input("marketplace_reviewer", { status: "failed" }, params));
+    const out = (await findHandler(ctx, "authoring.packs.publish")(input("marketplace_reviewer", undefined, params))) as HandlerOutput & {
+      body: { reason: string };
+    };
+    expect(out.status).toBe(409);
+    expect(out.body.reason).toBe("review_not_cleared");
   });
 });

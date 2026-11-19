@@ -17,6 +17,9 @@ import {
   DELETION_REQUEST_RECONCILED_OPERATION,
   DELETION_EVIDENCE_AUDITED_OPERATION,
   TOMBSTONE_SWEEP_AUDITED_OPERATION,
+  DELETION_REQUESTS_PENDING_READ_OPERATION,
+  DELETION_REQUEST_DEADLINE_EXTENDED_OPERATION,
+  type PendingPageLike,
   type DeletionRequestEvent,
   type DeletionRequestLike,
   type DeletionRequestRoutesContext,
@@ -129,6 +132,7 @@ interface Harness {
   readonly escalated: string[];
   readonly escalatedTombstones: string[];
   readonly escalatedVerdicts: string[];
+  readonly extensions: Array<Record<string, unknown>>;
 }
 
 function harness(
@@ -146,6 +150,8 @@ function harness(
     readonly auditThrows?: boolean;
     readonly sweep?: TombstoneAuditPageLike;
     readonly sweepThrows?: boolean;
+    readonly extendThrows?: unknown;
+    readonly extendReturnsNull?: boolean;
   } = {},
 ): Harness {
   const events: DeletionRequestEvent[] = [];
@@ -159,6 +165,7 @@ function harness(
   const escalatedTombstones: string[] = [];
   const escalatedVerdicts: string[] = [];
   const unreadableReports: Array<{ requestId: string | null; detail: string }> = [];
+  const extensions: Array<Record<string, unknown>> = [];
   const ctx: DeletionRequestRoutesContext = {
     onUnreadableRequest: (row) => unreadableReports.push({ ...row }),
     store: {
@@ -176,6 +183,18 @@ function harness(
         if (behaviour.transitionThrows !== undefined) throw behaviour.transitionThrows;
         if (behaviour.transitionReturnsNull === true) return null;
         return requestOf({ status: to, verifiedAt: AT, verifiedBy: CALLER });
+      },
+      extendDeadline: async (_id, input): Promise<DeletionRequestLike | null> => {
+        extensions.push({ ...input });
+        if (behaviour.extendThrows !== undefined) throw behaviour.extendThrows;
+        if (behaviour.extendReturnsNull === true) return null;
+        return requestOf({
+          status: "verified",
+          deadlineAt: input.deadlineAt,
+          verifiedAt: AT,
+          verifiedBy: "someone-else",
+          verificationMethod: "email_link",
+        });
       },
       stranded: async (olderThan, onUnreadable): Promise<readonly DeletionRequestLike[]> => {
         strandedCalls.push(olderThan);
@@ -245,6 +264,7 @@ function harness(
     escalated,
     escalatedTombstones,
     escalatedVerdicts,
+    extensions,
   };
 }
 
@@ -281,7 +301,6 @@ async function call(
 const SUBMIT_BODY = {
   tenantId: TENANT,
   subjectIdentifier: "subject@example.test",
-  submittedBy: "subject@example.test",
 };
 
 describe("the route declarations", () => {
@@ -302,6 +321,8 @@ describe("the route declarations", () => {
       { method: "POST", path: "v1/platform/deletion-requests/{id}/verify" },
       { method: "POST", path: "v1/platform/deletion-requests/{id}/reject" },
       { method: "POST", path: "v1/platform/deletion-requests/{id}/reconcile" },
+      { method: "POST", path: "v1/platform/deletion-requests/{id}/extend-deadline" },
+      { method: "GET", path: "v1/platform/deletion-requests/pending" },
       { method: "GET", path: "v1/platform/deletion-requests/unproven" },
       // The sweep hangs off `tombstones`, not `deletion-requests`, because it starts from the proofs
       // and the ones it exists for name no request at all (ADR-0327).
@@ -317,6 +338,8 @@ describe("the route declarations", () => {
     // subject — and both would run. Nothing else here creates anything.
     expect(routes.map((r) => r.route.idempotencyRequired)).toEqual([
       true,
+      false,
+      false,
       false,
       false,
       false,
@@ -374,6 +397,22 @@ describe("requestHandle", () => {
 });
 
 describe("submit", () => {
+  it("records the authenticated caller as the submitter, never a body field (H-05)", async () => {
+    const h = harness();
+    await call(h.ctx, SUBMIT, { parsedBody: SUBMIT_BODY });
+    expect(h.submits[0]?.["submittedBy"]).toBe(CALLER);
+  });
+
+  it("refuses a body that names its own submitter, rather than ignoring it", async () => {
+    const h = harness();
+    const res = await call(h.ctx, SUBMIT, {
+      parsedBody: { ...SUBMIT_BODY, submittedBy: "someone-else" },
+    });
+    expect(res.status).toBe(400);
+    expect(res.body["error"]).toBe("submitter_is_the_credential");
+    expect(h.submits).toEqual([]);
+  });
+
   it("creates a submitted request and returns the handle", async () => {
     const h = harness();
     const res = await call(h.ctx, SUBMIT, { parsedBody: SUBMIT_BODY });
@@ -1376,5 +1415,134 @@ describe("the lifecycle trail (meta.tenant_lifecycle_events)", () => {
     const sql = insertOf(statements)?.sql ?? "";
     expect(sql.startsWith("INSERT INTO")).toBe(true);
     expect(sql.toUpperCase()).not.toContain("DO UPDATE");
+  });
+});
+
+describe("extend-deadline (H-20)", () => {
+  const EXTEND = "platform.deletion_requests.extend_deadline";
+  const BODY = { deadlineAt: "2026-12-30T00:00:00.000Z", reason: "the subject's records span three systems" };
+
+  it("extends in place, stamped with the server's clock, and records it", async () => {
+    const h = harness();
+    const res = await call(h.ctx, EXTEND, { parsedBody: BODY });
+    expect(res.status).toBe(200);
+    expect(h.extensions).toEqual([
+      {
+        deadlineAt: "2026-12-30T00:00:00.000Z",
+        deadlineExtendedAt: AT,
+        deadlineExtensionReason: "the subject's records span three systems",
+      },
+    ]);
+    expect(res.body["deadlineAt"]).toBe("2026-12-30T00:00:00.000Z");
+    expect(h.events.at(-1)?.operation).toBe(DELETION_REQUEST_DEADLINE_EXTENDED_OPERATION);
+  });
+
+  it("refuses an empty or whitespace reason before the store", async () => {
+    const h = harness();
+    const res = await call(h.ctx, EXTEND, { parsedBody: { ...BODY, reason: "   " } });
+    expect(res.status).toBe(400);
+    expect(h.extensions).toEqual([]);
+  });
+
+  it("answers a planned refusal as a 409 naming it", async () => {
+    const refused = Object.assign(new Error("already extended"), { refusal: "already_extended" });
+    const h = harness({}, { extendThrows: refused });
+    const res = await call(h.ctx, EXTEND, { parsedBody: BODY });
+    expect(res.status).toBe(409);
+    expect(res.body["refusal"]).toBe("already_extended");
+  });
+
+  it("answers an unknown request as a 404 and an unreadable one as a 503", async () => {
+    const missing = Object.assign(new Error("no such"), { refusal: "not_found" });
+    expect((await call(harness({}, { extendThrows: missing }).ctx, EXTEND, { parsedBody: BODY })).status).toBe(404);
+    expect(
+      (await call(harness({}, { extendThrows: new Error("ZodError") }).ctx, EXTEND, { parsedBody: BODY })).status,
+    ).toBe(503);
+  });
+
+  it("answers a lost race as a 409, and refuses a role without the verify grant", async () => {
+    expect(
+      (await call(harness({}, { extendReturnsNull: true }).ctx, EXTEND, { parsedBody: BODY })).status,
+    ).toBe(409);
+    const h = harness({ verifyRoles: new Set() });
+    expect((await call(h.ctx, EXTEND, { parsedBody: BODY })).status).toBe(403);
+    expect(h.extensions).toEqual([]);
+  });
+});
+
+describe("pending list (H-20)", () => {
+  const PENDING = "platform.deletion_requests.pending";
+  const page = (over: Partial<PendingPageLike> = {}): PendingPageLike => ({
+    requests: [
+      {
+        request: requestOf({ id: "dreq_breached0001", status: "submitted" }),
+        assessment: { standing: "breached", deadlineAt: AT, msPastDeadline: 5, extendedAt: null },
+      },
+      {
+        request: requestOf({ id: "dreq_healthy00001" }),
+        assessment: { standing: "within_deadline", deadlineAt: AT, msPastDeadline: -5, extendedAt: null },
+      },
+    ],
+    unreadable: [],
+    complete: true,
+    warningDays: 7,
+    ...over,
+  });
+  const withQuery = (query: Record<string, string>): Partial<HandlerInput> => ({
+    request: { query } as unknown as HandlerInput["request"],
+  });
+
+  it("lists every unanswered request with its standing and records the read", async () => {
+    const limits: number[] = [];
+    const h = harness({ pending: async ({ limit }) => (limits.push(limit), page()) });
+    const res = await call(h.ctx, PENDING, withQuery({}));
+    expect(res.status).toBe(200);
+    expect((res.body["data"] as Array<Record<string, unknown>>).map((r) => r["standing"])).toEqual([
+      "breached",
+      "within_deadline",
+    ]);
+    expect(res.body["complete"]).toBe(true);
+    expect(limits).toEqual([100]);
+    expect(h.events.at(-1)?.operation).toBe(DELETION_REQUESTS_PENDING_READ_OPERATION);
+  });
+
+  it("narrows by a known standing and refuses an unknown one rather than dropping it", async () => {
+    const h = harness({ pending: async () => page() });
+    const narrowed = await call(h.ctx, PENDING, withQuery({ standing: "breached" }));
+    expect((narrowed.body["data"] as unknown[]).length).toBe(1);
+    const bad = await call(h.ctx, PENDING, withQuery({ standing: "late-ish" }));
+    expect(bad.status).toBe(400);
+  });
+
+  it("answers 501 with no source, and 403 without the reconcile grant", async () => {
+    expect((await call(harness().ctx, PENDING, withQuery({}))).status).toBe(501);
+    const h = harness({ pending: async () => page(), reconcileRoles: new Set() });
+    expect((await call(h.ctx, PENDING, withQuery({}))).status).toBe(403);
+  });
+
+  it("forwards unreadable rows to the reporter and keeps them on the page", async () => {
+    const h = harness({
+      pending: async () => page({ unreadable: [{ requestId: "dreq_bad000000001", detail: "x" }] }),
+    });
+    const res = await call(h.ctx, PENDING, withQuery({}));
+    expect(res.body["unreadable"]).toEqual([{ requestId: "dreq_bad000000001", detail: "x" }]);
+    expect(h.unreadableReports).toContainEqual({ requestId: "dreq_bad000000001", detail: "x" });
+  });
+});
+
+describe("grace on the handle (C-04)", () => {
+  it("says when a verified request may first run, pulled in before its deadline", () => {
+    const verified = requestOf({
+      status: "verified",
+      verifiedAt: "2026-10-03T13:00:00.000Z",
+      verifiedBy: "v",
+      verificationMethod: "email_link",
+      deadlineAt: "2026-11-02T13:00:00.000Z",
+    });
+    expect(requestHandle(verified, 7 * 86_400_000)["executeNotBefore"]).toBe(
+      "2026-10-10T13:00:00.000Z",
+    );
+    expect(requestHandle(verified)["executeNotBefore"]).toBeNull();
+    expect(requestHandle(requestOf(), 7 * 86_400_000)["executeNotBefore"]).toBeNull();
   });
 });

@@ -177,27 +177,50 @@ describe("checkType is a total map over the field-type enum", () => {
     }
   });
 
-  it("validated 9 kinds before and validates 12 now, so 11 remain deliberately open", () => {
-    // 14 of 23 reached `default: return null`. `date`, `time` and `datetime` are closed here;
-    // the other 11 are `acceptAny` on purpose and each is a visible line.
-    const open = [
-      "duration",
-      "uuid",
-      "reference",
-      "json",
-      "file",
-      "currency_amount",
-      "geo_point",
-      "geo_polygon",
-      "country_code",
-      "language_code",
-      "timezone",
-    ];
-    expect(open).toHaveLength(11);
+  it("leaves open only the six kinds whose published schema carries no type", () => {
+    // 14 of 23 reached `default: return null`. `date`, `time` and `datetime` closed first; five
+    // string kinds followed when a JSON number was measured passing them. These six publish no
+    // `type`, so any JSON is their contract and each is a visible line.
+    const open = ["duration", "json", "file", "currency_amount", "geo_point", "geo_polygon"];
     for (const kind of open) {
       const rule = { name: "f", required: false, kind, serverManaged: false };
       expect(validateBody([rule], { f: "anything at all" }, "update")).toEqual([]);
+      expect(validateBody([rule], { f: 42 }, "update")).toEqual([]);
+      expect(validateBody([rule], { f: { a: 1 } }, "update")).toEqual([]);
     }
+  });
+
+  it.each([
+    "text",
+    "long_text",
+    "phone",
+    "url",
+    "uuid",
+    "reference",
+    "country_code",
+    "language_code",
+    "timezone",
+    "enum",
+  ])("refuses a JSON number, boolean or object for the string kind %s and accepts a string", (kind) => {
+    const rule = {
+      name: "f",
+      required: false,
+      kind,
+      serverManaged: false,
+      ...(kind === "enum" ? { enumValues: ["42", "x"] } : {}),
+    };
+    for (const v of [42, true, { a: 1 }, ["x"]]) {
+      expect(validateBody([rule], { f: v }, "update")).toEqual([
+        { field: "f", code: kind === "enum" ? "enum" : "type", message: expect.any(String) as string },
+      ]);
+    }
+    expect(validateBody([rule], { f: kind === "enum" ? "42" : "x" }, "update")).toEqual([]);
+  });
+
+  it("still applies a string kind's own rule after the type check", () => {
+    const rule = { name: "f", required: false, kind: "phone", maxLength: 3, serverManaged: false };
+    expect(validateBody([rule], { f: "12345" }, "update").map((e) => e.code)).toEqual(["maxLength"]);
+    expect(validateBody([rule], { f: 12345 }, "update").map((e) => e.code)).toEqual(["type"]);
   });
 
   it("accepts anything on an array field, which has no scalar rule", () => {

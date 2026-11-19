@@ -1,7 +1,12 @@
 import { STAGE_OUTCOMES } from "@crossengin/api-gateway";
 import type { AuditSamplingSettings, SettingsStore } from "@crossengin/operate-runtime";
 
-import type { TenantAuditPolicy } from "./audit-chain.js";
+import {
+  widenWithLivePolicy,
+  type EffectiveAuditPolicy,
+  type LiveAuditPolicyField,
+  type TenantAuditPolicy,
+} from "./audit-chain.js";
 import type { ActiveTenantSource } from "./checkpoint-scheduler.js";
 import type { IntervalHandle, IntervalScheduler } from "./jwks.js";
 
@@ -39,6 +44,13 @@ export interface TenantAuditPolicyCacheOptions {
   readonly tenants: ActiveTenantSource;
   /** Routes a per-tenant load failure so one tenant's settings error never aborts the whole refresh. */
   readonly onError?: (err: unknown, tenantId: string) => void;
+  /**
+   * The deployment's own policy for a tenant — the floor a live policy may only widen (M-19). With
+   * it, a stored setting that tries to record less is named through `onNarrowingIgnored` on every
+   * refresh rather than sitting in the settings document doing nothing anyone was told about.
+   */
+  readonly floor?: (tenantId: string) => EffectiveAuditPolicy;
+  readonly onNarrowingIgnored?: (tenantId: string, fields: readonly LiveAuditPolicyField[]) => void;
 }
 
 /**
@@ -61,7 +73,12 @@ export class TenantAuditPolicyCache {
       try {
         const settings = await this.opts.settingsStore.get(tenantId);
         if (settings.auditSampling !== undefined) {
-          next.set(tenantId, auditPolicyFromSettings(settings.auditSampling));
+          const policy = auditPolicyFromSettings(settings.auditSampling);
+          next.set(tenantId, policy);
+          if (this.opts.floor !== undefined) {
+            const { narrowingIgnored } = widenWithLivePolicy(this.opts.floor(tenantId), policy);
+            if (narrowingIgnored.length > 0) this.opts.onNarrowingIgnored?.(tenantId, narrowingIgnored);
+          }
         }
       } catch (err) {
         this.opts.onError?.(err, tenantId);
@@ -161,6 +178,8 @@ export function buildTenantAuditPolicyCache(
     settingsStore: opts.settingsStore,
     tenants: opts.tenants,
     ...(opts.onError !== undefined ? { onError: opts.onError } : {}),
+    ...(opts.floor !== undefined ? { floor: opts.floor } : {}),
+    ...(opts.onNarrowingIgnored !== undefined ? { onNarrowingIgnored: opts.onNarrowingIgnored } : {}),
   });
   const refresher = new TenantAuditPolicyRefresher({
     cache,

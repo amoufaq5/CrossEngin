@@ -16,6 +16,8 @@ import {
   surveyPhiFields,
   type PhiField,
   type PhiStorageInput,
+  formatAtRestHonesty,
+  surveyPlaintextSensitiveFields,
 } from "./column-encryption.js";
 
 /** 36 bytes, 20 distinct — comfortably past both of the parser's floors. */
@@ -541,5 +543,53 @@ describe("buildColumnKeySource", () => {
     source(TENANT_A);
     source(TENANT_B);
     expect(parses).toBe(1);
+  });
+});
+
+describe("formatAtRestHonesty", () => {
+  const PII = [
+    { entity: "Employee", field: "work_email", classification: "pii" as const },
+  ];
+
+  it("says the document store encrypts nothing at rest", () => {
+    const line = formatAtRestHonesty({ store: "pg", encryptedFields: 0, plaintextSensitive: [] });
+    expect(line).toMatch(/--store pg encrypts no column at rest/);
+    expect(line).toMatch(/no KMS/);
+  });
+
+  it("names the cipher on the column store, and that it is not an AEAD", () => {
+    const line = formatAtRestHonesty({ store: "pg-columns", encryptedFields: 2, plaintextSensitive: [] });
+    expect(line).toMatch(/encrypts 2 phi\/regulated column/);
+    expect(line).toMatch(/cipher-algo=aes256/);
+    expect(line).toMatch(/not an AEAD/);
+  });
+
+  it("names pii fields as stored in the clear on every store", () => {
+    for (const store of ["memory", "pg", "pg-columns"] as const) {
+      const line = formatAtRestHonesty({ store, encryptedFields: 0, plaintextSensitive: PII });
+      expect(line).toMatch(/stored in the clear on every store: Employee\.work_email \(pii\)/);
+    }
+  });
+});
+
+describe("surveyPlaintextSensitiveFields", () => {
+  it("lists pii and commercial_sensitive and never phi or regulated", () => {
+    const fields = surveyPlaintextSensitiveFields({
+      manifestVersion: "1.0",
+      meta: { name: "t", version: "1.0.0" },
+      entities: [
+        {
+          name: "Person",
+          fields: [
+            { name: "email", type: { kind: "text" }, classification: "pii" },
+            { name: "price", type: { kind: "text" }, classification: "commercial_sensitive" },
+            { name: "mrn", type: { kind: "text" }, classification: "phi" },
+            { name: "nid", type: { kind: "text" }, classification: "regulated" },
+            { name: "note", type: { kind: "text" }, classification: "internal" },
+          ],
+        },
+      ],
+    } as unknown as Parameters<typeof surveyPlaintextSensitiveFields>[0]);
+    expect(fields.map((f) => f.field).sort()).toEqual(["email", "price"]);
   });
 });

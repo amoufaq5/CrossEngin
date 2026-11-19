@@ -100,21 +100,66 @@ describe("IncidentCommunicationSchema", () => {
     ).toThrow(/requiresLegalReview=true/);
   });
 
-  it("rejects breach_notification published after deadline", () => {
+  // A late notification used to be refused outright, which made the fact a regulator asks for first
+  // unstorable. Article 33(1) asks for it *with reasons for the delay*, so the reason is required and
+  // the row is admitted.
+  const lateBreach = {
+    ...base,
+    audience: "affected_tenants" as const,
+    kind: "breach_notification" as const,
+    statusPageLevel: undefined,
+    publishedAt: "2026-05-20T10:00:00Z",
+    requiresLegalReview: true,
+    legalReviewedBy: "u-legal",
+    legalReviewedAt: "2026-05-20T09:00:00Z",
+    breachNotificationDeadlineAt: "2026-05-17T10:00:00Z",
+    deliveryChannels: ["email" as const],
+  };
+
+  it("rejects a late breach_notification that states no delay reason", () => {
+    expect(() => IncidentCommunicationSchema.parse(lateBreach)).toThrow(
+      /must state breachNotificationDelayReason/,
+    );
+  });
+
+  it("rejects a whitespace-only delay reason as no reason", () => {
+    expect(() =>
+      IncidentCommunicationSchema.parse({ ...lateBreach, breachNotificationDelayReason: "   " }),
+    ).toThrow();
+  });
+
+  it("admits a late breach_notification carrying its delay reason, and reports it late", () => {
+    const parsed = IncidentCommunicationSchema.parse({
+      ...lateBreach,
+      breachNotificationDelayReason: "scope of affected records was not established until day 4",
+    });
+    expect(isBreachNotificationTimely(parsed)).toBe(false);
+  });
+
+  it("rejects a delay reason on a breach_notification that was on time", () => {
     expect(() =>
       IncidentCommunicationSchema.parse({
-        ...base,
-        audience: "affected_tenants",
-        kind: "breach_notification",
-        statusPageLevel: undefined,
-        publishedAt: "2026-05-20T10:00:00Z",
-        requiresLegalReview: true,
-        legalReviewedBy: "u-legal",
-        legalReviewedAt: "2026-05-20T09:00:00Z",
-        breachNotificationDeadlineAt: "2026-05-17T10:00:00Z",
-        deliveryChannels: ["email"],
+        ...lateBreach,
+        publishedAt: "2026-05-16T10:00:00Z",
+        legalReviewedAt: "2026-05-16T09:00:00Z",
+        breachNotificationDelayReason: "no delay happened",
       }),
-    ).toThrow(/notification was late/);
+    ).toThrow(/only valid on a breach_notification published after its deadline/);
+  });
+
+  it("rejects a delay reason on a communication that is not a breach_notification", () => {
+    expect(() =>
+      IncidentCommunicationSchema.parse({ ...base, breachNotificationDelayReason: "x" }),
+    ).toThrow(/only valid on a breach_notification/);
+  });
+
+  it("treats publication exactly at the deadline as on time", () => {
+    const parsed = IncidentCommunicationSchema.parse({
+      ...lateBreach,
+      publishedAt: "2026-05-17T10:00:00Z",
+      legalReviewedAt: "2026-05-17T09:00:00Z",
+    });
+    expect(isBreachNotificationTimely(parsed)).toBe(true);
   });
 
   it("rejects requiresLegalReview without reviewer", () => {

@@ -59,12 +59,21 @@ class FakeStore implements DeliveryStoreLike {
   async dueRetries(): Promise<readonly DueRetry[]> {
     return [];
   }
+  async reconcile(): Promise<unknown> {
+    return undefined;
+  }
+  async attemptedRecipients(): Promise<ReadonlySet<string>> {
+    return new Set();
+  }
+  async unsettledSending(): Promise<readonly string[]> {
+    return [];
+  }
 }
 
 const resolver: RecipientResolverLike = {
   async resolveAudience() {
     return [
-      { userId: USER, email: "a@x.test", displayName: null, primaryRole: "erp_admin", secondaryRoles: [] },
+      { userId: USER, email: "a@x.test", phoneE164: null, displayName: null, primaryRole: "erp_admin", secondaryRoles: [] },
     ];
   },
   async preferencesFor() {
@@ -234,6 +243,9 @@ describe("delivery-scheduler", () => {
       recordAttempt: (t, r, a) => store.recordAttempt(t, r, a),
       advance: (t, r, u) => store.advance(t, r, u),
       dueRetries: () => store.dueRetries(),
+      reconcile: () => store.reconcile(),
+      attemptedRecipients: () => store.attemptedRecipients(),
+      unsettledSending: () => store.unsettledSending(),
     };
     const s = new DeliveryScheduler({
       drain: drainOptions(slow),

@@ -32,6 +32,12 @@ import {
   type DocumentIndexEnsureReport,
   type DocumentIntegrityPlan,
 } from "./document-integrity.js";
+import {
+  ensureDeclaredIndexes,
+  planDocumentStoreIndexes,
+  type DeclaredIndexPlan,
+  type DeclaredIndexResult,
+} from "./declared-indexes.js";
 import { planLinkPrune } from "./link-integrity.js";
 import { withTenantContext } from "./tenant-context.js";
 
@@ -155,6 +161,7 @@ export class PostgresEntityStore
   private readonly linksTable: string;
   private readonly schema: string;
   private readonly integrity: DocumentIntegrityPlan | null;
+  private readonly lookup: DeclaredIndexPlan | null;
 
   constructor(conn: PgConnection, opts: PostgresEntityStoreOptions = {}) {
     this.conn = conn;
@@ -171,6 +178,22 @@ export class PostgresEntityStore
         : planDocumentIntegrity(opts.manifest, this.table, {
             ...(opts.enforceReferences !== undefined ? { enforceReferences: opts.enforceReferences } : {}),
           });
+    this.lookup = opts.manifest === undefined ? null : planDocumentStoreIndexes(opts.manifest, schema);
+  }
+
+  /** The manifest's declared lookup indexes on the shared table, or `null` with no manifest. */
+  lookupIndexPlan(): DeclaredIndexPlan | null {
+    return this.lookup;
+  }
+
+  /**
+   * Builds the declared lookup indexes `CONCURRENTLY`, or with `build: false` only reports which
+   * are present — what the API does at boot, since it owns nothing and building them is the owner's
+   * one-shot (`document-indexes`).
+   */
+  async ensureLookupIndexes(opts: { readonly build: boolean }): Promise<readonly DeclaredIndexResult[]> {
+    if (this.lookup === null) return [];
+    return ensureDeclaredIndexes(this.conn, this.lookup.indexes, opts);
   }
 
   /** What this store enforces, or `null` for a store constructed without a manifest. */
@@ -184,7 +207,12 @@ export class PostgresEntityStore
    */
   async ensureUniqueIndexes(): Promise<DocumentIndexEnsureReport> {
     if (this.integrity === null) return { results: [], stale: [] };
-    return ensureDocumentUniqueIndexes(this.conn, this.integrity, this.schema);
+    return ensureDocumentUniqueIndexes(
+      this.conn,
+      this.integrity,
+      this.schema,
+      new Set((this.lookup?.indexes ?? []).map((i) => i.name)),
+    );
   }
 
   list(tenantId: string, entity: string): Promise<readonly EntityRecord[]> {

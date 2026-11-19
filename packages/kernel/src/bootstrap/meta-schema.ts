@@ -211,6 +211,26 @@ function retainedRecordNoTenantDelete(table: string): RlsPolicy {
 }
 
 /**
+ * The same `DELETE` fence, for a table the Article 17 erasure does **not** retain but whose rows a
+ * tenant must still not be able to destroy, because they are the platform's evidence *about* the
+ * tenant rather than the tenant's own data: the key-management audit, the SLO loop's enforcement
+ * actions, the DR executions and readiness snapshots a certification reads,
+ * and the suppression list that stops the platform re-mailing an address that bounced or
+ * complained. A tenant deleting any of these erases the record of what the platform did or must not
+ * do, and — unlike an edited chain entry — nothing would detect it.
+ *
+ * A second helper rather than the first one reused, so the reason a table is fenced stays legible
+ * in the catalog and the workspace rule (`pg-record-retention.ts`) can hold each set to its own
+ * argument: a retained table is fenced *because* the erasure keeps it, an undeletable one carries a
+ * declared reason and must have no tenant-context `DELETE` writer anywhere in the workspace. The
+ * erasure is unaffected: it refuses to run on a session RLS confines
+ * (`rls_would_confine_this_session`), and a restrictive policy binds only such a session.
+ */
+function tenantUndeletableRecord(table: string): RlsPolicy {
+  return retainedRecordNoTenantDelete(table);
+}
+
+/**
  * The CHECK a `TIMESTAMPTZ` column is owed when a reader parses it as an **instant**.
  *
  * This is ADR-0374's expression, extracted rather than restated. That increment wrote it inline
@@ -423,11 +443,17 @@ export const META_USERS: TableDefinition = {
       // A regex and not a value set: `check-admission.ts` classifies `~` as `pattern`, so this
       // needs no `pg-value-set-domains.ts` declaration, while an `algorithm` column would have
       // needed one for a fact this string already states.
+      //
+      // Bounded to the parser's own shape: at most eight digits per parameter (the work ceiling
+      // admits nothing wider than seven) and an optional `k<version>$` naming the pepper the hash
+      // was keyed with, which a version-1 hash omits so every row written before versions existed
+      // still matches. The unbounded `[0-9]+` admitted rows `parsePasswordHash` refuses on read.
       name: "credential_hash",
       type: "TEXT",
       check:
         "credential_hash IS NULL OR credential_hash ~" +
-        " '^scrypt\\$[0-9]+\\$[0-9]+\\$[0-9]+\\$[0-9a-f]{32}\\$[0-9a-f]{128}$'",
+        " '^scrypt\\$[0-9]{1,8}\\$[0-9]{1,8}\\$[0-9]{1,8}\\$(k[1-9][0-9]{0,3}\\$)?" +
+        "[0-9a-f]{32}\\$[0-9a-f]{128}$'",
     },
     {
       // When the password was last set. Read by nothing yet; it is the only record that would let
@@ -457,6 +483,19 @@ export const META_USERS: TableDefinition = {
       // would record that a lock ever happened.
       name: "credential_locked_until",
       type: "TIMESTAMPTZ",
+    },
+    {
+      // The generation of this user's sessions. A minted token carries the value it was minted
+      // under and a request whose token names an older one is refused, so setting a password, an
+      // operator's reset and signing out each end every session already issued by advancing one
+      // integer, rather than by keeping a list of revoked tokens. `NOT NULL DEFAULT 0` for the
+      // counter's reason above: every existing row and every token minted before this column
+      // existed agree on zero.
+      name: "session_epoch",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "session_epoch >= 0",
     },
   ],
   primaryKey: ["id"],
@@ -4790,6 +4829,14 @@ export const META_INCIDENT_COMMUNICATIONS: TableDefinition = {
     { name: "retracted_reason", type: "TEXT" },
     { name: "breach_notification_deadline_at", type: "TIMESTAMPTZ" },
     {
+      // GDPR Article 33(1): a notification later than 72 hours is accompanied by the reasons for
+      // the delay. Nullable — only a late breach notification carries one — and paired with its
+      // condition by `incident_communications_delay_reason_check` below.
+      name: "breach_notification_delay_reason",
+      type: "TEXT",
+      check: "char_length(breach_notification_delay_reason) BETWEEN 1 AND 2000",
+    },
+    {
       // Optimistic concurrency. A postmortem is edited by humans over days and a runbook execution
       // by a scheduler while someone watches it, so two writers who both read the same version
       // would silently drop one's work. Every write states the revision it read.
@@ -4817,8 +4864,23 @@ export const META_INCIDENT_COMMUNICATIONS: TableDefinition = {
       // look like it worked while meaning nothing for every non-breach communication.
       kind: "check",
       name: "incident_communications_breach_window_check",
+      // Widened, not dropped: a notification published after its deadline is admitted only when it
+      // states why (Article 33(1)). This used to refuse a late notification outright, so the first
+      // fact a regulator asks for could not be stored. The old expression implies this one, so an
+      // already-applied database reconciles it as a proven widening with no manual SQL.
       expression:
-        "breach_notification_deadline_at IS NULL OR published_at <= breach_notification_deadline_at",
+        "breach_notification_deadline_at IS NULL OR published_at <= breach_notification_deadline_at OR breach_notification_delay_reason IS NOT NULL",
+    },
+    {
+      // The other direction: a delay reason is a claim that the notification was late, so it is
+      // refused on anything that was not. Unlike the widening above, no live constraint implies
+      // this one, so on a populated table it is reported `constraint_widening_unproven` with its
+      // SQL (measured: the planner proves the widening and not this). Empty everywhere today, since
+      // the comms store has no caller.
+      kind: "check",
+      name: "incident_communications_delay_reason_check",
+      expression:
+        "breach_notification_delay_reason IS NULL OR (kind = 'breach_notification' AND breach_notification_deadline_at IS NOT NULL AND published_at > breach_notification_deadline_at)",
     },
     // ADR-0296 declared "the two cross-column rules" above as the set with nowhere to live.
     // `IncidentCommunicationSchema` has **fifteen** such clauses, and the two already here cover
@@ -6261,6 +6323,7 @@ export const META_NOTIFICATION_SUPPRESSIONS: TableDefinition = {
         name: "notification_suppressions_tenant_isolation",
         using: TENANT_ISOLATION_USING,
       },
+      tenantUndeletableRecord("notification_suppressions"),
     ],
   },
 };
@@ -9915,6 +9978,17 @@ export const META_GATEWAY_IDEMPOTENCY_RECORDS: TableDefinition = {
     { name: "completed_at", type: "TIMESTAMPTZ" },
     { name: "error_code", type: "TEXT" },
     { name: "error_message", type: "TEXT" },
+    // The replay. Without these a completed key replayed its status and an empty body, so a client
+    // retrying a create learned that it had succeeded and not what it had created. Both nullable
+    // with no default: NULL is "no body was retained" (a row written before these columns, or a
+    // response over the gateway's stored-body cap), which the replay says in a header rather than
+    // inventing an empty body.
+    {
+      name: "response_headers",
+      type: "JSONB",
+      check: "jsonb_typeof(response_headers) = 'object'",
+    },
+    { name: "response_body", type: "BYTEA" },
   ],
   primaryKey: ["id"],
   uniqueConstraints: [
@@ -10718,6 +10792,7 @@ export const META_CRYPTO_AUDIT: TableDefinition = {
         command: "INSERT",
         check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
+      tenantUndeletableRecord("crypto_audit"),
     ],
   },
 };
@@ -11195,6 +11270,7 @@ export const META_SLO_ENFORCEMENT_ACTIONS: TableDefinition = {
         command: "INSERT",
         check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
+      tenantUndeletableRecord("slo_enforcement_actions"),
     ],
   },
 };
@@ -11524,6 +11600,7 @@ export const META_DR_FAILOVER_EXECUTIONS: TableDefinition = {
         using: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
         check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
+      tenantUndeletableRecord("dr_failover_executions"),
     ],
   },
 };
@@ -11590,6 +11667,7 @@ export const META_DR_DRILL_EXECUTIONS: TableDefinition = {
         using: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
         check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
+      tenantUndeletableRecord("dr_drill_executions"),
     ],
   },
 };
@@ -11699,6 +11777,7 @@ export const META_DR_READINESS_SNAPSHOTS: TableDefinition = {
         command: "INSERT",
         check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
+      tenantUndeletableRecord("dr_readiness_snapshots"),
     ],
   },
 };
@@ -13195,6 +13274,10 @@ export const META_TABLES: readonly TableDefinition[] = [
  * biconditional *forbade* fencing the two statutory tables — the right-to-left arm would have
  * reported them `fenced_table_not_protected` — while CLAUDE.md claimed the wider one. A rule
  * narrower than the invariant it is cited for is worse than no rule, because it passes.
+ *
+ * Since the M-01 slice the census is that union **plus** the tables declared with
+ * `tenantUndeletableRecord` — not retained, carrying a declared reason, and with no tenant-context
+ * `DELETE` writer — and the rule compares all three sets both ways.
  */
 export function tenantDeleteFencedTables(): readonly string[] {
   return META_TABLES.filter((table) =>

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { parseForwardedClientCertFingerprint } from "@crossengin/api-gateway";
+import { isPrincipalRefused, parseForwardedClientCertFingerprint } from "@crossengin/api-gateway";
 import type { IncomingRequest, ResolvedPrincipal } from "@crossengin/api-gateway";
 import {
   InMemoryJwksProvider,
@@ -66,16 +66,34 @@ interface CredentialSpecFields {
   readonly principalId: string | null;
 }
 
-function parseCredentialSpecFields(raw: string, flag: string, firstName: string): CredentialSpecFields {
+/**
+ * The spec as an error may quote it. For `--api-key` the first field **is** the credential, so it is
+ * replaced rather than echoed: a refusal reaches stderr, a container log and whatever ships logs, and
+ * a malformed spec is overwhelmingly a real token with a typo elsewhere in it. The other two flags'
+ * first field is a key id or a certificate fingerprint, both public by construction, and quoting them
+ * is what lets an operator find the line they mistyped.
+ */
+function quotableSpec(raw: string, firstIsSecret: boolean): string {
+  if (!firstIsSecret) return JSON.stringify(raw);
+  const colon = raw.indexOf(":");
+  return JSON.stringify(colon === -1 ? "<token>" : `<token>${raw.slice(colon)}`);
+}
+
+function parseCredentialSpecFields(
+  raw: string,
+  flag: string,
+  firstName: string,
+  firstIsSecret = false,
+): CredentialSpecFields {
   const parts = raw.split(":");
   if (parts.length < 3 || parts.length > 4) {
     throw new Error(
-      `invalid ${flag} (expected ${firstName}:role:tenant[:principalId]): ${JSON.stringify(raw)}`,
+      `invalid ${flag} (expected ${firstName}:role:tenant[:principalId]): ${quotableSpec(raw, firstIsSecret)}`,
     );
   }
   const [first, role, tenantId, principalId] = parts;
   if (!first || !role || !tenantId) {
-    throw new Error(`invalid ${flag} (empty field): ${JSON.stringify(raw)}`);
+    throw new Error(`invalid ${flag} (empty field): ${quotableSpec(raw, firstIsSecret)}`);
   }
   return {
     first,
@@ -90,7 +108,7 @@ function parseCredentialSpecFields(raw: string, flag: string, firstName: string)
  * fixed placeholder UUID so the common `key:role:tenant` form just works.
  */
 export function parseApiKeySpec(raw: string): ApiKeySpec {
-  const f = parseCredentialSpecFields(raw, "--api-key", "key");
+  const f = parseCredentialSpecFields(raw, "--api-key", "key", true);
   return {
     key: f.first,
     role: f.role,
@@ -260,13 +278,13 @@ export interface ScopeRoleReading {
  * IdP emitting `scope: "openid profile platform_admin"` used to resolve `primaryRole = "openid"`
  * and be refused everywhere; it now reaches `/v1/platform/tenants` — provision and delete.
  *
- * Still reported rather than refused, on a measurement and for want of a better instrument: no
- * shipped configuration passes a JWKS flag, and every alternative available without a contract
- * change is worse. Reading only the first scope when an external JWKS is configured would make a
- * `--credential-login` deployment's own secondary roles silently inert, which is this repo's
- * most-found class; refusing the combination would refuse a deployment that works. The fix that
- * would actually settle it is a reader that knows **which key verified the token**, and
- * `PrincipalResolverInput` does not carry the matched `kid`.
+ * That was reported rather than refused for want of an instrument: the fix that settles it is a
+ * reader that knows **which key verified the token**, and `PrincipalResolverInput` did not carry
+ * the matched `kid`. It does now (`bearer.kid`), so the dangerous case is enforced rather than
+ * reported — `withForeignPlatformRolesDropped` drops a platform-authority role from a token this
+ * deployment's own key did not sign, and `--idp-platform-roles` is the announced hatch. The rest of
+ * the widening (a foreign token's further *manifest* roles) is still reported: reading only the
+ * first scope would make a `--credential-login` deployment's own secondary roles silently inert.
  *
  * RFC 6749 §3.3 also makes `scope` an unordered set, so on a foreign token the increment promotes
  * an arbitrary element's authority rather than widening an ordered list. Our own mint writes the
@@ -281,6 +299,8 @@ export interface ScopeRoleReading {
 export function formatScopeRoleReading(opts: {
   readonly credentialLogin: boolean;
   readonly externalJwks: boolean;
+  /** Whether `--idp-platform-roles` lets a foreign token carry a platform role (H-04). */
+  readonly idpPlatformRoles: boolean;
 }): ScopeRoleReading | null {
   const clauses: string[] = [];
   if (opts.credentialLogin) {
@@ -288,17 +308,21 @@ export function formatScopeRoleReading(opts: {
   }
   if (opts.externalJwks) {
     clauses.push(
-      "a token this deployment did not mint has its scopes past the FIRST read as secondary" +
-        " roles, so a scope matching any role named in a --*-role flag now grants what that role" +
-        " grants — including --platform-admin-role, which reaches tenant provision and delete." +
-        " Emit exactly the roles you mean",
+      opts.idpPlatformRoles
+        ? "a token this deployment did not mint has every scope read as a role, and under" +
+            " --idp-platform-roles a scope naming a platform role (any --*-role flag that reaches" +
+            " platform routes, --platform-admin-role among them) grants it — so your IdP can" +
+            " provision and delete tenants. Emit exactly the roles you mean"
+        : "a token this deployment did not mint has every scope read as a role EXCEPT a platform" +
+            " role, which is removed: an IdP's scope cannot grant what --platform-admin-role and the" +
+            " other platform --*-role flags grant (pass --idp-platform-roles to let it)",
     );
   }
   if (clauses.length === 0) return null;
   return {
     message: `session roles: ${clauses.join("; ")}`,
     // The widening is the only clause worth interrupting an operator for.
-    level: opts.externalJwks ? "warn" : "info",
+    level: opts.externalJwks && opts.idpPlatformRoles ? "warn" : "info",
   };
 }
 
@@ -451,6 +475,53 @@ export function buildPrincipalWiring(
     principalResolver,
     opaqueTokenLookup,
     principalRoles: (p) => principalRolesFromScopes(p?.grantedScopes ?? []),
+  };
+}
+
+/**
+ * Which platform roles a bearer token signed by a key this deployment does not mint with may carry
+ * (H-04). `trustedKid` is the login's own key, or null when the deployment mints no sessions — then
+ * every bearer token is foreign.
+ */
+export interface ForeignTokenScopePolicy {
+  readonly trustedKid: string | null;
+  readonly platformRoles: ReadonlySet<string>;
+  /** Reports each drop, by kid and role, so an operator can see what their IdP asserted. */
+  readonly onDropped?: (kid: string, roles: readonly string[]) => void;
+}
+
+/**
+ * Removes platform-authority roles from a bearer token that this deployment's own key did not
+ * sign. ADR-0369 made a foreign token's scopes past the first into secondary roles and reported
+ * the consequence rather than refusing it, on the stated ground that the resolver did not know
+ * which key verified the token. It does now (`PrincipalResolverInput.bearer.kid`), so the warning
+ * becomes an enforcement: an IdP's `scope` can grant a role the tenant's manifest declares, and
+ * cannot grant one that reaches tenant provision or deletion unless the deployment says so
+ * (`--idp-platform-roles`, which is simply not installing this decoration).
+ *
+ * Dropped rather than refusing the request: the token is genuine and its other scopes are the
+ * IdP's to assert. The primary role is dropped too if it is a platform role — the first scope of a
+ * foreign token is no more authoritative than the rest, RFC 6749 §3.3 making `scope` a set.
+ */
+export function withForeignPlatformRolesDropped(
+  resolver: PrincipalResolver,
+  policy: ForeignTokenScopePolicy,
+): PrincipalResolver {
+  return {
+    async resolve(input: PrincipalResolverInput) {
+      const resolved = await resolver.resolve(input);
+      if (resolved === null || isPrincipalRefused(resolved)) return resolved;
+      if (input.authScheme !== "bearer_jwt") return resolved;
+      const kid = input.bearer?.kid ?? null;
+      if (kid !== null && kid === policy.trustedKid) return resolved;
+      const dropped = resolved.grantedScopes.filter((s) => policy.platformRoles.has(s));
+      if (dropped.length === 0) return resolved;
+      policy.onDropped?.(kid ?? "(none)", dropped);
+      return {
+        ...resolved,
+        grantedScopes: resolved.grantedScopes.filter((s) => !policy.platformRoles.has(s)),
+      };
+    },
   };
 }
 

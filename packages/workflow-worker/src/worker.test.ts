@@ -29,6 +29,7 @@ describe("WorkflowTimerWorker.runOnce", () => {
     };
     const processed: string[] = [];
     const worker = new WorkflowTimerWorker({
+      claimRenewer: null,
       workerId: "worker-A",
       claimer,
       processor: { process: async (t) => void processed.push(t.timerId) },
@@ -40,6 +41,55 @@ describe("WorkflowTimerWorker.runOnce", () => {
     expect(seen).toEqual({ workerId: "worker-A", now: "2026-05-17T12:00:00.000Z", limit: 7, leaseMs: 15_000 });
     expect(processed).toEqual(["a"]);
     expect(result.succeeded).toEqual(["a"]);
+  });
+});
+
+describe("WorkflowTimerWorker — per-item reaffirm and the poll gate", () => {
+  it("passes its claim renewer to the batch, so a queued timer is reaffirmed before it fires", async () => {
+    const asked: string[] = [];
+    const fired: string[] = [];
+    const worker = new WorkflowTimerWorker({
+      claimRenewer: {
+        renew: async (o) => {
+          asked.push(o.timerId);
+          return false;
+        },
+      },
+      workerId: "w",
+      claimer: { claim: async () => [timer("a")], release: async () => undefined },
+      processor: { process: async (t) => void fired.push(t.timerId) },
+    });
+    const result = await worker.runOnce();
+    expect(asked).toEqual(["a"]);
+    expect(fired).toEqual([]);
+    expect(result.skipped).toEqual([{ timerId: "a", reason: "lease_lost" }]);
+  });
+
+  it("backs off to the idle delay after a batch that claimed timers and fired none of them", async () => {
+    const sleeps: number[] = [];
+    let resolveDone!: () => void;
+    const done = new Promise<void>((r) => (resolveDone = r));
+    const worker = new WorkflowTimerWorker({
+      claimRenewer: null,
+      workerId: "w",
+      claimer: { claim: async () => [timer("poison")], release: async () => undefined },
+      processor: {
+        process: async () => {
+          throw new Error("deterministic bug");
+        },
+      },
+      idlePollMs: 1_000,
+      activePollMs: 0,
+      now: () => new Date("2026-01-01T00:00:00.000Z"),
+      sleep: async (ms) => {
+        sleeps.push(ms);
+        if (sleeps.length === 2) resolveDone();
+      },
+    });
+    worker.start();
+    await done;
+    await worker.stop();
+    expect(sleeps).toEqual([1_000, 1_000]);
   });
 });
 
@@ -58,6 +108,7 @@ describe("WorkflowTimerWorker loop", () => {
     const done = new Promise<void>((r) => (resolveDone = r));
 
     const worker = new WorkflowTimerWorker({
+      claimRenewer: null,
       workerId: "w",
       claimer,
       processor: { process: async (t) => void processed.push(t.timerId) },
@@ -95,6 +146,7 @@ describe("WorkflowTimerWorker loop", () => {
       release: async () => undefined,
     };
     const worker = new WorkflowTimerWorker({
+      claimRenewer: null,
       workerId: "w",
       claimer,
       processor: noopProcessor,
@@ -115,6 +167,7 @@ describe("WorkflowTimerWorker loop", () => {
 
   it("start() is idempotent and stop() is safe when never started", async () => {
     const worker = new WorkflowTimerWorker({
+      claimRenewer: null,
       workerId: "w",
       claimer: { claim: async () => [], release: async () => undefined },
       processor: noopProcessor,
@@ -132,6 +185,7 @@ describe("WorkflowTimerWorker loop", () => {
     let finishFirst!: () => void;
     const held = new Promise<void>((r) => (finishFirst = r));
     const worker = new WorkflowTimerWorker({
+      claimRenewer: null,
       workerId: "w",
       claimer: {
         claim: async () => [timer("a"), timer("b"), timer("c")],
@@ -167,6 +221,7 @@ describe("WorkflowTimerWorker loop", () => {
   it("runOnce() on a worker that was never started is not fenced", async () => {
     const processed: string[] = [];
     const worker = new WorkflowTimerWorker({
+      claimRenewer: null,
       workerId: "w",
       claimer: { claim: async () => [timer("a")], release: async () => undefined },
       processor: { process: async (t) => void processed.push(t.timerId) },

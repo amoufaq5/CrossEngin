@@ -39,31 +39,26 @@ import { assertScopeTenantId, type PgConnection } from "@crossengin/kernel-pg";
  * tenant it is enqueueing for — which is what makes the ordinary tenant context the honest answer
  * and is the same fix ADR-0333 swept into fourteen stores and ADR-0335 applied to two more.
  *
- * **Which statements it reaches is decided by one question: does the caller hold the row's tenant?**
- * The thirteen writes and reads against these tables fall into three groups, and the two it does not
- * reach are left for opposite reasons rather than both being unfinished.
+ * **Every statement against these tables now runs under the row's tenant.**
  *
- * *Fenced (10)* — every statement whose caller already has the tenant in hand: the three producers'
+ * *Fenced* — every statement whose caller already has the tenant in hand: the three producers'
  * `INSERT`s, `recordDeadLetter`'s, `executeJobRun`'s read and its three finalizing `UPDATE`s, and
  * `job-cancellation.ts`'s request/observe/finalize statements. For these the scope is a **fact about
  * the row**, so there is nothing to decide.
  *
- * *Cross-tenant by design (2)* — `claimDueJobs` and `reapCancelledJobRuns` sweep every tenant so one
- * fleet serves all of them, and `reapCancelledJobRuns` *returns* the tenant ids it found. There is no
- * single scope to set, and a platform *read* arm could not express it either for the same NOT NULL
- * reason. What a confined session's claim can see is the question `probeJobQueueVisibility` already
- * answers at boot (ADR-0334), and a negative-control test asserts the reaper issues no context
- * statement, so a later "completeness" edit cannot quietly turn a cross-tenant sweep into a
- * single-tenant one.
+ * *The claim and the reaper run per tenant.* `claimDueJobs` and `reapCancelledJobRuns` used to sweep
+ * every tenant in one statement, and that composed only for a session Postgres exempts from the
+ * policy — so on the shipped serving role (ADR-0424) the worker claimed **nothing**. A platform arm
+ * cannot serve them for the NOT NULL reason above. `claimDueJobsPerTenant` reads the tenant list
+ * from `meta.tenants`, which carries no RLS, and claims each tenant's queue under that tenant's
+ * context inside one transaction, with the tenant also in the predicate so an exempt session claims
+ * no other tenant's runs under it.
  *
- * *Blocked by a contract, not by wiring (2)* — `releaseJobClaim` and `renewJobClaim` take
- * `{jobId, workerId}` and **no tenant at all**, so they cannot be fenced without widening a
- * signature. The worker *does* hold it (`ClaimedJob.tenantId`, and `JobCancellationWatcher`
- * already takes `{jobId, tenantId}`), so the fact is one hop away — but `ClaimRenewer` is shared
- * with the timer and activity workers, so adding it there is a three-path contract change rather
- * than a parameter. Deferred on a stated cost: a lost release or renew is **recoverable**, because
- * the lease lapses and the run is re-claimed, where a lost finalize is not. That is the only reason
- * it is the safe half to leave; see this increment's ADR.
+ * *Release and renew carry the tenant now.* They took `{jobId, workerId}` and no tenant, so as a
+ * non-owner a release did not release and a renew answered *lease lost* for a lease still held. The
+ * worker always held the fact (`ClaimedJob.tenantId`); `ClaimRenewer` and the three `*Claimer.release`
+ * contracts in `@crossengin/workflow-worker` take a required `tenantId`, and the timer and activity
+ * paths are scoped the same way.
  *
  * A **ninth** spelling of a function this workspace already holds in eight packages, which is a known
  * and named debt: CLAUDE.md records it for `scopeFilter` — "copies exist for want of a shared home;

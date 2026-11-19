@@ -2,12 +2,16 @@ import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 import { describe, expect, it } from "vitest";
 
 import {
+  JOB_CLAIM_EXCLUDED_TENANT_STATUSES,
   JOB_QUEUE_VISIBILITY,
   claimDueJobs,
+  claimDueJobsPerTenant,
+  listJobClaimTenants,
   probeJobQueueVisibility,
   releaseJobClaim,
   renewJobClaim,
 } from "./job-claim.js";
+import { SET_TENANT_CONTEXT_SQL } from "./tenant-context.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 const NOW = "2026-05-17T12:00:00.000Z";
@@ -16,15 +20,20 @@ function mockConnection(
   rows: readonly Record<string, unknown>[],
   capture?: Array<{ sql: string; params: readonly unknown[] | undefined }>,
 ): PgConnection {
-  return {
+  const conn: PgConnection = {
     query: (async (sql: string, params?: readonly unknown[]): Promise<PgQueryResult> => {
       if (capture !== undefined) capture.push({ sql, params });
+      if (sql === SET_TENANT_CONTEXT_SQL) return { rows: [], rowCount: 1 };
       return { rows, rowCount: rows.length };
     }) as PgConnection["query"],
-    transaction: (async () => undefined) as unknown as PgConnection["transaction"],
+    // Runs the callback: a fake that discards it makes every statement inside a transaction
+    // unobservable (ADR-0389), which is exactly where the scoped release and renew now live.
+    transaction: (async <T,>(fn: (tx: PgConnection) => Promise<T>): Promise<T> =>
+      fn(conn)) as PgConnection["transaction"],
     withAdvisoryLock: (async () => undefined) as unknown as PgConnection["withAdvisoryLock"],
     close: (async () => undefined) as PgConnection["close"],
   };
+  return conn;
 }
 
 const jobRow = {
@@ -77,24 +86,210 @@ describe("claimDueJobs", () => {
 });
 
 describe("releaseJobClaim", () => {
-  it("clears the claim for this worker + a still-pending job", async () => {
+  it("clears the claim for this worker + a still-pending job, under the run's own tenant", async () => {
     const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
-    await releaseJobClaim(mockConnection([], capture), { jobId: "00000000-0000-4000-8000-0000000009a1", workerId: "worker-A" });
-    const { sql, params } = capture[0]!;
+    await releaseJobClaim(mockConnection([], capture), {
+      jobId: "00000000-0000-4000-8000-0000000009a1",
+      workerId: "worker-A",
+      tenantId: TENANT,
+    });
+    // The context first, in the same transaction: unscoped, a session the policy confines matched
+    // 0 rows and the release silently did nothing.
+    expect(capture[0]).toEqual({ sql: SET_TENANT_CONTEXT_SQL, params: [TENANT] });
+    const { sql, params } = capture[1]!;
     expect(sql).toContain("SET claimed_by = NULL, claim_expires_at = NULL");
-    expect(sql).toContain("claimed_by = $2 AND status = 'pending'");
-    expect(params).toEqual(["00000000-0000-4000-8000-0000000009a1", "worker-A"]);
+    expect(sql).toContain("claimed_by = $2 AND status = 'pending' AND tenant_id = $3::uuid");
+    expect(params).toEqual(["00000000-0000-4000-8000-0000000009a1", "worker-A", TENANT]);
+  });
+
+  it("refuses a malformed tenant before any statement", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    await expect(
+      releaseJobClaim(mockConnection([], capture), { jobId: "r", workerId: "w", tenantId: "x'; --" }),
+    ).rejects.toThrow(/invalid tenantId/);
+    expect(capture).toEqual([]);
   });
 });
 
 describe("renewJobClaim", () => {
   it("extends the lease, returning true on a row update and false when lost", async () => {
-    expect(
-      await renewJobClaim(mockConnection([{}]), { jobId: "00000000-0000-4000-8000-0000000009a1", workerId: "w", now: NOW }),
-    ).toBe(true);
-    expect(
-      await renewJobClaim(mockConnection([]), { jobId: "00000000-0000-4000-8000-0000000009a1", workerId: "w", now: NOW }),
-    ).toBe(false);
+    const ids = { jobId: "00000000-0000-4000-8000-0000000009a1", workerId: "w", tenantId: TENANT, now: NOW };
+    expect(await renewJobClaim(mockConnection([{}]), ids)).toBe(true);
+    expect(await renewJobClaim(mockConnection([]), ids)).toBe(false);
+  });
+
+  it("renews under the run's own tenant, so a held lease is not reported lost", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    await renewJobClaim(mockConnection([{}], capture), {
+      jobId: "00000000-0000-4000-8000-0000000009a1",
+      workerId: "w",
+      tenantId: TENANT,
+      now: NOW,
+    });
+    expect(capture[0]).toEqual({ sql: SET_TENANT_CONTEXT_SQL, params: [TENANT] });
+    expect(capture[1]!.sql).toContain("tenant_id = $4::uuid");
+    expect(capture[1]!.params?.[3]).toBe(TENANT);
+  });
+});
+
+describe("claimDueJobs confined to one tenant", () => {
+  it("adds the tenant predicate inside the due CTE, before LIMIT", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    await claimDueJobs(mockConnection([], capture), { workerId: "w", now: NOW, tenantId: TENANT });
+    const { sql, params } = capture[0]!;
+    expect(sql).toContain("AND tenant_id = $5::uuid");
+    expect(sql.indexOf("tenant_id = $5")).toBeLessThan(sql.indexOf("LIMIT $2"));
+    expect(params?.[4]).toBe(TENANT);
+  });
+
+  it("numbers the served arrays after the tenant", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    await claimDueJobs(mockConnection([], capture), {
+      workerId: "w",
+      now: NOW,
+      tenantId: TENANT,
+      serves: { jobIds: ["a"] },
+    });
+    expect(capture[0]!.sql).toContain("job_id = ANY($6::text[]) OR job_kind = ANY($7::text[])");
+  });
+});
+
+describe("listJobClaimTenants", () => {
+  it("reads every tenant but a deleted one, in id order", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const ids = await listJobClaimTenants(mockConnection([{ id: TENANT }], capture));
+    expect(ids).toEqual([TENANT]);
+    expect(capture[0]!.sql).toContain("FROM meta.tenants WHERE status <> ALL($1::text[]) ORDER BY id");
+    expect(capture[0]!.params).toEqual([JOB_CLAIM_EXCLUDED_TENANT_STATUSES]);
+    expect(JOB_CLAIM_EXCLUDED_TENANT_STATUSES).toEqual(["deleted"]);
+  });
+});
+
+describe("claimDueJobsPerTenant", () => {
+  const T = (n: number): string => `00000000-0000-4000-8000-${n.toString().padStart(12, "0")}`;
+
+  /** A queue of due runs per tenant; each claim takes from the head of the tenant it is confined to. */
+  function queueConnection(
+    due: Record<string, number>,
+    log: string[],
+  ): PgConnection {
+    let current: string | null = null;
+    let seq = 0;
+    const conn: PgConnection = {
+      query: (async (sql: string, params?: readonly unknown[]): Promise<PgQueryResult> => {
+        if (sql === SET_TENANT_CONTEXT_SQL) {
+          current = String(params?.[0]);
+          log.push(`ctx ${current}`);
+          return { rows: [], rowCount: 1 };
+        }
+        const limit = Number(params?.[1]);
+        const tenant = String(params?.[4]);
+        if (tenant !== current) throw new Error(`claim for ${tenant} under context ${String(current)}`);
+        const take = Math.min(limit, due[tenant] ?? 0);
+        due[tenant] = (due[tenant] ?? 0) - take;
+        log.push(`claim ${tenant} ${limit.toString()} -> ${take.toString()}`);
+        const rows = Array.from({ length: take }, () => ({ ...jobRow, run_id: `r${(seq += 1).toString()}`, tenant_id: tenant }));
+        return { rows, rowCount: rows.length };
+      }) as PgConnection["query"],
+      transaction: (async <T,>(fn: (tx: PgConnection) => Promise<T>): Promise<T> => {
+        log.push("BEGIN");
+        const out = await fn(conn);
+        log.push("COMMIT");
+        return out;
+      }) as PgConnection["transaction"],
+      withAdvisoryLock: (async () => undefined) as unknown as PgConnection["withAdvisoryLock"],
+      close: (async () => undefined) as PgConnection["close"],
+    };
+    return conn;
+  }
+
+  it("sets each tenant's context before claiming its runs, all in one transaction", async () => {
+    const log: string[] = [];
+    const result = await claimDueJobsPerTenant(queueConnection({ [T(1)]: 1, [T(2)]: 1 }, log), {
+      workerId: "w",
+      now: NOW,
+      limit: 10,
+      tenantIds: [T(1), T(2)],
+    });
+    expect(result.claimed.map((j) => j.tenantId)).toEqual([T(1), T(2)]);
+    expect(log[0]).toBe("BEGIN");
+    expect(log.at(-1)).toBe("COMMIT");
+    expect(log.filter((l) => l === "BEGIN")).toHaveLength(1);
+    expect(log.slice(1, 5)).toEqual([`ctx ${T(1)}`, `claim ${T(1)} 5 -> 1`, `ctx ${T(2)}`, `claim ${T(2)} 5 -> 1`]);
+    expect(result.tenantsVisited).toBe(2);
+  });
+
+  it("caps each tenant at its share, so one backlog cannot fill every slot", async () => {
+    const log: string[] = [];
+    const result = await claimDueJobsPerTenant(queueConnection({ [T(1)]: 100, [T(2)]: 100 }, log), {
+      workerId: "w",
+      now: NOW,
+      limit: 4,
+      tenantIds: [T(1), T(2)],
+    });
+    const counts = result.claimed.reduce<Record<string, number>>((m, j) => ({ ...m, [j.tenantId]: (m[j.tenantId] ?? 0) + 1 }), {});
+    expect(counts).toEqual({ [T(1)]: 2, [T(2)]: 2 });
+  });
+
+  it("gives leftover capacity to the tenants that filled their share", async () => {
+    const log: string[] = [];
+    const result = await claimDueJobsPerTenant(queueConnection({ [T(1)]: 100, [T(2)]: 0, [T(3)]: 0 }, log), {
+      workerId: "w",
+      now: NOW,
+      limit: 9,
+      tenantIds: [T(1), T(2), T(3)],
+    });
+    expect(result.claimed).toHaveLength(9);
+    expect(result.claimed.every((j) => j.tenantId === T(1))).toBe(true);
+  });
+
+  it("rotates the starting tenant and resumes after the last one asked", async () => {
+    const log: string[] = [];
+    const conn = queueConnection({ [T(1)]: 100, [T(2)]: 100, [T(3)]: 100 }, log);
+    const first = await claimDueJobsPerTenant(conn, { workerId: "w", now: NOW, limit: 1, tenantIds: [T(1), T(2), T(3)] });
+    expect(first.claimed.map((j) => j.tenantId)).toEqual([T(1)]);
+    expect(first.nextStartIndex).toBe(1);
+    const second = await claimDueJobsPerTenant(conn, {
+      workerId: "w",
+      now: NOW,
+      limit: 1,
+      tenantIds: [T(1), T(2), T(3)],
+      startIndex: first.nextStartIndex,
+    });
+    expect(second.claimed.map((j) => j.tenantId)).toEqual([T(2)]);
+    expect(second.nextStartIndex).toBe(2);
+  });
+
+  it("opens no transaction for an empty tenant list", async () => {
+    const log: string[] = [];
+    const result = await claimDueJobsPerTenant(queueConnection({}, log), { workerId: "w", now: NOW, tenantIds: [] });
+    expect(result).toEqual({ claimed: [], nextStartIndex: 0, tenantsVisited: 0 });
+    expect(log).toEqual([]);
+  });
+
+  it("refuses a malformed tenant id before opening the transaction", async () => {
+    const log: string[] = [];
+    await expect(
+      claimDueJobsPerTenant(queueConnection({}, log), { workerId: "w", now: NOW, tenantIds: ["bad tenant"] }),
+    ).rejects.toThrow(/invalid tenantId/);
+    expect(log).toEqual([]);
+  });
+
+  it("runs beforeClaim once per tenant under that tenant's context", async () => {
+    const log: string[] = [];
+    const conn = queueConnection({ [T(1)]: 100 }, log);
+    const seen: string[] = [];
+    await claimDueJobsPerTenant(conn, {
+      workerId: "w",
+      now: NOW,
+      limit: 4,
+      tenantIds: [T(1), T(2)],
+      beforeClaim: async (_tx, tenantId) => {
+        seen.push(`${tenantId} after ${log.at(-1) ?? ""}`);
+      },
+    });
+    // T(1) fills its share and is asked again in pass two, without running beforeClaim twice.
+    expect(seen).toEqual([`${T(1)} after ctx ${T(1)}`, `${T(2)} after ctx ${T(2)}`]);
   });
 });
 
@@ -274,8 +469,8 @@ describe("probeJobQueueVisibility", () => {
     expect(report.visibility).toBe("confined_by_rls");
     expect(report.isOwner).toBe(true);
     expect(report.detail).toContain("forced_on_owner");
-    // And the remedy is the one an owner can act on. "Connect as the table's owner" is what this
-    // branch used to say and it is advice they have already taken.
+    // "Connect as the table's owner" is what this branch used to say, and it is advice they have
+    // already taken.
     expect(report.detail).toContain("Owning the table is not enough here");
     expect(report.detail).not.toContain("Connect as the table's owner");
   });
@@ -303,13 +498,18 @@ describe("probeJobQueueVisibility", () => {
     expect(report.bypassesRls).toBe(true);
   });
 
-  it("answers confined_by_rls for an ordinary role, and names the remedy", async () => {
+  it("answers confined_by_rls for an ordinary role, and does not prescribe BYPASSRLS", async () => {
+    // It used to end "Connect as the table's owner, or grant the role BYPASSRLS" — a remedy that
+    // undoes the serving role's confinement (ADR-0424), for a queue the per-tenant claim now serves.
     const report = await probeJobQueueVisibility(
       catalogConnection({ role: "app", bypasses_rls: false, is_owner: false, rls_enabled: true }),
     );
     expect(report.visibility).toBe("confined_by_rls");
     expect(report.detail).toContain("matches nothing");
-    expect(report.detail).toContain("BYPASSRLS");
+    expect(report.detail).toContain("claims per tenant");
+    expect(report.detail).not.toContain("Connect as the table's owner");
+    expect(report.detail).not.toMatch(/grant (the role )?BYPASSRLS/);
+    expect(report.detail).not.toContain("Owning the table is not enough");
   });
 
   it("answers unguarded when RLS is off, which is its own finding", async () => {

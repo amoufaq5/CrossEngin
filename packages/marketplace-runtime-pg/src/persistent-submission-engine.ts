@@ -6,16 +6,17 @@ import {
   type SubmitVersionInput,
 } from "@crossengin/marketplace-runtime";
 import type { Clock } from "@crossengin/marketplace-runtime";
-import type { PackVersionRecord } from "@crossengin/marketplace";
+import type { PackPublisherRegistry, PackVersionRecord } from "@crossengin/marketplace";
 import type { PgConnection } from "@crossengin/kernel-pg";
 
 import { PostgresPackVersionStore } from "./version-store.js";
 
 /**
- * A `PackSubmissionEngine` whose every step also persists the resulting
- * `PackVersionRecord` into `meta.pack_versions` (idempotent `UPSERT` on
- * `(pack_id, version)`). The pure engine stays the source of truth for the state
- * machine + signature/gate checks; this wrapper is the persistence boundary.
+ * A `PackSubmissionEngine` whose every step also persists the resulting `PackVersionRecord` into
+ * `meta.pack_versions`: a submission inserts a new version and refuses one that exists, and every
+ * later step advances the row only from the state it was read in. The pure engine stays the source
+ * of truth for the state machine and the publisher/gate checks; this wrapper is the persistence
+ * boundary.
  */
 export class PersistentPackSubmissionEngine {
   readonly engine: PackSubmissionEngine;
@@ -27,38 +28,40 @@ export class PersistentPackSubmissionEngine {
   }
 
   async submit(input: SubmitVersionInput): Promise<PackVersionRecord> {
-    return this.persist(this.engine.submit(input));
+    const draft = this.engine.submit(input);
+    await this.store.insertDraft(draft);
+    return draft;
   }
 
   async submitForReview(version: PackVersionRecord): Promise<PackVersionRecord> {
-    return this.persist(this.engine.submitForReview(version));
+    return this.advance(version, this.engine.submitForReview(version));
   }
 
   async recordReview(version: PackVersionRecord, outcome: ReviewOutcomeInput): Promise<PackVersionRecord> {
-    return this.persist(this.engine.recordReview(version, outcome));
+    return this.advance(version, this.engine.recordReview(version, outcome));
   }
 
   async publish(version: PackVersionRecord, input: PublishInput): Promise<PackVersionRecord> {
-    return this.persist(this.engine.publish(version, input));
+    return this.advance(version, this.engine.publish(version, input));
   }
 
   async deprecate(version: PackVersionRecord, input: RetireInput): Promise<PackVersionRecord> {
-    return this.persist(this.engine.deprecate(version, input));
+    return this.advance(version, this.engine.deprecate(version, input));
   }
 
   async withdraw(version: PackVersionRecord, input: RetireInput): Promise<PackVersionRecord> {
-    return this.persist(this.engine.withdraw(version, input));
+    return this.advance(version, this.engine.withdraw(version, input));
   }
 
-  private async persist(version: PackVersionRecord): Promise<PackVersionRecord> {
-    await this.store.upsert(version);
-    return version;
+  private async advance(previous: PackVersionRecord, next: PackVersionRecord): Promise<PackVersionRecord> {
+    await this.store.advance(previous, next);
+    return next;
   }
 }
 
 export function buildPersistentPackSubmissionEngine(
   conn: PgConnection,
-  options: { readonly clock?: Clock } = {},
+  options: { readonly clock?: Clock; readonly publishers: PackPublisherRegistry },
 ): PersistentPackSubmissionEngine {
   return new PersistentPackSubmissionEngine({
     engine: new PackSubmissionEngine(options),

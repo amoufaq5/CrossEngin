@@ -190,8 +190,10 @@ describe("withDatetimeWireType", () => {
 
   it("leaves null and absent values alone", async () => {
     const store = wrapped();
+    // Not converted and not refused: the null reaches the store, which serves a field with no
+    // value as absent on every binding (ADR-0414 Q4), so it is neither a string nor present.
     const created = await store.create("t1", "Encounter", { id: "a", scheduled_at: null });
-    expect(created["scheduled_at"]).toBeNull();
+    expect("scheduled_at" in created).toBe(false);
     expect("due_date" in created).toBe(false);
   });
 
@@ -274,5 +276,17 @@ describe("withDatetimeWireType", () => {
       scheduled_at: "2026-01-31T19:00:00+09:00",
     });
     expect(created["scheduled_at"]).toBe("2026-01-31T10:00:00.000Z");
+  });
+});
+
+describe("withDatetimeWireType passes a page's narrowing through", () => {
+  it("keeps `searchNarrowedBy`, which rebuilding the page from its records would drop", async () => {
+    class Narrowing extends InMemoryEntityStore {
+      override async listPage(...args: Parameters<InMemoryEntityStore["listPage"]>) {
+        return { ...(await super.listPage(...args)), searchNarrowedBy: ["mrn"] };
+      }
+    }
+    const page = await withDatetimeWireType(new Narrowing(), INDEX).listPage("t1", "Encounter", QUERY);
+    expect(page.searchNarrowedBy).toEqual(["mrn"]);
   });
 });

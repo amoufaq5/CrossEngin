@@ -94,6 +94,8 @@ function mockConnection(opts: {
 }
 
 const FIXED_NOW = () => new Date("2026-05-17T12:00:00.000Z");
+/** A call holding no claim — every pre-existing case here, which predates the fence. */
+const UNFENCED = { claimedBy: null } as const;
 
 describe("JobHandlerRegistry", () => {
   const handler: JobHandler = async () => ({ status: "completed" });
@@ -123,7 +125,7 @@ describe("PostgresJobRunEngine.executeJobRun", () => {
       now: FIXED_NOW,
     });
 
-    const result = await engine.executeJobRun(RUN, TENANT);
+    const result = await engine.executeJobRun(RUN, TENANT, UNFENCED);
 
     expect(result).toEqual({ runId: RUN, executed: true, disposition: "completed", attempts: 1 });
     expect(seen).toMatchObject({
@@ -150,7 +152,7 @@ describe("PostgresJobRunEngine.executeJobRun", () => {
       handler: async () => ({ status: "completed" }),
     });
     const engine = new PostgresJobRunEngine(mockConnection({ readRows: [] }), registry, { now: FIXED_NOW });
-    expect(await engine.executeJobRun(RUN, TENANT)).toEqual({
+    expect(await engine.executeJobRun(RUN, TENANT, UNFENCED)).toEqual({
       runId: RUN,
       executed: false,
       disposition: "not_claimable",
@@ -169,7 +171,7 @@ describe("PostgresJobRunEngine.executeJobRun", () => {
       { now: FIXED_NOW },
     );
 
-    const result = await engine.executeJobRun(RUN, TENANT);
+    const result = await engine.executeJobRun(RUN, TENANT, UNFENCED);
 
     expect(result).toEqual({
       runId: RUN,
@@ -194,7 +196,7 @@ describe("PostgresJobRunEngine.executeJobRun", () => {
       { now: FIXED_NOW },
     );
 
-    const result = await engine.executeJobRun(RUN, TENANT);
+    const result = await engine.executeJobRun(RUN, TENANT, UNFENCED);
 
     expect(result).toEqual({ runId: RUN, executed: true, disposition: "retry_scheduled", attempts: 2 });
     const update = statements(calls)[1]!;
@@ -214,7 +216,7 @@ describe("PostgresJobRunEngine.executeJobRun", () => {
       { now: FIXED_NOW },
     );
 
-    const result = await engine.executeJobRun(RUN, TENANT);
+    const result = await engine.executeJobRun(RUN, TENANT, UNFENCED);
 
     expect(result).toEqual({ runId: RUN, executed: true, disposition: "retry_scheduled", attempts: 3 });
     const update = statements(calls)[1]!;
@@ -235,7 +237,7 @@ describe("PostgresJobRunEngine.executeJobRun", () => {
       { now: FIXED_NOW },
     );
 
-    const result = await engine.executeJobRun(RUN, TENANT);
+    const result = await engine.executeJobRun(RUN, TENANT, UNFENCED);
 
     expect(result.disposition).toBe("dead-lettered");
     expect(statements(calls)[1]!.params?.[2]).toBe("dead-lettered");
@@ -253,7 +255,7 @@ describe("PostgresJobRunEngine.executeJobRun", () => {
       { now: FIXED_NOW },
     );
 
-    const result = await engine.executeJobRun(RUN, TENANT);
+    const result = await engine.executeJobRun(RUN, TENANT, UNFENCED);
 
     expect(result).toEqual({
       runId: RUN,
@@ -272,21 +274,47 @@ describe("PostgresJobRunEngine.executeJobRun", () => {
       new JobHandlerRegistry(),
       { now: FIXED_NOW },
     );
-    const result = await engine.executeJobRun(RUN, TENANT);
+    const result = await engine.executeJobRun(RUN, TENANT, UNFENCED);
     expect(result).toMatchObject({ executed: true, disposition: "failed" });
     expect(statements(calls)[1]!.params?.[5]).toContain("handler_not_found");
   });
 
-  it("propagates a thrown handler so the caller releases the claim (transient infra error)", async () => {
+  it("counts a thrown handler as a retryable failure under the declared ceiling, with backoff", async () => {
+    // This used to pin the poison pill: a throw propagated, the run stayed `pending` with no attempt
+    // consumed, and the batch released it to be re-claimed at poll speed for ever.
+    const calls: Call[] = [];
     const registry = new JobHandlerRegistry().register("overdue-invoice-reminder", {
       handler: async () => {
         throw new Error("connection reset");
       },
+      retry: { maxAttempts: 3, backoff: { kind: "constant", initialDelay: "PT30S", jitter: false } },
     });
-    const engine = new PostgresJobRunEngine(mockConnection({ readRows: [runRow()] }), registry, {
+    const engine = new PostgresJobRunEngine(mockConnection({ readRows: [runRow({ attempts: 1 })], calls }), registry, {
       now: FIXED_NOW,
     });
-    await expect(engine.executeJobRun(RUN, TENANT)).rejects.toThrow(/connection reset/);
+    const result = await engine.executeJobRun(RUN, TENANT, UNFENCED);
+    expect(result).toEqual({ runId: RUN, executed: true, disposition: "retry_scheduled", attempts: 2 });
+    const update = statements(calls)[1]!;
+    expect(update.sql).toContain("SET attempts = attempts + 1");
+    expect(String(update.params?.[2])).toContain("handler_threw");
+    expect(String(update.params?.[2])).toContain("connection reset");
+    expect(update.params?.[3]).toBe("2026-05-17T12:00:30.000Z");
+  });
+
+  it("dead-letters a handler that keeps throwing once the ceiling is reached", async () => {
+    const calls: Call[] = [];
+    const registry = new JobHandlerRegistry().register("overdue-invoice-reminder", {
+      handler: async () => {
+        throw new TypeError("cannot read properties of undefined");
+      },
+      maxAttempts: 3,
+    });
+    const engine = new PostgresJobRunEngine(mockConnection({ readRows: [runRow({ attempts: 3 })], calls }), registry, {
+      now: FIXED_NOW,
+    });
+    const result = await engine.executeJobRun(RUN, TENANT, UNFENCED);
+    expect(result).toMatchObject({ executed: true, disposition: "dead-lettered", attempts: 3, deadLetter: "recorded" });
+    expect(statements(calls).some((c) => c.sql.includes("dead_letter_jobs"))).toBe(true);
   });
 
   it("finalize losing the status guard is an idempotent no-op", async () => {
@@ -298,7 +326,7 @@ describe("PostgresJobRunEngine.executeJobRun", () => {
       registry,
       { now: FIXED_NOW },
     );
-    expect(await engine.executeJobRun(RUN, TENANT)).toEqual({
+    expect(await engine.executeJobRun(RUN, TENANT, UNFENCED)).toEqual({
       runId: RUN,
       executed: false,
       disposition: "not_claimable",
@@ -309,6 +337,97 @@ describe("PostgresJobRunEngine.executeJobRun", () => {
     expect(() => new PostgresJobRunEngine(mockConnection({ readRows: [] }), new JobHandlerRegistry(), { schema: "x;y" })).toThrow(
       /invalid schema/,
     );
+  });
+});
+
+describe("PostgresJobRunEngine — the claim fences the run", () => {
+  const WORKER = "host-a:4242";
+  const completing = new JobHandlerRegistry().register("overdue-invoice-reminder", {
+    handler: async () => ({ status: "completed", output: { sent: 1 } }),
+  });
+
+  it("reads and finalizes only under the caller's claim", async () => {
+    const calls: Call[] = [];
+    const engine = new PostgresJobRunEngine(mockConnection({ readRows: [runRow()], calls }), completing, {
+      now: FIXED_NOW,
+    });
+    const result = await engine.executeJobRun(RUN, TENANT, { claimedBy: WORKER });
+    expect(result).toMatchObject({ executed: true, disposition: "completed" });
+    const [read, finalize] = statements(calls);
+    expect(read!.sql).toContain("AND claimed_by = $3");
+    expect(read!.params).toEqual([RUN, TENANT, WORKER]);
+    expect(finalize!.sql).toContain("AND claimed_by = $6");
+    expect(finalize!.params?.[5]).toBe(WORKER);
+  });
+
+  it("does not start a run whose claim another worker now holds", async () => {
+    // The read is fenced, so a run re-claimed by worker B reads as no row for worker A.
+    let invoked = false;
+    const engine = new PostgresJobRunEngine(
+      mockConnection({ readRows: [] }),
+      new JobHandlerRegistry().register("overdue-invoice-reminder", {
+        handler: async () => {
+          invoked = true;
+          return { status: "completed" };
+        },
+      }),
+      { now: FIXED_NOW },
+    );
+    const result = await engine.executeJobRun(RUN, TENANT, { claimedBy: WORKER });
+    expect(result).toEqual({ runId: RUN, executed: false, disposition: "not_claimable" });
+    expect(invoked).toBe(false);
+  });
+
+  it("fences the retry write, so a stale worker cannot clear the new holder's claim", async () => {
+    const calls: Call[] = [];
+    const engine = new PostgresJobRunEngine(
+      mockConnection({ readRows: [runRow()], calls, updateRowCount: 0 }),
+      new JobHandlerRegistry().register("overdue-invoice-reminder", {
+        handler: async () => ({ status: "failed", error: { code: "x" }, retryable: true }),
+        maxAttempts: 3,
+      }),
+      { now: FIXED_NOW },
+    );
+    const result = await engine.executeJobRun(RUN, TENANT, { claimedBy: WORKER });
+    expect(result.disposition).toBe("not_claimable");
+    const retry = statements(calls).find((c) => c.sql.includes("attempts = attempts + 1"))!;
+    expect(retry.sql).toContain("AND claimed_by = $5");
+    expect(retry.params?.[4]).toBe(WORKER);
+  });
+
+  it("fences the terminal-failure and cancellation writes", async () => {
+    const calls: Call[] = [];
+    const engine = new PostgresJobRunEngine(
+      mockConnection({ readRows: [runRow({ cancel_requested_at: "2026-05-17T11:00:00Z" })], calls }),
+      completing,
+      { now: FIXED_NOW },
+    );
+    await engine.executeJobRun(RUN, TENANT, { claimedBy: WORKER });
+    const cancel = statements(calls).find((c) => c.sql.includes("status = 'cancelled'"))!;
+    expect(cancel.sql).toContain("AND claimed_by = $6");
+    expect(cancel.params?.[5]).toBe(WORKER);
+
+    const failCalls: Call[] = [];
+    const failing = new PostgresJobRunEngine(
+      mockConnection({ readRows: [runRow()], calls: failCalls }),
+      new JobHandlerRegistry().register("overdue-invoice-reminder", {
+        handler: async () => ({ status: "failed", error: { code: "x" }, retryable: false }),
+      }),
+      { now: FIXED_NOW },
+    );
+    await failing.executeJobRun(RUN, TENANT, { claimedBy: WORKER });
+    const terminal = statements(failCalls).find((c) => c.sql.includes("SET status = $3"))!;
+    expect(terminal.sql).toContain("AND claimed_by = $7");
+    expect(terminal.params?.[6]).toBe(WORKER);
+  });
+
+  it("adds no predicate for a caller that declares it holds no claim", async () => {
+    const calls: Call[] = [];
+    const engine = new PostgresJobRunEngine(mockConnection({ readRows: [runRow()], calls }), completing, {
+      now: FIXED_NOW,
+    });
+    await engine.executeJobRun(RUN, TENANT, UNFENCED);
+    expect(statements(calls).every((c) => !c.sql.includes("claimed_by = $"))).toBe(true);
   });
 });
 
@@ -332,7 +451,7 @@ describe("PostgresJobRunEngine — cancellation", () => {
       { now: FIXED_NOW },
     );
 
-    const result = await engine.executeJobRun(RUN, TENANT);
+    const result = await engine.executeJobRun(RUN, TENANT, UNFENCED);
     expect(result).toEqual({
       runId: RUN,
       executed: false,
@@ -356,7 +475,7 @@ describe("PostgresJobRunEngine — cancellation", () => {
       }),
       { now: FIXED_NOW },
     );
-    expect(await engine.executeJobRun(RUN, TENANT)).toEqual({
+    expect(await engine.executeJobRun(RUN, TENANT, UNFENCED)).toEqual({
       runId: RUN,
       executed: false,
       disposition: "not_claimable",
@@ -375,7 +494,7 @@ describe("PostgresJobRunEngine — cancellation", () => {
       }),
       { now: FIXED_NOW },
     );
-    const result = await engine.executeJobRun(RUN, TENANT);
+    const result = await engine.executeJobRun(RUN, TENANT, UNFENCED);
     expect(result.disposition).toBe("completed");
     expect(seen?.aborted).toBe(false);
   });
@@ -397,7 +516,7 @@ describe("PostgresJobRunEngine — cancellation", () => {
       { now: FIXED_NOW },
     );
 
-    const result = await engine.executeJobRun(RUN, TENANT, { signal: controller.signal });
+    const result = await engine.executeJobRun(RUN, TENANT, { ...UNFENCED, signal: controller.signal });
     expect(result).toEqual({
       runId: RUN,
       executed: true,
@@ -422,7 +541,7 @@ describe("PostgresJobRunEngine — cancellation", () => {
       }),
       { now: FIXED_NOW },
     );
-    const result = await engine.executeJobRun(RUN, TENANT, { signal: controller.signal });
+    const result = await engine.executeJobRun(RUN, TENANT, { ...UNFENCED, signal: controller.signal });
     expect(result.disposition).toBe("cancelled");
     expect(calls.some((c) => c.sql.includes("attempts = attempts + 1"))).toBe(false);
     expect(calls.some((c) => c.sql.includes("status = $3"))).toBe(false);
@@ -441,11 +560,11 @@ describe("PostgresJobRunEngine — cancellation", () => {
       }),
       { now: FIXED_NOW },
     );
-    const result = await engine.executeJobRun(RUN, TENANT, { signal: controller.signal });
+    const result = await engine.executeJobRun(RUN, TENANT, { ...UNFENCED, signal: controller.signal });
     expect(result).toEqual({ runId: RUN, executed: true, disposition: "completed", attempts: 1 });
   });
 
-  it("still lets an unaborted throw mean 'transient infra' — the run stays pending for re-claim", async () => {
+  it("does not read an unaborted throw as a cancellation — it is a counted failure, not `cancelled`", async () => {
     const calls: Call[] = [];
     const engine = new PostgresJobRunEngine(
       mockConnection({ readRows: [runRow()], calls }),
@@ -456,9 +575,10 @@ describe("PostgresJobRunEngine — cancellation", () => {
       }),
       { now: FIXED_NOW },
     );
-    await expect(engine.executeJobRun(RUN, TENANT)).rejects.toThrow("connection reset");
-    // The read alone: an unaborted throw finalizes nothing, so no `UPDATE` follows it.
-    expect(statements(calls)).toHaveLength(1);
+    const result = await engine.executeJobRun(RUN, TENANT, UNFENCED);
+    // No retry declared, so the ceiling is one attempt and a retryable failure dead-letters.
+    expect(result).toMatchObject({ executed: true, disposition: "dead-lettered" });
+    expect(statements(calls).some((c) => c.sql.includes("status = 'cancelled'"))).toBe(false);
   });
 
   it("reports not_claimable when the cancel finalize loses the row after an abort", async () => {
@@ -471,7 +591,7 @@ describe("PostgresJobRunEngine — cancellation", () => {
       }),
       { now: FIXED_NOW },
     );
-    expect(await engine.executeJobRun(RUN, TENANT, { signal: controller.signal })).toEqual({
+    expect(await engine.executeJobRun(RUN, TENANT, { ...UNFENCED, signal: controller.signal })).toEqual({
       runId: RUN,
       executed: true,
       disposition: "not_claimable",
@@ -559,7 +679,7 @@ describe("PostgresJobRunEngine dead-letter rows", () => {
       registry,
       { now: FIXED_NOW },
     );
-    await engine.executeJobRun(RUN, TENANT);
+    await engine.executeJobRun(RUN, TENANT, UNFENCED);
     const insert = deadLetterCall(calls);
     expect(missingRequiredColumns(META_DEAD_LETTER_JOBS, insert.sql)).toEqual([]);
     // And the bound parameters number exactly as many as the columns named.
@@ -586,7 +706,7 @@ describe("PostgresJobRunEngine dead-letter rows", () => {
       registry,
       { now: FIXED_NOW },
     );
-    await engine.executeJobRun(RUN, TENANT);
+    await engine.executeJobRun(RUN, TENANT, UNFENCED);
 
     // Every statement opens its own transaction, so the context that answers for the insert is the
     // one *immediately* before it — and that is a stronger assertion than the
@@ -619,7 +739,7 @@ describe("PostgresJobRunEngine dead-letter rows", () => {
       registry,
       { now: FIXED_NOW },
     );
-    const result = await engine.executeJobRun(RUN, TENANT);
+    const result = await engine.executeJobRun(RUN, TENANT, UNFENCED);
     expect(result.deadLetter).toBe("recorded");
     const insert = deadLetterCall(calls);
     expect(insert.params?.[0]).toBe(TENANT);
@@ -640,7 +760,7 @@ describe("PostgresJobRunEngine dead-letter rows", () => {
       registry,
       { now: FIXED_NOW },
     );
-    await engine.executeJobRun(RUN, TENANT);
+    await engine.executeJobRun(RUN, TENANT, UNFENCED);
     expect(deadLetterCall(calls).params?.[3]).toBe("permanent-error");
   });
 
@@ -655,7 +775,7 @@ describe("PostgresJobRunEngine dead-letter rows", () => {
       registry,
       { now: FIXED_NOW },
     );
-    await engine.executeJobRun(RUN, TENANT);
+    await engine.executeJobRun(RUN, TENANT, UNFENCED);
     const finalError: unknown = JSON.parse(String(deadLetterCall(calls).params?.[5]));
     expect(finalError).toMatchObject({ kind: "retryable", message: "relay refused", code: "smtp_down" });
   });
@@ -670,7 +790,7 @@ describe("PostgresJobRunEngine dead-letter rows", () => {
       registry,
       { now: FIXED_NOW },
     );
-    await engine.executeJobRun(RUN, TENANT);
+    await engine.executeJobRun(RUN, TENANT, UNFENCED);
     const finalError = JSON.parse(String(deadLetterCall(calls).params?.[5])) as { message: string };
     expect(finalError.message).toBe("bad_input");
   });
@@ -685,7 +805,7 @@ describe("PostgresJobRunEngine dead-letter rows", () => {
       registry,
       { now: FIXED_NOW },
     );
-    await engine.executeJobRun(RUN, TENANT);
+    await engine.executeJobRun(RUN, TENANT, UNFENCED);
     expect(JSON.parse(String(deadLetterCall(calls).params?.[6]))).toEqual({ since: "2026-01-01" });
   });
 
@@ -700,7 +820,7 @@ describe("PostgresJobRunEngine dead-letter rows", () => {
       registry,
       { now: FIXED_NOW },
     );
-    const result = await engine.executeJobRun(RUN, TENANT);
+    const result = await engine.executeJobRun(RUN, TENANT, UNFENCED);
     expect(result.deadLetter).toBe("suppressed");
     expect(calls.some((c) => /dead_letter_jobs/i.test(c.sql))).toBe(false);
   });
@@ -722,7 +842,7 @@ describe("PostgresJobRunEngine dead-letter rows", () => {
         registry,
         { now: FIXED_NOW },
       );
-      expect((await engine.executeJobRun(RUN, TENANT)).deadLetter).toBe("recorded");
+      expect((await engine.executeJobRun(RUN, TENANT, UNFENCED)).deadLetter).toBe("recorded");
     }
   });
 
@@ -736,7 +856,7 @@ describe("PostgresJobRunEngine dead-letter rows", () => {
       registry,
       { now: FIXED_NOW },
     );
-    const result = await engine.executeJobRun(RUN, TENANT);
+    const result = await engine.executeJobRun(RUN, TENANT, UNFENCED);
     expect(result.deadLetter).toBe("already_recorded");
     expect(result.disposition).toBe("failed");
     expect(deadLetterCall(calls).sql).toContain("ON CONFLICT (tenant_id, run_id) DO NOTHING");
@@ -753,7 +873,7 @@ describe("PostgresJobRunEngine dead-letter rows", () => {
       registry,
       { now: FIXED_NOW, onDeadLetterError: (err, detail) => seen.push([detail.runId, String(err)]) },
     );
-    const result = await engine.executeJobRun(RUN, TENANT);
+    const result = await engine.executeJobRun(RUN, TENANT, UNFENCED);
     expect(result.disposition).toBe("failed");
     expect(result.deadLetter).toBe("failed");
     expect(seen).toHaveLength(1);
@@ -769,7 +889,7 @@ describe("PostgresJobRunEngine dead-letter rows", () => {
       registry,
       { now: FIXED_NOW },
     );
-    const result = await engine.executeJobRun(RUN, TENANT);
+    const result = await engine.executeJobRun(RUN, TENANT, UNFENCED);
     expect(result.disposition).toBe("not_claimable");
     expect(result.deadLetter).toBeUndefined();
     expect(calls.some((c) => /dead_letter_jobs/i.test(c.sql))).toBe(false);
@@ -782,7 +902,7 @@ describe("PostgresJobRunEngine dead-letter rows", () => {
       new JobHandlerRegistry(),
       { now: FIXED_NOW },
     );
-    const result = await engine.executeJobRun(RUN, TENANT);
+    const result = await engine.executeJobRun(RUN, TENANT, UNFENCED);
     expect(result.disposition).toBe("failed");
     expect(result.deadLetter).toBe("recorded");
     const insert = deadLetterCall(calls);
@@ -801,7 +921,7 @@ describe("PostgresJobRunEngine dead-letter rows", () => {
       registry,
       { now: FIXED_NOW },
     );
-    const result = await engine.executeJobRun(RUN, TENANT);
+    const result = await engine.executeJobRun(RUN, TENANT, UNFENCED);
     expect(result.disposition).toBe("completed");
     expect(result.deadLetter).toBeUndefined();
     expect(calls.some((c) => /dead_letter_jobs/i.test(c.sql))).toBe(false);
@@ -818,7 +938,7 @@ describe("PostgresJobRunEngine dead-letter rows", () => {
       registry,
       { now: FIXED_NOW },
     );
-    const result = await engine.executeJobRun(RUN, TENANT);
+    const result = await engine.executeJobRun(RUN, TENANT, UNFENCED);
     expect(result.disposition).toBe("retry_scheduled");
     expect(result.deadLetter).toBeUndefined();
     expect(calls.some((c) => /dead_letter_jobs/i.test(c.sql))).toBe(false);
@@ -837,7 +957,7 @@ describe("PostgresJobRunEngine dead-letter rows", () => {
       registry,
       { now: FIXED_NOW },
     );
-    const result = await engine.executeJobRun(RUN, TENANT);
+    const result = await engine.executeJobRun(RUN, TENANT, UNFENCED);
     expect(result.disposition).toBe("cancelled");
     expect(calls.some((c) => /dead_letter_jobs/i.test(c.sql))).toBe(false);
   });
@@ -882,7 +1002,7 @@ describe("PostgresJobRunEngine — tenant context per statement", () => {
       new JobHandlerRegistry().register("overdue-invoice-reminder", { handler: completes }),
       { now: FIXED_NOW },
     );
-    expect((await engine.executeJobRun(RUN, TENANT)).disposition).toBe("completed");
+    expect((await engine.executeJobRun(RUN, TENANT, UNFENCED)).disposition).toBe("completed");
     const context = contextFor(calls, /FROM meta\.job_runs/);
     expect(context.params).toEqual([TENANT]);
     // Bound, never interpolated: the id must not reach the SQL text (log_statement, pg_stat_statements).
@@ -896,7 +1016,7 @@ describe("PostgresJobRunEngine — tenant context per statement", () => {
       new JobHandlerRegistry().register("overdue-invoice-reminder", { handler: completes }),
       { now: FIXED_NOW },
     );
-    await engine.executeJobRun(RUN, TENANT);
+    await engine.executeJobRun(RUN, TENANT, UNFENCED);
     const context = contextFor(calls, /SET status = 'completed'/);
     expect(context.params).toEqual([TENANT]);
     expect(context.sql).not.toContain(TENANT);
@@ -912,7 +1032,7 @@ describe("PostgresJobRunEngine — tenant context per statement", () => {
       }),
       { now: FIXED_NOW },
     );
-    expect((await engine.executeJobRun(RUN, TENANT)).disposition).toBe("retry_scheduled");
+    expect((await engine.executeJobRun(RUN, TENANT, UNFENCED)).disposition).toBe("retry_scheduled");
     const context = contextFor(calls, /SET attempts = attempts \+ 1/);
     expect(context.params).toEqual([TENANT]);
     expect(context.sql).not.toContain(TENANT);
@@ -931,7 +1051,7 @@ describe("PostgresJobRunEngine — tenant context per statement", () => {
       new JobHandlerRegistry().register("overdue-invoice-reminder", { handler: failing(false) }),
       { now: FIXED_NOW },
     );
-    const result = await engine.executeJobRun(RUN, TENANT);
+    const result = await engine.executeJobRun(RUN, TENANT, UNFENCED);
 
     const context = contextFor(calls, /SET status = \$3/);
     expect(context.params).toEqual([TENANT]);
@@ -959,7 +1079,7 @@ describe("PostgresJobRunEngine — tenant context per statement", () => {
       }),
       { now: FIXED_NOW },
     );
-    await engine.executeJobRun(RUN, TENANT);
+    await engine.executeJobRun(RUN, TENANT, UNFENCED);
 
     // context, read, context, finalize — the pairing and the ordering in one assertion.
     expect(calls.map(isContext)).toEqual([true, false, true, false]);

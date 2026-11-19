@@ -1,3 +1,5 @@
+import { randomBytes } from "node:crypto";
+
 import type { ForwardedProto, HttpMethod, PipelineExecution } from "@crossengin/api-gateway";
 import type {
   AbacBatchEvaluator,
@@ -48,12 +50,16 @@ import type { EdgeTrust } from "@crossengin/api-gateway-runtime";
 import { parseMethod, rawToIncoming, splitTarget, type RawHttpRequest, type RawHttpResponse } from "./http.js";
 import {
   buildPrincipalWiring,
+  withForeignPlatformRolesDropped,
+  type ForeignTokenScopePolicy,
   type ApiKeySpec,
   type HmacKeySpec,
   type MtlsClientSpec,
   type JwtVerifyConfig,
 } from "./principals.js";
 import { applyTenantStatusGate, type TenantStatusGateOptions } from "./tenant-status-gate.js";
+import { applyResidencyGate } from "./residency-gate.js";
+import { preAuthLimitedResponse, type PreAuthLimiter } from "./pre-auth-limit.js";
 import { AbacObligationsUnevaluable, checkAbacObligations } from "./abac-obligations.js";
 import { surveySensitiveFields, type SensitiveFieldSurvey } from "./sensitive-field-policy.js";
 import {
@@ -61,11 +67,57 @@ import {
   withMembershipRevocationCheck,
   type AbacAttributeDirectory,
 } from "./abac-attributes.js";
+import { withSessionStandingCheck, type SessionStandingCheckOptions } from "./session-standing.js";
 
-let requestCounter = 0;
+// Random as well as ordered. Every 5xx body now tells the caller to quote this id and the log line
+// keys on it, so it has to name one request across replicas and restarts: a time-plus-counter id
+// repeated whenever two processes, or one restarted process, reached the same counter in the same
+// millisecond.
 function defaultRequestId(): string {
-  requestCounter += 1;
-  return `req_${Date.now().toString(36)}${requestCounter.toString(36).padStart(4, "0")}`;
+  return `req_${Date.now().toString(36)}${randomBytes(6).toString("hex")}`;
+}
+
+/**
+ * One request that ended in a 5xx, for the operator. The caller's body names nothing but the request
+ * id; the cause lives here, keyed by that id. `reason` is the recorded stage reason — for a stage or
+ * handler that threw, the exception's message — and `cause` is the thrown value when dispatch itself
+ * threw before or around the gateway.
+ */
+export interface ServerErrorEvent {
+  readonly requestId: string;
+  readonly status: number;
+  readonly method: string;
+  readonly path: string;
+  readonly operationId: string | null;
+  readonly stage: string | null;
+  readonly reason: string | null;
+  readonly cause?: unknown;
+}
+
+const INTERNAL_ERROR_TYPE = "https://crossengin.io/problems/internal-server-error";
+const INTERNAL_ERROR_DETAIL =
+  "the request could not be completed; quote this response's x-request-id when reporting it";
+
+/** The 500 a caller gets when the serving core itself threw: a fixed sentence and the id. */
+export function internalErrorResponse(requestId: string): RawHttpResponse {
+  const body = new TextEncoder().encode(
+    JSON.stringify({
+      type: INTERNAL_ERROR_TYPE,
+      title: "Internal server error",
+      status: 500,
+      detail: INTERNAL_ERROR_DETAIL,
+      extensions: { requestId },
+    }),
+  );
+  return {
+    status: 500,
+    headers: {
+      "content-type": "application/problem+json",
+      "content-length": body.byteLength.toString(),
+      "x-request-id": requestId,
+    },
+    body,
+  };
 }
 
 /**
@@ -80,10 +132,10 @@ export interface WebhookRoute {
 }
 
 /**
- * Data-residency edge routing: this instance's `region` + a tenant→profile
- * directory. Before dispatch, a request carrying a tenant hint whose profile
- * forbids `region` is redirected to the tenant's home region (or denied), so a
- * tenant's data is only ever served from a residency-compatible region.
+ * Data-residency routing: this instance's `region` + a tenant→profile directory. Enforced on the
+ * authenticated tenant by `applyResidencyGate`, with the tenant hint used only for advisory pre-auth
+ * routing. It decides which instance answers a request — never where the rows are stored, which is
+ * the database's region and so infrastructure (see `residency-gate.ts`).
  */
 export interface RegionGuardConfig {
   readonly region: Region;
@@ -117,6 +169,17 @@ export interface OperateHttpServerOptions {
    * serving.
    */
   readonly onExecution?: (execution: PipelineExecution) => void;
+  /**
+   * Every request that ended in a 5xx, with its cause. Absent, a 5xx is logged to stderr — which is
+   * what the deployed binary relied on and did not have: a handler's 500 left no line anywhere, so
+   * the request id a caller quoted named nothing an operator could find.
+   */
+  readonly onServerError?: (event: ServerErrorEvent) => void;
+  /**
+   * A bound on requests checked before authentication, keyed on address and credential shape.
+   * Absent ⇒ no pre-auth bound, which is the default and is said at boot (see `pre-auth-limit.ts`).
+   */
+  readonly preAuthLimiter?: PreAuthLimiter;
 }
 
 const METHOD_NOT_ALLOWED_TYPE = "https://crossengin.io/problems/method-not-allowed";
@@ -139,6 +202,10 @@ export class OperateHttpServer {
   private readonly idGenerator: () => string;
   private readonly now: () => Date;
   private readonly onExecution: ((execution: PipelineExecution) => void) | null;
+  private readonly onServerError: (event: ServerErrorEvent) => void;
+  private readonly preAuthLimiter: PreAuthLimiter | null;
+  /** Responses whose 5xx the gateway path already reported, so `dispatch` does not report twice. */
+  private readonly reported = new WeakSet<RawHttpResponse>();
 
   constructor(opts: OperateHttpServerOptions) {
     this.gateway = opts.gateway;
@@ -149,6 +216,8 @@ export class OperateHttpServer {
     this.idGenerator = opts.idGenerator ?? defaultRequestId;
     this.now = opts.now ?? (() => new Date());
     this.onExecution = opts.onExecution ?? null;
+    this.onServerError = opts.onServerError ?? logServerError;
+    this.preAuthLimiter = opts.preAuthLimiter ?? null;
   }
 
   /**
@@ -161,10 +230,73 @@ export class OperateHttpServer {
     return this.gateway.systemEntityAccess;
   }
 
+  /**
+   * Never throws. Before this a throw anywhere here — a target `new URL` refuses, a residency lookup,
+   * a webhook handler — escaped to the transport, which wrote the exception's own message into a 500
+   * body an unauthenticated caller could provoke. The id is minted first so a fault before the
+   * gateway still has one to quote.
+   */
   async dispatch(raw: RawHttpRequest, body: Uint8Array | null): Promise<RawHttpResponse> {
+    const requestId = this.idGenerator();
+    try {
+      const response = await this.dispatchUnguarded(raw, body, requestId);
+      if (response.status >= 500) {
+        if (!response.headers["x-request-id"]) response.headers["x-request-id"] = requestId;
+        // The gateway path reports its own with the stage it ended at. Anything else that answers a
+        // 5xx here — the signature-verified webhook, which never enters the gateway — did not, and
+        // "every 5xx is logged under the id the caller was given" has no exception for it.
+        if (!this.reported.has(response)) {
+          this.reportServerError({
+            requestId,
+            status: response.status,
+            method: raw.method,
+            path: safePath(raw.url),
+            operationId: null,
+            stage: "pre_gateway",
+            reason: null,
+          });
+        }
+      }
+      return response;
+    } catch (err) {
+      this.reportServerError({
+        requestId,
+        status: 500,
+        method: raw.method,
+        path: safePath(raw.url),
+        operationId: null,
+        stage: "dispatch",
+        reason: err instanceof Error ? err.message.slice(0, 480) : "non_error_thrown",
+        cause: err,
+      });
+      return internalErrorResponse(requestId);
+    }
+  }
+
+  private reportServerError(event: ServerErrorEvent): void {
+    try {
+      this.onServerError(event);
+    } catch {
+      // A reporter that throws must not turn a logged 500 into a lost response.
+    }
+  }
+
+  private async dispatchUnguarded(
+    raw: RawHttpRequest,
+    body: Uint8Array | null,
+    requestId: string,
+  ): Promise<RawHttpResponse> {
     const method = parseMethod(raw.method);
     if (method === null) {
       return problem(405, METHOD_NOT_ALLOWED_TYPE, "Method not allowed", `unsupported method ${raw.method}`);
+    }
+    // Before the webhook and the gateway alike: both verify a credential, which is the work this
+    // bound exists to cap, and neither has run yet.
+    if (this.preAuthLimiter !== null) {
+      const decision = this.preAuthLimiter.check(raw);
+      if (!decision.allowed) {
+        return preAuthLimitedResponse(decision.retryAfterSeconds);
+      }
     }
     // Signature-authenticated webhook ingress bypasses the gateway auth pipeline.
     if (this.webhookRoute !== null && method === this.webhookRoute.method && splitTarget(raw.url).path === this.webhookRoute.path) {
@@ -183,7 +315,7 @@ export class OperateHttpServer {
     const incoming = rawToIncoming(raw, body, {
       method,
       scheme: forwardedProto,
-      id: this.idGenerator(),
+      id: requestId,
       receivedAt: this.now().toISOString(),
       edgeTrust: this.edgeTrust,
     });
@@ -195,14 +327,29 @@ export class OperateHttpServer {
         // Observation must never break serving.
       }
     }
-    return { status: response.status, headers: { ...response.headers }, body: response.bodyBytes };
+    if (response.status >= 500) {
+      const last = execution.stages[execution.stages.length - 1];
+      this.reportServerError({
+        requestId,
+        status: response.status,
+        method: raw.method,
+        path: incoming.path,
+        operationId: execution.routeOperationId,
+        stage: last?.stage ?? null,
+        reason: last?.reason ?? null,
+      });
+    }
+    const out: RawHttpResponse = { status: response.status, headers: { ...response.headers }, body: response.bodyBytes };
+    if (response.status >= 500) this.reported.add(out);
+    return out;
   }
 
   /**
-   * Residency edge decision for a request. Uses the (unverified) tenant hint header only to *route*
-   * (redirect to the tenant's home region) or *deny* a forbidden region — never to grant access, so a
-   * spoofed hint can at worst misdirect the attacker's own request. A tenant with no residency profile
-   * is unconstrained (returns null → dispatch proceeds); the gateway still authenticates authoritatively.
+   * Advisory residency routing on the (unverified) tenant hint header, before authentication: it can
+   * send a well-behaved client to its home region a round trip early, and can only misdirect the
+   * sender's own request. It is **not** the residency decision — a request with no hint, or a hint
+   * naming a tenant with no profile, passes here whatever the credential's tenant requires. The
+   * decision is `applyResidencyGate` (`residency-gate.ts`), on the authenticated tenant.
    */
   private async checkResidency(raw: RawHttpRequest): Promise<RawHttpResponse | null> {
     if (this.regionGuard === null) return null;
@@ -221,6 +368,30 @@ export class OperateHttpServer {
     }
     return null;
   }
+}
+
+/** The path without its query, which can carry a credential (`?api_key=`) a log must not hold. */
+function safePath(url: string): string {
+  const q = url.indexOf("?");
+  return (q === -1 ? url : url.slice(0, q)).slice(0, 512);
+}
+
+/** The default sink: one structured line per 5xx, keyed by the id the caller was told to quote. */
+export function logServerError(event: ServerErrorEvent): void {
+  const { cause, ...fields } = event;
+  console.error(`[5xx] ${JSON.stringify(fields)}`);
+  if (cause instanceof Error && cause.stack !== undefined) {
+    console.error(`[5xx] ${event.requestId} ${cause.stack}`);
+  }
+}
+
+/** The stack of a stage or handler that threw, under the id the caller was told to quote. */
+export function logGatewayInternalError(
+  err: unknown,
+  at: { readonly requestId: string; readonly stage: string },
+): void {
+  const detail = err instanceof Error ? (err.stack ?? err.message) : "non_error_thrown";
+  console.error(`[5xx] ${at.requestId} ${at.stage} ${detail}`);
 }
 
 /** A residency problem doc carrying the correct region (as a header + an extension). */
@@ -334,6 +505,12 @@ export interface BuildOperateHttpServerOptions {
   /** Optional live-request observer sink (e.g. the SLO request observer). */
   readonly onExecution?: (execution: PipelineExecution) => void;
   /**
+   * The process's one pre-authentication bound — one instance, so a per-tenant gateway counts
+   * against the same budget as the deployment's (the resource it protects is this process's auth
+   * stage, not one tenant's).
+   */
+  readonly preAuthLimiter?: PreAuthLimiter;
+  /**
    * Enforce the caller tenant's lifecycle state on every request (ADR-0334). Absent ⇒ no gate, which
    * is what every deployment had: `meta.tenants.status` was a column nothing on the request path
    * read, so a `pending_deletion` tenant went on accepting writes into data about to be destroyed.
@@ -432,6 +609,19 @@ export interface BuildOperateHttpServerOptions {
     readonly directory: AbacAttributeDirectory;
     readonly onRefused?: (tenantId: string, userId: string) => void;
   };
+  /**
+   * The per-person half the membership check cannot answer: `meta.users.status` and the session
+   * generation (`session-standing.ts`). A separate field because it reads a different row, keyed on
+   * the user alone, and it is composed outermost so a person who may not act is refused whatever
+   * their membership says.
+   */
+  readonly sessionStanding?: SessionStandingCheckOptions;
+  /**
+   * Removes platform-authority roles from a bearer token this deployment's own key did not sign
+   * (H-04). Absent under `--idp-platform-roles`, which is the hatch, and on a deployment with no
+   * bearer path, where there is nothing to remove.
+   */
+  readonly foreignTokenScopes?: ForeignTokenScopePolicy;
   /**
    * The HMAC signing-key lookup, present exactly when this deployment declared `--hmac-key` and
    * holds a usable `REQUEST_SIGNING_SECRET`.
@@ -557,10 +747,16 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
   // Decorated here rather than inside `buildPrincipalWiring`: the directory needs a connection and
   // this is the seam that already takes deployment-supplied collaborators, so the api-key and JWT
   // paths both get attributes from one wrap instead of two.
+  // Innermost: every decoration after this one reads the scopes, so a platform role an IdP asserted
+  // must be gone before any of them looks.
+  const scopesTrimmed =
+    options.foreignTokenScopes !== undefined
+      ? withForeignPlatformRolesDropped(wiring.principalResolver, options.foreignTokenScopes)
+      : wiring.principalResolver;
   const withAttributes =
     options.abac?.attributeDirectory !== undefined
-      ? withAbacAttributes(wiring.principalResolver, options.abac.attributeDirectory)
-      : wiring.principalResolver;
+      ? withAbacAttributes(scopesTrimmed, options.abac.attributeDirectory)
+      : scopesTrimmed;
   /*
    * The revocation check wraps **outside** the attribute decoration.
    *
@@ -591,10 +787,14 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
           options.sessionRevocation.onRefused,
         )
       : withAttributes;
+  const standingChecked =
+    options.sessionStanding !== undefined
+      ? withSessionStandingCheck(principalResolver, options.sessionStanding)
+      : principalResolver;
   const gateway = buildOperateGateway(options.manifest, {
     store: options.store,
     principalRoles: wiring.principalRoles,
-    principalResolver,
+    principalResolver: standingChecked,
     opaqueTokenLookup: wiring.opaqueTokenLookup,
     ...(options.mtlsClients !== undefined
       ? { mtlsClientLookup: options.mtlsClients.lookup }
@@ -637,6 +837,9 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
     ...(options.extraRoutes !== undefined ? { extraRoutes: options.extraRoutes } : {}),
     ...(options.rateLimitChecker !== undefined ? { rateLimitChecker: options.rateLimitChecker } : {}),
     ...(options.idempotencyStore !== undefined ? { idempotencyStore: options.idempotencyStore } : {}),
+    // The gateway already reports a 5xx with the stage it ended at; this is the cause's stack,
+    // keyed by the same request id, which a thrown handler otherwise left in no log.
+    onInternalError: logGatewayInternalError,
     ...(options.policyForEntity !== undefined ? { policyForEntity: options.policyForEntity } : {}),
     ...(options.writeMaskMode !== undefined ? { writeMaskMode: options.writeMaskMode } : {}),
     ...(options.allowUncoveredSettlement !== undefined
@@ -664,6 +867,16 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
   if (options.tenantStatusGate !== undefined) {
     applyTenantStatusGate(gateway.handlers, options.tenantStatusGate);
   }
+  // After the status gate, so it wraps outermost: a request the tenant's residency forbids is refused
+  // before anything — including the status lookup — is asked about the tenant on this instance. The
+  // pre-auth `checkResidency` below stays as advisory routing on the unverified hint; this is the
+  // check on the tenant the auth stage verified.
+  if (options.regionGuard !== undefined) {
+    applyResidencyGate(gateway.handlers, {
+      region: options.regionGuard.region,
+      directory: options.regionGuard.directory,
+    });
+  }
   const httpServer = new OperateHttpServer({
     gateway,
     edgeTrust: options.edgeTrust,
@@ -673,6 +886,7 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
     ...(options.idGenerator !== undefined ? { idGenerator: options.idGenerator } : {}),
     ...(options.now !== undefined ? { now: options.now } : {}),
     ...(options.onExecution !== undefined ? { onExecution: options.onExecution } : {}),
+    ...(options.preAuthLimiter !== undefined ? { preAuthLimiter: options.preAuthLimiter } : {}),
   });
   return { httpServer, gateway };
 }

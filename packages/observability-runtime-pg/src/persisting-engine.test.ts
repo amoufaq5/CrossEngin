@@ -479,3 +479,122 @@ describe("buildPersistentSloEnforcementEngine — a write that fails never costs
     expect(capture.some((c) => c.sql.includes("feature_flag_kill_switches"))).toBe(false);
   });
 });
+
+describe("buildPersistentSloEnforcementEngine — pages delivered before the row is written (ADR-0415)", () => {
+  type Captured = Array<{ sql: string; params: readonly unknown[] | undefined }>;
+
+  function withDeliverer(
+    capture: Captured,
+    deliverPages: Parameters<typeof buildPersistentSloEnforcementEngine>[1]["deliverPages"],
+    phases: string[] = [],
+  ) {
+    const clock = new FixedClock(BASE);
+    const persistent = buildPersistentSloEnforcementEngine(mockConnection(capture), {
+      alertPolicy: policy,
+      systemActorUserId: SYSTEM_ACTOR,
+      registrations: [{ slo, category: "availability", tenantId: TENANT }],
+      clock,
+      onDeclarationError: (_e, f) => phases.push(f.phase),
+      ...(deliverPages !== undefined ? { deliverPages } : {}),
+    });
+    return { persistent, clock };
+  }
+
+  it("delivers first, writes paged from the tally, and says it delivered on the decision", async () => {
+    const capture: Captured = [];
+    const order: string[] = [];
+    const { persistent } = withDeliverer(capture, async (decision, pages) => {
+      order.push(`deliver:${String(capture.length)}`);
+      expect(decision.incidentId).toMatch(/^INC-/);
+      expect(pages).toHaveLength(1);
+      return { deliveredChannels: 1 };
+    });
+    burst(persistent, 25, BASE.getTime());
+    const decisions = await persistent.evaluate(BASE);
+    expect(decisions[0]?.pageDelivery).toEqual({ deliveredChannels: 1 });
+    const actionInsert = capture.find((c) => c.sql.includes("INSERT INTO meta.slo_enforcement_actions"));
+    expect(bound(actionInsert, "paged")).toBe(true);
+    expect(bound(actionInsert, "page_channel_count")).toBe(1);
+    // The delivery ran before the action row existed.
+    const insertAt = capture.indexOf(actionInsert!);
+    expect(Number(order[0]?.split(":")[1])).toBeLessThanOrEqual(insertAt);
+  });
+
+  it("writes paged false when the delivery reached nothing", async () => {
+    const capture: Captured = [];
+    const { persistent } = withDeliverer(capture, async () => ({ deliveredChannels: 0 }));
+    burst(persistent, 25, BASE.getTime());
+    await persistent.evaluate(BASE);
+    const actionInsert = capture.find((c) => c.sql.includes("INSERT INTO meta.slo_enforcement_actions"));
+    expect(bound(actionInsert, "paged")).toBe(false);
+    expect(bound(actionInsert, "page_channel_count")).toBe(0);
+  });
+
+  it("reports a throwing deliverer as deliver_pages, writes paged false, and keeps the decision", async () => {
+    const capture: Captured = [];
+    const phases: string[] = [];
+    const { persistent } = withDeliverer(
+      capture,
+      async () => {
+        throw new Error("pager unreachable");
+      },
+      phases,
+    );
+    burst(persistent, 25, BASE.getTime());
+    const decisions = await persistent.evaluate(BASE);
+    expect(decisions[0]?.kind).toBe("breach_opened");
+    expect(decisions[0]?.pageDelivery).toEqual({ deliveredChannels: 0 });
+    expect(phases).toEqual(["deliver_pages"]);
+    const actionInsert = capture.find((c) => c.sql.includes("INSERT INTO meta.slo_enforcement_actions"));
+    expect(bound(actionInsert, "paged")).toBe(false);
+  });
+
+  it("without a deliverer, records paged false and leaves delivery to the caller", async () => {
+    const capture: Captured = [];
+    const { persistent } = withDeliverer(capture, undefined);
+    burst(persistent, 25, BASE.getTime());
+    const decisions = await persistent.evaluate(BASE);
+    expect(decisions[0]?.pageDelivery).toBeNull();
+    const actionInsert = capture.find((c) => c.sql.includes("INSERT INTO meta.slo_enforcement_actions"));
+    expect(bound(actionInsert, "paged")).toBe(false);
+  });
+
+  it("does not call the deliverer for a decision with no page", async () => {
+    const capture: Captured = [];
+    let calls = 0;
+    const { persistent, clock } = withDeliverer(capture, async () => {
+      calls += 1;
+      return { deliveredChannels: 1 };
+    });
+    burst(persistent, 25, BASE.getTime());
+    await persistent.evaluate(BASE);
+    clock.advance(60_000);
+    burst(persistent, 25, clock.nowMs());
+    const ongoing = await persistent.evaluate(clock.now());
+    expect(ongoing[0]?.kind).toBe("breach_ongoing");
+    expect(ongoing[0]?.pageDelivery).toBeNull();
+    expect(calls).toBe(1);
+  });
+
+  it("releases the recorded kill switch on recovery through the store, by default", async () => {
+    const capture: Captured = [];
+    const clock = new FixedClock(BASE);
+    const persistent = buildPersistentSloEnforcementEngine(mockConnection(capture), {
+      alertPolicy: policy,
+      systemActorUserId: SYSTEM_ACTOR,
+      registrations: [
+        { slo, category: "availability", tenantId: TENANT, rollback: { flagId: "ff_checkout01", safeValueJson: "false" } },
+      ],
+      clock,
+    });
+    burst(persistent, 25, BASE.getTime());
+    await persistent.evaluate(BASE);
+    clock.advance(2 * 3_600_000);
+    const recovered = (await persistent.evaluate(clock.now()))[0];
+    // The fake answers the load with no row, so the default releaser asked and found nothing active.
+    expect(recovered).toMatchObject({ kind: "recovered", killSwitchRelease: "not_active" });
+    expect(
+      capture.some((c) => c.sql.includes("feature_flag_kill_switches") && c.sql.includes("WHERE kill_switch_id = $1")),
+    ).toBe(true);
+  });
+});

@@ -212,6 +212,8 @@ export async function ensureDocumentUniqueIndexes(
   conn: PgConnection,
   plan: DocumentIntegrityPlan,
   schema: string,
+  /** Other runtime indexes the served manifest declares — its lookup indexes — which are not stale. */
+  alsoPlanned: ReadonlySet<string> = new Set(),
 ): Promise<DocumentIndexEnsureReport> {
   const results: DocumentUniqueIndexResult[] = [];
   for (const index of plan.uniqueIndexes) {
@@ -262,7 +264,7 @@ export async function ensureDocumentUniqueIndexes(
           : "the CREATE succeeded and no index of this name is present afterwards",
     };
   });
-  const planned = new Set(plan.uniqueIndexes.map((i) => i.name));
+  const planned = new Set([...plan.uniqueIndexes.map((i) => i.name), ...alsoPlanned]);
   const stale = [...liveByName.keys()]
     .filter((name) => !planned.has(name))
     .sort()

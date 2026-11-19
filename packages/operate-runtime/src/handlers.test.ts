@@ -2334,3 +2334,31 @@ describe("operate handlers — a reference the store refuses", () => {
     expect(body["field"]).toBe("product_id");
   });
 });
+
+/** A store whose search ran without some fields, the way the column store answers for ciphertext. */
+class NarrowingStore extends CapturingStore {
+  constructor(private readonly narrowed: readonly string[]) {
+    super();
+  }
+  override async listPage(...args: Parameters<InMemoryEntityStore["listPage"]>): Promise<ListPage> {
+    const page = await super.listPage(...args);
+    return { ...page, searchNarrowedBy: this.narrowed };
+  }
+}
+
+describe("operate handlers — a partially-narrowed search says so on the page", () => {
+  it("carries the store's narrowed fields onto `page.searchNarrowedBy`", async () => {
+    const out = await hit(clinicCtx(new NarrowingStore(["mrn"]), evaluator("satisfied")), "roster.list", {
+      role: "clinician",
+    });
+    expect(out.status).toBe(200);
+    expect((bodyOf(out)["page"] as Record<string, unknown>)["searchNarrowedBy"]).toEqual(["mrn"]);
+  });
+
+  it("omits the key when nothing was left out, so an ordinary page is unchanged", async () => {
+    for (const store of [new NarrowingStore([]), await withRoster()]) {
+      const out = await hit(clinicCtx(store, evaluator("satisfied")), "roster.list", { role: "clinician" });
+      expect(bodyOf(out)["page"]).not.toHaveProperty("searchNarrowedBy");
+    }
+  });
+});

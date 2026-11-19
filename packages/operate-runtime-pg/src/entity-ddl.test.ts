@@ -1,8 +1,14 @@
 import type { Entity } from "@crossengin/types/meta-schema";
 import { describe, expect, it } from "vitest";
 
-import { columnPlanForEntity, joinTablePlansForManifest, UnresolvableUniqueScopeError } from "./column-plan.js";
-import type { Manifest } from "@crossengin/kernel/manifest";
+import { toTableName } from "@crossengin/kernel/ddl";
+import {
+  columnPlanForEntity,
+  columnPlansForManifest,
+  joinTablePlansForManifest,
+  UnresolvableUniqueScopeError,
+} from "./column-plan.js";
+import { validateManifest, type Manifest } from "@crossengin/kernel/manifest";
 import {
   emitAddColumnDdl,
   emitEntityTableDdl,
@@ -24,7 +30,11 @@ const WIDGET: Entity = {
     { name: "sku", type: { kind: "text" }, required: true },
     { name: "price", type: { kind: "decimal", precision: 12, scale: 2 } },
     { name: "ssn", type: { kind: "text" }, classification: "phi" },
-    { name: "cost", type: { kind: "decimal", precision: 12, scale: 2 }, classification: "commercial_sensitive" },
+    {
+      name: "cost",
+      type: { kind: "decimal", precision: 12, scale: 2 },
+      classification: "commercial_sensitive",
+    },
   ],
 };
 
@@ -48,18 +58,41 @@ describe("emitEntityTableDdl", () => {
   it("enables RLS with an idempotent tenant-isolation policy", () => {
     expect(sql).toContain("ENABLE ROW LEVEL SECURITY");
     expect(sql).toContain('DROP POLICY IF EXISTS "widget_tenant_isolation"');
+    // One statement, so no transaction boundary falls between the drop and the create.
+    const policy = emitEntityTableDdl(columnPlanForEntity(WIDGET, { schema: "tenant_app" })).filter((s) => s.includes("widget_tenant_isolation"));
+    expect(policy).toHaveLength(1);
+    expect(policy[0]).toMatch(/^DO \$ce_policy\$ BEGIN\n/);
     // NULLIF, not the bare cast: on a pooled connection whose tenant GUC has been reset to the empty
     // string, `''::UUID` raises instead of matching no rows.
     expect(sql).toContain("NULLIF(current_setting('app.current_tenant_id', true), '')::UUID");
   });
 
-  it("creates a tenant index idempotently", () => {
-    expect(sql).toContain('CREATE INDEX IF NOT EXISTS "idx_widget_tenant"');
+  it("keeps a policy that already says what the server renders, and replaces any other", () => {
+    const rendering = "(tenant_id = (NULLIF(current_setting('app.current_tenant_id'::text, true), ''::text))::uuid)";
+    const [policy] = emitEntityTableDdl(columnPlanForEntity(WIDGET, { schema: "tenant_app" }), {
+      isolationQualRendering: rendering,
+    }).filter((s) => s.includes("widget_tenant_isolation"));
+    expect(policy).toContain("IF NOT EXISTS (SELECT 1 FROM pg_policy p WHERE ");
+    expect(policy).toContain("p.polcmd = '*'");
+    expect(policy).toContain("p.polroles = ARRAY[0]::oid[]");
+    expect(policy).toContain("p.polwithcheck IS NULL");
+    // Quoted as a literal, so the rendering's own quotes are doubled rather than ending it.
+    expect(policy).toContain(`pg_get_expr(p.polqual, p.polrelid) = '${rendering.replace(/'/g, "''")}'`);
+    expect(policy!.indexOf("CREATE POLICY")).toBeGreaterThan(policy!.indexOf("THEN"));
+  });
+
+  it("creates no tenant-only index, which the (tenant_id, id) primary key already serves", () => {
+    expect(sql).not.toContain('"idx_widget_tenant"');
+    expect(sql).toContain('PRIMARY KEY ("tenant_id", "id")');
   });
 
   it("writes classification comments (with encrypt=at_rest for phi)", () => {
-    expect(sql).toContain(`COMMENT ON COLUMN "tenant_app"."widget"."ssn" IS 'crossengin.data_class=phi; crossengin.encrypt=at_rest'`);
-    expect(sql).toContain(`COMMENT ON COLUMN "tenant_app"."widget"."cost" IS 'crossengin.data_class=commercial_sensitive'`);
+    expect(sql).toContain(
+      `COMMENT ON COLUMN "tenant_app"."widget"."ssn" IS 'crossengin.data_class=phi; crossengin.encrypt=at_rest'`,
+    );
+    expect(sql).toContain(
+      `COMMENT ON COLUMN "tenant_app"."widget"."cost" IS 'crossengin.data_class=commercial_sensitive'`,
+    );
   });
 
   it("does not comment unclassified columns", () => {
@@ -118,7 +151,9 @@ describe("emitForeignKeyDdl", () => {
     const sql = emitForeignKeyDdl(plan, new Set(["Account", "Order"])).join("\n");
     expect(sql).toContain('DROP CONSTRAINT IF EXISTS "fk_order_account_id"');
     expect(sql).toContain('ADD CONSTRAINT "fk_order_account_id"');
-    expect(sql).toContain('FOREIGN KEY ("tenant_id", "account_id") REFERENCES "tenant_app"."account" ("tenant_id", "id") ON DELETE RESTRICT');
+    expect(sql).toContain(
+      'FOREIGN KEY ("tenant_id", "account_id") REFERENCES "tenant_app"."account" ("tenant_id", "id") ON DELETE RESTRICT',
+    );
   });
 
   it("skips a reference whose target is not a known table", () => {
@@ -126,7 +161,10 @@ describe("emitForeignKeyDdl", () => {
   });
 
   it("emits nothing for an entity with no references", () => {
-    const acct = columnPlanForEntity({ name: "Account", fields: [{ name: "name", type: { kind: "text" } }] }, { schema: "tenant_app" });
+    const acct = columnPlanForEntity(
+      { name: "Account", fields: [{ name: "name", type: { kind: "text" } }] },
+      { schema: "tenant_app" },
+    );
     expect(emitForeignKeyDdl(acct, new Set(["Account"]))).toEqual([]);
   });
 
@@ -139,12 +177,42 @@ describe("emitForeignKeyDdl", () => {
     const sql = emitForeignKeyDdl(plan, new Set(["Account", "Order"]), (f) =>
       f === "account" ? "cascade" : undefined,
     ).join("\n");
-    expect(sql).toContain("REFERENCES \"tenant_app\".\"account\" (\"tenant_id\", \"id\") ON DELETE CASCADE");
+    expect(sql).toContain(
+      'REFERENCES "tenant_app"."account" ("tenant_id", "id") ON DELETE CASCADE',
+    );
   });
 
   it("uses the column-list SET NULL form (nulls only <ref>_id, never tenant_id)", () => {
     const sql = emitForeignKeyDdl(plan, new Set(["Account", "Order"]), () => "set_null").join("\n");
     expect(sql).toContain('ON DELETE SET NULL ("account_id")');
+  });
+
+  it("replaces the constraint only when the catalog does not already hold it as declared", () => {
+    // Before: an unconditional DROP + ADD on every boot, re-validating the whole child table.
+    const stmts = emitForeignKeyDdl(plan, new Set(["Account", "Order"]));
+    expect(stmts).toHaveLength(1);
+    const [stmt] = stmts;
+    expect(stmt).toMatch(/^DO \$ce_fk\$ BEGIN\n  IF NOT EXISTS \(SELECT 1 FROM pg_constraint c WHERE /);
+    expect(stmt).toContain(`c.conname = 'fk_order_account_id'`);
+    expect(stmt).toContain(`c.confrelid = '"tenant_app"."account"'::regclass`);
+    expect(stmt).toContain("c.confdeltype = 'r'");
+    expect(stmt).toContain("c.convalidated");
+    expect(stmt).toContain("= ARRAY['tenant_id', 'account_id']");
+    expect(stmt).toContain("= ARRAY['tenant_id', 'id']");
+    // The drop and the add are inside the guard, so they run together or not at all.
+    expect(stmt!.indexOf("DROP CONSTRAINT")).toBeGreaterThan(stmt!.indexOf("THEN"));
+    expect(stmt!.indexOf("ADD CONSTRAINT")).toBeLessThan(stmt!.indexOf("END IF"));
+  });
+
+  it("compares the action it declares, and names confdelsetcols only for SET NULL", () => {
+    const cascade = emitForeignKeyDdl(plan, new Set(["Account", "Order"]), () => "cascade")[0]!;
+    expect(cascade).toContain("c.confdeltype = 'c'");
+    // `confdelsetcols` does not exist on Postgres 14, so naming it on a non-SET NULL guard would
+    // make every guard fail to parse there.
+    expect(cascade).not.toContain("confdelsetcols");
+    const setNull = emitForeignKeyDdl(plan, new Set(["Account", "Order"]), () => "set_null")[0]!;
+    expect(setNull).toContain("c.confdeltype = 'n'");
+    expect(setNull).toContain("unnest(c.confdelsetcols)");
   });
 });
 
@@ -157,7 +225,9 @@ describe("onDeleteClause", () => {
 });
 
 describe("emitJoinTableDdl", () => {
-  const manifest = { relations: [{ kind: "many_to_many", left: "Course", right: "Student" }] } as unknown as Manifest;
+  const manifest = {
+    relations: [{ kind: "many_to_many", left: "Course", right: "Student" }],
+  } as unknown as Manifest;
   const plan = joinTablePlansForManifest(manifest, { schema: "tenant_app" })[0]!;
 
   it("creates a tenant-scoped link table with a composite PK + RLS", () => {
@@ -170,8 +240,12 @@ describe("emitJoinTableDdl", () => {
 
   it("adds composite ON DELETE CASCADE FKs to both sides", () => {
     const sql = emitJoinTableDdl(plan, new Set(["Course", "Student"])).join("\n");
-    expect(sql).toContain('FOREIGN KEY ("tenant_id", "course_id") REFERENCES "tenant_app"."course" ("tenant_id", "id") ON DELETE CASCADE');
-    expect(sql).toContain('FOREIGN KEY ("tenant_id", "student_id") REFERENCES "tenant_app"."student" ("tenant_id", "id") ON DELETE CASCADE');
+    expect(sql).toContain(
+      'FOREIGN KEY ("tenant_id", "course_id") REFERENCES "tenant_app"."course" ("tenant_id", "id") ON DELETE CASCADE',
+    );
+    expect(sql).toContain(
+      'FOREIGN KEY ("tenant_id", "student_id") REFERENCES "tenant_app"."student" ("tenant_id", "id") ON DELETE CASCADE',
+    );
   });
 
   it("skips a FK whose side is not a known entity table", () => {
@@ -481,8 +555,12 @@ describe("emitEntityTableDdl — trait-supplied timestamps", () => {
 
   it("still supplies the housekeeping timestamps for an entity with no auditable trait", () => {
     const create = emitEntityTableDdl(columnPlanForEntity(PLAIN, { schema: "app" }))[0] ?? "";
-    expect(create).toContain(`"created_at" TIMESTAMPTZ NOT NULL DEFAULT date_trunc('milliseconds', now())`);
-    expect(create).toContain(`"updated_at" TIMESTAMPTZ NOT NULL DEFAULT date_trunc('milliseconds', now())`);
+    expect(create).toContain(
+      `"created_at" TIMESTAMPTZ NOT NULL DEFAULT date_trunc('milliseconds', now())`,
+    );
+    expect(create).toContain(
+      `"updated_at" TIMESTAMPTZ NOT NULL DEFAULT date_trunc('milliseconds', now())`,
+    );
   });
 });
 
@@ -492,7 +570,12 @@ describe("emitAddColumnDdl", () => {
     fields: [
       { name: "reason", type: { kind: "text" } },
       { name: "triage", type: { kind: "text" }, required: true },
-      { name: "version", type: { kind: "integer" }, required: true, default: { kind: "literal", value: 1 } },
+      {
+        name: "version",
+        type: { kind: "integer" },
+        required: true,
+        default: { kind: "literal", value: 1 },
+      },
     ],
   };
   const stmts = emitAddColumnDdl(columnPlanForEntity(WITH_REQUIRED, { schema: "app" }));
@@ -582,7 +665,9 @@ describe("emitManifestSchemaDdl", () => {
     ["Account", columnPlanForEntity(ACCOUNT, { schema: "app" })],
   ]);
   const joins = joinTablePlansForManifest(
-    { relations: [{ kind: "many_to_many", left: "Order", right: "Account" }] } as unknown as Manifest,
+    {
+      relations: [{ kind: "many_to_many", left: "Order", right: "Account" }],
+    } as unknown as Manifest,
     { schema: "app" },
   );
 
@@ -619,5 +704,138 @@ describe("emitManifestSchemaDdl", () => {
 
   it("emits nothing for a manifest with no entities", () => {
     expect(emitManifestSchemaDdl(new Map())).toEqual([]);
+  });
+});
+
+describe("derived index and constraint names, against validateManifest", () => {
+  // `validateManifest` refuses a manifest whose derived names collide or overrun 63 bytes, over the
+  // name functions this emitter calls. The fence: whatever passes validation, at the limit, emits no
+  // relation name twice and none Postgres would truncate — so an `IF NOT EXISTS` cannot skip one and
+  // a `DROP CONSTRAINT IF EXISTS` cannot drop a sibling.
+  const longEntity = "Abcdefghijklmnopqrstuvwxyzabcd";
+  const atLimit = "f".repeat(63 - toTableName(longEntity).length - "__utrgm".length);
+  const manifest: Manifest = {
+    manifestVersion: "1.0",
+    meta: { name: "T", slug: "t", version: "1.0.0" },
+    entities: [
+      { name: "Order", fields: [{ name: "line_item", type: { kind: "text" }, unique: true }] },
+      { name: "OrderLine", fields: [{ name: "items", type: { kind: "text" }, unique: true }] },
+      { name: "Course", fields: [{ name: "title", type: { kind: "text" } }] },
+      {
+        name: longEntity,
+        fields: [
+          { name: atLimit, type: { kind: "text" }, unique: true },
+          { name: `${atLimit.slice(1)}x`, type: { kind: "text" }, unique: true },
+          { name: "course", type: { kind: "reference", target: "Course" } },
+        ],
+      },
+    ],
+    relations: [{ kind: "many_to_many", left: "Course", right: "OrderLine" }],
+  };
+
+  it("emits every relation name once and within 63 bytes for a manifest validation admits", () => {
+    expect(() => validateManifest(manifest)).not.toThrow();
+    const plans = columnPlansForManifest(manifest, { schema: "app" });
+    const ddl = [
+      ...emitManifestSchemaDdl(plans, joinTablePlansForManifest(manifest, { schema: "app" })),
+      ...[...plans.values()].flatMap((p) => emitUniqueIndexDdl(p)),
+    ];
+    const relations = [
+      ...[...plans.values()].map((p) => p.table),
+      ...ddl.flatMap((s) =>
+        [...s.matchAll(/CREATE (?:UNIQUE )?INDEX IF NOT EXISTS "([^"]+)"/g)].map((m) => m[1] ?? ""),
+      ),
+    ];
+    expect(relations.length).toBeGreaterThan(8);
+    expect(new Set(relations).size).toBe(relations.length);
+    const constraints = ddl.flatMap((s) =>
+      [...s.matchAll(/ADD CONSTRAINT "([^"]+)"/g)].map((m) => m[1] ?? ""),
+    );
+    expect(constraints.length).toBe(3);
+    for (const name of [...relations, ...constraints])
+      expect(Buffer.byteLength(name)).toBeLessThanOrEqual(63);
+  });
+});
+
+describe("emitEntityTableDdl — catalog guards", () => {
+  // Each statement below changes nothing on a table already holding its declaration, and each one
+  // still takes a table lock before deciding so — measured on PG 16, `ADD COLUMN IF NOT EXISTS` and
+  // an already-on `ENABLE ROW LEVEL SECURITY` time out behind a plain open `SELECT`. Guarded, an
+  // unchanged schema's boot issues none of them.
+  const plan = columnPlanForEntity({ ...WIDGET, traits: ["auditable"] } as Entity, { schema: "tenant_app" });
+  const rendering = "date_trunc('milliseconds'::text, now())";
+  const guarded = emitEntityTableDdl(plan, { catalogGuards: { millisecondNowRendering: rendering } });
+  const bare = emitEntityTableDdl(plan);
+
+  it("guards each ADD COLUMN by the column's presence in pg_attribute", () => {
+    const add = guarded.filter((s) => s.includes("ADD COLUMN IF NOT EXISTS"));
+    expect(add).toHaveLength(plan.columns.length);
+    for (const [i, s] of add.entries()) {
+      expect(s).toMatch(/^DO \$ce_guard\$ BEGIN\n  IF NOT EXISTS \(SELECT 1 FROM pg_attribute a /);
+      expect(s).toContain(`a.attname = '${plan.columns[i]!.column}'`);
+      expect(s.indexOf("ALTER TABLE")).toBeGreaterThan(s.indexOf("THEN"));
+    }
+  });
+
+  it("guards ENABLE ROW LEVEL SECURITY by relrowsecurity", () => {
+    const rls = guarded.filter((s) => s.includes("ENABLE ROW LEVEL SECURITY"));
+    expect(rls).toHaveLength(1);
+    expect(rls[0]).toContain("IF NOT (SELECT c.relrowsecurity FROM pg_class c");
+  });
+
+  it("guards each trigram index by its name resolving", () => {
+    const trigram = guarded.filter((s) => s.includes(TRIGRAM_INDEX_SUFFIX));
+    expect(trigram.length).toBeGreaterThan(0);
+    for (const s of trigram) expect(s).toMatch(/IF to_regclass\('"tenant_app"\."widget_[a-z_]+_utrgm"'\) IS NULL THEN/);
+  });
+
+  it("guards the millisecond SET DEFAULT by the stored default's deparse, and only given one", () => {
+    const set = guarded.filter((s) => s.includes("SET DEFAULT"));
+    expect(set).toHaveLength(2);
+    expect(set[0]).toContain(`pg_get_expr(d.adbin, d.adrelid) = '${rendering.replace(/'/g, "''")}'`);
+    expect(set[0]).toContain("a.attname = 'created_at'");
+    expect(set[1]).toContain("a.attname = 'updated_at'");
+    const unrendered = emitEntityTableDdl(plan, { catalogGuards: { millisecondNowRendering: null } });
+    expect(unrendered.filter((s) => s.includes("SET DEFAULT")).every((s) => s.startsWith("ALTER TABLE"))).toBe(true);
+  });
+
+  it("issues the same statements unguarded when not asked — the per-tenant applier's form", () => {
+    expect(bare.filter((s) => s.startsWith("DO $ce_guard")).length).toBe(0);
+    expect(bare.filter((s) => s.includes("ADD COLUMN IF NOT EXISTS")).every((s) => s.startsWith("ALTER TABLE"))).toBe(true);
+    // Same statement count either way: guarding wraps, it never drops a statement.
+    expect(guarded).toHaveLength(bare.length);
+  });
+
+  it("chooses a dollar-quote tag a manifest-authored default cannot close", () => {
+    const hostile = columnPlanForEntity(
+      {
+        name: "Note",
+        fields: [{ name: "body", type: { kind: "text" }, default: { kind: "literal", value: "x$ce_guard$y" } }],
+      } as Entity,
+      { schema: "tenant_app" },
+    );
+    const [add] = emitEntityTableDdl(hostile, { catalogGuards: { millisecondNowRendering: null } }).filter((s) =>
+      s.includes('ADD COLUMN IF NOT EXISTS "body"'),
+    );
+    expect(add).toContain("$ce_guard$");
+    expect(add).toMatch(/^DO \$ce_guard1\$ BEGIN/);
+    expect(add!.endsWith("END $ce_guard1$;")).toBe(true);
+  });
+
+  it("guards a join table's ENABLE ROW LEVEL SECURITY too", () => {
+    const [join] = joinTablePlansForManifest(
+      {
+        entities: [
+          { name: "Course", fields: [{ name: "t", type: { kind: "text" } }] },
+          { name: "Student", fields: [{ name: "n", type: { kind: "text" } }] },
+        ],
+        relations: [{ kind: "many_to_many", left: "Course", right: "Student" }],
+      } as unknown as Manifest,
+      { schema: "tenant_app" },
+    );
+    const stmts = emitJoinTableDdl(join!, new Set(["Course", "Student"]), {
+      catalogGuards: { millisecondNowRendering: null },
+    });
+    expect(stmts.find((s) => s.includes("ENABLE ROW LEVEL SECURITY"))).toContain("relrowsecurity");
   });
 });

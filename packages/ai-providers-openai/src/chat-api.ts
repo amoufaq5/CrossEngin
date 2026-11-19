@@ -1,6 +1,6 @@
 import type { CompletionRequest, LlmMessage, LlmTool, Usage } from "@crossengin/ai-providers";
 
-import { computeUsageCost, type OpenAiModel } from "./pricing.js";
+import { computeUsageCost, type OpenAiModel, type OpenAiModelPricing } from "./pricing.js";
 
 export interface OpenAiChatRequest {
   readonly model: string;
@@ -139,13 +139,21 @@ function buildTool(tool: LlmTool): OpenAiTool {
   };
 }
 
-export function normalizeUsage(model: OpenAiModel, usage: OpenAiUsage): Usage {
+export function normalizeUsage(
+  model: OpenAiModel,
+  usage: OpenAiUsage,
+  pricing?: OpenAiModelPricing,
+): Usage {
   const cached = usage.prompt_tokens_details?.cached_tokens ?? 0;
-  const cost = computeUsageCost(model, {
-    inputTokens: usage.prompt_tokens,
-    cachedInputTokens: cached,
-    outputTokens: usage.completion_tokens,
-  });
+  const cost = computeUsageCost(
+    model,
+    {
+      inputTokens: usage.prompt_tokens,
+      cachedInputTokens: cached,
+      outputTokens: usage.completion_tokens,
+    },
+    pricing,
+  );
   return {
     inputTokens: usage.prompt_tokens,
     outputTokens: usage.completion_tokens,

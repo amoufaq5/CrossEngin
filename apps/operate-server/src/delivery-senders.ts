@@ -12,6 +12,35 @@ export interface SendRequest {
   readonly locale: string;
   readonly recipientAddress: string;
   readonly attemptNumber: number;
+  /**
+   * The template rendered for this dispatch, or `null` when nothing could render one — in which case
+   * a provider sends its own identifier-only notice. Required, so a caller states which it holds.
+   */
+  readonly content: DispatchContent | null;
+}
+
+export interface DispatchContent {
+  readonly subject: string;
+  readonly body: string;
+  readonly htmlBody: string | null;
+}
+
+/**
+ * Reads the rendered content back off a request a provider composer was handed. A composer is typed
+ * against the provider package's own `SendRequest`, which has no `content` field, so the value is
+ * checked rather than asserted: anything that is not exactly this shape answers `null` and the
+ * provider's default notice is sent.
+ */
+export function dispatchContentOf(request: object): DispatchContent | null {
+  if (!("content" in request)) return null;
+  const c: unknown = request.content;
+  if (typeof c !== "object" || c === null) return null;
+  if (!("subject" in c) || !("body" in c) || !("htmlBody" in c)) return null;
+  const { subject, body, htmlBody } = c;
+  if (typeof subject !== "string" || typeof body !== "string") return null;
+  if (htmlBody !== null && typeof htmlBody !== "string") return null;
+  if (body.length === 0) return null;
+  return { subject, body, htmlBody };
 }
 
 export interface SendResult {

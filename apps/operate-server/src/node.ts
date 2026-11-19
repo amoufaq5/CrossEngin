@@ -12,6 +12,7 @@ import {
   PostgresIdempotencyStore,
   PostgresPipelineExecutionStore,
   PostgresRateLimitChecker,
+  RATE_LIMIT_WINDOW_SEMANTICS,
   probeDecisionSchema,
   surveyRoutePolicies,
 } from "@crossengin/api-gateway-pg";
@@ -25,9 +26,7 @@ import {
   formatPgPoolSettings,
   parsePgEnvConfig,
   SERVING_POOL_SETTINGS,
-  pgChannelAssurance,
-  PG_CHANNEL_ASSURANCE_DESCRIPTIONS,
-  sslModeValidatesCertificate,
+  describePgChannel,
   surveyCheckAdmission,
   type CheckAdmissionSurvey,
 } from "@crossengin/kernel-pg";
@@ -77,13 +76,16 @@ import {
   eraseTenantSchema,
   eraseTenantSchemaWithin,
   ingestStripeWebhook,
+  setTenantContextWithin,
   surveyTenantSchemaWithCollateral,
   tenantSchemaName,
   type BootSchemaErasurePlan,
   type ColumnEncryptionKeySource,
+  DOCUMENT_LOOKUP_INDEX_PREFIX,
 } from "@crossengin/operate-runtime-pg";
 
 import type {
+  ColumnSchemaOptions,
   DocumentIndexesOptions,
   PruneOptions,
   ReplayOptions,
@@ -143,6 +145,8 @@ import {
   buildColumnKeySource,
   decidePhiStorage,
   formatPhiStorageDecision,
+  formatAtRestHonesty,
+  surveyPlaintextSensitiveFields,
   surveyPhiFields,
 } from "./column-encryption.js";
 import {
@@ -156,12 +160,20 @@ import {
 } from "./cursor-encryption.js";
 import {
   COLUMN_KEY_MODE_FLAG,
+  ColumnKeyLedger,
   DEFAULT_COLUMN_KEY_TTL_MS,
   buildEnvelopeKeySource,
   formatColumnKeyMode,
   formatShreddability,
   shreddabilityOf,
 } from "./data-key-envelope.js";
+import { fenceColumnKeyGeneration } from "./column-key-fence.js";
+import {
+  formatColumnSecretRing,
+  kekResolverFor,
+  resolveColumnSecretRing,
+  seedSecretOf,
+} from "./column-secret-ring.js";
 import { buildTenantCiphertextProbe } from "./tenant-ciphertext-probe.js";
 import {
   bootErasureCoverageIsSuspect,
@@ -231,6 +243,12 @@ import {
   IdempotencyPruneScheduler,
   ReportingIdempotencyStore,
 } from "./gateway-idempotency.js";
+import {
+  DEFAULT_RETENTION_INTERVAL_MS,
+  OperationalRetentionScheduler,
+  formatRetentionPass,
+  formatRetentionPolicy,
+} from "./operational-retention.js";
 import { DeliveryScheduler } from "./delivery-scheduler.js";
 import { PostgresDeliveryStore } from "./delivery-store.js";
 import { PostgresRecipientResolver } from "./recipient-resolver.js";
@@ -249,9 +267,11 @@ import { BOUNCE_WEBHOOK_SOURCES } from "@crossengin/notification-providers";
 import { PostgresSuppressionStore } from "./suppression-store.js";
 import { PostgresDigestStore } from "./digest-store.js";
 import { PostgresTemplateStore } from "./template-store.js";
+import { templateContentSource } from "./delivery-content.js";
 import { PostgresAuditEmitter, auditActor, auditEntry } from "./audit-log-store.js";
 import { AmbientTransactions } from "./ambient-transaction.js";
 import { buildEntityAuditRecorder, type EntityAuditRecorder } from "./entity-audit-recorder.js";
+import { formatTenantSchemaRefusal } from "./tenant-schema-refusal-log.js";
 import { buildLoginAuditRecorder } from "./login-audit.js";
 import {
   TENANT_SCOPE_DENIED_OPERATION,
@@ -282,9 +302,17 @@ import {
 import { formatEdgeTrustSurvey, resolveMtlsClients } from "./mtls-client.js";
 import {
   formatApiKeySpecSource,
+  formatWeakApiKeyTokens,
   resolveApiKeySpecs,
   SOURCE_EXPOSES_ARGV,
+  surveyApiKeyTokens,
 } from "./api-key-source.js";
+import {
+  formatStripeSecrets,
+  resolveStripeSecrets,
+  stripeRequirementRefusal,
+  stripeUnusedSecretWarnings,
+} from "./stripe-secret-source.js";
 import {
   buildHealthInterceptor,
   buildPostgresReadinessCheck,
@@ -300,6 +328,7 @@ import {
 import {
   AUTH_TOKEN_PATH,
   buildAuthTokenInterceptor,
+  isAuthTokenPath,
   DEFAULT_LOGIN_LOCKOUT_ATTEMPTS,
   DEFAULT_LOGIN_LOCKOUT_SECONDS,
   parseLoginLockout,
@@ -312,9 +341,20 @@ import {
 } from "./login-admission.js";
 import { formatCredentialAuth, resolveCredentialAuth } from "./credential-auth-env.js";
 import { ensureSearchExtension, searchExtensionLine } from "@crossengin/operate-runtime-pg";
+import {
+  ensureDeclaredIndexes,
+  formatDeclaredIndexPlan,
+  formatDeclaredIndexResults,
+} from "@crossengin/operate-runtime-pg";
 import { aiModelLine, resolveAiModel } from "./ai-model-source.js";
-import { buildCredentialRoutes } from "./credential-routes.js";
+import { buildCredentialRoutes, DEFAULT_MIN_PASSWORD_LENGTH } from "./credential-routes.js";
+import { platformAuthorityRoles } from "./platform-authority.js";
 import { PostgresCredentialStore } from "./credential-store.js";
+import {
+  CachedSessionStandingDirectory,
+  formatSessionStanding,
+  type SessionStandingRefusal,
+} from "./session-standing.js";
 import { DEFAULT_SESSION_TOKEN_SECONDS, mintSessionToken } from "./token-mint.js";
 import {
   PersistentMarketplaceInstallEngine,
@@ -327,6 +367,7 @@ import {
   PostgresWorkflowDefinitionStore,
   buildJobHandlerRegistry,
   buildPersistentEngine,
+  formatWorkflowEngineReach,
   probeJobQueueVisibility,
   requestJobCancellation,
   surveyManifestWorkflows,
@@ -336,6 +377,7 @@ import {
 import {
   DeletionReconciler,
   DeletionRunner,
+  pendingDeletionRequests,
   PostgresDeletionRequestStore,
   PostgresLifecycleEventStore,
   PostgresTombstoneStore,
@@ -356,15 +398,27 @@ import {
   type TenantLifecycleState,
 } from "@crossengin/tenant-lifecycle";
 import type { ExtraGatewayRoute, WriteMaskMode } from "@crossengin/operate-runtime";
-import { buildMarketplaceAdminRoutes, loadPackCatalog } from "./marketplace-admin.js";
+import {
+  PACK_INSTALL_EFFECT,
+  buildMarketplaceAdminRoutes,
+  loadPackCatalog,
+  surveyPackCatalog,
+} from "./marketplace-admin.js";
+import { buildMarketplaceTenantContext, formatMarketplaceTenantFacts } from "./marketplace-tenant-context.js";
 import { buildMarketplaceAuthoringRoutes } from "./marketplace-authoring.js";
-import { PostgresTenantStore, buildPlatformAdminRoutes } from "./platform-admin.js";
+import { PreAuthLimiter, formatPreAuthLimit, preAuthLimitedResponse } from "./pre-auth-limit.js";
+import {
+  PostgresTenantStore,
+  TENANT_CREATED_OPERATION,
+  buildPlatformAdminRoutes,
+} from "./platform-admin.js";
 import {
   CachedTenantStatusDirectory,
   surveyTenantStatusCoverage,
   tenantStatusDirectoryFromStore,
   type TenantStatusGateOptions,
 } from "./tenant-status-gate.js";
+import { formatResidencyGate } from "./residency-gate.js";
 import { buildTenantStateMover } from "./tenant-state-mover.js";
 import {
   MEMBERSHIP_GRANTED_OPERATION,
@@ -401,6 +455,8 @@ import {
   PostgresActivationWatermarkSource,
 } from "./manifest-activation-poller.js";
 import { DEFAULT_AI_DESIGN_MAX_USD_PER_MONTH, buildAiDesignBudget } from "./ai-design-budget.js";
+import { decideAiDesignPricing } from "./ai-design-pricing.js";
+import { buildAiProviderResidencyGate, formatAiProviderResidency } from "./ai-provider-residency.js";
 import { PostgresDesignJobStore } from "./design-jobs.js";
 import { PostgresDesignReviewStore } from "./design-review-store.js";
 import { buildDesignReviewRoutes, formatFourEyesLine } from "./design-review-routes.js";
@@ -420,7 +476,6 @@ import { PageRecorder, formatPageRecord } from "./page-record.js";
 import { formatPageReport, type PageDeliveryReport } from "@crossengin/notification-providers";
 import type { PageDirective } from "@crossengin/observability-runtime";
 import {
-  DEFAULT_DELETION_APPROVED_BY,
   DEFAULT_DELETION_EXECUTED_BY,
   DeletionScheduler,
   TENANT_WIDE_KIND_BY_SCOPE,
@@ -466,10 +521,23 @@ import {
   PostgresTenantCostStore,
 } from "@crossengin/ai-architect-runtime-pg";
 import { loadResidencyDirectory } from "./residency-source.js";
-import type { Region } from "@crossengin/residency";
+import { RegionSchema, type Region } from "@crossengin/residency";
+import { PackPublisherRegistry, parsePackPublisherSpec } from "@crossengin/marketplace";
 import type { TenantResidencyDirectory } from "@crossengin/residency-runtime";
 import { PostgresTenantResidencyDirectory } from "@crossengin/residency-runtime-pg";
-import { OperateHttpServer, buildOperateHttpServer, type WebhookRoute } from "./server.js";
+import {
+  applyHttpListenerSettings,
+  closeListener,
+  formatHttpListenerSettings,
+  resolveHttpListenerSettings,
+} from "./http-listener.js";
+import {
+  OperateHttpServer,
+  buildOperateHttpServer,
+  internalErrorResponse,
+  logServerError,
+  type WebhookRoute,
+} from "./server.js";
 import { JobScheduler, PostgresTenantSource, StaticTenantSource, type TenantSource } from "./scheduler.js";
 import { PostgresEntityEventSink } from "./entity-events.js";
 import { buildSloEnforcement, loadSloConfig } from "./slo-config.js";
@@ -513,6 +581,7 @@ import {
   auditChainStore,
   buildAuditChain,
   ed25519ChainSigner,
+  resolveAuditPolicy,
   type AuditChain,
   type AuditChainConfig,
 } from "./audit-chain.js";
@@ -545,13 +614,13 @@ import {
 } from "./checkpoint-scheduler.js";
 import {
   PostgresDataKeyStore,
+  type DataKeyRewrap,
   PostgresKeyRegistry,
   rekeyTenant,
   surveyTenantRekey,
   type TenantRekeyResult,
   type TenantRekeySurvey,
 } from "@crossengin/crypto-pg";
-import { deriveTenantKek, parseColumnEncryptionSecret } from "@crossengin/crypto";
 import { PostgresChainCheckpointStore, PostgresChainLogReader } from "@crossengin/forensics-pg";
 import {
   PostgresIncidentDeclarer,
@@ -565,6 +634,7 @@ import {
   PinnedChainKeys,
   formatChainVerification,
   requirePinnedChainKeys,
+  resolverFor,
   verifyChainForAudit,
   type ChainVerificationReport,
 } from "./chain-verify.js";
@@ -709,21 +779,28 @@ export function createNodeRequestListener(
         res.end(payload);
         return;
       }
-      const detail = err instanceof Error ? err.message : "unknown error";
-      const payload = new TextEncoder().encode(
-        JSON.stringify({
-          type: "https://crossengin.io/problems/internal-error",
-          title: "Internal server error",
-          status: 500,
-          detail,
-          extensions: {},
-        }),
-      );
-      res.writeHead(500, {
-        "content-type": "application/problem+json",
-        "content-length": payload.byteLength.toString(),
+      // The exception's message went into this body until now — reachable before authentication,
+      // since a body read or a dispatch target that throws is reached by any caller. It goes to the
+      // log under an id the caller is given instead, which is the only half the caller can use.
+      const requestId = `req_${Date.now().toString(36)}${randomUUID().replace(/-/g, "").slice(0, 12)}`;
+      logServerError({
+        requestId,
+        status: 500,
+        method: req.method ?? "GET",
+        path: (req.url ?? "/").split("?")[0]!.slice(0, 512),
+        operationId: null,
+        stage: "listener",
+        reason: err instanceof Error ? err.message.slice(0, 480) : "non_error_thrown",
+        cause: err,
       });
-      res.end(payload);
+      const fallback = internalErrorResponse(requestId);
+      try {
+        res.writeHead(fallback.status, fallback.headers);
+        res.end(fallback.body ?? undefined);
+      } catch {
+        // The socket is gone or the head was already written; the line above is the record. A throw
+        // out of this listener is an unhandled rejection, which ends the process.
+      }
     }
   };
 }
@@ -799,6 +876,11 @@ interface ResolvedStores {
    * cache, rather than a second one.
    */
   readonly columnKey?: ColumnEncryptionKeySource;
+  /**
+   * The connection an encrypting column store writes through: `conn` behind the data-key
+   * generation fence in envelope mode (`column-key-fence.ts`), `conn` itself otherwise.
+   */
+  readonly columnConn?: PgConnection;
   /** Which transaction a caller is inside, over `conn` (present exactly when `conn` is). */
   readonly ambient?: AmbientTransactions;
 }
@@ -835,6 +917,13 @@ async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<
     if (phiDecision.verdict === "plaintext_accepted") console.warn(`[phi] ${line}`);
     else console.info(`[phi] ${line}`);
   }
+  console.info(
+    `[phi] ${formatAtRestHonesty({
+      store: options.store,
+      encryptedFields: phiDecision.verdict === "encrypted" ? phiDecision.fields.length : 0,
+      plaintextSensitive: surveyPlaintextSensitiveFields(manifest),
+    })}`,
+  );
   // A secret that is set and not used is a deployment believing it has encryption it has not
   // got. It is not a refusal — the variable may be set globally for a sibling service, and
   // refusing would break a deployment that works — but going quiet is how the original defect
@@ -870,16 +959,10 @@ async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<
   const pgConfig = parsePgEnvConfig();
   // What the database channel actually promises, said out loud because this wire carries the whole
   // tenant-isolation boundary — `app.current_tenant_id` crosses it on every query — and on
-  // `--store pg-columns` it carries `app.column_encryption_key` on every PHI write. The default is
-  // `prefer`, which lets the *server* decide whether there is any TLS at all, and `require`, which
-  // this repo's own managed-cloud guide prescribes, authenticates nothing: the peer is whoever
-  // answered. Three facts rather than a boolean, because "not validated" collapses two different
-  // remedies — a `prefer` deployment has to arrange TLS, a `require` one already has it and needs
-  // the trust decision.
-  const channel = pgChannelAssurance(pgConfig.ssl);
-  const channelLine = `database channel: PGSSLMODE=${pgConfig.ssl} — ${PG_CHANNEL_ASSURANCE_DESCRIPTIONS[channel]}`;
-  if (sslModeValidatesCertificate(pgConfig.ssl)) console.info(`[pg] ${channelLine}`);
-  else console.warn(`[pg] ${channelLine}; PGSSLMODE=verify-full validates it`);
+  // `--store pg-columns` it carries `app.column_encryption_key` on every PHI write.
+  const channel = describePgChannel(pgConfig);
+  if (channel.level === "info") console.info(`[pg] ${channel.line}`);
+  else console.warn(`[pg] ${channel.line}`);
   // The serving pool is bounded and the operator subcommands are not (`UNBOUNDED_POOL_SETTINGS`):
   // a request that waits for ever, a statement that never ends and a transaction a wedged handler
   // abandoned all hold a connection and its locks, and here they are said at boot either way.
@@ -901,19 +984,56 @@ async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<
   // `buildColumnKeySource`'s rule, and this is where it has to land now, because
   // `buildEnvelopeKeySource` takes bytes and so cannot repeat it. A weak secret therefore still
   // fails at boot naming the measured figures rather than on the first PHI write.
+  // The secret ring (M-10): a previous secret is held only while a rotation re-wraps envelope rows,
+  // and is refused outright in derived mode, where it has nothing to re-wrap. Resolved whenever a
+  // column is encrypted, so a derived deployment that set the variable is refused rather than
+  // silently ignoring it.
+  const secretRing =
+    derivedColumnKey !== undefined
+      ? resolveColumnSecretRing(process.env, options.columnKeyMode)
+      : undefined;
+  if (secretRing !== undefined) console.info(`[phi] ${formatColumnSecretRing(secretRing)}`);
+  let columnConn: PgConnection = conn;
   const columnKey = ((): ColumnEncryptionKeySource | undefined => {
-    if (derivedColumnKey === undefined || options.columnKeyMode !== "envelope") {
+    if (
+      derivedColumnKey === undefined ||
+      secretRing === undefined ||
+      options.columnKeyMode !== "envelope"
+    ) {
       return derivedColumnKey;
     }
-    const secret = parseColumnEncryptionSecret(rawSecret);
-    const store = new PostgresDataKeyStore(
-      conn,
-      (tenantId) => deriveTenantKek(secret, tenantId),
-      schema !== undefined ? { schema } : {},
-    );
+    const store = new PostgresDataKeyStore(conn, kekResolverFor(secretRing), {
+      ...(schema !== undefined ? { schema } : {}),
+      kekGeneration: secretRing.currentGeneration,
+    });
+    const ledger = new ColumnKeyLedger();
+    // Every transaction that sets a column key re-checks the tenant's data-key generation under the
+    // shared form of the rekey's lock (M-25), so a rekey in another process can no longer leave
+    // this one writing under the destroyed key for the rest of the cache TTL.
+    columnConn = fenceColumnKeyGeneration(conn, {
+      store,
+      ledger,
+      onFence: (tenantId, outcome) => {
+        if (outcome === "healed") {
+          console.warn(
+            `[phi] tenant ${String(tenantId)}: the cached column key was a superseded data-key ` +
+              "generation (a rekey committed elsewhere); the write was moved to the current one",
+          );
+        }
+      },
+    });
     return buildEnvelopeKeySource({
       store,
-      secret,
+      ledger,
+      onRewrap: (outcome) => {
+        if (outcome.outcome === "rewrapped") {
+          console.info(
+            `[phi] tenant ${outcome.tenantId}: data key re-wrapped from key-encryption-key ` +
+              `generation ${String(outcome.fromKekGeneration)} to ${outcome.toKekGeneration.toString()}`,
+          );
+        }
+      },
+      secret: seedSecretOf(secretRing),
       // The boot schema the column store actually writes to, which is `public` when `--schema` is
       // absent — `ColumnMappedEntityStore`'s own default, and not this module's `undefined`. Read
       // from the one exported spelling of that default rather than a third copy of the literal
@@ -953,7 +1073,7 @@ async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<
   const searchExt = await ensureSearchExtension(conn);
   console.info(searchExtensionLine(searchExt, options.store));
   if (options.store === "pg-columns") {
-    const store = new ColumnMappedEntityStore(conn, manifest, {
+    const store = new ColumnMappedEntityStore(columnConn, manifest, {
       ...(options.schema !== null ? { schema: options.schema } : {}),
       ...(columnKey !== undefined ? { encryptionKey: columnKey } : {}),
       // Always supplied, because the callback's absence swallows the failure. A unique index is the
@@ -968,10 +1088,47 @@ async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<
             ` created and the duplicate rows are already there: ${detail}. Deduplicate, then run:` +
             ` ${sql}`,
         ),
+      onLookupIndexRefused: (entity, sql, detail) =>
+        console.warn(
+          `[indexes] ${entity}: a declared lookup index was not built (${detail}); lists and parent` +
+            ` deletes on it scan the tenant's rows until it is. Statement: ${sql}`,
+        ),
     });
-    await store.ensureSchema();
-    sayUniqueEnforcement(manifest, "pg-columns", [], store);
-    return { store, allocator, settingsStore, conn, columnKey, ambient };
+    const ensured = await store.ensureSchema();
+    console.info(`[indexes] ${formatDeclaredIndexPlan("pg-columns", store.declaredIndexPlan())}`);
+    if (ensured.mode === "verified") {
+      // Nothing on this arm builds them, so their presence is the one thing to report.
+      const lookups = await ensureDeclaredIndexes(columnConn, store.declaredIndexPlan().indexes, { build: false });
+      console.info(
+        `[indexes] ${formatDeclaredIndexResults(lookups, "run `operate-server column-schema` as the schema's owner to build them")}`,
+      );
+    }
+    if (ensured.mode === "verified") {
+      console.info(
+        `[pg-columns] schema '${ensured.schema ?? "?"}' verified against this manifest; '${ensured.role ?? "?"}'` +
+          " cannot apply DDL to it, so the owner's column-schema one-shot does",
+      );
+      for (const u of ensured.uniqueIndexes) {
+        console.error(
+          `[unique] ${u.entity}.${u.field}: a declared unique field is NOT enforced — index ${u.index} is` +
+            ` ${u.state} in the provisioned schema; run column-schema again as the owner, after` +
+            " deduplicating if it reports duplicate rows",
+        );
+      }
+    }
+    // On the verifying arm nothing ran the CREATE UNIQUE INDEX, so what the schema lacks is the only
+    // evidence of a withheld index — without it the line counted every planned index as enforced.
+    sayUniqueEnforcement(
+      manifest,
+      "pg-columns",
+      ensured.uniqueIndexes.map((u) => ({
+        entity: u.entity,
+        field: u.field,
+        reason: u.state === "invalid" ? ("index_invalid" as const) : ("index_failed" as const),
+      })),
+      store,
+    );
+    return { store, allocator, settingsStore, conn, columnKey, columnConn, ambient };
   }
   const store = new PostgresEntityStore(conn, {
     ...(options.schema !== null ? { schema: options.schema } : {}),
@@ -987,9 +1144,11 @@ async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<
     );
   }
   for (const stale of indexes.stale) {
+    const lookup = stale.name.startsWith(DOCUMENT_LOOKUP_INDEX_PREFIX);
     console.warn(
-      `[unique] runtime index ${stale.name} is enforced and no longer declared by this manifest;` +
-        ` it is left in place (the store never drops a constraint at boot). To retire it: ${stale.dropSql}`,
+      `[${lookup ? "indexes" : "unique"}] runtime ${lookup ? "lookup" : "unique"} index ${stale.name}` +
+        ` is no longer declared by this manifest; it is left in place (the store drops no index at boot)` +
+        `${lookup ? "" : " and still refuses duplicates"}. To retire it: ${stale.dropSql}`,
     );
   }
   sayUniqueEnforcement(
@@ -1002,6 +1161,15 @@ async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<
     ),
   );
   sayReferenceIntegrity(store, options.allowDanglingReferences);
+  const lookupPlan = store.lookupIndexPlan();
+  if (lookupPlan !== null) {
+    console.info(`[indexes] ${formatDeclaredIndexPlan("pg", lookupPlan)}`);
+    // Looked for, never built: the API owns nothing, and the owner's one-shot builds them.
+    const lookups = await store.ensureLookupIndexes({ build: false });
+    console.info(
+      `[indexes] ${formatDeclaredIndexResults(lookups, "run `operate-server document-indexes` as the table's owner to build them")}`,
+    );
+  }
   return { store, allocator, settingsStore, conn, ambient };
 }
 
@@ -1081,7 +1249,10 @@ function sayUniqueEnforcement(
   const fromPlans = store.uniqueWithheld();
   const key = (w: { readonly entity: string; readonly field: string }): string =>
     `${w.entity}.${w.field}`;
-  const surveyed = new Set(report.withheld.map(key));
+  // An observed refusal is the database's fact and not the emitter's, so it is no divergence between
+  // the boot figure and the emitted DDL.
+  const observedKeys = new Set(observed.map(key));
+  const surveyed = new Set(report.withheld.map(key).filter((k) => !observedKeys.has(k)));
   const planned = new Set(fromPlans.map(key));
   // Compared as sets of (entity, field) and not by count: two lists of equal length naming
   // different fields is the divergence most likely to go unnoticed, and the one a count cannot see.
@@ -1132,6 +1303,30 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   } else {
     console.info(`[auth] ${formatApiKeySpecSource(apiKeySource)}`);
   }
+  // M-28: the two Stripe secrets get the environment route `--api-key` got above. The cross-checks
+  // that ran at parse run here, over the resolved values, since the parser cannot see the
+  // environment by design.
+  const stripeSecrets = resolveStripeSecrets({
+    flagApiKey: options.stripeApiKey,
+    flagWebhookSecret: options.stripeWebhookSecret,
+    env: process.env,
+  });
+  const stripeRequirement = {
+    secrets: stripeSecrets,
+    store: options.store,
+    planCatalogFile: options.planCatalogFile,
+    billingPortalReturnUrl: options.billingPortalReturnUrl,
+    stripeUsageSyncConfig: options.stripeUsageSyncConfig,
+  };
+  const stripeRefusal = stripeRequirementRefusal(stripeRequirement);
+  if (stripeRefusal !== null) throw new Error(`[stripe] ${stripeRefusal}`);
+  for (const warning of stripeUnusedSecretWarnings(stripeRequirement)) {
+    console.warn(`[stripe] ${warning}`);
+  }
+  const stripeApiKey = stripeSecrets.apiKey.value;
+  const stripeWebhookSecret = stripeSecrets.webhookSecret.value;
+  const stripeLine = formatStripeSecrets(stripeSecrets);
+  if (stripeLine !== null) console.info(stripeLine);
   /*
    * HMAC request signatures. Resolved here, before the store, because the two refusing absences are
    * properties of the flags and the environment alone — nothing is read and no connection is needed
@@ -1175,7 +1370,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   console.info(
     `[auth] ${formatEdgeTrustSurvey(options.trustedEdgeClientCert, mtlsClients)}`,
   );
-  const { store, allocator, settingsStore, conn, columnKey, ambient } = await resolveStore(
+  const { store, allocator, settingsStore, conn, columnKey, columnConn, ambient } = await resolveStore(
     options,
     manifest,
   );
@@ -1269,9 +1464,6 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   } else {
     console.info(settlementLine);
   }
-  // Said either way. Off is a decision a single-user tenant needs, and on changes what an approval
-  // means for every record already in the database — none of which carries a recorded creator.
-  console.info(formatSegregationOfDuties(manifest, options.segregationOfDuties));
   // Who may read and write each sensitive class. One declaration, both directions: the same policy
   // object reaches the response-redaction registry and the write mask, because `privilegedForClass`
   // has a single definition precisely so a role cannot end up able to write a class it may not read
@@ -1438,6 +1630,15 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // billing past what was received), so it is announced with the tenant settings that relax it.
   console.info(formatInventoryAccounting(inventoryShape(manifest), inventoryPostsToLedger(manifest)));
   const apiKeys = apiKeySource.specs.map(parseApiKeySpec);
+  // M-28: an api-key token is the whole credential, so a short or low-variety one is a guessable
+  // one. Refused at boot rather than served, with a named hatch: a deployment running a weak key
+  // today works, and refusing it with no way through would turn an upgrade into an outage.
+  const weakApiKeys = surveyApiKeyTokens(apiKeys);
+  if (weakApiKeys.length > 0) {
+    const message = `[auth] ${formatWeakApiKeyTokens(weakApiKeys, options.allowWeakApiKeys)}`;
+    if (!options.allowWeakApiKeys) throw new Error(message);
+    console.warn(message);
+  }
   // ADR-0358. Resolved *before* the JWKS, because the public half of this deployment's own signing
   // key is one of the JWKS entries and is derived from the seed rather than configured beside it.
   // `--credential-login` already refused `--jwks-url` at parse, so there is no case where this key
@@ -1472,11 +1673,29 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // `externalJwks` is any of the three static/remote JWKS flags: `--credential-login` refuses
   // `--jwks-url` at parse, so the reachable combination is its own key beside a foreign
   // `--jwks-key`/`--jwks-file` entry, and a pure external IdP has no credential line at all.
+  const externalJwks =
+    options.jwksKeys.length > 0 || options.jwksFile !== null || options.jwksUrl !== null;
   const scopeRoleReading = formatScopeRoleReading({
     credentialLogin: credentialAuth?.ok === true,
-    externalJwks:
-      options.jwksKeys.length > 0 || options.jwksFile !== null || options.jwksUrl !== null,
+    externalJwks,
+    idpPlatformRoles: options.idpPlatformRoles,
   });
+  // H-04: the resolver knows which key verified a bearer token now, so a platform role an IdP's
+  // scope asserts is removed rather than warned about. Installed only where a foreign key exists;
+  // a deployment whose only JWKS entry is its own login key has no foreign token to trim.
+  const foreignTokenScopes =
+    externalJwks && !options.idpPlatformRoles
+      ? {
+          trustedKid: credentialAuth?.ok === true ? credentialAuth.material.kid : null,
+          platformRoles: platformAuthorityRoles(options),
+          onDropped: (kid: string, roles: readonly string[]): void => {
+            console.warn(
+              `[auth] removed platform role(s) ${roles.join(", ")} from a token signed by kid ${kid}` +
+                " (pass --idp-platform-roles to let your IdP grant them)",
+            );
+          },
+        }
+      : undefined;
   if (scopeRoleReading !== null) {
     // `console.error` for the warning level, which is where every other boot warning in this file
     // goes: the external-token clause names a privilege widening that reaches tenant deletion, and
@@ -1610,6 +1829,42 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           },
         }
       : undefined;
+  // H-07: `meta.users.status` and the session generation, under the same declaration as the
+  // membership check above and for its reason — this deployment mints sessions, so it is the one
+  // that can end them. Its own cache, keyed on the user alone, because that row has no tenant.
+  const sessionStandingDirectory =
+    conn !== undefined && credentialAuth?.ok === true
+      ? new CachedSessionStandingDirectory(
+          {
+            standingOf: (userId: string) =>
+              new PostgresCredentialStore(conn, schemaOpt).sessionStanding(userId),
+          },
+          {
+            onRefreshError: (userId: string, err: unknown, servedStale: boolean): void => {
+              console.warn(
+                `[auth] could not re-read ${userId}'s session standing` +
+                  `${servedStale ? " (served the last known answer)" : " (the request is refused)"}:` +
+                  ` ${err instanceof Error ? err.message : String(err)}`,
+              );
+            },
+          },
+        )
+      : undefined;
+  const sessionStanding =
+    sessionStandingDirectory !== undefined && credentialAuth?.ok === true
+      ? {
+          directory: sessionStandingDirectory,
+          loginKid: credentialAuth.material.kid,
+          onRefused: (userId: string, refusal: SessionStandingRefusal): void => {
+            console.warn(`[auth] session refused for ${userId}: ${refusal}`);
+          },
+        }
+      : undefined;
+  if (sessionStandingDirectory !== undefined && credentialAuth?.ok === true) {
+    console.info(
+      formatSessionStanding(sessionStandingDirectory.standingTtlMs, credentialAuth.material.kid),
+    );
+  }
   /*
    * The signed-in person's own name and email for the UI-schema viewer.
    *
@@ -1670,7 +1925,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // One subscription store backs both the webhook (writes snapshots) and the billing portal
   // (reads the tenant's Stripe customer id), when either is configured over a pg connection.
   const subscriptionStore =
-    conn !== undefined && (options.stripeWebhookSecret !== null || options.stripeApiKey !== null)
+    conn !== undefined && (stripeWebhookSecret !== null || stripeApiKey !== null)
       ? new PostgresSubscriptionStore(conn, schemaOpt)
       : undefined;
   /**
@@ -1685,8 +1940,8 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
    */
   const mountedOutOfRegistry = new Set<OutOfRegistrySurfaceKind>();
   let webhookRoute: WebhookRoute | undefined;
-  if (options.stripeWebhookSecret !== null && conn !== undefined && subscriptionStore !== undefined) {
-    const secret = options.stripeWebhookSecret;
+  if (stripeWebhookSecret !== null && conn !== undefined && subscriptionStore !== undefined) {
+    const secret = stripeWebhookSecret;
     if (entitlementResolver === undefined) entitlementResolver = new PostgresEntitlementResolver(conn, schemaOpt);
     // Optional declarative plan catalog: a webhook event resolves its record cap + features from
     // the catalog (by plan or Stripe price id), falling back to the subscription's own metadata.
@@ -1718,10 +1973,10 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // manage/fix their subscription. The subscription store resolves the tenant's Stripe customer
   // id; the Stripe client (with the secret key) creates the session. Both structural.
   let billingPortal: BillingPortalWiring | undefined;
-  if (options.stripeApiKey !== null && options.billingPortalReturnUrl !== null && subscriptionStore !== undefined) {
+  if (stripeApiKey !== null && options.billingPortalReturnUrl !== null && subscriptionStore !== undefined) {
     billingPortal = {
       customers: subscriptionStore,
-      portal: new StripeClient({ apiKey: options.stripeApiKey }),
+      portal: new StripeClient({ apiKey: stripeApiKey }),
       returnUrl: options.billingPortalReturnUrl,
     };
   }
@@ -1779,23 +2034,43 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       : new Map<string, ReadonlySet<string>>();
   // Marketplace admin: the /v1/admin/packs routes install/list/uninstall catalog packs per tenant via
   // the persistent install engine. Enabled by --pack-catalog over a pg store (needs the conn for the
-  // installation store). The tenant context is a deployment default; per-tenant plan/region is a follow-up.
+  // installation store). Packs are verified against the --pack-publisher-key registry (the CLI refuses
+  // a marketplace surface with none), and the tenant's facts are resolved per install: a fact this
+  // deployment has no source for is `null`, which refuses only a pack that constrains it.
   const extraRouteList: ExtraGatewayRoute[] = [];
+  const packPublishers = new PackPublisherRegistry(options.packPublisherKeys.map(parsePackPublisherSpec));
   if (options.packCatalogFile !== null && conn !== undefined) {
+    const catalog = loadPackCatalog(await readFile(options.packCatalogFile, "utf8"));
+    const deploymentRegion = RegionSchema.safeParse(options.region);
+    const tenantFacts = {
+      platformVersion: options.marketplacePlatformVersion,
+      deploymentRegion: deploymentRegion.success ? deploymentRegion.data : null,
+    };
+    console.log(
+      formatMarketplaceTenantFacts(
+        { ...tenantFacts, residencyConfigured: options.residencyFile !== null || options.residencyStore },
+        manifest.meta.compliancePacks ?? [],
+      ),
+    );
+    console.log(`[marketplace] ${PACK_INSTALL_EFFECT.detail}`);
+    const catalogFindings = surveyPackCatalog(catalog, packPublishers);
+    console.log(
+      `[marketplace] pack catalog: ${catalog.list().length.toString()} version(s), ${(catalog.list().length - catalogFindings.length).toString()} signed by a registered publisher`,
+    );
+    for (const f of catalogFindings) {
+      console.warn(`[marketplace] catalog ${f.packId}@${f.version} will be refused at install: ${f.refusal} — ${f.detail}`);
+    }
     extraRouteList.push(
       ...buildMarketplaceAdminRoutes({
         engine: new PersistentMarketplaceInstallEngine(new PostgresInstallationStore(conn, schemaOpt)),
         store: new PostgresInstallationStore(conn, schemaOpt),
-        catalog: loadPackCatalog(await readFile(options.packCatalogFile, "utf8")),
+        catalog,
+        publishers: packPublishers,
         principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
-        adminRoles: new Set(["erp_admin"]),
-        tenantContext: {
-          platformVersion: "1.0.0",
-          region: "us-east",
-          planTier: "professional",
-          compliancePacks: [],
-          isDedicatedTenant: false,
-        },
+        adminRoles: new Set(options.packAdminRoles),
+        // `residencyDirectory` is assigned further down this function and read here only per request,
+        // after boot has finished, so the closure always sees the built directory.
+        tenantContext: buildMarketplaceTenantContext({ ...tenantFacts, residency: () => residencyDirectory }),
       }),
     );
   }
@@ -1805,7 +2080,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   if (options.marketplaceAuthoring && conn !== undefined) {
     extraRouteList.push(
       ...buildMarketplaceAuthoringRoutes({
-        engine: buildPersistentPackSubmissionEngine(conn),
+        engine: buildPersistentPackSubmissionEngine(conn, { publishers: packPublishers }),
         store: new PostgresPackVersionStore(conn),
         principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
         authorRoles: new Set(["pack_author"]),
@@ -1858,6 +2133,36 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         ...(lifecycleEvents !== null ? { lifecycleEvents } : {}),
         onLifecycleError: (err, action) =>
           console.error(`[lifecycle] console ${action} not recorded`, err),
+        // Filed in the new tenant's own scope and in the INSERT's transaction, so the row and its
+        // record commit together. Its scope is the tenant's because the tenant row exists by then
+        // (meta.tenants carries no RLS), and a platform-scope entry would need a write elevation
+        // claimed inside a transaction about one tenant. `auditEmitter` is assigned below this
+        // block and read only when a request arrives, by which point it is set on every Postgres
+        // store — which `--platform-admin` already requires.
+        recordCreation: async (tx, event): Promise<void> => {
+          if (auditEmitter === null) throw new Error("no audit emitter on this deployment");
+          await setTenantContextWithin(tx, event.tenant.id);
+          await auditEmitter.emitWithin(
+            tx,
+            auditEntry({
+              id: randomUUID(),
+              tenantId: event.tenant.id,
+              occurredAt: event.at,
+              operation: TENANT_CREATED_OPERATION,
+              entity: "Tenant",
+              entityId: event.tenant.id,
+              actor: auditActor({ userId: event.principalId }),
+              after: {
+                slug: event.tenant.slug,
+                name: event.tenant.name,
+                status: event.tenant.status,
+                tier: event.tenant.tier,
+                region: event.tenant.region,
+                schemaName: event.tenant.schemaName,
+              },
+            }),
+          );
+        },
       }),
     );
   }
@@ -1955,6 +2260,11 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         " pass --store pg or --store pg-columns",
     );
   }
+  // Said either way. Off is a decision a single-user tenant needs, and on changes what an approval
+  // means for every record already in the database — none of which carries a recorded creator.
+  // Said here, after the trail is built, because whether a deleted or moved line counts against its
+  // approver is read from that trail and the line has to say which.
+  console.info(formatSegregationOfDuties(manifest, options.segregationOfDuties, entityAudit !== null));
   /**
    * The emitter, for a surface that has already established it has a connection.
    *
@@ -2267,11 +2577,26 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
             "will be refused",
         );
       }
+      if (!options.deletionRequestRoutes) {
+        // H-05: the erasure's approver is the verifier of a deletion request; see the deletion route.
+        console.warn(
+          "[platform] --tenant-erasure-routes acts only under a verified deletion request, and " +
+            "--deletion-request-routes is not mounted: no request can be verified through this " +
+            "process, so every erase answers deletion_request_not_found",
+        );
+      }
+      console.log(
+        `[platform] --tenant-erasure-routes refuses a request inside its ` +
+          `${options.deletionGraceDays.toString()}-day grace after verification (--deletion-grace-days)`,
+      );
       const eraseConn = conn;
       const emitter = requireEmitter("--tenant-erasure-routes");
       const registry = (): TenantColumnStoreRegistry | null => tenantStoreRegistry;
       extraRouteList.push(
         ...buildTenantErasureRoutes({
+          // The approver is the verifier of a deletion request for the tenant (H-05).
+          requests: new PostgresDeletionRequestStore(eraseConn, schemaOpt),
+          graceMs: options.deletionGraceDays * 86_400_000,
           eraser: {
             survey: async (tenantId) => {
               const { survey, collateral } = await surveyTenantSchemaWithCollateral(
@@ -2349,6 +2674,21 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
             "will be refused",
         );
       }
+      if (!options.deletionRequestRoutes) {
+        // The approval this route executes under is a verified deletion request (H-05), and the
+        // routes that submit and verify one are not mounted here, so the surface mounts and refuses
+        // every call unless another process verifies requests against this database.
+        console.warn(
+          "[platform] --tenant-deletion-routes acts only under a verified deletion request, and " +
+            "--deletion-request-routes is not mounted: no request can be verified through this " +
+            "process, so every call answers deletion_request_not_found",
+        );
+      }
+      // The runner says its grace only when it is mounted; this route enforces the same one.
+      console.log(
+        `[platform] --tenant-deletion-routes refuses a request inside its ` +
+          `${options.deletionGraceDays.toString()}-day grace after verification (--deletion-grace-days)`,
+      );
       const delConn = conn;
       const emitter = requireEmitter("--tenant-deletion-routes");
       // The same chain the audit log anchors into, not a second one: one tamper-evident trail per
@@ -2406,6 +2746,22 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
             retire: async (tenantId) => (await tenantStore.setStatus(tenantId, "deleted")) !== null,
             tombstonesFor: async (tenantId) => tombstones.listForTenant(tenantId),
           },
+          // The approval this route executes under is a verified deletion request (H-05), so the
+          // request store is part of the route rather than an optional extra.
+          requests: new PostgresDeletionRequestStore(delConn, schemaOpt),
+          // A refused deletion settles its request `rejected`, so the tenant the verify route made
+          // read-only is restored here exactly as the reject route restores it.
+          tenantState: buildTenantStateMover(tenantStore, {
+            onNoMatch: ({ tenantId }) =>
+              console.warn(`[platform] tenant ${tenantId} was not pending_deletion; nothing to restore`),
+          }),
+          onRestoreError: (err, tenantId) =>
+            console.error(
+              `[platform] deletion of tenant ${tenantId} was refused and its request rejected, but the` +
+                " tenant could not be restored from pending_deletion; restore it by hand",
+              err,
+            ),
+          graceMs: options.deletionGraceDays * 86_400_000,
           principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
           deleteRoles: new Set(options.tenantDeletionRoles),
           ...(options.tenantTombstoneReadRoles.length > 0
@@ -2535,12 +2891,13 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     directive: PageDirective,
     surface: string,
     tenantId: string | null,
-  ): Promise<void> => {
+  ): Promise<PageDeliveryReport> => {
     const report = await pager.deliver(directive);
     const outcome = await (pageRecorder?.record(report, tenantId) ??
       Promise.resolve({ audited: false, reason: "no recorder" }));
     if (!outcome.audited) console.warn(`[${surface}] ${formatPageRecord(report, outcome)}`);
     await notePage(directive.incidentId, report, "trigger", surface);
+    return report;
   };
   /**
    * Closes the alert and notes that it was closed.
@@ -2711,6 +3068,15 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       extraRouteList.push(
         ...buildDeletionRequestRoutes({
           store: requestStore,
+          graceMs: options.deletionGraceDays * 86_400_000,
+          pending: ({ limit }) =>
+            pendingDeletionRequests(requestStore, {
+              now: new Date(),
+              limit,
+              ...(options.deletionWarningDays !== null
+                ? { warningDays: options.deletionWarningDays }
+                : {}),
+            }),
           // The same reporter one indentation out: the route's audience is the operator reading
           // `GET .../stranded`, where an unreadable row is the most interesting finding on the page.
           onUnreadableRequest: (row) =>
@@ -2969,6 +3335,15 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       });
       workflowEngine = bundle;
       workflowDefinitionCount = definitions.size;
+      // A mounted engine reads as a working one unless the boot says what can reach it (H-17).
+      for (const { level, line } of formatWorkflowEngineReach({
+        cancellationRoute: options.workflowCancelRoles.length > 0,
+        workers: options.workflowWorkers,
+        eventsVisibility: (await probeJobQueueVisibility(conn, { table: "workflow_events" })).visibility,
+      })) {
+        if (level === "warn") console.warn(line);
+        else console.log(line);
+      }
       if (options.workflowCancelRoles.length > 0) {
         extraRouteList.push(
           ...buildWorkflowCancellationRoutes({
@@ -3084,11 +3459,24 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       );
     } else {
       const emitter = requireEmitter("--platform-user-routes");
+      const platformAuthority = platformAuthorityRoles(options);
+      console.info(
+        `[platform-users] a membership naming a platform role (${[...platformAuthority].sort().join(", ") || "none declared"})` +
+          " can be granted only by a principal holding that role (H-04)",
+      );
       extraRouteList.push(
         ...buildPlatformUserRoutes({
           store: new PostgresUserStore(conn, schemaOpt),
           principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
           adminRoles: new Set(options.platformUserRoles),
+          // H-04: derived from every platform-scoped role flag through a total map, so the grant
+          // route cannot hand out an authority its caller does not already hold.
+          platformAuthorityRoles: platformAuthority,
+          // A suspension or retirement is enforced per request by the standing check; dropping this
+          // process's cached standing makes it bite here at once rather than after the TTL.
+          onUserStatusChanged: (userId: string): void => {
+            sessionStandingDirectory?.forget(userId);
+          },
           // Which roles the tenant being granted into actually declares. The grant boundary is the
           // only place that question has both halves in hand, and a boot census over existing
           // memberships could not stand in for it: `meta.user_tenant_membership` carries one
@@ -3201,6 +3589,12 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       ...buildCredentialRoutes({
         store: credentialStore,
         pepper: credentialAuth.material.pepper,
+        minPasswordLength: options.minPasswordLength ?? DEFAULT_MIN_PASSWORD_LENGTH,
+        // The write that ends a person's sessions has committed; dropping this process's cached
+        // standing is what makes it bite here at once rather than after the TTL.
+        onSessionsEnded: (userId: string): void => {
+          sessionStandingDirectory?.forget(userId);
+        },
         principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
         adminRoles: new Set(options.credentialAdminRoles),
         // Required for the same reason the registry's is: both acts replace the one credential a
@@ -3254,11 +3648,16 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     );
     console.info(
       options.credentialAdminRoles.length > 0
-        ? "[auth] credential routes mounted: POST /v1/account/password (self) and" +
-            ` POST /v1/platform/users/{id}/credential for roles: ${options.credentialAdminRoles.join(", ")}`
-        : "[auth] credential routes mounted: POST /v1/account/password (self) only —" +
-            " no --credential-admin-role, so setting another user's password still needs" +
-            " 'operate-server set-credential' and a shell",
+        ? "[auth] credential routes mounted: POST /v1/account/password and POST /v1/account/logout" +
+            ` (self) and POST /v1/platform/users/{id}/credential for roles: ${options.credentialAdminRoles.join(", ")}`
+        : "[auth] credential routes mounted: POST /v1/account/password and POST /v1/account/logout" +
+            " (self) only — no --credential-admin-role, so setting another user's password still" +
+            " needs 'operate-server set-credential' and a shell",
+    );
+    console.info(
+      `[auth] new passwords must be at least ${(options.minPasswordLength ?? DEFAULT_MIN_PASSWORD_LENGTH).toString()}` +
+        " characters; checked when one is set, never at login, so an existing shorter password" +
+        " works until it is changed",
     );
   }
   if (options.readStateRoutes) {
@@ -3474,6 +3873,17 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       }),
     );
   }
+  // Data-residency edge routing: this instance's region + a tenant→profile directory (a static file
+  // via --residency-file, or the Postgres tenant_residency_profiles table via --residency-store). A
+  // tenant hint whose profile forbids this region is redirected to its home region before dispatch.
+  // Built before the AI block, which asks the same directory whether a tenant's profile admits the
+  // designer's provider (M-17).
+  let residencyDirectory: TenantResidencyDirectory | undefined;
+  if (options.residencyFile !== null) {
+    residencyDirectory = loadResidencyDirectory(await readFile(options.residencyFile, "utf8"));
+  } else if (options.residencyStore && conn !== undefined) {
+    residencyDirectory = new PostgresTenantResidencyDirectory(conn, schemaOpt);
+  }
   // In-product AI Architect: /v1/ai routes let a tenant admin describe their business, get a
   // kernel-validated manifest proposal (meta.operate_tenant_manifests), and activate it as the
   // tenant's live system. The designer resolves from env, local first: LOCAL_LLM_BASE_URL /
@@ -3488,10 +3898,43 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     // `ai-model-source.ts` for why that copy was a defect and not merely duplication.
     const aiModel = resolveAiModel(options.aiModel, process.env);
     console.info(aiModelLine(aiModel));
-    const providerBuild = buildDesignProviderFromEnv(
-      process.env,
-      aiModel.model !== null ? { model: aiModel.model } : {},
-    );
+    const providerBuild = buildDesignProviderFromEnv(process.env, {
+      ...(aiModel.model !== null ? { model: aiModel.model } : {}),
+      ...(options.aiProviderTimeoutMs !== null ? { inactivityTimeoutMs: options.aiProviderTimeoutMs } : {}),
+      ...(options.aiModelPrice !== null ? { declaredPrice: options.aiModelPrice } : {}),
+    });
+    const aiMaxUsdPerMonth = options.aiMaxUsdPerMonth ?? DEFAULT_AI_DESIGN_MAX_USD_PER_MONTH;
+    // Durable per-tenant monthly spend ceiling over meta.architect_tenant_cost (the same ledger
+    // the Architect CLI writes), so a design loop can't run up an unbounded bill and the limit
+    // holds across replicas and restarts. The designer charges it atomically before each provider
+    // call and settles it after (M-16); the routes only `check` it, to refuse a spent month before
+    // a job row is created.
+    const budget =
+      conn !== undefined
+        ? buildAiDesignBudget({
+            store: new PostgresTenantCostStore(conn, schemaOpt),
+            // The estimator's learned correction, kept per tenant and across restarts (ADR-0330).
+            // Its own table rather than a column on the monthly ledger, because that one is keyed
+            // by period and would reset the correction every month — ADR-0311's forgetting on a
+            // monthly cadence instead of a per-restart one.
+            inflationStore: new PostgresEstimateInflationStore(conn, schemaOpt),
+            onInflationFallback: (tenantId, provenance) =>
+              console.warn(
+                `[ai-design] tenant ${tenantId} cost estimator fell back to a pessimistic` +
+                  ` correction (${provenance}); requests may be delayed until it is re-learned`,
+              ),
+            maxUsdPerMonth: aiMaxUsdPerMonth,
+            onDenied: (tenantId, spentUsd, limitUsd) =>
+              console.warn(
+                `[ai-design] tenant ${tenantId} denied: $${spentUsd.toFixed(2)} of $${limitUsd.toFixed(2)} monthly budget spent`,
+              ),
+            onReservationRefused: (tenantId, estimateUsd, limitUsd) =>
+              console.warn(
+                `[ai-design] tenant ${tenantId} refused: a $${estimateUsd.toFixed(4)} design estimate does not fit ` +
+                  `the remaining headroom of its $${limitUsd.toFixed(2)} monthly budget`,
+              ),
+          })
+        : undefined;
     const designer =
       providerBuild !== null
         ? buildDesignDesigner({
@@ -3499,6 +3942,10 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
             model: providerBuild.model,
             providerLabel: providerBuild.providerLabel,
             ensureRoles: options.aiDesignRoles,
+            // Until M-16 neither was passed: the shipped `--ai-max-request-dollars 2` was parsed,
+            // handed to the budget and read by nothing, so no design was ever refused by it.
+            ...(options.aiMaxRequestDollars !== null ? { maxRequestDollars: options.aiMaxRequestDollars } : {}),
+            ...(budget !== undefined ? { budget } : {}),
             // The pack every design from this deployment extends, and it is the PRODUCER half of
             // the lineage `tenantLineage` resolves. Shipping one without the other is the defect
             // ADR-0368 is about: the mechanism applied to an input nothing produces, or an input
@@ -3526,9 +3973,10 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       // operator who configured a key correctly got silence, so the one surface that could confirm
       // which vendor a tenant's business description is about to be sent to said nothing at all.
       console.log(`[ai-design] provider: ${providerBuild.providerLabel}`);
-      // And the resolution can DISCARD the operator's own declaration. Both cloud arms gate
-      // `--ai-model` on a pricing catalogue (`isAnthropicModel` / `isOpenAiChatModel`) and fall back
-      // to a priceable default on a miss, which is right in direction — an unpriced model cannot be
+      // And the resolution can DISCARD the operator's own declaration. The Anthropic arm, and the
+      // OpenAI arm on api.openai.com, gate `--ai-model` on a pricing catalogue (`isAnthropicModel` /
+      // `isOpenAiChatModel`) and fall back to a priceable default on a miss (an OpenAI custom base
+      // URL takes any model and is `unpriced` instead — `decideAiDesignPricing` below), which is right in direction — an unpriced model cannot be
       // held to --ai-max-usd-per-month, so accepting it would silently disable the ceiling the flag
       // exists to impose — and silent, which is a declaration the runtime drops. Reported rather
       // than refused, on ADR-0352's split: the fallback serves correctly, it is only named wrongly,
@@ -3542,6 +3990,30 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         );
       }
     }
+    // Whether the ceilings bound anything, and whether a tenant's residency profile is consulted
+    // before its description leaves the deployment — both said at boot either way (M-16, M-17).
+    if (providerBuild !== null) {
+      const pricingDecision = decideAiDesignPricing({
+        providerLabel: providerBuild.providerLabel,
+        pricing: providerBuild.pricing,
+        pricingAsOf: providerBuild.pricingAsOf,
+        maxUsdPerMonth: aiMaxUsdPerMonth,
+        maxRequestDollars: options.aiMaxRequestDollars,
+        allowUnpricedModel: options.allowUnpricedModel,
+        declaredPrice: options.aiModelPrice,
+        now: new Date(),
+      });
+      for (const line of pricingDecision.info) console.log(`[ai-design] ${line}`);
+      for (const line of pricingDecision.warnings) console.warn(`[ai-design] ${line}`);
+      if (pricingDecision.refusal !== null) throw new Error(`[ai-design] ${pricingDecision.refusal}`);
+    }
+    const residencyGateInput = {
+      ...(residencyDirectory !== undefined ? { directory: residencyDirectory } : {}),
+      providerRef: options.aiProviderRef,
+      providerLabel: providerBuild?.providerLabel ?? "the AI provider",
+    };
+    console.log(`[ai-design] ${formatAiProviderResidency(residencyGateInput)}`);
+    const providerAdmission = buildAiProviderResidencyGate(residencyGateInput);
     // With review required, a new proposal must enter the queue as `pending` — otherwise it
     // keeps the default `not_required`, the activation gate denies it forever, and it never
     // appears for a reviewer. Enrolment is best-effort: a failure never loses the proposal.
@@ -3557,36 +4029,6 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     // instead of blocking ~a minute on one request. The job survives the client disconnecting
     // and is readable from any replica.
     const designJobs = conn !== undefined ? new PostgresDesignJobStore(conn, schemaOpt) : undefined;
-    // Durable per-tenant monthly spend ceiling over meta.architect_tenant_cost (the same ledger
-    // the Architect CLI writes), so a design loop can't run up an unbounded bill and the limit
-    // holds across replicas and restarts.
-    const budget =
-      conn !== undefined
-        ? buildAiDesignBudget({
-            store: new PostgresTenantCostStore(conn, schemaOpt),
-            // The estimator's learned correction, kept per tenant and across restarts (ADR-0330).
-            // Its own table rather than a column on the monthly ledger, because that one is keyed
-            // by period and would reset the correction every month — ADR-0311's forgetting on a
-            // monthly cadence instead of a per-restart one.
-            inflationStore: new PostgresEstimateInflationStore(conn, schemaOpt),
-            onInflationFallback: (tenantId, provenance) =>
-              console.warn(
-                `[ai-design] tenant ${tenantId} cost estimator fell back to a pessimistic` +
-                  ` correction (${provenance}); requests may be delayed until it is re-learned`,
-              ),
-            maxUsdPerMonth: options.aiMaxUsdPerMonth ?? DEFAULT_AI_DESIGN_MAX_USD_PER_MONTH,
-            // Bounds one prompt rather than one month (ADR-0267). Off unless configured: a request
-            // ceiling that is wrong refuses legitimate designs, which the monthly ceiling never
-            // does, so this one is opt-in and the monthly one always applies.
-            ...(options.aiMaxRequestDollars !== null
-              ? { maxUsdPerRequest: options.aiMaxRequestDollars }
-              : {}),
-            onDenied: (tenantId, spentUsd, limitUsd) =>
-              console.warn(
-                `[ai-design] tenant ${tenantId} denied: $${spentUsd.toFixed(2)} of $${limitUsd.toFixed(2)} monthly budget spent`,
-              ),
-          })
-        : undefined;
     extraRouteList.push(
       ...buildAiDesignRoutes({
         store,
@@ -3600,6 +4042,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         activeManifests: manifestStore,
         diffLineage: buildDiffLineage(manifest, tenantLineage.registry),
         ...(budget !== undefined ? { budget } : {}),
+        ...(providerAdmission !== undefined ? { providerAdmission } : {}),
         ...(options.requireDesignReview && reviewStore !== null ? { reviewGate: reviewStore } : {}),
         ...(designJobs !== undefined && designer !== null
           ? {
@@ -3610,7 +4053,6 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
                     jobs: designJobs,
                     manifests: store,
                     designer,
-                    ...(budget !== undefined ? { budget } : {}),
                     onError: (err) => console.error(`[ai-design] job ${jobId} failed`, err),
                   },
                   tenantId,
@@ -3623,19 +4065,11 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     );
   }
   const extraRoutes = extraRouteList.length > 0 ? extraRouteList : undefined;
-  // Data-residency edge routing: this instance's region + a tenant→profile directory (a static file
-  // via --residency-file, or the Postgres tenant_residency_profiles table via --residency-store). A
-  // tenant hint whose profile forbids this region is redirected to its home region before dispatch.
-  let residencyDirectory: TenantResidencyDirectory | undefined;
-  if (options.residencyFile !== null) {
-    residencyDirectory = loadResidencyDirectory(await readFile(options.residencyFile, "utf8"));
-  } else if (options.residencyStore && conn !== undefined) {
-    residencyDirectory = new PostgresTenantResidencyDirectory(conn, schemaOpt);
-  }
   const regionGuard =
     options.region !== null && residencyDirectory !== undefined
       ? { region: options.region as Region, directory: residencyDirectory }
       : undefined;
+  if (regionGuard !== undefined) console.log(formatResidencyGate(regionGuard.region));
   // Channel senders come from the environment, not from flags: all but the sender identity are
   // credentials and a process's argv is readable by anyone who can run `ps`. A registered sender is
   // only the last hop, so the boot line is a survey of whether each channel can deliver at all:
@@ -3715,7 +4149,11 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
             console.info(
               `[slo] ${d.signal} ${d.kind} surface=${d.surface} slo=${d.sloId}` +
                 (d.incidentId !== null ? ` incident=${d.incidentId}` : "") +
-                (d.closeOut !== null ? ` closeOut=${d.closeOut}` : ""),
+                (d.kind === "breach_escalated" && d.severity !== null ? ` severity=${d.severity}` : "") +
+                (d.closeOut !== null ? ` closeOut=${d.closeOut}` : "") +
+                (d.killSwitchRelease !== null && d.killSwitchRelease !== "none"
+                  ? ` killSwitch=${d.killSwitchRelease}`
+                  : ""),
             ),
           // The pages the engines have been planning since Phase 2 and nothing ever read. Awaited,
           // so a pass does not report a breach handled before anybody was told (ADR-0326).
@@ -3725,6 +4163,15 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
             for (const directive of d.pages) {
               await deliverAndRecord(sloPager, directive, "slo", null);
             }
+          },
+          // Over a Postgres store the engines deliver before they write the action row, so its
+          // `paged` column is what the pager reached rather than what was planned (ADR-0415).
+          deliverPages: async (_decision, pages) => {
+            let deliveredChannels = 0;
+            for (const directive of pages) {
+              deliveredChannels += (await deliverAndRecord(sloPager, directive, "slo", null)).delivered;
+            }
+            return { deliveredChannels };
           },
           // Closes those alerts when the breach recovers, over the directives that were actually
           // delivered rather than freshly-planned ones: a recovered decision carries no severity,
@@ -3832,7 +4279,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           : {}),
         onTick: (r) =>
           console.info(
-            `[access-reviews] started=${r.startedCampaigns.length.toString()} items=${r.generatedItems.toString()} revoked=${r.autoRevocations.length.toString()}`,
+            `[access-reviews] started=${r.startedCampaigns.length.toString()} items=${r.generatedItems.toString()} revoke-decisions=${r.autoRevocations.length.toString()} (recorded, not applied: the reviewed grants are read from configuration, so removing access is an operator edit)`,
           ),
         onError: (err) => console.error("[access-reviews] tick error", err),
       });
@@ -3850,10 +4297,13 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         conn,
         await loadCertificationConfig(options.certificationConfig),
         {
+          // Without a pinned chain key the tamper-evidence control is unsatisfiable by design (H-19):
+          // a chain is only evidence once its signatures verify against a key a writer does not hold.
+          chainSignatures: chainTrust === null ? null : resolverFor(chainTrust, null),
           onReports: (reports) => {
             for (const r of reports) {
               console.info(
-                `[certification] ${r.framework} certifiable=${r.certifiable.toString()} ` +
+                `[certification] ${r.framework} automated-controls-pass=${r.certifiable.toString()} (readiness evidence, not a certification) ` +
                   `satisfied=${r.assessment.counts.satisfied.toString()}/${r.assessment.counts.total.toString()} report=${r.reportId}`,
               );
             }
@@ -3881,10 +4331,10 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // Stripe usage sync: periodically report each configured tenant's un-synced usage records to Stripe
   // and mark them synced. Enabled by --stripe-usage-sync-config over a pg store + --stripe-api-key.
   let stripeUsageSync: StripeUsageSync | null = null;
-  if (options.stripeUsageSyncConfig !== null && conn !== undefined && options.stripeApiKey !== null) {
+  if (options.stripeUsageSyncConfig !== null && conn !== undefined && stripeApiKey !== null) {
     stripeUsageSync = buildStripeUsageSync(
       conn,
-      new StripeClient({ apiKey: options.stripeApiKey }),
+      new StripeClient({ apiKey: stripeApiKey }),
       await loadStripeUsageSyncConfig(options.stripeUsageSyncConfig),
       {
         onSync: (o) =>
@@ -3924,7 +4374,18 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         onError: (err, tenantId) =>
           console.error(`[audit-sampling] tenant=${tenantId} settings load error`, err),
         refreshOnError: (err) => console.error("[audit-sampling] refresh error", err),
+        // A tenant's own administrator writes this policy, so it may record more than the
+        // deployment does and never less (M-19).
+        floor: (tenantId) => resolveAuditPolicy(tenantId, auditConfig),
+        onNarrowingIgnored: (tenantId, fields) =>
+          console.warn(
+            `[audit-sampling] tenant=${tenantId} stored auditSampling would record less than this` +
+              ` deployment does (${fields.join(", ")}); ignored — a tenant policy only widens`,
+          ),
       });
+      console.info(
+        "[audit-sampling] live tenant policies: on — a tenant's auditSampling can widen what is recorded, never narrow it",
+      );
     }
     auditChain = buildAuditChain(conn, auditConfig, {
       // The producer the audit-log emitter already anchors into, so per-request entries and
@@ -4183,12 +4644,17 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // Phase 1 and nothing on this path read it, so a `suspended` tenant kept writing and a tenant
   // whose Article 17 erasure was verified and queued kept writing into data about to be destroyed.
   //
-  // Opt-in for one concrete reason: the gate refuses a credential whose tenant has no
-  // `meta.tenants` row, and `--api-key 'key:role:tenant'` specs name arbitrary UUIDs that nothing
-  // requires to exist — so on-by-default would 403 every request of a deployment that is working
-  // today. The survey names those tenants at boot instead of leaving an operator to read it off a
-  // 403, which is the rule this file keeps relearning: a surface that refuses has to say so first.
+  // On by default on a Postgres store, with `--no-tenant-status-gate` as the hatch — see
+  // `ServeOptions.tenantStatusGate` for why the default moved. The gate refuses a credential whose
+  // tenant has no `meta.tenants` row, so the survey names those tenants at boot instead of leaving
+  // an operator to read it off a 403: a surface that refuses has to say so first.
   let tenantStatusGate: TenantStatusGateOptions | undefined;
+  if (options.tenantStatusGateSource === "disabled_by_flag") {
+    console.warn(
+      "[tenant-status] gate OFF (--no-tenant-status-gate): meta.tenants.status is unenforced on the" +
+        " request path, so a suspended, archived or pending_deletion tenant keeps writing",
+    );
+  }
   if (options.tenantStatusGate) {
     if (conn === undefined) {
       console.error(
@@ -4242,7 +4708,10 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       }
       console.info(
         `[tenant-status] gate mounted over ${survey.checked.length.toString()} configured tenant(s)` +
-          `; /v1/platform routes exempt`,
+          `; /v1/platform routes exempt` +
+          (options.tenantStatusGateSource === "default"
+            ? " (on by default; --no-tenant-status-gate turns it off)"
+            : ""),
       );
     }
   }
@@ -4274,8 +4743,10 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   }
   // The rate-limit checker. Absent ⇒ `buildOperateGateway` installs `InMemoryRateLimitChecker` at
   // 10,000/window, which is what every deployment has had: `PostgresRateLimitChecker` existed with
-  // tests and nothing in this binary constructed it, so `meta.rate_limit_decisions` has never held
-  // a row and the sliding window was per-replica and per-restart.
+  // tests and nothing in this binary constructed it, so `meta.rate_limit_decisions` never held a
+  // row. The window was never sliding and is still per replica: `PostgresRateLimitChecker` persists
+  // its *decisions* and counts a fixed window in process (`RATE_LIMIT_WINDOW_SEMANTICS`), said at
+  // boot below so N replicas are not read as one limit.
   let rateLimitChecker: PostgresRateLimitChecker | undefined;
   if (options.rateLimitPolicies !== null && conn !== undefined) {
     // Probed **once at boot** rather than lazily on the request path: the remedy for an unpatched
@@ -4296,27 +4767,31 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       policies: options.rateLimitPolicies,
       schema: decisionSchema,
     });
+    console.info(`[rate-limit] ${RATE_LIMIT_WINDOW_SEMANTICS}`);
   }
   // The gateway's replay guard. Absent ⇒ `buildOperateGateway` installs `InMemoryIdempotencyStore`,
   // which is a `Map` in one process: `PostgresIdempotencyStore` existed with tests and nothing
   // constructed it, so every deployment's idempotency has been per-replica and per-restart —
   // including on `--tenant-deletion-routes`, the one route here that requires a key. Said out loud
-  // either way, because the guarantee it buys is bounded (ADR-0322's rule): there is no reserve
-  // step between the stage-10 read and the post-handler write, so two *concurrent* retries of one
-  // key can still both execute, and only the sequential case is closed.
+  // either way, because the guarantee it buys is bounded (ADR-0322's rule): a key is reserved
+  // before the handler runs, so a concurrent retry is answered 409 in progress, and the bound that
+  // remains is the reservation's lease — a handler that outlives it can be re-executed by a retry.
   let idempotencyStore: ReportingIdempotencyStore | undefined;
   let idempotencyPrune: IdempotencyPruneScheduler | null = null;
   if (options.pgIdempotencyStore && conn !== undefined) {
     const pgIdempotency = new PostgresIdempotencyStore(conn);
     idempotencyStore = new ReportingIdempotencyStore(pgIdempotency, {
-      // Reported, never thrown. `persistIdempotency` runs *after* the handler's own transaction
-      // committed, so raising would turn a successful mutation into a 500 — and a client retrying
-      // that 500 re-executes, with no record to stop it, so the throw would cause the exact harm
-      // the record prevents. ADR-0333's rule, and the hole is logged rather than absorbed.
+      // Reported, never thrown. Completing or releasing a reservation runs *after* the handler's
+      // own transaction committed, so raising would turn a successful mutation into a 500 — and a
+      // client retrying that 500 re-executes, so the throw would cause the exact harm the record
+      // prevents. ADR-0333's rule, and the hole is logged rather than absorbed.
       onPersistError: (err, where) =>
         console.error(
-          `[idempotency] tenant ${where.tenantId} key ${where.key}: record not stored; a retry of` +
-            ` this mutation will re-execute: ${err instanceof Error ? err.message : String(err)}`,
+          `[idempotency] tenant ${where.tenantId} key ${where.key}: ` +
+            (where.operation === "release"
+              ? "reservation not given back; a retry is answered 409 in progress until its lease lapses"
+              : "record not stored; a retry of this mutation will re-execute") +
+            `: ${err instanceof Error ? err.message : String(err)}`,
         ),
     });
     console.info(`[idempotency] meta.gateway_idempotency_records: ${IDEMPOTENCY_GUARANTEE}`);
@@ -4335,6 +4810,27 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     console.warn(
       "[idempotency] --idempotency-store pg needs a Postgres connection; the in-memory guard is" +
         " per process and a retry on another replica will re-execute",
+    );
+  }
+  // Operational retention. Said either way: four tables grow with traffic for ever without it.
+  let operationalRetention: OperationalRetentionScheduler | null = null;
+  if (options.retention !== null && conn !== undefined) {
+    console.info(`[retention] ${formatRetentionPolicy(options.retention, DEFAULT_RETENTION_INTERVAL_MS)}`);
+    operationalRetention = new OperationalRetentionScheduler({
+      conn,
+      // Every status: a retired tenant's operational rows age out like anyone's.
+      tenants: new PostgresTenantSource(conn, { statuses: chainScopeStatuses(undefined) }),
+      policy: options.retention,
+      onPass: (result) => console.info(`[retention] ${formatRetentionPass(result)}`),
+      onError: (err) =>
+        console.error(
+          `[retention] pass failed: ${err instanceof Error ? err.message : String(err)}`,
+        ),
+    });
+  } else if (conn !== undefined) {
+    console.info(
+      "[retention] off: job_runs, gateway_pipeline_executions, rate_limit_decisions and" +
+        " notification_dispatches grow without bound; --retention-sweep prunes them",
     );
   }
   // Sampled `PipelineExecution` capture — the writer `meta.gateway_pipeline_executions` never had,
@@ -4385,8 +4881,18 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           for (const sink of executionSinks) sink(execution);
         }
       : undefined;
+  // One instance for both literals: it bounds this process's auth stage, which a per-tenant gateway
+  // shares. Said either way at boot, because "off" is the default and a default an operator cannot
+  // see is one they believe was chosen for them.
+  const servedEdgeTrust = options.trustedEdgeClientCert ? "trusted" : "untrusted";
+  const preAuthLimiter =
+    options.preAuthRateLimit !== null
+      ? new PreAuthLimiter(options.preAuthRateLimit, servedEdgeTrust)
+      : undefined;
+  console.info(`[pre-auth] ${formatPreAuthLimit(options.preAuthRateLimit, servedEdgeTrust)}`);
   const { httpServer, gateway } = buildOperateHttpServer({
     manifest,
+    ...(preAuthLimiter !== undefined ? { preAuthLimiter } : {}),
     // Read on the document's first request, not here — by then every mount has recorded itself.
     openApiCoverage: () => coverageFromMountedSurfaces(mountedOutOfRegistry),
     store,
@@ -4415,6 +4921,8 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     ...(entityAudit !== null ? { entityAudit } : {}),
     ...(abac !== undefined ? { abac } : {}),
     ...(sessionRevocation !== undefined ? { sessionRevocation } : {}),
+    ...(sessionStanding !== undefined ? { sessionStanding } : {}),
+    ...(foreignTokenScopes !== undefined ? { foreignTokenScopes } : {}),
     // Unconditional, so a drop at this literal is a compile error rather than a silent safe
     // default — ADR-0391's finding, and the reason `edgeTrust` is required at both ends of the
     // forwarding literal in `server.ts`.
@@ -4721,16 +5229,21 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       ...(workerConfig !== undefined ? { config: workerConfig } : {}),
       events: consoleWorkflowWorkerEvents(),
     });
-    // `meta.job_runs`, `meta.dead_letter_jobs` and `meta.job_costs` each carry one `ALL`-scope
-    // tenant-isolation policy and no platform arm, while the fleet is deliberately cross-tenant. As a
-    // non-owner with no tenant context the claim matches **0 rows** and `executeJobRun` answers
-    // `not_claimable` — observed live — and neither is an error: an empty claim is what an empty
-    // queue looks like. So a fleet that can never execute anything reads exactly like an idle one,
-    // which is why this asks the catalog (RLS enabled, role bypass, ownership) rather than counting
-    // rows. The queue tables are always in `meta`, independent of the entity `--schema`.
+    // `meta.job_runs` carries one `ALL`-scope tenant-isolation policy and no platform arm, so the job
+    // worker claims **per tenant** — the tenant list from `meta.tenants` (no RLS), then each tenant's
+    // queue under its own context — which works for the confined serving role (ADR-0424) and an
+    // exempt one alike. A confined session is therefore the expected state and said as such; what is
+    // still a finding is a queue table with RLS off, or one that does not exist. Asked of the catalog
+    // rather than by counting rows, because an empty queue and an invisible one both count 0.
     const queueVisibility = await probeJobQueueVisibility(conn);
-    if (queueVisibility.visibility !== "visible") {
-      console.warn(`[jobs] job queue not visible to this connection: ${queueVisibility.detail}`);
+    if (queueVisibility.visibility === "confined_by_rls") {
+      console.log(
+        `[jobs] row-level security confines '${queueVisibility.role}' on meta.job_runs, so the job ` +
+          "worker claims one tenant at a time under each tenant's own context (two statements per " +
+          "non-deleted tenant per poll, in one transaction)",
+      );
+    } else if (queueVisibility.visibility !== "visible") {
+      console.warn(`[jobs] job queue: ${queueVisibility.detail}`);
     }
   }
   // In-process dangling-link prune sweep: periodically prune every active tenant's orphaned m2m
@@ -4791,11 +5304,17 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       const tenantStore = new PostgresTenantStore(runConn);
       const registry = (): TenantColumnStoreRegistry | null => tenantStoreRegistry;
       const executedBy = options.deletionRunnerExecutedBy ?? DEFAULT_DELETION_EXECUTED_BY;
-      const approvedBy = options.deletionRunnerApprovedBy ?? DEFAULT_DELETION_APPROVED_BY;
+      // The approver is no longer configured here (H-05): it is each request's verifier, a
+      // principal who authenticated to make that act, and the runner refuses one equal to itself.
+      console.log(
+        `[deletion] runner grace: ${options.deletionGraceDays.toString()} day(s) between verify and ` +
+          "execution — rejecting a request inside that window cancels it; the wait yields to the " +
+          "Article 12(3) deadline (--deletion-grace-days)",
+      );
       const runner = new DeletionRunner({
         store: requests,
         executedBy,
-        approvedBy,
+        graceMs: options.deletionGraceDays * 86_400_000,
         onUnreadableRequest: (row) =>
           console.error(
             `[deletion] request row unreadable (${row.requestId ?? "id unreadable"}): ${row.detail}`,
@@ -4884,7 +5403,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
                   entityId: result.tenantId,
                   actor: auditActor({ userId: executedBy }),
                   after: {
-                    approvedBy,
+                    approvedBy: result.approvedBy,
                     tombstoneId: result.tombstoneId,
                     relatedDeletionRequestId: result.requestId,
                     tenantRetired: row !== null,
@@ -5190,6 +5709,10 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           adminRoles: options.notificationAdminRoles,
         }),
         senders: senderWiring.registry,
+        // An approved template renders into the provider's message; with none, or with a placeholder
+        // the ledger cannot fill (it stores only the variables' digest), the provider's own
+        // identifier-only notice is sent.
+        content: templateContentSource(new PostgresTemplateStore(conn, schemaOpt)),
         digests: digestStore,
         // Quiet hours + digest cadence are live tenant settings, so an admin can change them
         // without a redeploy; an absent or malformed policy means "send now", never a stall.
@@ -5232,13 +5755,13 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         ? new PostgresEntityStore(conn, schemaOpt)
         : store;
     if (store instanceof ColumnMappedEntityStore && conn !== undefined) {
-      tenantStoreRegistry = new TenantColumnStoreRegistry(conn, {
+      tenantStoreRegistry = new TenantColumnStoreRegistry(columnConn ?? conn, {
         // The same resolver the boot store got, so a tenant's key is derived from the one
         // deployment secret and cached once. Absent when this deployment encrypts nothing, in
         // which case a tenant activating a manifest with a classified field is refused by the
         // store's own constructor — named, rather than 500ing on their first PHI write.
         ...(columnKey !== undefined ? { encryptionKey: columnKey } : {}),
-        onApplication: (application, retained) => {
+        onApplication: (application, refusal) => {
           if (application.applied) {
             console.info(
               `[tenant-schema] ${application.tenantId} applied to ${application.schema}` +
@@ -5262,19 +5785,8 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           }
           // A refusal is not a failure to report once and forget: the tenant is served something
           // other than what they activated until an operator runs the reported SQL, so it is logged
-          // loudly with the reason attached — and the sentence says *which* something, because a
-          // refused re-activation keeps the last applied manifest in service (the schema is exactly
-          // as that manifest built it) while a refused first activation is served from the JSONB
-          // fallback. The old sentence named the fallback for both.
-          const blocking = application.changes.filter((c) => c.blocking);
-          console.error(
-            `[tenant-schema] ${application.tenantId} REFUSED; ` +
-              (retained !== null
-                ? `still serving the last applied manifest ${retained.manifestHash.slice(0, 12)} from ` +
-                  `${retained.schema} — the re-activation does not take effect until this is resolved. `
-                : `serving from the JSONB fallback. `) +
-              blocking.map((c) => `${c.table}.${c.column ?? "-"}: ${c.detail}`).join("; "),
-          );
+          // loudly, saying which something — see `formatTenantSchemaRefusal`.
+          console.error(formatTenantSchemaRefusal(application, refusal));
         },
       });
     }
@@ -5348,6 +5860,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         return buildOperateHttpServer({
           manifest: served,
           store: tenantStoreFor(served),
+          ...(preAuthLimiter !== undefined ? { preAuthLimiter } : {}),
           // The deployment's, not the tenant's: the secret is one deployment secret and the key is
           // derived per tenant inside the sealer, so an activated manifest gets sealed cursors on
           // the same terms — and the boot refusal travels with it, since this is the function that
@@ -5382,6 +5895,8 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           // `buildOperateHttpServer`: a tenant serving its own activated manifest serves the same
           // tenant's users, so a revoked membership must stop working there as well.
           ...(sessionRevocation !== undefined ? { sessionRevocation } : {}),
+          ...(sessionStanding !== undefined ? { sessionStanding } : {}),
+          ...(foreignTokenScopes !== undefined ? { foreignTokenScopes } : {}),
           // And the signing keys: a key id *names its tenant*, so the lookup resolves
           // `ctx.tenantId` from the credential exactly as an api key does. This said a signed request
           // "is routed to a tenant's own gateway", and it is not: `resolveRequestTenant` reads an api
@@ -5727,20 +6242,28 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           userId: outcome.userId,
           tenantId: outcome.tenantId,
           roles: outcome.roles,
+          sessionEpoch: outcome.sessionEpoch,
           now: new Date(),
           lifetimeSeconds: ttl,
           kid: material.kid,
           signingSeedBase64: material.signingSeedBase64,
           publicKeyBase64: material.publicKeyBase64,
         }),
-      onSuccess: async (userId, rehashTo) => {
+      onSuccess: async (userId, rehash) => {
         await credentialStore.recordSuccess(userId);
-        if (rehashTo !== null) {
+        if (rehash !== null) {
           // Ordered after the success record and in its own statement, because an upgrade that
           // failed must not cost the user their login or their counter reset. A hash left at the
-          // old parameters is the state we were already in.
-          await credentialStore.setCredential(userId, rehashTo);
-          console.info(`[auth] user ${userId} credential re-hashed at current scrypt parameters`);
+          // old parameters is the state we were already in. `rehashCredential` and not
+          // `setCredential`: the same password re-hashed is not a password change, so it must not
+          // end the session this very login is minting, and it lands only if the hash is still the
+          // one this login verified.
+          const landed = await credentialStore.rehashCredential(userId, rehash.from, rehash.to);
+          console.info(
+            landed
+              ? `[auth] user ${userId} credential re-hashed at current scrypt parameters and pepper`
+              : `[auth] user ${userId} credential not re-hashed: it changed after this login read it`,
+          );
         }
       },
       admission: loginAdmission,
@@ -5757,8 +6280,17 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     mountedOutOfRegistry.add("credential_login");
     const inner = dispatchTarget;
     dispatchTarget = {
-      dispatch: async (raw, body): Promise<RawHttpResponse> =>
-        (await login(raw, body)) ?? (await inner.dispatch(raw, body)),
+      dispatch: async (raw, body): Promise<RawHttpResponse> => {
+        // The login sits in front of the gateway, so the bound `OperateHttpServer.dispatch` applies
+        // never sees it — and it is the one route that verifies a password, which is the work a
+        // pre-authentication bound exists to cap. Checked only for this path: every other request
+        // falls through to the dispatch that counts it, so none is counted twice.
+        if (preAuthLimiter !== undefined && isAuthTokenPath(raw.url)) {
+          const decision = preAuthLimiter.check(raw);
+          if (!decision.allowed) return preAuthLimitedResponse(decision.retryAfterSeconds);
+        }
+        return (await login(raw, body)) ?? (await inner.dispatch(raw, body));
+      },
     };
     console.info(
       `[auth] serving ${AUTH_TOKEN_PATH} (session ttl ${ttl.toString()}s, lockout after` +
@@ -5871,6 +6403,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   workflowWorkers?.start();
   pruneScheduler?.start();
   idempotencyPrune?.start();
+  operationalRetention?.start();
   deletionScheduler?.start();
   deliveryScheduler?.start();
   sloEnforcement?.scheduler.start();
@@ -5880,7 +6413,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   checkpoints?.scheduler.start();
   integrityProof?.scheduler.start();
   auditPolicy?.refresher.start();
-  metering?.flushScheduler?.start();
+  metering?.flushScheduler.start();
   stripeUsageSync?.scheduler.start();
   const listener = createNodeRequestListener(
     dispatchTarget,
@@ -5890,6 +6423,9 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   const server = createServer((req, res) => {
     void listener(req as unknown as NodeReqLike, res as unknown as NodeResLike);
   });
+  const httpListenerSettings = resolveHttpListenerSettings(options.httpListener);
+  applyHttpListenerSettings(server, httpListenerSettings);
+  console.info(`[http] ${formatHttpListenerSettings(httpListenerSettings)} — tune with --http-* flags`);
   await new Promise<void>((resolve) => server.listen(options.port, resolve));
   const address = server.address();
   const port = typeof address === "object" && address !== null ? address.port : options.port;
@@ -5903,22 +6439,30 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         jobScheduler?.stop();
         pruneScheduler?.stop();
         idempotencyPrune?.stop();
-        // The aggregate, once, at the one moment it is actionable. Every swallowed `put` is already
+        operationalRetention?.stop();
+        // The aggregate, once, at the one moment it is actionable. Every swallowed write is already
         // logged individually, but a count is what says whether the guard was working at all —
         // `failed > 0` means that many mutations have no dedup record and a retry of each would
-        // re-execute, which is precisely the thing the flag was turned on to prevent.
-        if (idempotencyStore !== undefined) {
+        // re-execute, which is precisely the thing the flag was turned on to prevent. Printed once
+        // the listener has drained (below), not here: the requests still running complete their
+        // records during the grace, and a count taken first left them out.
+        const reportIdempotency = (): void => {
+          if (idempotencyStore === undefined) return;
           const report = idempotencyStore.report();
+          const released =
+            report.releaseFailed > 0
+              ? `; ${String(report.releaseFailed)} reservation(s) not given back (answered 409 until their lease lapses)`
+              : "";
           if (report.failed > 0) {
             console.error(
               `[idempotency] ${String(report.persisted)} record(s) stored, ` +
                 `${String(report.failed)} NOT stored — a retry of each would re-execute; ` +
-                `first failure: ${report.firstFailure ?? "unknown"}`,
+                `first failure: ${report.firstFailure ?? "unknown"}${released}`,
             );
           } else {
-            console.info(`[idempotency] ${String(report.persisted)} record(s) stored, 0 failed`);
+            console.info(`[idempotency] ${String(report.persisted)} record(s) stored, 0 failed${released}`);
           }
-        }
+        };
         deletionScheduler?.stop();
         deliveryScheduler?.stop();
         sloEnforcement?.scheduler.stop();
@@ -5928,7 +6472,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         checkpoints?.scheduler.stop();
         integrityProof?.scheduler.stop();
         auditPolicy?.refresher.stop();
-        metering?.flushScheduler?.stop();
+        metering?.flushScheduler.stop();
         stripeUsageSync?.scheduler.stop();
         // Hand every claimed timer, activity and job run back before the process goes away, so
         // another replica picks them up immediately instead of waiting out the lease. Reported
@@ -5945,17 +6489,37 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         // Both drains, not one after the other: they touch different things (the chain's append
         // queue and the claim tables) and a shutdown should not pay for them serially.
         // Drain any queued audit-chain appends too, so no request's entry is lost on shutdown.
+        // The listener first: no new request may start while the drains below assume none will, and
+        // the requests already running get the grace to finish before their sockets are closed.
+        const listenerClosed = closeListener(server, httpListenerSettings.shutdownGraceMs).then((outcome) => {
+          if (outcome === "grace_elapsed") {
+            console.warn(
+              `[http] shutdown grace of ${String(httpListenerSettings.shutdownGraceMs)} ms elapsed; ` +
+                "requests still running had their sockets closed",
+            );
+          }
+          reportIdempotency();
+        });
         void Promise.all([
+          listenerClosed,
           auditChain?.observer.drain() ?? Promise.resolve(),
           workersDrained,
+          // Usage metered in memory since the last flush, written once the listener has closed so the
+          // requests finishing inside the grace are in it. Before, a shutdown dropped it unbilled.
+          listenerClosed.then(() => metering?.flushScheduler.flushOnce()),
           // The capture's in-flight writes, in the same parallel set rather than after it. Purely
           // observational, so abandoning them would lose a fraction of a fraction — but it is
           // bounded by `maxInFlight` and costs nothing to wait for, and a shutdown that dropped
           // rows it had already decided to sample would make the sample a lie about itself.
           executionCapture?.drain() ?? Promise.resolve(),
-        ]).finally(() => {
-          server.close((err) => (err ? reject(err) : resolve()));
-        });
+        ])
+          // The pool last, once nothing that holds a connection is still running. Left open before,
+          // so a shutdown under `docker stop` was a kill with the server-side sessions still live.
+          .then(() => conn?.close())
+          .then(
+            () => resolve(),
+            (err: unknown) => reject(err instanceof Error ? err : new Error(String(err))),
+          );
       }),
   };
 }
@@ -5976,7 +6540,72 @@ export async function runDocumentIndexes(options: DocumentIndexesOptions): Promi
       ...(options.schema !== null ? { schema: options.schema } : {}),
       manifest,
     });
-    return await store.ensureUniqueIndexes();
+    const report = await store.ensureUniqueIndexes();
+    // The lookup indexes after the unique ones, `CONCURRENTLY`, reported here because the report
+    // type is the unique pass's; a failure is printed and does not fail the one-shot.
+    const lookupPlan = store.lookupIndexPlan();
+    if (lookupPlan !== null) {
+      console.info(`[indexes] ${formatDeclaredIndexPlan("pg", lookupPlan)}`);
+      const lookups = await store.ensureLookupIndexes({ build: true });
+      for (const r of lookups) {
+        if (r.outcome !== "built" && r.outcome !== "present") {
+          console.error(`[indexes] ${r.index.entity} (${r.index.fields.join(", ")}): ${r.outcome}: ${r.detail ?? ""}`);
+        }
+      }
+      console.info(`[indexes] ${formatDeclaredIndexResults(lookups, "see the lines above")}`);
+    }
+    return report;
+  } finally {
+    await conn.close();
+  }
+}
+
+/** What the `column-schema` one-shot did, for the bin to print. */
+export interface ColumnSchemaRunReport {
+  readonly schema: string | null;
+  readonly grants: readonly string[];
+  readonly uniqueIndexRefusals: readonly { readonly entity: string; readonly detail: string; readonly sql: string }[];
+}
+
+/**
+ * Runs the `column-schema` subcommand: applies `--store pg-columns`' DDL as whoever this connection
+ * is — which must be a role that may (the schema's owner, the one that runs migrate) — then grants
+ * each `--grant-to` role the DML the API issues. A session that may not apply it is refused by
+ * `ensureSchema` itself rather than half-applying, because its verifying arm reads only the catalog.
+ */
+export async function runColumnSchema(options: ColumnSchemaOptions): Promise<ColumnSchemaRunReport> {
+  const manifest =
+    options.manifestPath !== null
+      ? loadManifestFromJson(await readFile(options.manifestPath, "utf8"))
+      : await loadBuiltinPack(options.pack ?? "");
+  const conn = createNodePgConnection(parsePgEnvConfig());
+  const refusals: { entity: string; detail: string; sql: string }[] = [];
+  try {
+    const store = new ColumnMappedEntityStore(conn, manifest, {
+      ...(options.schema !== null ? { schema: options.schema } : {}),
+      // The DDL reads no key; a resolver is supplied only so a manifest with an at-rest-encrypted
+      // column can be provisioned, and it refuses if anything ever asks it.
+      encryptionKey: () => {
+        throw new Error("column-schema applies DDL and reads no column-encryption key");
+      },
+      onUniqueIndexRefused: (entity, sql, detail) => refusals.push({ entity, detail, sql }),
+      onLookupIndexRefused: (entity, sql, detail) =>
+        console.error(`[indexes] ${entity}: declared lookup index not built (${detail}). Statement: ${sql}`),
+    });
+    const ensured = await store.ensureSchema();
+    console.info(`[indexes] ${formatDeclaredIndexPlan("pg-columns", store.declaredIndexPlan())}`);
+    // `ensureSchema` *verifies* for a role that may not apply DDL, and a verified schema reads as
+    // success there — so without this the one-shot run as the wrong role would print "applied" over
+    // DDL it never ran (and its grants would then fail as a non-owner's).
+    if (ensured.mode === "verified") {
+      throw new Error(
+        `column-schema: role '${ensured.role ?? "?"}' cannot apply DDL to schema '${ensured.schema ?? "?"}' ` +
+          "(it does not own the schema); run this as the role that owns it — the one that runs migrate",
+      );
+    }
+    const grants: string[] = [];
+    for (const role of options.grantTo) grants.push(...(await store.grantServingRole(role)));
+    return { schema: ensured.schema, grants, uniqueIndexRefusals: refusals };
   } finally {
     await conn.close();
   }
@@ -6318,10 +6947,14 @@ export async function runVerifyChain(options: VerifyChainOptions): Promise<Verif
 export interface RekeyReport {
   readonly tenantId: string;
   readonly dataSchema: string;
-  readonly writeStatus: TenantWriteStatus;
-  readonly survey: TenantRekeySurvey;
+  /** `null` on a `--rewrap-kek` run, which needs no write gate and so asks no status. */
+  readonly writeStatus: TenantWriteStatus | null;
+  /** `null` on a `--rewrap-kek` run, which surveys no entity column. */
+  readonly survey: TenantRekeySurvey | null;
   /** Absent on `--plan`, and on a run the survey refused. */
   readonly result: TenantRekeyResult | null;
+  /** Present exactly on a `--rewrap-kek` run; under `--plan` it is what would happen. */
+  readonly rewrap: DataKeyRewrap | null;
   readonly staleKeyWindowMs: number;
   /** Whether `staleKeyWindowMs` is the operator's stated fleet value or this process's default. */
   readonly staleKeyWindowStated: boolean;
@@ -6355,17 +6988,52 @@ export async function runRekey(options: RekeyOptions): Promise<RekeyReport> {
     );
   }
   // Parsed eagerly, so a secret that is present and too weak fails here rather than after the
-  // survey has printed a plan an operator would then act on.
-  const secret = parseColumnEncryptionSecret(rawSecret);
+  // survey has printed a plan an operator would then act on. The ring is the serving process's
+  // own (`column-secret-ring.ts`), so a rekey during a rotation opens a row under whichever
+  // generation wrapped it and writes the new one under the current generation.
+  const ring = resolveColumnSecretRing(process.env, "envelope");
   const metaSchema = options.schema ?? undefined;
   const dataSchema = options.dataSchema ?? "public";
   const conn = createNodePgConnection(parsePgEnvConfig());
   try {
-    const store = new PostgresDataKeyStore(
-      conn,
-      (tenantId) => deriveTenantKek(secret, tenantId),
-      metaSchema !== undefined ? { schema: metaSchema } : {},
-    );
+    const store = new PostgresDataKeyStore(conn, kekResolverFor(ring), {
+      ...(metaSchema !== undefined ? { schema: metaSchema } : {}),
+      kekGeneration: ring.currentGeneration,
+    });
+    if (options.rewrapKek) {
+      // No survey of the entity columns and no write gate: the data key is unchanged, so nothing a
+      // serving process caches goes stale. `--plan` reads the row and says what would happen.
+      const current = await store.load(options.tenantId);
+      const planned: DataKeyRewrap =
+        current === null
+          ? {
+              tenantId: options.tenantId,
+              generation: null,
+              fromKekGeneration: null,
+              toKekGeneration: ring.currentGeneration,
+              outcome: "no_data_key_row",
+            }
+          : {
+              tenantId: options.tenantId,
+              generation: current.generation,
+              fromKekGeneration: current.kekGeneration,
+              toKekGeneration: ring.currentGeneration,
+              outcome:
+                current.kekGeneration === ring.currentGeneration ? "already_current" : "rewrapped",
+            };
+      const rewrap = options.plan ? planned : await store.rewrap(options.tenantId);
+      return {
+        tenantId: options.tenantId,
+        dataSchema,
+        writeStatus: null,
+        survey: null,
+        result: null,
+        rewrap,
+        staleKeyWindowMs: 0,
+        staleKeyWindowStated: false,
+        ok: rewrap.outcome !== "no_data_key_row",
+      };
+    }
     const writeStatus = await probeTenantWriteStatus(
       conn,
       metaSchema ?? "meta",
@@ -6390,6 +7058,7 @@ export async function runRekey(options: RekeyOptions): Promise<RekeyReport> {
         writeStatus,
         survey,
         result: null,
+        rewrap: null,
         staleKeyWindowMs,
         staleKeyWindowStated: options.columnKeyTtlMs !== null,
         ok: survey.refusals.length === 0,
@@ -6398,8 +7067,8 @@ export async function runRekey(options: RekeyOptions): Promise<RekeyReport> {
     if (writeStatus === "permits_writes" && !options.allowLiveRekey) {
       throw new Error(
         `tenant ${options.tenantId} still accepts writes: ${TENANT_WRITE_STATUS_DETAIL.permits_writes}` +
-          " Suspend it for the duration — which only bites on a fleet running --tenant-status-gate," +
-          " that flag being opt-in and off by default — or stop the serving processes and pass" +
+          " Suspend it for the duration — which only bites on a fleet whose tenant-status gate is on," +
+          " as it is by default unless --no-tenant-status-gate was passed — or stop the serving processes and pass" +
           " --allow-live-rekey.",
       );
     }
@@ -6410,6 +7079,7 @@ export async function runRekey(options: RekeyOptions): Promise<RekeyReport> {
       writeStatus,
       survey,
       result,
+      rewrap: null,
       staleKeyWindowMs,
       staleKeyWindowStated: options.columnKeyTtlMs !== null,
       ok: true,

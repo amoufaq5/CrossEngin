@@ -324,6 +324,23 @@ describe("columnPlanForEntity — a field type with no decided wire type", () =>
     ).toThrow(UndecidedColumnTypeError);
   });
 
+  it.each([
+    ["geo_point", "geography(POINT)"],
+    ["geo_polygon", "geography(POLYGON)"],
+  ] as const)("refuses a %s at plan time rather than raising 42704 at ensureSchema", (kind, sqlType) => {
+    const place: Entity = { name: "Site", fields: [{ name: "where", type: { kind } }] };
+    let caught: UndecidedColumnTypeError | null = null;
+    try {
+      columnPlanForEntity(place, { schema: "app" });
+    } catch (e) {
+      caught = e as UndecidedColumnTypeError;
+    }
+    expect(caught).toBeInstanceOf(UndecidedColumnTypeError);
+    expect(caught?.field).toBe("where");
+    expect(caught?.sqlType).toBe(sqlType);
+    expect(caught?.message).toMatch(/Site\.where.*PostGIS/);
+  });
+
   it("plans every other field kind without complaint", () => {
     const ok: Entity = {
       name: "Evt",

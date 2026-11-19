@@ -1,7 +1,12 @@
 import type { PathSegment, ResolvedPrincipal, RouteDefinition } from "@crossengin/api-gateway";
 import type { Handler, HandlerOutput, PrincipalRoles } from "@crossengin/api-gateway-runtime";
 import type { ExtraGatewayRoute } from "@crossengin/operate-runtime";
-import type { LifecycleAction, TenantLifecycleState } from "@crossengin/tenant-lifecycle";
+import {
+  DEADLINE_STANDINGS,
+  deletionExecuteNotBefore,
+  type LifecycleAction,
+  type TenantLifecycleState,
+} from "@crossengin/tenant-lifecycle";
 import { lifecycleEventFor, type PostgresLifecycleEventStore } from "@crossengin/tenant-lifecycle-pg";
 import { z } from "zod";
 
@@ -221,6 +226,37 @@ export interface DeletionRequestStoreLike {
     onUnreadable: (row: { readonly requestId: string | null; readonly detail: string }) => void,
     limit?: number,
   ): Promise<readonly DeletionRequestLike[]>;
+  /**
+   * Article 12(3)'s extension, applied to `deadlineAt` in place (ADR-0387). `null` means somebody
+   * else moved or extended it first. Throws a refusal carrying `refusal` for a plan that does not
+   * hold — already answered, already extended, past the cap, no reason.
+   */
+  extendDeadline(
+    requestId: string,
+    input: {
+      readonly deadlineAt: string;
+      readonly deadlineExtendedAt: string;
+      readonly deadlineExtensionReason: string;
+    },
+  ): Promise<DeletionRequestLike | null>;
+}
+
+/** One unanswered request on the operator's pending list, with its Article 12(3) standing. */
+export interface PendingRequestLike {
+  readonly request: DeletionRequestLike;
+  readonly assessment: {
+    readonly standing: string;
+    readonly deadlineAt: string;
+    readonly msPastDeadline: number | null;
+    readonly extendedAt: string | null;
+  };
+}
+
+export interface PendingPageLike {
+  readonly requests: readonly PendingRequestLike[];
+  readonly unreadable: readonly { readonly requestId: string | null; readonly detail: string }[];
+  readonly complete: boolean;
+  readonly warningDays: number;
 }
 
 export const DELETION_REQUEST_SUBMITTED_OPERATION = "platform.deletion_request_submitted";
@@ -232,6 +268,9 @@ export const DELETION_EVIDENCE_AUDITED_OPERATION = "platform.deletion_evidence_a
 /** The sweep that starts from the tombstone table rather than from a request (ADR-0327). */
 export const TOMBSTONE_SWEEP_AUDITED_OPERATION = "platform.tombstone_sweep_audited";
 export const DELETION_REQUESTS_STRANDED_READ_OPERATION = "platform.deletion_requests_stranded_read";
+export const DELETION_REQUESTS_PENDING_READ_OPERATION = "platform.deletion_requests_pending_read";
+export const DELETION_REQUEST_DEADLINE_EXTENDED_OPERATION =
+  "platform.deletion_request_deadline_extended";
 
 export interface DeletionRequestEvent {
   readonly tenantId: string;
@@ -330,6 +369,18 @@ export interface DeletionRequestRoutesContext {
    */
   readonly escalateVerdict?: (result: ReconciliationLike) => Promise<void>;
   readonly deadlineDays?: number;
+  /**
+   * The runner's grace (C-04), so a verified request's handle says when it may first be executed.
+   * Absent ⇒ the handle carries `executeNotBefore: null` — this deployment runs no grace-gated
+   * runner, and the field says *not computed* rather than *now*.
+   */
+  readonly graceMs?: number;
+  /**
+   * The operator's pending list (H-20): every unanswered request with its Article 12(3) standing.
+   * Absent ⇒ `GET …/pending` answers 501. Mounted behind `reconcileRoles`, the grant that already
+   * reads which tenants' deletions are in doubt.
+   */
+  readonly pending?: (opts: { readonly limit: number }) => Promise<PendingPageLike>;
   readonly recordAction: DeletionRequestRecorder;
   readonly newRequestId?: () => string;
   readonly clock?: () => Date;
@@ -341,11 +392,12 @@ export const SubmitDeletionRequestBodySchema = z
     tenantId: z.string().regex(UUID_RE),
     subjectIdentifier: z.string().min(1).max(500),
     legalBasis: z.string().min(1).max(100).default("article_17_right_to_erasure"),
-    /**
-     * Who asked. Free text because it is often the data subject's own address rather than a platform
-     * user, and the verifier is checked against it.
+    /*
+     * `submittedBy` used to stand here as free text, and the verify route's four-eyes rule compared
+     * the verifier's principal against it — so the submitter could type any name and verify their
+     * own request (H-05). The submitter is the authenticated credential now, recorded by this route;
+     * who the request is *about* is `subjectIdentifier`, and how it arrived belongs in `notes`.
      */
-    submittedBy: z.string().min(1).max(200),
     retentionObligations: z.array(z.string().min(1)).default(["none"]),
     notes: z.string().min(1).max(2000).optional(),
   })
@@ -358,6 +410,16 @@ export const VerifyDeletionRequestBodySchema = z
 export const RejectDeletionRequestBodySchema = z
   .object({ reason: z.string().min(1).max(500) })
   .strict();
+
+export const ExtendDeadlineBodySchema = z
+  .object({
+    deadlineAt: z.string().datetime({ offset: true }),
+    reason: z.string().trim().min(1).max(500),
+  })
+  .strict();
+
+const PENDING_LIMIT_MAX = 500;
+const DEADLINE_STANDINGS_SET: ReadonlySet<string> = new Set(DEADLINE_STANDINGS);
 
 function json(status: number, body: unknown): HandlerOutput {
   return { kind: "json", status, body };
@@ -397,7 +459,10 @@ export function newRequestId(uuid: string): string {
  * The handle. Everything a caller needs to know whether the deletion has happened and, once it has,
  * to find the receipt — which is the whole reason the flow became asynchronous (ADR-0320, ADR-0321).
  */
-export function requestHandle(request: DeletionRequestLike): Record<string, unknown> {
+export function requestHandle(
+  request: DeletionRequestLike,
+  graceMs?: number,
+): Record<string, unknown> {
   return {
     requestId: request.id,
     tenantId: request.tenantId,
@@ -416,6 +481,13 @@ export function requestHandle(request: DeletionRequestLike): Record<string, unkn
     tombstoneId: request.tombstoneId,
     completionSha256: request.completionSha256,
     terminal: request.status === "completed" || request.status === "rejected",
+    // When the runner may first execute a verified request, and until then `POST …/reject` cancels
+    // it (C-04). `null` before verification, after the run, and where this deployment has no
+    // grace-gated runner to say it for.
+    executeNotBefore:
+      graceMs !== undefined && request.status === "verified"
+        ? deletionExecuteNotBefore(request, graceMs)
+        : null,
   };
 }
 
@@ -443,7 +515,17 @@ function buildSubmitHandler(ctx: DeletionRequestRoutesContext): Handler {
         detail: "submitting a deletion request is not granted to this role",
       });
     }
-    const parsed = SubmitDeletionRequestBodySchema.safeParse(input.parsedBody ?? {});
+    const body = input.parsedBody;
+    if (typeof body === "object" && body !== null && "submittedBy" in body) {
+      // Refused rather than ignored (ADR-0331's rule): a client sending it believes it chose the
+      // submitter, and the four-eyes rule depends on that name being the credential's.
+      return json(400, {
+        error: "submitter_is_the_credential",
+        detail:
+          "submittedBy is recorded from the authenticated caller and may not be supplied; put how the request arrived in notes",
+      });
+    }
+    const parsed = SubmitDeletionRequestBodySchema.safeParse(body ?? {});
     if (!parsed.success) {
       return json(400, {
         error: "invalid_request",
@@ -463,7 +545,7 @@ function buildSubmitHandler(ctx: DeletionRequestRoutesContext): Handler {
         tenantId: parsed.data.tenantId,
         subjectIdentifier: parsed.data.subjectIdentifier,
         legalBasis: parsed.data.legalBasis,
-        submittedBy: parsed.data.submittedBy,
+        submittedBy: principal.principalId,
         submittedAt: at,
         deadlineAt,
         retentionObligations: parsed.data.retentionObligations,
@@ -485,7 +567,7 @@ function buildSubmitHandler(ctx: DeletionRequestRoutesContext): Handler {
       detail: request.subjectIdentifier,
       at,
     });
-    return json(201, requestHandle(request));
+    return json(201, requestHandle(request, ctx.graceMs));
   };
 }
 
@@ -572,7 +654,7 @@ function buildVerifyHandler(ctx: DeletionRequestRoutesContext): Handler {
     });
     // Verified is the queue: nothing here runs the deletion, and a 202 says so.
     return json(202, {
-      ...requestHandle(moved),
+      ...requestHandle(moved, ctx.graceMs),
       tenantReadOnly: readOnly.claim,
       lifecycleRecorded,
     });
@@ -725,7 +807,7 @@ function buildRejectHandler(ctx: DeletionRequestRoutesContext): Handler {
       actorUserId: principal.principalId,
     });
     return json(200, {
-      ...requestHandle(moved),
+      ...requestHandle(moved, ctx.graceMs),
       tenantRestored: restored.claim,
       lifecycleRecorded,
     });
@@ -770,7 +852,7 @@ function buildReadHandler(ctx: DeletionRequestRoutesContext): Handler {
       detail: null,
       at,
     });
-    return json(200, requestHandle(request));
+    return json(200, requestHandle(request, ctx.graceMs));
   };
 }
 
@@ -848,7 +930,7 @@ function buildStrandedHandler(ctx: DeletionRequestRoutesContext): Handler {
     // The verdict per row, writing nothing: a list is for looking at. Applying is the POST.
     const assessed = await Promise.all(
       stranded.map(async (request) => ({
-        ...requestHandle(request),
+        ...requestHandle(request, ctx.graceMs),
         reconciliation: await reconciler.assess(request),
       })),
     );
@@ -1140,7 +1222,163 @@ function buildReconcileHandler(ctx: DeletionRequestRoutesContext): Handler {
     // 200 when something was written, 409 when a verdict needs an operator and nothing was: the
     // caller asked for a resolution and did not get one, and a 200 would read as "resolved".
     const status = result.applied ? 200 : 409;
-    return json(status, { ...requestHandle(updated), reconciliation: result });
+    return json(status, { ...requestHandle(updated, ctx.graceMs), reconciliation: result });
+  };
+}
+
+/**
+ * `GET /v1/platform/deletion-requests/pending` — every request the data subject is still waiting
+ * on, nearest deadline first, each with its Article 12(3) standing (H-20).
+ *
+ * The deadline sweep reports breaches to a log; until this route nothing *listed* the pending
+ * requests, so an operator had no page to work the queue from. `?standing=` narrows the page to one
+ * standing and an unknown one is a 400, never a dropped filter (ADR-0359: an ignored filter widens
+ * the answer). Recorded against the reader's tenant like `stranded`, and refused when none resolves.
+ */
+function buildPendingHandler(ctx: DeletionRequestRoutesContext): Handler {
+  return async (input) => {
+    const principal = input.principal;
+    if (principal === null) return json(401, { error: "authentication_required" });
+    if (!allowed(ctx, principal, ctx.reconcileRoles ?? new Set())) {
+      return json(403, {
+        error: "forbidden",
+        detail: "listing pending deletion requests is not granted to this role",
+      });
+    }
+    const pending = ctx.pending;
+    if (pending === undefined) return json(501, { error: "pending_list_unavailable" });
+    const query: Readonly<Record<string, string | readonly string[]>> = input.request.query ?? {};
+    const first = (v: string | readonly string[] | undefined): string | undefined =>
+      typeof v === "string" ? v : v?.[0];
+    const standing = first(query["standing"]);
+    if (standing !== undefined && standing !== "" && !DEADLINE_STANDINGS_SET.has(standing)) {
+      return json(400, {
+        error: "invalid_request",
+        detail: `standing must be one of ${[...DEADLINE_STANDINGS_SET].join(", ")}`,
+      });
+    }
+    const limitRaw = first(query["limit"]);
+    let limit = 100;
+    if (limitRaw !== undefined && limitRaw !== "") {
+      const n = Number(limitRaw);
+      if (!Number.isInteger(n) || n < 1) {
+        return json(400, { error: "invalid_request", detail: "limit must be a positive integer" });
+      }
+      limit = Math.min(n, PENDING_LIMIT_MAX);
+    }
+    const readerTenant = principal.tenantId;
+    if (readerTenant === null) {
+      return json(503, {
+        error: "audit_unrecordable",
+        detail: "this read is recorded against the reader's tenant, and none could be resolved",
+      });
+    }
+    let page: PendingPageLike;
+    try {
+      page = await pending({ limit });
+    } catch {
+      return json(503, {
+        error: "requests_unreadable",
+        detail: "the pending listing could not be read; do not treat this as an absence",
+      });
+    }
+    for (const row of page.unreadable) ctx.onUnreadableRequest(row);
+    const wanted = standing === undefined || standing === "" ? null : standing;
+    const rows = page.requests.filter((r) => wanted === null || r.assessment.standing === wanted);
+    const at = (ctx.clock ?? ((): Date => new Date()))().toISOString();
+    await record(ctx, {
+      tenantId: readerTenant,
+      requestId: rows[0]?.request.id ?? "-",
+      principalId: principal.principalId,
+      operation: DELETION_REQUESTS_PENDING_READ_OPERATION,
+      status: rows.length === 0 ? "none" : "pending",
+      tombstoneId: null,
+      detail: `${rows.length.toString()} pending${wanted === null ? "" : ` (${wanted})`}, ${page.unreadable.length.toString()} unreadable`,
+      at,
+    });
+    return json(200, {
+      data: rows.map((r) => ({
+        ...requestHandle(r.request, ctx.graceMs),
+        standing: r.assessment.standing,
+        msPastDeadline: r.assessment.msPastDeadline,
+        deadlineExtendedAt: r.assessment.extendedAt,
+      })),
+      unreadable: page.unreadable,
+      complete: page.complete,
+      warningDays: page.warningDays,
+    });
+  };
+}
+
+/**
+ * `POST /v1/platform/deletion-requests/{id}/extend-deadline` — Article 12(3)'s two-further-months
+ * extension, which had a store method and no surface (ADR-0387's open question 1), so the sweep's
+ * findings named a remedy nobody could apply.
+ *
+ * The verify grant, because extending is the controller adjudicating the request, which is what a
+ * verifier does. The plan's refusals are a 409 naming the refusal, since the request is fine and its
+ * state is the answer.
+ */
+function buildExtendDeadlineHandler(ctx: DeletionRequestRoutesContext): Handler {
+  return async (input) => {
+    const principal = input.principal;
+    if (principal === null) return json(401, { error: "authentication_required" });
+    if (!allowed(ctx, principal, ctx.verifyRoles)) {
+      return json(403, {
+        error: "forbidden",
+        detail: "extending a deletion request's deadline is not granted to this role",
+      });
+    }
+    const requestId = input.params["id"] ?? "";
+    if (!REQUEST_ID_RE.test(requestId)) {
+      return json(400, { error: "invalid_request", detail: "request id must be a dreq_… id" });
+    }
+    const parsed = ExtendDeadlineBodySchema.safeParse(input.parsedBody ?? {});
+    if (!parsed.success) {
+      return json(400, {
+        error: "invalid_request",
+        detail: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`),
+      });
+    }
+    const at = (ctx.clock ?? ((): Date => new Date()))().toISOString();
+    let moved: DeletionRequestLike | null;
+    try {
+      moved = await ctx.store.extendDeadline(requestId, {
+        deadlineAt: new Date(parsed.data.deadlineAt).toISOString(),
+        deadlineExtendedAt: at,
+        deadlineExtensionReason: parsed.data.reason,
+      });
+    } catch (err) {
+      // Both of the store's refusal classes carry a `refusal` name; anything else is a read or a
+      // write that did not happen, and a 404 or a 409 for it would be a claim about the request.
+      const carried = (err as { readonly refusal?: unknown } | null)?.refusal;
+      const named = typeof carried === "string" ? carried : null;
+      if (named === "not_found") return json(404, { error: "not_found" });
+      if (named !== null) {
+        return json(409, { error: "extension_refused", refusal: named, detail: messageOf(err) });
+      }
+      return json(503, {
+        error: "request_unreadable",
+        detail: "the deletion request could not be read or written; do not treat this as an absence",
+      });
+    }
+    if (moved === null) {
+      return json(409, {
+        error: "concurrent_modification",
+        detail: "the request changed status, or was extended, while this extension was in flight",
+      });
+    }
+    await record(ctx, {
+      tenantId: moved.tenantId,
+      requestId: moved.id,
+      principalId: principal.principalId,
+      operation: DELETION_REQUEST_DEADLINE_EXTENDED_OPERATION,
+      status: moved.status,
+      tombstoneId: null,
+      detail: `deadline ${moved.deadlineAt}: ${parsed.data.reason}`,
+      at,
+    });
+    return json(200, requestHandle(moved, ctx.graceMs));
   };
 }
 
@@ -1212,6 +1450,25 @@ export function buildDeletionRequestRoutes(
         false,
       ),
       handler: buildReconcileHandler(ctx),
+    },
+    {
+      route: route(
+        "platform.deletion_requests.extend_deadline",
+        "POST",
+        ["v1", "platform", "deletion-requests", { param: "id" }, "extend-deadline"],
+        false,
+      ),
+      handler: buildExtendDeadlineHandler(ctx),
+    },
+    {
+      /** Literal, and before the `{id}` route for the same reason `stranded` is. */
+      route: route(
+        "platform.deletion_requests.pending",
+        "GET",
+        ["v1", "platform", "deletion-requests", "pending"],
+        false,
+      ),
+      handler: buildPendingHandler(ctx),
     },
     {
       /** Literal, and before the `{id}` route for the same reason `stranded` is (ADR-0323). */

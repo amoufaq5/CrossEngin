@@ -53,7 +53,11 @@ export const TEST_RUNNER_EXEMPT_MEMBERS: Readonly<
     reason:
       "a Next.js app with no vitest config and no `test` script, so `pnpm -r test` has nothing to run for it",
     consequence:
-      "58 tracked .ts/.tsx files, 14,318 lines, 19 pages and 41 `fetch(` call sites are fenced by no test. " +
+      "62 .ts/.tsx files, 14,969 lines, 19 pages and 41 `fetch(` call sites have no runner of their own. " +
+      "Only the import-free helpers are run, from outside (`packages/testing/src/operate-web.test.ts`: " +
+      "`safeNextPath`, the CSV cell, the proxy's cross-site/body/timeout rules and the page security " +
+      "headers), and the three `/api` route handlers are checked as text to call them; no page, " +
+      "component or route handler is executed by any test. " +
       "It also sets no `noUnusedLocals`, so a change that orphans a binding leaves `tsc` and `next build` " +
       "both green — measured in ADR-0385, where commenting out that increment's one publish line was " +
       "invisible to both. The cost has been paid three times: ADR-0335 shipped a console button that was a " +

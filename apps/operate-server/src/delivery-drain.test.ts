@@ -14,6 +14,7 @@ import { describe, expect, it } from "vitest";
 import {
   QUIET_HOURS_DEFER_ERROR_CODE,
   QUIET_HOURS_DROP_ERROR_CODE,
+  RECIPIENT_UNADDRESSABLE_ERROR_CODE,
   addressFor,
   drainTenant,
   drainTenants,
@@ -83,7 +84,7 @@ function dispatch(overrides: Partial<NotificationDispatch> = {}): NotificationDi
 }
 
 function recipient(userId: string, email: string): ResolvedRecipient {
-  return { userId, email, displayName: null, primaryRole: "erp_admin", secondaryRoles: [] };
+  return { userId, email, phoneE164: null, displayName: null, primaryRole: "erp_admin", secondaryRoles: [] };
 }
 
 class FakeStore implements DeliveryStoreLike {
@@ -107,6 +108,19 @@ class FakeStore implements DeliveryStoreLike {
   }
   async dueRetries(): Promise<readonly DueRetry[]> {
     return this.retries;
+  }
+  readonly reconciles: string[] = [];
+  attempted = new Set<string>();
+  unsettled: string[] = [];
+  async reconcile(_t: string, rowId: string): Promise<unknown> {
+    this.reconciles.push(rowId);
+    return undefined;
+  }
+  async attemptedRecipients(): Promise<ReadonlySet<string>> {
+    return this.attempted;
+  }
+  async unsettledSending(): Promise<readonly string[]> {
+    return this.unsettled;
   }
 }
 
@@ -167,20 +181,25 @@ describe("delivery-drain — addressFor", () => {
     expect(addressFor("in_app", recipient(USER_A, "a@x.test"))).toBe(USER_A);
   });
 
-  it("uses the user id for push_mobile", () => {
-    expect(addressFor("push_mobile", recipient(USER_A, "a@x.test"))).toBe(USER_A);
+  // A push needs a device token and there is no device-token table, so the user id is not an
+  // address: it was handed to FCM as one before, which answers `UNREGISTERED` for every user.
+  it("answers null for push_mobile and webhook, which have no address source", () => {
+    expect(addressFor("push_mobile", recipient(USER_A, "a@x.test"))).toBeNull();
+    expect(addressFor("webhook", recipient(USER_A, "a@x.test"))).toBeNull();
   });
 
   it("uses the email for email", () => {
     expect(addressFor("email", recipient(USER_A, "a@x.test"))).toBe("a@x.test");
   });
 
-  // `meta.users.phone_e164` exists and has a writer (platform-users.ts); the resolver does not
-  // select it, so an sms is handed the recipient's email. Pinned as the current behaviour, not as
-  // a specification.
-  it("uses the email for sms and webhook, because the resolver reads no phone column", () => {
-    expect(addressFor("sms", recipient(USER_A, "a@x.test"))).toBe("a@x.test");
-    expect(addressFor("webhook", recipient(USER_A, "a@x.test"))).toBe("a@x.test");
+  // Rewritten: this test used to pin that an sms was handed the recipient's email, because the
+  // resolver read no phone column. It reads `meta.users.phone_e164` now.
+  it("uses the E.164 phone for sms and voice_call, and null where none is stored", () => {
+    const withPhone = { ...recipient(USER_A, "a@x.test"), phoneE164: "+15550100" };
+    expect(addressFor("sms", withPhone)).toBe("+15550100");
+    expect(addressFor("voice_call", withPhone)).toBe("+15550100");
+    expect(addressFor("sms", recipient(USER_A, "a@x.test"))).toBeNull();
+    expect(addressFor("voice_call", recipient(USER_A, "a@x.test"))).toBeNull();
   });
 });
 
@@ -536,7 +555,10 @@ describe("delivery-drain — retries", () => {
     expect(() => DeliveryAttemptSchema.parse(store.attempts[0])).not.toThrow();
   });
 
-  it("skips a retry whose recipient has left the audience", async () => {
+  // This test used to assert that nothing was recorded. That left the retry's attempt the latest
+  // and still retryable, so the parent never settled and, with the retry leased, it came back once
+  // a lease for ever. It is closed with a terminal attempt now, and no provider is called.
+  it("settles a retry whose recipient has left the audience, without sending", async () => {
     const store = new FakeStore();
     store.retries = [
       {
@@ -550,7 +572,178 @@ describe("delivery-drain — retries", () => {
     const report = await drainTenant(opts(store, new FakeResolver([])), TENANT);
 
     expect(report.retriesAttempted).toBe(0);
-    expect(store.attempts).toHaveLength(0);
+    expect(report.dropped).toBe(1);
+    expect(store.attempts).toHaveLength(1);
+    expect(store.attempts[0]?.outcome).toBe("dropped");
+    expect(store.attempts[0]?.attemptNumber).toBe(2);
+    expect(store.attempts[0]?.nextRetryAt).toBeNull();
+    expect(store.attempts[0]?.sentAt).toBeNull();
+    expect(store.attempts[0]?.errorCode).toBe("recipient_no_longer_sendable");
+    expect(() => DeliveryAttemptSchema.parse(store.attempts[0])).not.toThrow();
+  });
+
+  it("settles a retry whose recipient was suppressed since, as suppressed and without sending", async () => {
+    const probe = new FakeStore();
+    probe.claims = [{ rowId: "row-0", dispatch: dispatch({ category: "operational_digest" }) }];
+    await drainTenant(opts(probe, new FakeResolver([recipient(USER_A, "a@x.test")])), TENANT);
+    const hash = probe.attempts[0]?.recipientAddressSha256 ?? "";
+    const store = new FakeStore();
+    store.retries = [
+      {
+        rowId: "row-1",
+        dispatch: dispatch({ status: "sending", category: "operational_digest" }),
+        recipientAddressSha256: hash,
+        attemptNumber: 1,
+      },
+    ];
+    const resolver = new FakeResolver([recipient(USER_A, "a@x.test")]);
+    resolver.suppressions = [suppression(USER_A)];
+    const sender = new ScriptedSender([DELIVERED_RESULT]);
+
+    const report = await drainTenant(opts(store, resolver, new SenderRegistry([sender])), TENANT);
+
+    expect(sender.seen).toHaveLength(0);
+    expect(report.suppressed).toBe(1);
+    expect(report.retriesAttempted).toBe(0);
+    expect(store.attempts.map((a) => a.outcome)).toEqual(["suppressed"]);
+    expect(store.attempts[0]?.nextRetryAt).toBeNull();
+  });
+});
+
+const DELIVERED_RESULT: SendResult = {
+  outcome: "delivered",
+  provider: "in_app_native",
+  providerMessageId: "m1",
+  httpStatus: null,
+  bytesSent: null,
+  errorCode: null,
+  errorMessage: null,
+};
+
+describe("delivery-drain — crash recovery, retry settlement and addressing (H-31)", () => {
+  it("reconciles a retry's parent after the retry is attempted", async () => {
+    const probe = new FakeStore();
+    probe.claims = [{ rowId: "row-0", dispatch: dispatch() }];
+    await drainTenant(opts(probe, new FakeResolver([recipient(USER_A, "a@x.test")])), TENANT);
+    const hash = probe.attempts[0]?.recipientAddressSha256 ?? "";
+    const store = new FakeStore();
+    store.retries = [
+      {
+        rowId: "row-1",
+        dispatch: dispatch({ status: "sending" }),
+        recipientAddressSha256: hash,
+        attemptNumber: 1,
+      },
+    ];
+    await drainTenant(opts(store, new FakeResolver([recipient(USER_A, "a@x.test")])), TENANT);
+    expect(store.reconciles).toEqual(["row-1"]);
+  });
+
+  it("settles every sending dispatch the store reports as having nothing pending", async () => {
+    const store = new FakeStore();
+    store.unsettled = ["row-7", "row-8"];
+    await drainTenant(opts(store, new FakeResolver([])), TENANT);
+    expect(store.reconciles).toEqual(["row-7", "row-8"]);
+  });
+
+  it("does not re-send to a recipient a reclaimed dispatch already attempted", async () => {
+    const probe = new FakeStore();
+    probe.claims = [{ rowId: "row-0", dispatch: dispatch() }];
+    const both = [recipient(USER_A, "a@x.test"), recipient(USER_B, "b@x.test")];
+    await drainTenant(opts(probe, new FakeResolver(both)), TENANT);
+    const hashA = probe.attempts.find((a) => a.outcome === "delivered")?.recipientAddressSha256;
+
+    const store = new FakeStore();
+    store.claims = [{ rowId: "row-9", dispatch: dispatch({ status: "rendering" }) }];
+    store.attempted = new Set([hashA ?? ""]);
+    const sender = new ScriptedSender([DELIVERED_RESULT]);
+    await drainTenant(opts(store, new FakeResolver(both), new SenderRegistry([sender])), TENANT);
+
+    expect(sender.seen).toHaveLength(1);
+    expect(store.attempts).toHaveLength(1);
+    expect(store.attempts[0]?.recipientAddressSha256).not.toBe(hashA);
+    // A reclaimed dispatch's counters are recomputed from the record, not from this pass.
+    expect(store.advances).toEqual([]);
+    expect(store.reconciles).toContain("row-9");
+  });
+
+  it("records an sms recipient with no stored phone as a dropped attempt, and sends nothing", async () => {
+    const store = new FakeStore();
+    store.claims = [{ rowId: "row-1", dispatch: dispatch({ channel: "sms" }) }];
+    const sms = new ScriptedSender([DELIVERED_RESULT]);
+    Object.assign(sms, { channel: "sms", provider: "twilio" });
+    await drainTenant(
+      opts(store, new FakeResolver([recipient(USER_A, "a@x.test")]), new SenderRegistry([sms])),
+      TENANT,
+    );
+    expect(sms.seen).toEqual([]);
+    expect(store.attempts).toHaveLength(1);
+    expect(store.attempts[0]?.outcome).toBe("dropped");
+    expect(store.attempts[0]?.errorCode).toBe(RECIPIENT_UNADDRESSABLE_ERROR_CODE);
+    expect(() => DeliveryAttemptSchema.parse(store.attempts[0])).not.toThrow();
+    expect(store.advances[0]?.update.status).toBe("failed");
+  });
+
+  it("sends an sms to the recipient's E.164 phone, never to their email", async () => {
+    const store = new FakeStore();
+    store.claims = [{ rowId: "row-1", dispatch: dispatch({ channel: "sms" }) }];
+    const sms = new ScriptedSender([DELIVERED_RESULT]);
+    Object.assign(sms, { channel: "sms", provider: "twilio" });
+    const withPhone = { ...recipient(USER_A, "a@x.test"), phoneE164: "+15550100" };
+    await drainTenant(opts(store, new FakeResolver([withPhone]), new SenderRegistry([sms])), TENANT);
+    expect(sms.seen.map((r) => r.recipientAddress)).toEqual(["+15550100"]);
+  });
+
+  it("hands the sender the dispatch's rendered content, resolved once per dispatch", async () => {
+    const store = new FakeStore();
+    store.claims = [{ rowId: "row-1", dispatch: dispatch() }];
+    const sender = new ScriptedSender([DELIVERED_RESULT]);
+    let resolved = 0;
+    const content = { subject: "S", body: "B", htmlBody: null };
+    await drainTenant(
+      {
+        ...opts(
+          store,
+          new FakeResolver([recipient(USER_A, "a@x.test"), recipient(USER_B, "b@x.test")]),
+          new SenderRegistry([sender]),
+        ),
+        content: async () => {
+          resolved += 1;
+          return { kind: "rendered", content };
+        },
+      },
+      TENANT,
+    );
+    expect(sender.seen.map((r) => r.content)).toEqual([content, content]);
+    expect(resolved).toBe(1);
+  });
+
+  it("sends with no content when the source declines or throws", async () => {
+    for (const source of [
+      async () => ({ kind: "not_rendered" as const, reason: "variables_not_persisted" as const }),
+      async () => {
+        throw new Error("boom");
+      },
+    ]) {
+      const store = new FakeStore();
+      store.claims = [{ rowId: "row-1", dispatch: dispatch() }];
+      const sender = new ScriptedSender([DELIVERED_RESULT]);
+      await drainTenant(
+        {
+          ...opts(store, new FakeResolver([recipient(USER_A, "a@x.test")]), new SenderRegistry([sender])),
+          content: source,
+        },
+        TENANT,
+      );
+      expect(sender.seen[0]?.content).toBeNull();
+    }
+  });
+
+  it("drops a push recipient, because no device token exists to address", async () => {
+    const store = new FakeStore();
+    store.claims = [{ rowId: "row-1", dispatch: dispatch({ channel: "push_mobile" }) }];
+    await drainTenant(opts(store, new FakeResolver([recipient(USER_A, "a@x.test")])), TENANT);
+    expect(store.attempts.map((a) => a.errorCode)).toEqual([RECIPIENT_UNADDRESSABLE_ERROR_CODE]);
   });
 });
 
@@ -581,6 +774,9 @@ describe("delivery-drain — drainTenants", () => {
       recordAttempt: (t, r, a) => store.recordAttempt(t, r, a),
       advance: (t, r, u) => store.advance(t, r, u),
       dueRetries: () => store.dueRetries(),
+      reconcile: (t, r) => store.reconcile(t, r),
+      attemptedRecipients: () => store.attemptedRecipients(),
+      unsettledSending: () => store.unsettledSending(),
     };
 
     const report = await drainTenants(

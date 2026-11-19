@@ -6,6 +6,7 @@ import {
   DEFAULT_PROPOSAL_NAME,
   buildAiDesignRoutes,
   type AiDesignContext,
+  type AiProviderAdmission,
   type AiManifestCreateInput,
   type AiManifestListPage,
   type AiManifestListQuery,
@@ -796,40 +797,98 @@ describe("ai-design routes — spend ceiling", () => {
     expect(recorded).toHaveLength(0);
   });
 
-  it("allows under budget and records the actual usage cost", async () => {
+  it("allows under budget, hands the designer the tenant, and records nothing itself", async () => {
+    // The designer reserves and settles each attempt against the month; a route that also
+    // recorded `result.usage` would charge every design twice (it did until the reservation).
     const { ctx, recorded, designCalls } = withBudget(true);
-    const out = await design(ctx, { description: "a coffee shop" });
-    expect(out.status).toBe(201);
-    expect(designCalls()).toBe(1);
-    expect(recorded).toEqual([{ tenantId: TENANT, costUsd: 0.0123 }]);
-  });
-
-  it("charges a failed design too — the tokens were still spent", async () => {
-    const recorded: { tenantId: string; costUsd: number }[] = [];
-    const base = makeCtx({
-      designer: async () => ({
-        ok: false, manifest: null, manifestHash: null, issues: ["nope"], attempts: 3,
-        providerLabel: "openai/gpt-4o", usage: { inputTokens: 5, outputTokens: 5, cost: 0.02 },
-      }),
-    });
-    const ctx = {
-      ...base,
-      budget: {
-        check: async () => ({ allowed: true, spentUsd: 0, limitUsd: 25 }),
-        record: async (tenantId: string, costUsd: number) => {
-          recorded.push({ tenantId, costUsd });
-          return costUsd;
+    const seen: string[] = [];
+    const designer = ctx.designer;
+    const out = await design(
+      {
+        ...ctx,
+        designer: async (i) => {
+          seen.push(i.tenantId);
+          return (designer as NonNullable<typeof designer>)(i);
         },
       },
-    };
-    const out = await design(ctx, { description: "a coffee shop" });
-    expect(out.status).toBe(422);
-    expect(recorded).toEqual([{ tenantId: TENANT, costUsd: 0.02 }]);
+      { description: "a coffee shop" },
+    );
+    expect(out.status).toBe(201);
+    expect(designCalls()).toBe(1);
+    expect(seen).toEqual([TENANT]);
+    expect(recorded).toEqual([]);
+  });
+
+  it("402s a design the month refused mid-run, with the designer's own sentence", async () => {
+    const base = makeCtx({
+      designer: async () => ({
+        ok: false, manifest: null, manifestHash: null,
+        issues: ["the monthly AI design budget cannot absorb this request's estimated $0.1230"],
+        attempts: 1, providerLabel: "openai/gpt-4o", usage: null, failure: "monthly_budget_exhausted",
+      }),
+    });
+    const out = await design(
+      { ...base, budget: { check: async () => ({ allowed: true, spentUsd: 24.9, limitUsd: 25 }) } },
+      { description: "a coffee shop" },
+    );
+    expect(out.status).toBe(402);
+    expect(out.body["error"]).toBe("ai_budget_exceeded");
+    expect(String(out.body["detail"])).toMatch(/cannot absorb/);
   });
 
   it("is a no-op when no budget is configured", async () => {
     const out = await design(makeCtx(), { description: "a coffee shop" });
     expect(out.status).toBe(201);
+  });
+});
+
+describe("ai-design routes — provider residency", () => {
+  function gated(admission: AiProviderAdmission): { ctx: AiDesignContext; calls: () => number } {
+    let calls = 0;
+    const base = makeCtx({
+      designer: async (i) => {
+        calls += 1;
+        return okDesigner()(i);
+      },
+    });
+    return {
+      ctx: { ...base, providerAdmission: async () => admission },
+      calls: () => calls,
+    };
+  }
+
+  it("refuses a tenant whose profile forbids the provider before any call, on both routes", async () => {
+    const refusal: AiProviderAdmission = {
+      allowed: false,
+      status: 403,
+      error: "ai_provider_residency_forbidden",
+      detail: "provider 'anthropic:us' not in allowedLlmProviders for profile 'eu-only'",
+    };
+    const { ctx, calls } = gated(refusal);
+    const out = await design(ctx, { description: "a coffee shop" });
+    expect(out.status).toBe(403);
+    expect(out.body["error"]).toBe("ai_provider_residency_forbidden");
+    expect(calls()).toBe(0);
+    const { ctx: jobCtx, jobs, started } = makeJobCtx();
+    const job = await createJob({ ...jobCtx, providerAdmission: async () => refusal }, { description: "x" });
+    expect(job.status).toBe(403);
+    expect(jobs.createCalls).toHaveLength(0);
+    expect(started).toHaveLength(0);
+  });
+
+  it("asks residency before the month, so the remedy named is the one that applies", async () => {
+    const { ctx } = gated({ allowed: false, status: 503, error: "ai_residency_unresolved", detail: "x" });
+    const out = await design(
+      { ...ctx, budget: { check: async () => ({ allowed: false, spentUsd: 30, limitUsd: 25 }) } },
+      { description: "a coffee shop" },
+    );
+    expect(out.status).toBe(503);
+  });
+
+  it("admits an allowed tenant", async () => {
+    const { ctx, calls } = gated({ allowed: true });
+    expect((await design(ctx, { description: "a coffee shop" })).status).toBe(201);
+    expect(calls()).toBe(1);
   });
 });
 

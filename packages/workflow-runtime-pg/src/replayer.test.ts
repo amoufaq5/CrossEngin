@@ -6,7 +6,7 @@ import {
   WorkflowDefinitionIdResolver,
   WorkflowInstanceIdResolver,
 } from "./id-mapping.js";
-import { RESYNC_REFUSALS, WorkflowReplayer, timerProjectionSignature } from "./replayer.js";
+import { RESYNC_REFUSALS, SNAPSHOT_SQL, WorkflowReplayer, timerProjectionSignature } from "./replayer.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 const INSTANCE_UUID = "00000000-0000-4000-8000-000000000111";
@@ -33,6 +33,12 @@ interface MockState {
    */
   rlsEnabled: boolean;
   isOwner: boolean;
+  /**
+   * Every statement issued inside a transaction, in order, so the snapshot a verification reads
+   * under is observable. The transaction runs its callback — a fake that discarded it would make the
+   * whole verification unobservable (ADR-0389) and every report `undefined`.
+   */
+  txStatements: string[];
 }
 
 function fixtureDefinition(): WorkflowDefinition {
@@ -166,8 +172,7 @@ function signalReceivedEvent(): WorkflowEvent {
 }
 
 function buildMockConnection(state: MockState): PgConnection {
-  return {
-    query: vi.fn(async (sql: string, params?: readonly unknown[]): Promise<PgQueryResult> => {
+  const query = vi.fn(async (sql: string, params?: readonly unknown[]): Promise<PgQueryResult> => {
       void params;
       if (sql.includes("FROM pg_class c")) {
         // `policies_active` is derived here, not taken from `MockState`, because the probe's
@@ -265,11 +270,23 @@ function buildMockConnection(state: MockState): PgConnection {
         return { rows: [], rowCount: 1 };
       }
       return { rows: [], rowCount: 0 };
-    }) as PgConnection["query"],
-    transaction: vi.fn() as PgConnection["transaction"],
+    });
+  const conn: PgConnection = {
+    query: query as PgConnection["query"],
+    transaction: (async <T,>(fn: (tx: PgConnection) => Promise<T>): Promise<T> => {
+      const tx: PgConnection = {
+        ...conn,
+        query: (async (sql: string, params?: readonly unknown[]) => {
+          state.txStatements.push(sql);
+          return query(sql, params);
+        }) as PgConnection["query"],
+      };
+      return fn(tx);
+    }) as PgConnection["transaction"],
     withAdvisoryLock: vi.fn() as PgConnection["withAdvisoryLock"],
     close: vi.fn() as PgConnection["close"],
   };
+  return conn;
 }
 
 function buildReplayer(
@@ -297,6 +314,7 @@ function emptyState(events: WorkflowEvent[] = []): MockState {
     updates: [],
     rlsEnabled: true,
     isOwner: true,
+    txStatements: [],
   };
 }
 
@@ -563,6 +581,23 @@ describe("WorkflowReplayer.resyncInstance", () => {
 });
 
 describe("WorkflowReplayer.verifyInstance", () => {
+  it("reads the log and every projection inside one read-only repeatable-read snapshot", async () => {
+    const state = emptyState([startedEvent(), signalReceivedEvent()]);
+    state.signals = [{ signal_id: "wfs_sig00001", status: "matched_to_instance" }];
+    const replayer = buildReplayer(state);
+    await replayer.verifyInstance("wfi_inst0001");
+    // The isolation level is the transaction's first statement: Postgres refuses it after any query.
+    expect(state.txStatements[0]).toBe(SNAPSHOT_SQL);
+    expect(SNAPSHOT_SQL).toBe("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    const inSnapshot = (fragment: string): boolean => state.txStatements.some((q) => q.includes(fragment));
+    // Both sides of every comparison come from the snapshot — the log and all four projections.
+    expect(inSnapshot("FROM meta.workflow_events")).toBe(true);
+    expect(inSnapshot("SELECT instance_id, status, current_state")).toBe(true);
+    expect(inSnapshot("FROM meta.workflow_activities")).toBe(true);
+    expect(inSnapshot("FROM meta.workflow_signals")).toBe(true);
+    expect(inSnapshot("FROM meta.workflow_timers")).toBe(true);
+  });
+
   it("returns hasEvents=false + drifted=false when there are no events", async () => {
     const replayer = buildReplayer(emptyState());
     const report = await replayer.verifyInstance("wfi_inst0001");

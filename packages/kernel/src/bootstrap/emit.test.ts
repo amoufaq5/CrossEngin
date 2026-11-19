@@ -940,14 +940,15 @@ describe("the catalog's own emission is unchanged", () => {
    */
   const statements = emitBootstrapSql(META_SCHEMA_NAME, META_TABLES);
 
-  it("writes AS RESTRICTIVE for exactly the eighteen DELETE fences, and AS PERMISSIVE never", () => {
+  it("writes AS RESTRICTIVE for exactly the twenty-four DELETE fences, and AS PERMISSIVE never", () => {
     // Until ADR-0400 this asserted the catalog wrote neither keyword, and it was a true statement
     // about a mechanism with no producer: `RlsPolicy.permissive` was declared, emitted, introspected
     // and diffed, and no table set it. The fence is the first producer, so the assertion becomes a
     // both-directions one rather than a flip — the dangerous direction being a *nineteenth*
     // restrictive policy nobody chose, which an `.toEqual([])` cannot see and a count would hide.
     //
-    // Eighteen since ADR-0401, which fenced the two statutory-retention tables. The floor below is a
+    // Twenty-four: eighteen retained tables since ADR-0401, plus six the erasure does not retain and
+    // a tenant must still not destroy (`tenantUndeletableRecord`, M-01 slice). The floor below is a
     // non-vacuity guard and not the claim: what makes this a partition is the `toEqual` against the
     // derived set, so the number only has to move when the set does.
     const restrictive = statements
@@ -959,7 +960,7 @@ describe("the catalog's own emission is unchanged", () => {
         .map((t) => `${t}_no_tenant_delete`)
         .sort(),
     );
-    expect(restrictive).toHaveLength(18);
+    expect(restrictive).toHaveLength(24);
     // `AS PERMISSIVE` is the `CREATE POLICY` default, so writing it is never necessary and a policy
     // that does has had `permissive: true` declared by hand — which the catalog has no reason to do
     // and which would make the omitted-means-permissive canonicalisation untestable.
@@ -1031,7 +1032,7 @@ describe("the catalog's own emission is unchanged", () => {
         expect(policy.permissive, `${table.name}.${policy.name}`).toBeUndefined();
       }
     }
-    expect(fences).toBe(18);
+    expect(fences).toBe(24);
   });
 });
 

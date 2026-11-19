@@ -29,16 +29,22 @@ function mockConn(
   rowsForClaim: readonly Record<string, unknown>[],
   capture?: Array<{ sql: string; params: readonly unknown[] | undefined }>,
 ): PgConnection {
-  return {
+  const conn: PgConnection = {
     query: (async (sql: string, params?: readonly unknown[]): Promise<PgQueryResult> => {
       if (capture !== undefined) capture.push({ sql, params });
+      // The pre-start reaffirmation: the claim this fake handed out is still this worker's.
+      if (sql.includes("SET claim_expires_at = $3")) return { rows: [], rowCount: rowsForClaim.length > 0 ? 1 : 0 };
       // The claim is the only statement that RETURNs rows.
       return sql.includes("RETURNING") ? { rows: rowsForClaim, rowCount: rowsForClaim.length } : { rows: [], rowCount: 0 };
     }) as PgConnection["query"],
-    transaction: (async () => undefined) as unknown as PgConnection["transaction"],
+    // Runs its callback: the release and renew run inside the row's tenant context now, and a fake
+    // that discarded the callback would make both unobservable (ADR-0389).
+    transaction: (async <T,>(fn: (tx: PgConnection) => Promise<T>): Promise<T> =>
+      fn(conn)) as PgConnection["transaction"],
     withAdvisoryLock: (async () => undefined) as unknown as PgConnection["withAdvisoryLock"],
     close: (async () => undefined) as PgConnection["close"],
   };
+  return conn;
 }
 
 function recordingEngine(): {
@@ -70,8 +76,13 @@ describe("buildActivityClaimer", () => {
 
   it("releases via releaseActivityClaim", async () => {
     const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
-    await buildActivityClaimer(mockConn([], capture)).release({ activityId: "wfa_act00001", workerId: "w" });
-    expect(capture[0]!.sql).toContain("SET claimed_by = NULL");
+    await buildActivityClaimer(mockConn([], capture)).release({
+      activityId: "wfa_act00001",
+      workerId: "w",
+      tenantId: "00000000-0000-4000-8000-000000000001",
+    });
+    expect(capture[0]!.sql).toContain("set_config('app.current_tenant_id'");
+    expect(capture[1]!.sql).toContain("SET claimed_by = NULL");
   });
 });
 
@@ -158,5 +169,26 @@ describe("buildWorkflowActivityWorker — end to end", () => {
     const { engine } = recordingEngine();
     const worker = buildWorkflowActivityWorker({ conn: mockConn([]), engine, workerId: "w", now: () => new Date(NOW) });
     expect((await worker.runOnce()).claimed).toBe(0);
+  });
+
+  it("reaffirms the claim under the activity's tenant before executing, and skips one it lost", async () => {
+    const { engine, executed } = recordingEngine();
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const base = mockConn([claimRow()], capture);
+    const conn: PgConnection = {
+      ...base,
+      query: (async (sql: string, params?: readonly unknown[]) =>
+        sql.includes("SET claim_expires_at = $3")
+          ? (capture.push({ sql, params }), { rows: [], rowCount: 0 })
+          : base.query(sql, params)) as PgConnection["query"],
+      transaction: (async <T,>(fn: (tx: PgConnection) => Promise<T>): Promise<T> =>
+        fn(conn)) as PgConnection["transaction"],
+    };
+    const worker = buildWorkflowActivityWorker({ conn, engine, workerId: "worker-A", now: () => new Date(NOW) });
+    const result = await worker.runOnce();
+    expect(result.skipped).toEqual([{ activityId: "wfa_act00001", reason: "lease_lost" }]);
+    expect(executed).toEqual([]);
+    const renew = capture.find((c) => c.sql.includes("SET claim_expires_at = $3"))!;
+    expect(renew.params).toEqual(["wfa_act00001", "worker-A", "2026-05-17T12:00:30.000Z", TENANT]);
   });
 });

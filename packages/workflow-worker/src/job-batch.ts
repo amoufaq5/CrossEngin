@@ -5,6 +5,7 @@ import type {
   JobClaimer,
   JobProcessor,
 } from "./job-types.js";
+import { reaffirmClaim, type ClaimRenewer } from "./renew.js";
 
 export interface JobBatchFailure {
   readonly jobId: string;
@@ -12,7 +13,12 @@ export interface JobBatchFailure {
 }
 
 /** Why a claimed run was handed back without being started. */
-export const JOB_SKIP_REASONS = ["cancel_requested", "cancellation_unknown", "worker_stopping"] as const;
+export const JOB_SKIP_REASONS = [
+  "cancel_requested",
+  "cancellation_unknown",
+  "worker_stopping",
+  "lease_lost",
+] as const;
 export type JobSkipReason = (typeof JOB_SKIP_REASONS)[number];
 
 export interface JobBatchSkip {
@@ -37,6 +43,8 @@ export interface ProcessJobBatchOptions {
   /** Checked before each item; `false` stops the batch and hands the rest back. */
   readonly shouldContinue?: () => boolean;
   readonly onSkipped?: (job: ClaimedJob, reason: JobSkipReason) => void;
+  /** Renews each run's claim just before it starts; see `ProcessTimerBatchOptions.claimRenewer`. */
+  readonly claimRenewer?: ClaimRenewer | null;
 }
 
 /**
@@ -72,7 +80,7 @@ export async function processJobBatch(
 
   const release = async (job: ClaimedJob): Promise<void> => {
     try {
-      await claimer.release({ jobId: job.jobId, workerId: opts.workerId });
+      await claimer.release({ jobId: job.jobId, workerId: opts.workerId, tenantId: job.tenantId });
     } catch {
       // The lease will lapse and recover the run regardless.
     }
@@ -84,6 +92,19 @@ export async function processJobBatch(
       skipped.push({ jobId: job.jobId, reason });
       options.onSkipped?.(job, reason);
       await release(job);
+      continue;
+    }
+    if (
+      options.claimRenewer !== undefined &&
+      options.claimRenewer !== null &&
+      !(await reaffirmClaim(options.claimRenewer, {
+        id: job.jobId,
+        workerId: opts.workerId,
+        tenantId: job.tenantId,
+      }))
+    ) {
+      skipped.push({ jobId: job.jobId, reason: "lease_lost" });
+      options.onSkipped?.(job, "lease_lost");
       continue;
     }
     try {

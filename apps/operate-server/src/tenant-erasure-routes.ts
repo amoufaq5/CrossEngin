@@ -2,6 +2,11 @@ import type { PathSegment, ResolvedPrincipal, RouteDefinition } from "@crossengi
 import type { Handler, HandlerOutput, PrincipalRoles } from "@crossengin/api-gateway-runtime";
 import type { ExtraGatewayRoute } from "@crossengin/operate-runtime";
 import { z } from "zod";
+import {
+  DELETION_REQUEST_ID_RE,
+  resolveVerifiedApproval,
+  type ApprovingRequestStoreLike,
+} from "./tenant-deletion-routes.js";
 
 /**
  * `GET /v1/platform/tenants/{id}/schema` and `POST /v1/platform/tenants/{id}/erase-schema` — the
@@ -20,11 +25,13 @@ import { z } from "zod";
  * extent of first is one they approve blind. It writes nothing and takes no lock, so it is safe to
  * render in a console.
  *
- * **Four-eyes is structural, not advisory.** `executedBy` is the authenticated caller and is never read
- * from the body; `approvedBy` comes from the body and must differ. So the route cannot be driven by one
- * person holding one credential, which is the same rule `TombstoneRecordSchema` enforces on the
- * receipt — applied here *before* the data is gone, because a record that fails to parse afterwards is
- * a refusal that arrives too late to matter.
+ * **Four-eyes is structural, and both eyes authenticate (H-05).** `executedBy` is the authenticated
+ * caller. The approver used to be a body field — a name the caller typed — and is now the principal who
+ * verified the deletion request the body names (`relatedDeletionRequestId`), through the same
+ * `resolveVerifiedApproval` the deletion route uses, so one person holding one credential cannot drive
+ * either. Applied *before* the data is gone, because a record that fails to parse afterwards is a
+ * refusal that arrives too late to matter. The request is not moved here: erasing the schema is one
+ * step of the deletion, and the request's terminal state belongs to the tombstone that proves it.
  *
  * **The response is the tombstone's evidence.** It carries the schema, the schema-qualified table list,
  * the exact row count and the byte total, which is what a caller merges into `DeletionScope`. A
@@ -117,6 +124,10 @@ export type TenantErasureRecorder = (event: TenantErasureEvent) => Promise<void>
 
 export interface TenantErasureRoutesContext {
   readonly eraser: TenantSchemaEraserLike;
+  /** Where the approval comes from (H-05): a verified deletion request for this tenant. */
+  readonly requests: Pick<ApprovingRequestStoreLike, "read">;
+  /** The declared wait between a verify and acting on it (ms). Absent ⇒ no wait. */
+  readonly graceMs?: number;
   readonly principalRoles: (principal: ResolvedPrincipal | null) => PrincipalRoles;
   /**
    * Roles permitted to survey and erase. Fail-closed: empty ⇒ nobody. Deliberately one grant for both
@@ -131,8 +142,8 @@ export interface TenantErasureRoutesContext {
 
 export const EraseSchemaInputSchema = z
   .object({
-    /** The second person. Refused when it equals the caller — see the module note. */
-    approvedBy: z.string().min(1).max(200),
+    /** The verified request this erasure acts under; its verifier is the approver. */
+    relatedDeletionRequestId: z.string().regex(DELETION_REQUEST_ID_RE),
     /**
      * The tenant id, repeated in the body. A destructive, irreversible action should not be one
      * mistyped path segment away, so the path and the body must agree.
@@ -294,7 +305,16 @@ function buildEraseHandler(ctx: TenantErasureRoutesContext): Handler {
     if (!UUID_RE.test(tenantId)) {
       return json(400, { error: "invalid_request", detail: "tenant id must be a uuid" });
     }
-    const parsed = EraseSchemaInputSchema.safeParse(input.parsedBody ?? {});
+    const body = input.parsedBody;
+    if (typeof body === "object" && body !== null && "approvedBy" in body) {
+      return json(400, {
+        error: "approver_is_the_verifier",
+        detail:
+          "approvedBy is not accepted: the approver is the principal who verified the deletion " +
+          "request named by relatedDeletionRequestId",
+      });
+    }
+    const parsed = EraseSchemaInputSchema.safeParse(body ?? {});
     if (!parsed.success) {
       return json(400, {
         error: "invalid_request",
@@ -308,18 +328,19 @@ function buildEraseHandler(ctx: TenantErasureRoutesContext): Handler {
       });
     }
     const executedBy = input.principal.principalId;
-    if (executedBy === parsed.data.approvedBy) {
-      // Also refused by the plan, which is the layer that matters; refused here so the caller gets a
-      // 403 naming the rule rather than a generic refusal after a survey has already run.
-      return json(403, {
-        error: "four_eyes_required",
-        detail: "approvedBy must not be the caller: erasing a tenant's data needs a second person",
-      });
-    }
+    const approval = await resolveVerifiedApproval(ctx.requests, {
+      requestId: parsed.data.relatedDeletionRequestId,
+      tenantId,
+      executedBy,
+      now: (ctx.clock ?? ((): Date => new Date()))(),
+      ...(ctx.graceMs !== undefined ? { graceMs: ctx.graceMs } : {}),
+    });
+    if (!approval.ok) return json(approval.status, approval.body);
+    const approvedBy = approval.approvedBy;
 
     let erasure: SchemaErasureLike;
     try {
-      erasure = await ctx.eraser.erase(tenantId, { executedBy, approvedBy: parsed.data.approvedBy });
+      erasure = await ctx.eraser.erase(tenantId, { executedBy, approvedBy });
     } catch (err) {
       // Includes the "dropped but still present" guard, which rolls back rather than reporting
       // success. No detail: the message can name the schema's internals.
@@ -335,7 +356,7 @@ function buildEraseHandler(ctx: TenantErasureRoutesContext): Handler {
         schema: erasure.schema,
         principalId: executedBy,
         operation: refused ? TENANT_SCHEMA_ERASE_REFUSED_OPERATION : TENANT_SCHEMA_ERASED_OPERATION,
-        approvedBy: parsed.data.approvedBy,
+        approvedBy,
         rowCount: erasure.rowCount,
         storageBytes: erasure.storageBytes,
         tables: qualify(erasure.schema, erasure.erasedRelations),

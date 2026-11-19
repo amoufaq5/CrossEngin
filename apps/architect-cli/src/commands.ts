@@ -447,8 +447,17 @@ export async function runChat(
       approver = interactiveApprover({ io: ctx.io, reader: lines });
     }
   }
+  const fileToolsEnabled = !toolsDisabled && (allowFileRead || allowFileWrite);
+  if (command.flags.has("file-root") && !fileToolsEnabled) {
+    // A root that confines nothing reads, in the invocation, as a confinement that is in force.
+    printError(
+      ctx.io,
+      `chat: --file-root has no effect ${toolsDisabled ? "under --no-tools" : "without --allow-file-read or --allow-file-write"}; drop it or enable a file tool`,
+    );
+    return 2;
+  }
   let fileRootDir: string | undefined;
-  if (!toolsDisabled && (allowFileRead || allowFileWrite)) {
+  if (fileToolsEnabled) {
     const fileRootFlag = getStringFlag(command, "file-root");
     if (command.flags.has("file-root") && (fileRootFlag === null || fileRootFlag.length === 0)) {
       // A bare --file-root would otherwise fall back to the working directory, which is not what was asked.

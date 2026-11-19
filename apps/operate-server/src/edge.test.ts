@@ -122,6 +122,44 @@ describe("fetchToRaw", () => {
     expect(problem.type).toBe("https://crossengin.io/problems/payload-too-large");
     expect(problem.status).toBe(413);
   });
+
+  it("answers a body that fails mid-read with a fixed 500 naming an id, never the cause", async () => {
+    const h = buildEdgeFetchHandler({
+      edgeTrust: "untrusted",
+      manifest,
+      apiKeys: [parseApiKeySpec(`k:store_manager:${TENANT}`)],
+    });
+    const failing = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.error(new Error("socket reset at db-internal-host:5432"));
+      },
+    });
+    const logged: unknown[][] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]): void => {
+      logged.push(args);
+    };
+    let res: Response;
+    try {
+      res = await h.fetch(
+        new Request("https://api.example.com/v1/products", {
+          method: "POST",
+          headers: { "x-api-key": "k", "content-type": "application/json" },
+          body: failing,
+          duplex: "half",
+        } as RequestInit),
+      );
+    } finally {
+      console.error = original;
+    }
+    expect(res.status).toBe(500);
+    const text = await res.text();
+    expect(text).not.toContain("db-internal-host");
+    const requestId = res.headers.get("x-request-id");
+    expect(requestId).toMatch(/^req_/);
+    expect(text).toContain(requestId);
+    expect(logged.some((line) => String(line[0]).includes(requestId ?? "?") && String(line[0]).includes("db-internal-host"))).toBe(true);
+  });
 });
 
 describe("createFetchHandler — serving over the Fetch API", () => {

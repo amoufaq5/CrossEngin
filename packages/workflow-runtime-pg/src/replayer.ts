@@ -362,6 +362,9 @@ function canonicalJson(value: unknown): string {
   return JSON.stringify(value) ?? "null";
 }
 
+/** One consistent view of the log and its projections; see `WorkflowReplayer.verifyInstance`. */
+export const SNAPSHOT_SQL = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY";
+
 export class WorkflowReplayer {
   private readonly conn: PgConnection;
   private readonly definitions: ReadonlyMap<string, WorkflowDefinition>;
@@ -529,9 +532,37 @@ export class WorkflowReplayer {
     };
   }
 
+  /**
+   * Reads the log and all four projections under **one snapshot**, and only then compares them.
+   *
+   * The comparison is equality — `sequence_cursor`, a status, a fire count — and equality is only
+   * sound when both sides describe the same moment (CLAUDE.md register P2.17). Issued as separate
+   * statements on the pool, the log could be read before an append and the projection after it, or
+   * the reverse, and every in-flight instance read as drifted; and before the append became one
+   * transaction, a reader could also see an event whose projection had not yet been written, which
+   * no ordering of the reads could fix. With the append atomic and the reads in one
+   * `REPEATABLE READ` snapshot, the projection a reader sees is the fold of the log it sees, so a
+   * difference is drift and not timing. `READ ONLY` makes a serialization failure unreachable — it
+   * needs a write — so a sweep needs no retry loop. The isolation level is the transaction's first
+   * statement because Postgres refuses it after any query (`25001`), and nothing here sets a tenant
+   * context first, since a replay is deliberately cross-tenant (see `probeVisibility`).
+   */
   async verifyInstance(instanceId: string): Promise<VerifyReport> {
     const verifiable = (await this.probeVisibility()).usable;
-    const log = await this.eventLog.listByInstanceWithUnreadable(instanceId);
+    return this.conn.transaction(async (tx) => {
+      await tx.query(SNAPSHOT_SQL);
+      return this.verifyInstanceIn(tx, instanceId, verifiable);
+    });
+  }
+
+  private async verifyInstanceIn(
+    db: PgConnection,
+    instanceId: string,
+    verifiable: boolean,
+  ): Promise<VerifyReport> {
+    const resolver = this.instanceResolver.boundTo(db);
+    const eventLog = new PostgresEventLog({ conn: db, instanceResolver: resolver });
+    const log = await eventLog.listByInstanceWithUnreadable(instanceId);
     const unreadableEvents = log.unreadable;
     const events = log.records;
     if (events.length === 0) {
@@ -542,7 +573,7 @@ export class WorkflowReplayer {
       // `hasEvents: false` with a non-empty `unreadableEvents` is a third state and not a
       // contradiction: the log has rows and none of them could be read, which is the opposite of
       // `instanceOrphaned` and would otherwise be reported as it.
-      const orphan = await this.fetchInstanceRow(instanceId);
+      const orphan = await this.fetchInstanceRow(db, instanceId);
       return {
         instanceId,
         hasEvents: false,
@@ -572,7 +603,7 @@ export class WorkflowReplayer {
       expected = null;
       logUnprojectable = messageOf(err);
     }
-    const storedInstance = await this.fetchInstanceRow(instanceId);
+    const storedInstance = await this.fetchInstanceRow(db, instanceId);
     const instanceDrift = expected === null
       ? {
           instanceMissing: false,
@@ -585,7 +616,7 @@ export class WorkflowReplayer {
     // reason, as the signals below: a read-only report must stay answerable when the definition map
     // is incomplete, and it compares only the two fields a resync can repair.
     const expectedActivities = projectActivities(events);
-    const storedActivities = await this.fetchActivityRows(instanceId);
+    const storedActivities = await this.fetchActivityRows(db, resolver, instanceId);
     const activityDrift = compareActivityProjections(expectedActivities, storedActivities);
 
     // `projectSignals`, not `projectPersistableSignals`: this is the read-only report, and it
@@ -597,14 +628,14 @@ export class WorkflowReplayer {
     // opposite choice from the write path above — a diagnostic that refuses to diagnose is worse
     // than one that reports less, while a write that invents a guarantee is worse than no write.
     const expectedSignals = projectSignals(events);
-    const storedSignals = await this.fetchSignalRows(instanceId);
+    const storedSignals = await this.fetchSignalRows(db, resolver, instanceId);
     const signalDrift = compareSimpleProjections(
       expectedSignals.map((s) => ({ id: s.id, status: s.status })),
       storedSignals.map((s) => ({ id: s.signal_id, status: s.status })),
     );
 
     const expectedTimers = projectTimers(events);
-    const storedTimers = await this.fetchTimerRows(instanceId);
+    const storedTimers = await this.fetchTimerRows(db, resolver, instanceId);
     const timerDrift = compareSimpleProjections(
       expectedTimers.map((t) => ({
         id: t.id,
@@ -740,8 +771,8 @@ export class WorkflowReplayer {
     return { reports, errors };
   }
 
-  private async fetchInstanceRow(instanceId: string): Promise<StoredInstanceRow | null> {
-    const result = await this.conn.query<StoredInstanceRow>(
+  private async fetchInstanceRow(db: PgConnection, instanceId: string): Promise<StoredInstanceRow | null> {
+    const result = await db.query<StoredInstanceRow>(
       `SELECT instance_id, status, current_state, variables, sequence_cursor,
               completed_at, failed_at, cancelled_at, suspended_at,
               compensation_started_at, compensation_completed_at,
@@ -755,10 +786,14 @@ export class WorkflowReplayer {
     return result.rows[0] ?? null;
   }
 
-  private async fetchActivityRows(instanceId: string): Promise<readonly StoredActivityRow[]> {
-    const uuid = await this.instanceResolver.resolve(instanceId);
+  private async fetchActivityRows(
+    db: PgConnection,
+    resolver: WorkflowInstanceIdResolver,
+    instanceId: string,
+  ): Promise<readonly StoredActivityRow[]> {
+    const uuid = await resolver.resolve(instanceId);
     if (uuid === null) return [];
-    const result = await this.conn.query<StoredActivityRow>(
+    const result = await db.query<StoredActivityRow>(
       `SELECT activity_id, status, definition_activity_key
          FROM ${SCHEMA}.workflow_activities
         WHERE instance_id = $1`,
@@ -767,10 +802,14 @@ export class WorkflowReplayer {
     return result.rows;
   }
 
-  private async fetchSignalRows(instanceId: string): Promise<readonly StoredSignalRow[]> {
-    const uuid = await this.instanceResolver.resolve(instanceId);
+  private async fetchSignalRows(
+    db: PgConnection,
+    resolver: WorkflowInstanceIdResolver,
+    instanceId: string,
+  ): Promise<readonly StoredSignalRow[]> {
+    const uuid = await resolver.resolve(instanceId);
     if (uuid === null) return [];
-    const result = await this.conn.query<StoredSignalRow>(
+    const result = await db.query<StoredSignalRow>(
       `SELECT signal_id, status
          FROM ${SCHEMA}.workflow_signals
         WHERE instance_id = $1`,
@@ -779,10 +818,14 @@ export class WorkflowReplayer {
     return result.rows;
   }
 
-  private async fetchTimerRows(instanceId: string): Promise<readonly StoredTimerRow[]> {
-    const uuid = await this.instanceResolver.resolve(instanceId);
+  private async fetchTimerRows(
+    db: PgConnection,
+    resolver: WorkflowInstanceIdResolver,
+    instanceId: string,
+  ): Promise<readonly StoredTimerRow[]> {
+    const uuid = await resolver.resolve(instanceId);
     if (uuid === null) return [];
-    const result = await this.conn.query<StoredTimerRow>(
+    const result = await db.query<StoredTimerRow>(
       `SELECT timer_id, status, fire_count, next_fire_at
          FROM ${SCHEMA}.workflow_timers
         WHERE instance_id = $1`,

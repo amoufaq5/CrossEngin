@@ -94,8 +94,10 @@ describe("withDecimalWireType", () => {
 
   it("passes null and absent through untouched", async () => {
     const store = wrapped();
+    // Not converted and not refused: the null reaches the store, which serves a field with no
+    // value as absent on every binding (ADR-0414 Q4).
     const created = await store.create("t1", "Invoice", { id: "a", total: null });
-    expect(created["total"]).toBeNull();
+    expect("total" in created).toBe(false);
     expect("rate" in created).toBe(false);
   });
 
@@ -227,5 +229,17 @@ describe("ordering under the wire type", () => {
       filters: [{ field: "rate", op: "eq", value: "1.5" }],
     });
     expect(page.records.map((r) => r["id"])).toEqual(["a"]);
+  });
+});
+
+describe("withDecimalWireType passes a page's narrowing through", () => {
+  it("keeps `searchNarrowedBy`, which rebuilding the page from its records would drop", async () => {
+    class Narrowing extends InMemoryEntityStore {
+      override async listPage(...args: Parameters<InMemoryEntityStore["listPage"]>) {
+        return { ...(await super.listPage(...args)), searchNarrowedBy: ["mrn"] };
+      }
+    }
+    const page = await withDecimalWireType(new Narrowing(), INDEX).listPage("t1", "Invoice", QUERY);
+    expect(page.searchNarrowedBy).toEqual(["mrn"]);
   });
 });

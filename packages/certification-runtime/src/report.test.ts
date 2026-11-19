@@ -163,6 +163,21 @@ describe("seal", () => {
 });
 
 describe("formatCertificationReport", () => {
+  it("words a fully satisfied report as readiness evidence and never as a certification (H-19)", () => {
+    const { clock, ids } = fixtures();
+    const report = buildCertificationReport({
+      framework: "soc2_type2",
+      evidence: compliantEvidence(),
+      clock,
+      ids,
+    });
+    expect(report.certifiable).toBe(true);
+    const text = formatCertificationReport(report);
+    expect(text).toContain("Control readiness: soc2_type2 — every automated control satisfied");
+    expect(text).toContain("automated evidence over 4 control(s)");
+    expect(text).not.toMatch(/CERTIFIABLE|certified/i);
+  });
+
   it("renders PASS/FAIL/MISS lines and the seal", () => {
     const { clock, ids } = fixtures();
     const evidence = compliantEvidence();
@@ -185,7 +200,9 @@ describe("formatCertificationReport", () => {
       ids,
     });
     const text = formatCertificationReport(report);
-    expect(text).toContain("NOT CERTIFIABLE");
+    expect(text).toContain("Control readiness: soc2_type2 — NOT READY");
+    expect(text).toContain("not a certification");
+    expect(text).not.toContain("CERTIFIABLE");
     expect(text).toContain("[PASS]");
     expect(text).toContain("[FAIL]");
     expect(text).toContain("[MISS]");

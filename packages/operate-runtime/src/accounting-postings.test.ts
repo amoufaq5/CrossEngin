@@ -507,7 +507,11 @@ describe("the unrealized FX revaluation reverses itself and posts once per perio
     let total = 0;
     for (const e of entries) {
       for (const l of await linesOf(h, String(e["id"]))) {
-        if (l["ledger_account_id"] === "unrealized_fx_gain_loss") total += cents(l["debit"]) - cents(l["credit"]);
+        // Functional amounts: a revaluation moves what a foreign balance is worth in the base currency
+        // and no transaction amount (ADR-0429's open question, closed with H-11).
+        if (l["ledger_account_id"] === "unrealized_fx_gain_loss") {
+          total += cents(l["functional_debit"]) - cents(l["functional_credit"]);
+        }
       }
     }
     return total / 100;

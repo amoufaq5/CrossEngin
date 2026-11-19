@@ -127,6 +127,32 @@ export function idempotencyMismatch(input: {
   });
 }
 
+/**
+ * Another request carrying this key is still executing. A 409 rather than a wait: the gateway holds
+ * no lock across the handler, and the honest answer is "not yet" with a time to come back.
+ *
+ * Shares the mismatch's problem type because `PROBLEM_TYPES` has one conflict entry for the key;
+ * `idempotencyState` is what tells the two apart.
+ */
+export function idempotencyInProgress(input: {
+  readonly retryAfterSeconds: number;
+  readonly correlationId?: string;
+}): ProblemEnvelope {
+  const env = buildEnvelope({
+    key: "conflict_idempotency_mismatch",
+    status: 409,
+    detail: "a request with this Idempotency-Key is still being processed; retry after it completes",
+    extensions: { idempotencyState: "in_progress", retryAfterSeconds: input.retryAfterSeconds },
+    correlationId: input.correlationId,
+    extraHeaders: { "retry-after": input.retryAfterSeconds.toString() },
+  });
+  const body = { ...env.body, title: "Idempotency-Key in use" };
+  return {
+    body,
+    response: outgoingResponseFromJson({ status: 409, headers: env.response.headers, body }),
+  };
+}
+
 export function unsupportedMediaType(input: {
   readonly contentType: string;
   readonly correlationId?: string;
@@ -183,11 +209,14 @@ export function tooManyRequests(input: {
 export function internalServerError(input: {
   readonly reason: string;
   readonly correlationId?: string;
+  /** The gateway's own id for the request — the handle an operator finds the logged cause by. */
+  readonly requestId?: string;
 }): ProblemEnvelope {
   return buildEnvelope({
     key: "internal_server_error",
     status: 500,
     detail: input.reason,
+    ...(input.requestId !== undefined ? { extensions: { requestId: input.requestId } } : {}),
     correlationId: input.correlationId,
   });
 }

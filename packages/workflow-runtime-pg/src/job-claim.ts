@@ -1,4 +1,5 @@
 import {
+  assertScopeTenantId,
   parseSessionPolicyVisibility,
   sessionPolicyVisibilityReason,
   sessionWouldBeConfined,
@@ -6,6 +7,8 @@ import {
   type PgConnection,
   type SessionPolicyVisibilityRow,
 } from "@crossengin/kernel-pg";
+
+import { SET_TENANT_CONTEXT_SQL, withTenantContext } from "./tenant-context.js";
 
 const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
 const DEFAULT_SCHEMA = "meta";
@@ -61,6 +64,14 @@ export interface ClaimDueJobsOptions {
    * process with no handlers from a claim/release hot loop.
    */
   readonly serves?: JobClaimScope;
+  /**
+   * Confines the claim to one tenant's runs (`tenant_id = …` inside the `due` CTE). Absent, the claim
+   * spans every tenant the session can see — which is every tenant only for a session Postgres
+   * exempts from the table's policies, and none at all for the shipped serving role; see
+   * `claimDueJobsPerTenant`. The predicate is the second belt beside the tenant context, and the one
+   * that keeps an exempt session from claiming another tenant's runs under a tenant's context.
+   */
+  readonly tenantId?: string;
 }
 
 interface ClaimRow {
@@ -89,10 +100,12 @@ function int(v: unknown, fallback: number): number {
  * A run with a recorded cancellation is **never** claimed: once `cancel_requested_at` is set the work
  * must not start on a fresh worker, so the predicate excludes it rather than relying on a later check.
  * That leaves such a run unclaimable, which is why `reapCancelledJobRuns` exists to finalize the ones
- * no live worker is going to honour. The worker
- * connection is platform-scoped (RLS-bypassing), so one fleet serves every tenant; `tenant_id` rides
- * back per row. (The job worker + jobs execution engine that consume this queue substrate are the
- * follow-ups; this is the primitive they plug into.)
+ * no live worker is going to honour.
+ *
+ * With `tenantId`, the claim is confined to that tenant and is meant to run under its context — the
+ * form `claimDueJobsPerTenant` uses and the worker adapter calls. Without it, the statement spans
+ * every tenant the session can see, which is every tenant only for a session exempt from the
+ * table's policies and none for a confined one; `tenant_id` rides back per row either way.
  */
 export async function claimDueJobs(
   conn: PgConnection,
@@ -111,6 +124,12 @@ export async function claimDueJobs(
   // `LIMIT` slots — so a backlog of unserved runs would starve the served ones behind it while
   // every poll honestly reported claiming nothing.
   const params: unknown[] = [options.now, limit, options.workerId, claimExpiresAt];
+  let tenantPredicate = "";
+  if (options.tenantId !== undefined) {
+    assertScopeTenantId(options.tenantId);
+    params.push(options.tenantId);
+    tenantPredicate = `\n          AND tenant_id = $${params.length.toString()}::uuid`;
+  }
   let servedPredicate = "";
   if (options.serves !== undefined) {
     const clauses: string[] = [];
@@ -130,7 +149,7 @@ export async function claimDueJobs(
         WHERE status = 'pending'
           AND started_at <= $1::timestamptz
           AND cancel_requested_at IS NULL
-          AND (claimed_by IS NULL OR claim_expires_at IS NULL OR claim_expires_at < $1::timestamptz)${servedPredicate}
+          AND (claimed_by IS NULL OR claim_expires_at IS NULL OR claim_expires_at < $1::timestamptz)${tenantPredicate}${servedPredicate}
         ORDER BY started_at ASC
         LIMIT $2
         FOR UPDATE SKIP LOCKED
@@ -151,6 +170,112 @@ export async function claimDueJobs(
     attempts: int(r.attempts, 1),
     claimExpiresAt: str(r.claim_expires_at),
   }));
+}
+
+/**
+ * The tenants whose queues a per-tenant claim visits. Every status but `deleted`: a suspended or
+ * archived tenant's already-enqueued runs are still the platform's work to finish, while a deleted
+ * tenant's queue rows were erased with it (`meta.job_runs` is not a retained table), so visiting one
+ * would only cost a round trip. `meta.tenants` carries no row-level security, which is what lets a
+ * confined session enumerate the tenants it then claims for one at a time.
+ */
+export const JOB_CLAIM_EXCLUDED_TENANT_STATUSES = ["deleted"] as const;
+
+/** Reads the tenant ids a per-tenant claim visits, in a stable order (`id`). */
+export async function listJobClaimTenants(
+  conn: PgConnection,
+  options: { readonly schema?: string } = {},
+): Promise<readonly string[]> {
+  const schema = options.schema ?? DEFAULT_SCHEMA;
+  if (!SCHEMA_RE.test(schema)) throw new Error(`invalid schema identifier: ${JSON.stringify(schema)}`);
+  const result = await conn.query<{ id: unknown }>(
+    `SELECT id FROM ${schema}.tenants WHERE status <> ALL($1::text[]) ORDER BY id`,
+    [JOB_CLAIM_EXCLUDED_TENANT_STATUSES],
+  );
+  return result.rows.map((r) => str(r.id));
+}
+
+export interface ClaimDueJobsPerTenantOptions extends Omit<ClaimDueJobsOptions, "tenantId"> {
+  /** The tenants to visit — `listJobClaimTenants`, read once per poll. */
+  readonly tenantIds: readonly string[];
+  /** Where in `tenantIds` this poll starts; the caller carries `nextStartIndex` between polls. */
+  readonly startIndex?: number;
+  /**
+   * Runs each tenant's visit before its claim, inside the same transaction and tenant context —
+   * the cancellation reaper's per-tenant form, so it reaches the rows a confined session can see.
+   */
+  readonly beforeClaim?: (tx: PgConnection, tenantId: string) => Promise<void>;
+}
+
+export interface ClaimDueJobsPerTenantResult {
+  readonly claimed: readonly ClaimedJob[];
+  /** Where the next poll should start, so the head of the tenant list is not always served first. */
+  readonly nextStartIndex: number;
+  /** How many tenants the first pass asked — the poll's cost is two statements per tenant asked. */
+  readonly tenantsVisited: number;
+}
+
+/**
+ * Claims due job runs one tenant at a time, under each tenant's own context, so a session the queue's
+ * tenant-isolation policy confines can claim at all.
+ *
+ * Why not a platform claim arm. `meta.job_runs.tenant_id` is NOT NULL, so ADR-0332's
+ * `tenant_id IS NULL` write arm admits no row (ADR-0389, proven live); and an `UPDATE` arm on a bare
+ * GUC is a cross-tenant write route for any session able to call `set_config`, which is the shape
+ * ADR-0409 removed from `meta.operate_tenant_manifests`. The tenant is a fact about the row, so the
+ * claim takes it from the row's tenant — enumerated from `meta.tenants`, which has no RLS.
+ *
+ * **One transaction, two statements per tenant asked**, and the cost is stated rather than hidden: an
+ * idle poll over N tenants is `2N + 2` round trips. `set_config(…, true)` is transaction-local and
+ * re-settable, so the tenants share one `BEGIN`/`COMMIT`; the row locks the claims take are held only
+ * until that commit.
+ *
+ * Fairness. Pass one asks each tenant, starting at `startIndex` and rotating, for at most
+ * `ceil(limit / tenants)` runs, so one tenant's backlog cannot fill every slot; pass two gives any
+ * capacity left to the tenants that filled their share. `nextStartIndex` is one past the last tenant
+ * pass one asked, so a poll that stopped early resumes with the next tenant rather than the first.
+ */
+export async function claimDueJobsPerTenant(
+  conn: PgConnection,
+  options: ClaimDueJobsPerTenantOptions,
+): Promise<ClaimDueJobsPerTenantResult> {
+  const limit = options.limit ?? DEFAULT_LIMIT;
+  if (!Number.isInteger(limit) || limit < 1) throw new Error(`invalid limit: ${String(limit)}`);
+  const tenants = options.tenantIds;
+  for (const t of tenants) assertScopeTenantId(t);
+  const n = tenants.length;
+  if (n === 0) return { claimed: [], nextStartIndex: 0, tenantsVisited: 0 };
+  const start = (((options.startIndex ?? 0) % n) + n) % n;
+  const share = Math.max(1, Math.ceil(limit / n));
+  const { tenantIds: _ignored, startIndex: _start, beforeClaim, ...claimOpts } = options;
+
+  return conn.transaction(async (tx) => {
+    const claimed: ClaimedJob[] = [];
+    const saturated: string[] = [];
+    let visited = 0;
+    let nextStartIndex = start;
+    const claimFor = async (tenantId: string, cap: number, first: boolean): Promise<number> => {
+      await tx.query(SET_TENANT_CONTEXT_SQL, [tenantId]);
+      if (first && beforeClaim !== undefined) await beforeClaim(tx, tenantId);
+      const got = await claimDueJobs(tx, { ...claimOpts, limit: cap, tenantId });
+      claimed.push(...got);
+      return got.length;
+    };
+    for (let i = 0; i < n && claimed.length < limit; i += 1) {
+      const index = (start + i) % n;
+      const tenantId = tenants[index] as string;
+      const cap = Math.min(share, limit - claimed.length);
+      const got = await claimFor(tenantId, cap, true);
+      visited += 1;
+      nextStartIndex = (index + 1) % n;
+      if (got === cap) saturated.push(tenantId);
+    }
+    for (const tenantId of saturated) {
+      if (claimed.length >= limit) break;
+      await claimFor(tenantId, limit - claimed.length, false);
+    }
+    return { claimed, nextStartIndex, tenantsVisited: visited };
+  });
 }
 
 /**
@@ -270,57 +395,61 @@ export async function probeJobQueueVisibility(
     detail:
       `Postgres will apply ${schema}.${table}'s policies to '${role}' ` +
       `(${sessionPolicyVisibilityReason(v)}), and the table has only a tenant-isolation policy — so ` +
-      "a cross-tenant claim with no app.current_tenant_id set matches nothing and every poll " +
-      `reports an empty queue. ${
-        v.rlsForced && isOwner
-          ? "Owning the table is not enough here: FORCE ROW LEVEL SECURITY confines the owner too, " +
-            "so grant the role BYPASSRLS or clear the flag"
-          : "Connect as the table's owner, or grant the role BYPASSRLS"
-      }`,
+      "a single cross-tenant claim with no app.current_tenant_id set matches nothing. " +
+      (v.rlsForced && isOwner
+        ? "Owning the table is not enough here: FORCE ROW LEVEL SECURITY confines the owner too. "
+        : "") +
+      "The job worker claims per tenant under each tenant's own context (claimDueJobsPerTenant), " +
+      "which serves the queue for this role; granting it BYPASSRLS would end the confinement the " +
+      "serving role exists for (ADR-0424) and is not the remedy",
   };
 }
 
 /**
  * Hands a claimed-but-unexecuted job back for immediate re-claim (scoped to the owning worker).
  *
- * **Deliberately not inside `withTenantContext`, and blocked by a contract rather than by wiring.**
- * Its predicate is `run_id = $1 AND claimed_by = $2` with no tenant, and the options carry none — so
- * as a non-owner this `UPDATE` matches 0 rows silently and the claim is not released. The worker
- * *has* the tenant (`ClaimedJob.tenantId`), but `JobClaimer.release` in `@crossengin/workflow-worker`
- * does not pass it and `ClaimRenewer` beside it is shared with the timer and activity workers, so
- * carrying it is a three-path contract change. Left for its own increment on a stated cost, which is
- * the only reason this is the safe half to defer: a lost release is **recoverable** — the lease
- * lapses and the run is re-claimed — where a lost finalize is not. See `tenant-context.ts`.
+ * Under the run's own tenant context, with `tenant_id` in the predicate too. `meta.job_runs` carries
+ * one `ALL`-scope tenant-isolation policy, so without the context a session that policy confines —
+ * the shipped serving role, ADR-0424 — matched 0 rows silently and the claim was not released; the
+ * predicate keeps an exempt session (the owner opt-out) to the same one row. The tenant travels from
+ * `ClaimedJob.tenantId` through `JobClaimer.release`, which is what made it a contract change across
+ * the timer, activity and job paths rather than a parameter here.
  */
 export async function releaseJobClaim(
   conn: PgConnection,
-  options: { readonly jobId: string; readonly workerId: string; readonly schema?: string },
+  options: {
+    readonly jobId: string;
+    readonly workerId: string;
+    readonly tenantId: string;
+    readonly schema?: string;
+  },
 ): Promise<void> {
   const schema = options.schema ?? DEFAULT_SCHEMA;
   if (!SCHEMA_RE.test(schema)) throw new Error(`invalid schema identifier: ${JSON.stringify(schema)}`);
-  await conn.query(
-    `UPDATE ${schema}.job_runs
-        SET claimed_by = NULL, claim_expires_at = NULL
-      WHERE run_id = $1 AND claimed_by = $2 AND status = 'pending'`,
-    [options.jobId, options.workerId],
+  await withTenantContext(conn, options.tenantId, (tx) =>
+    tx.query(
+      `UPDATE ${schema}.job_runs
+          SET claimed_by = NULL, claim_expires_at = NULL
+        WHERE run_id = $1 AND claimed_by = $2 AND status = 'pending' AND tenant_id = $3::uuid`,
+      [options.jobId, options.workerId, options.tenantId],
+    ),
   );
 }
 
 /**
- * Extends the lease on a job this worker still holds (for a slow handler). Returns `true`
- * only if the row updated — still `pending` AND still owned; `false` means the lease was lost.
+ * Extends the lease on a job this worker still holds (for a slow handler). Returns `true` only if the
+ * row updated — still `pending` AND still owned; `false` means the lease was lost.
  *
- * Unfenced for `releaseJobClaim`'s reason and with one extra consequence worth knowing: as a
- * non-owner the `UPDATE` matches 0 rows, so this answers `false` — *the lease was lost* — for a
- * lease the worker still holds. The caller's response is to stop renewing and let the run be
- * re-claimed, which is the conservative direction, so the degradation is at-least-once execution
- * rather than a wrong answer to a client.
+ * Scoped for `releaseJobClaim`'s reason. Unscoped, a confined session answered `false` — *the lease
+ * was lost* — for a lease the worker still held, so every slow handler was re-claimed by another
+ * replica while it ran and executed twice.
  */
 export async function renewJobClaim(
   conn: PgConnection,
   options: {
     readonly jobId: string;
     readonly workerId: string;
+    readonly tenantId: string;
     readonly now: string;
     readonly leaseMs?: number;
     readonly schema?: string;
@@ -331,11 +460,13 @@ export async function renewJobClaim(
   const leaseMs = options.leaseMs ?? DEFAULT_LEASE_MS;
   if (!Number.isInteger(leaseMs) || leaseMs < 1) throw new Error(`invalid leaseMs: ${String(leaseMs)}`);
   const claimExpiresAt = new Date(new Date(options.now).getTime() + leaseMs).toISOString();
-  const result = await conn.query(
-    `UPDATE ${schema}.job_runs
-        SET claim_expires_at = $3::timestamptz
-      WHERE run_id = $1 AND claimed_by = $2 AND status = 'pending'`,
-    [options.jobId, options.workerId, claimExpiresAt],
+  const result = await withTenantContext(conn, options.tenantId, (tx) =>
+    tx.query(
+      `UPDATE ${schema}.job_runs
+          SET claim_expires_at = $3::timestamptz
+        WHERE run_id = $1 AND claimed_by = $2 AND status = 'pending' AND tenant_id = $4::uuid`,
+      [options.jobId, options.workerId, claimExpiresAt, options.tenantId],
+    ),
   );
   return (result.rowCount ?? 0) > 0;
 }

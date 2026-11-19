@@ -1,5 +1,7 @@
 import type { ArchitectToolInvocationRecord } from "@crossengin/ai-architect";
-import type { PgConnection } from "@crossengin/kernel-pg";
+import { requireIsoInstant, type PgConnection } from "@crossengin/kernel-pg";
+
+import { withTenantContext } from "./tenant-context.js";
 
 const SCHEMA = "meta";
 const TABLE = "architect_tool_invocations";
@@ -27,7 +29,7 @@ interface Row {
   readonly output: string;
   readonly is_error: boolean;
   readonly duration_ms: number | null;
-  readonly started_at: string;
+  readonly started_at: unknown;
 }
 
 function parseJsonb(value: unknown): unknown {
@@ -51,7 +53,7 @@ function rowToRecord(row: Row): ArchitectToolInvocationRecord {
     output: row.output,
     isError: row.is_error,
     durationMs: row.duration_ms,
-    startedAt: row.started_at,
+    startedAt: requireIsoInstant(row.started_at, "started_at"),
   };
 }
 
@@ -64,28 +66,35 @@ export class PostgresArchitectToolInvocationStore {
        output, is_error, duration_ms)
       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9)
       RETURNING *`;
-    const result = await this.conn.query<Row>(sql, [
-      input.tenantId,
-      input.sessionId,
-      input.messageId,
-      input.toolCallId,
-      input.toolName,
-      JSON.stringify(input.input ?? null),
-      input.output,
-      input.isError,
-      input.durationMs,
-    ]);
+    const result = await withTenantContext(this.conn, input.tenantId, (tx) =>
+      tx.query<Row>(sql, [
+        input.tenantId,
+        input.sessionId,
+        input.messageId,
+        input.toolCallId,
+        input.toolName,
+        JSON.stringify(input.input ?? null),
+        input.output,
+        input.isError,
+        input.durationMs,
+      ]),
+    );
     const row = result.rows[0];
     if (row === undefined) throw new Error("append tool invocation: insert returned no row");
     return rowToRecord(row);
   }
 
-  async listForSession(sessionId: string): Promise<readonly ArchitectToolInvocationRecord[]> {
-    const result = await this.conn.query<Row>(
-      `SELECT * FROM ${SCHEMA}.${TABLE}
-       WHERE session_id = $1
-       ORDER BY started_at ASC`,
-      [sessionId],
+  async listForSession(
+    tenantId: string,
+    sessionId: string,
+  ): Promise<readonly ArchitectToolInvocationRecord[]> {
+    const result = await withTenantContext(this.conn, tenantId, (tx) =>
+      tx.query<Row>(
+        `SELECT * FROM ${SCHEMA}.${TABLE}
+         WHERE session_id = $1 AND tenant_id = $2
+         ORDER BY started_at ASC`,
+        [sessionId, tenantId],
+      ),
     );
     return result.rows.map(rowToRecord);
   }

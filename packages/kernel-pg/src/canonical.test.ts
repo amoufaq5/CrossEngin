@@ -471,7 +471,9 @@ describe("policy role canonicalization", () => {
     // `tenant_id IS NULL`, so a bare-GUC `SELECT` arm is not a platform read arm and the
     // INSERT-pairing rule skips it — the same escape `gdpr_deletion_requests`,
     // `tenant_lifecycle_events` and `tenant_tombstones` already take on a NOT NULL `tenant_id`.
-    expect(narrowed).toBe(102);
+    // **108 since the M-01 slice**: six `_no_tenant_delete` fences on tables the erasure does not
+    // retain and a tenant must still not destroy (`tenantUndeletableRecord`).
+    expect(narrowed).toBe(108);
   });
 });
 
@@ -691,14 +693,15 @@ describe("declaredPolicyPermissive", () => {
     expect(declaredPolicyPermissive({ name: "p", using: "true", permissive: false })).toBe(false);
   });
 
-  it("answers restrictive for exactly the eighteen DELETE fences, permissive for the rest", () => {
+  it("answers restrictive for exactly the twenty-four DELETE fences, permissive for the rest", () => {
     // Until ADR-0400 this read "leaves every policy in the real catalog permissive", and it was a
     // true statement about a mechanism with no producer: `permissive` was declared, emitted,
     // introspected, canonicalised here and diffed, and no table set it — so the only thing the
     // catalog could demonstrate about this function was its default. The fence is the first
     // producer, so the assertion is a partition rather than a flip, and the dangerous direction is
     // a *nineteenth* restrictive policy nobody chose: `.toBe(true)` could not have seen one, and a
-    // count would hide which table gained it. Eighteen since ADR-0401.
+    // count would hide which table gained it. Eighteen since ADR-0401, twenty-four since the M-01
+    // slice added six declared-undeletable tables.
     const restrictive: string[] = [];
     for (const t of META_TABLES) {
       for (const policy of t.rls?.policies ?? []) {
@@ -711,6 +714,6 @@ describe("declaredPolicyPermissive", () => {
         .map((t) => `${t}.${t}_no_tenant_delete`)
         .sort(),
     );
-    expect(restrictive).toHaveLength(18);
+    expect(restrictive).toHaveLength(24);
   });
 });

@@ -32,7 +32,8 @@ export const LIST_SURFACE_VERDICTS = [
    * Only `?q` is affected, and only partly: some of its fields are inexpressible and at least one
    * is not, so the search still runs over the rest. The *rows* it returns are right and a match on
    * the inexpressible field is missed, so nothing is refused and nothing is wrong — it is narrower
-   * than the view declares, and this is the only place that says so.
+   * than the view declares. This line says so at boot and each such response says so in
+   * `page.searchNarrowedBy`, since the caller holding an empty page is the one who needs telling.
    */
   "search_narrowed",
 ] as const;
@@ -200,7 +201,8 @@ export function formatListSurfaceReport(report: ListSurfaceReport): string {
   if (report.narrowedSearchEntities.length > 0) {
     lines.push(
       `  ?q is narrower than declared on ${report.narrowedSearchEntities.join(", ")}: it runs over` +
-        ` the remaining fields, so a match on an encrypted one is missed rather than refused`,
+        ` the remaining fields, so a match on an encrypted one is missed rather than refused, and` +
+        ` each response names the fields left out in page.searchNarrowedBy`,
     );
   }
   return lines.join("\n");

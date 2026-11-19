@@ -1,5 +1,13 @@
 import { NextResponse, type NextRequest } from "next/server";
 
+import {
+  CROSS_SITE_REFUSAL_DETAIL,
+  crossSiteRefusal,
+  isUpstreamTimeout,
+  provenanceOf,
+  proxyLimitsFromEnv,
+  readCappedBody,
+} from "@/lib/proxy-guard";
 import { SESSION_COOKIE, SESSION_COOKIE_OPTIONS, sessionMaxAgeSeconds } from "@/lib/session";
 import { UPSTREAM_BASE_URL } from "@/lib/upstream";
 
@@ -55,14 +63,36 @@ function readSuccess(raw: unknown): LoginSuccess | null {
   return { token, expiresAt, role: typeof role === "string" ? role : "" };
 }
 
+/**
+ * A login body is three short strings. The cap is far above any honest one and far below what an
+ * unbounded `req.json()` would buffer for a caller who sends a gigabyte to an unauthenticated route.
+ */
+const LOGIN_BODY_MAX_BYTES = 16 * 1024;
+
+/**
+ * The proxy's declared timeout, read the same way. This route is the one a caller reaches with no
+ * session, so an unbounded wait on a wedged API here holds a node worker per anonymous request.
+ */
+const LOGIN_UPSTREAM_TIMEOUT_MS = proxyLimitsFromEnv(process.env).upstreamTimeoutMs;
+
 function refused(): NextResponse {
   return NextResponse.json({ ok: false, error: REFUSED }, { status: 401 });
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  // Login CSRF: a page elsewhere posting an attacker's credentials here would sign the victim's
+  // browser into the attacker's account, so whatever they then enter lands somewhere the attacker
+  // can read. `SameSite` cannot stop it — there is no cookie yet — so the request's own provenance
+  // is checked, by the rule the proxy uses.
+  const refusal = crossSiteRefusal(provenanceOf(req));
+  if (refusal !== null) {
+    return NextResponse.json({ ok: false, error: CROSS_SITE_REFUSAL_DETAIL }, { status: 403 });
+  }
+  const read = await readCappedBody(req, LOGIN_BODY_MAX_BYTES);
+  if (!read.ok) return refused();
   let parsed: unknown;
   try {
-    parsed = await req.json();
+    parsed = JSON.parse(new TextDecoder().decode(read.bytes));
   } catch {
     return refused();
   }
@@ -76,8 +106,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       headers: { "content-type": "application/json", accept: "application/json" },
       body: JSON.stringify(credentials),
       cache: "no-store",
+      signal: AbortSignal.timeout(LOGIN_UPSTREAM_TIMEOUT_MS),
     });
-  } catch {
+  } catch (err) {
+    if (isUpstreamTimeout(err)) {
+      return NextResponse.json(
+        { ok: false, error: "The API did not answer in time. Try again shortly." },
+        { status: 504 },
+      );
+    }
     // Reachability is not a fact about the credential, so it is reported separately: an
     // operator reading "the API could not be reached" goes to the API, where one more
     // "credentials were not accepted" would send them to the password. The error is not
@@ -93,7 +130,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   let issued: unknown;
   try {
     issued = await upstream.json();
-  } catch {
+  } catch (err) {
+    // The signal bounds the body read as well; a stall there is the API's, not the credential's.
+    if (isUpstreamTimeout(err)) {
+      return NextResponse.json(
+        { ok: false, error: "The API did not answer in time. Try again shortly." },
+        { status: 504 },
+      );
+    }
     return refused();
   }
   const session = readSuccess(issued);

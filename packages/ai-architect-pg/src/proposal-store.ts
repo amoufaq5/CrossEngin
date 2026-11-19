@@ -2,7 +2,9 @@ import type {
   ArchitectProposalDecision,
   ArchitectProposalRecord,
 } from "@crossengin/ai-architect";
-import type { PgConnection } from "@crossengin/kernel-pg";
+import { isoInstant, requireIsoInstant, type PgConnection } from "@crossengin/kernel-pg";
+
+import { withTenantContext } from "./tenant-context.js";
 
 const SCHEMA = "meta";
 const TABLE = "architect_proposals";
@@ -38,8 +40,8 @@ interface Row {
   readonly decision: ArchitectProposalDecision;
   readonly applied: boolean;
   readonly denial_reason: string | null;
-  readonly proposed_at: string;
-  readonly decided_at: string | null;
+  readonly proposed_at: unknown;
+  readonly decided_at: unknown;
 }
 
 function rowToRecord(row: Row): ArchitectProposalRecord {
@@ -58,8 +60,8 @@ function rowToRecord(row: Row): ArchitectProposalRecord {
     decision: row.decision,
     applied: row.applied,
     denialReason: row.denial_reason,
-    proposedAt: row.proposed_at,
-    decidedAt: row.decided_at,
+    proposedAt: requireIsoInstant(row.proposed_at, "proposed_at"),
+    decidedAt: isoInstant(row.decided_at),
   };
 }
 
@@ -73,32 +75,36 @@ export class PostgresArchitectProposalStore {
        decision, applied, denial_reason, decided_at)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
       RETURNING *`;
-    const result = await this.conn.query<Row>(sql, [
-      input.tenantId,
-      input.sessionId,
-      input.toolInvocationId,
-      input.targetPath,
-      input.isNew,
-      input.oldHash,
-      input.newHash,
-      input.entitiesAdded,
-      input.entitiesRemoved,
-      input.entitiesModified,
-      input.decision,
-      input.applied,
-      input.denialReason,
-    ]);
+    const result = await withTenantContext(this.conn, input.tenantId, (tx) =>
+      tx.query<Row>(sql, [
+        input.tenantId,
+        input.sessionId,
+        input.toolInvocationId,
+        input.targetPath,
+        input.isNew,
+        input.oldHash,
+        input.newHash,
+        input.entitiesAdded,
+        input.entitiesRemoved,
+        input.entitiesModified,
+        input.decision,
+        input.applied,
+        input.denialReason,
+      ]),
+    );
     const row = result.rows[0];
     if (row === undefined) throw new Error("append proposal: insert returned no row");
     return rowToRecord(row);
   }
 
-  async listForSession(sessionId: string): Promise<readonly ArchitectProposalRecord[]> {
-    const result = await this.conn.query<Row>(
-      `SELECT * FROM ${SCHEMA}.${TABLE}
-       WHERE session_id = $1
-       ORDER BY proposed_at ASC`,
-      [sessionId],
+  async listForSession(tenantId: string, sessionId: string): Promise<readonly ArchitectProposalRecord[]> {
+    const result = await withTenantContext(this.conn, tenantId, (tx) =>
+      tx.query<Row>(
+        `SELECT * FROM ${SCHEMA}.${TABLE}
+         WHERE session_id = $1 AND tenant_id = $2
+         ORDER BY proposed_at ASC`,
+        [sessionId, tenantId],
+      ),
     );
     return result.rows.map(rowToRecord);
   }

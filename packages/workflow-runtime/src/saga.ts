@@ -20,6 +20,21 @@ export interface CompletedActivitySummary {
   readonly compensationActivityKey: string | null;
 }
 
+/**
+ * The side-effect activities a rollback must undo: those with an `activity_completed` and no
+ * `activity_compensated`.
+ *
+ * It used to admit every `activity_scheduled`, so a charge that failed outright was "refunded", a
+ * charge that failed twice and succeeded on its third attempt was refunded three times (each retry
+ * schedules a fresh activityId), and an activity cancelled before its handler ran was compensated
+ * though `never_started` promises nothing ran. The completion is the evidence that the side effect
+ * happened, so it is the only admission — a failed, timed-out or never-started attempt leaves it out,
+ * and a retried activity contributes exactly its one successful attempt. A completion that arrived
+ * after a cooperative cancellation still counts: the cancellation sealed the status, not the fact
+ * that the handler finished its work. This is the rule `computeCompensationPlan` in
+ * `@crossengin/workflow-engine` already applies (`status === "succeeded"`); the runtime now agrees
+ * with it.
+ */
 export function listCompensatableActivities(
   events: readonly WorkflowEvent[],
 ): readonly CompletedActivitySummary[] {
@@ -27,7 +42,7 @@ export function listCompensatableActivities(
     activityId: string;
     definitionActivityKey: string;
     kind: ActivityKind;
-    completedAt: string;
+    completedAt: string | null;
     compensationActivityKey: string | null;
   }
   const scheduledByActivityId = new Map<string, PendingActivity>();
@@ -45,7 +60,7 @@ export function listCompensatableActivities(
           typeof event.payload["kind"] === "string"
             ? (event.payload["kind"] as ActivityKind)
             : "transformation",
-        completedAt: event.occurredAt,
+        completedAt: null,
         compensationActivityKey:
           typeof event.payload["compensationActivityKey"] === "string"
             ? (event.payload["compensationActivityKey"] as string)
@@ -62,9 +77,10 @@ export function listCompensatableActivities(
   }
   const out: CompletedActivitySummary[] = [];
   for (const a of scheduledByActivityId.values()) {
+    if (a.completedAt === null) continue;
     if (compensated.has(a.activityId)) continue;
     if (!SIDE_EFFECT_KINDS.has(a.kind)) continue;
-    out.push(a);
+    out.push({ ...a, completedAt: a.completedAt });
   }
   return out;
 }

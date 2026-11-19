@@ -616,6 +616,30 @@ describe("table column shapes", () => {
     expect(check).not.toMatch(/\bIN\s*\(/);
   });
 
+  it("META_USERS.credential_hash admits exactly the shape the parser reads", () => {
+    const check = META_USERS.columns.find((c) => c.name === "credential_hash")?.check ?? "";
+    // The literal between the quotes, with SQL's doubled backslashes as one each.
+    const literal = /~ '(.*)'$/.exec(check)?.[1] ?? "^$";
+    const pattern = new RegExp(literal);
+    const tail = `${"a".repeat(32)}$${"b".repeat(128)}`;
+    // Every row written before pepper versions existed still matches.
+    expect(pattern.test(`scrypt$32768$8$1$${tail}`)).toBe(true);
+    expect(pattern.test(`scrypt$32768$8$3$k2$${tail}`)).toBe(true);
+    expect(pattern.test(`scrypt$32768$8$3$k9999$${tail}`)).toBe(true);
+    // The unbounded form admitted these, which the parser refuses on every read.
+    expect(pattern.test(`scrypt$123456789$8$1$${tail}`)).toBe(false);
+    expect(pattern.test(`scrypt$32768$8$1$k0$${tail}`)).toBe(false);
+    expect(pattern.test(`scrypt$32768$8$1$k10000$${tail}`)).toBe(false);
+  });
+
+  it("META_USERS.session_epoch defaults to the generation every pre-existing token carries", () => {
+    const col = META_USERS.columns.find((c) => c.name === "session_epoch");
+    expect(col?.type).toBe("INTEGER");
+    expect(col?.notNull).toBe(true);
+    expect(col?.default).toBe("0");
+    expect(col?.check).toBe("session_epoch >= 0");
+  });
+
   it("META_USER_TENANT_MEMBERSHIP enforces (user_id, tenant_id) uniqueness", () => {
     expect(META_USER_TENANT_MEMBERSHIP.uniqueConstraints).toEqual([
       {
@@ -2008,6 +2032,16 @@ describe("table column shapes", () => {
     // A CHECK that evaluates to NULL is passed by Postgres, so the null guard is what makes the
     // deadline rule mean anything for a non-breach communication.
     expect(window?.kind === "check" && window.expression).toContain("IS NULL OR");
+    // Article 33(1): a late notification is admitted with its reason rather than refused, and the
+    // reason is refused on a notification that was not late.
+    expect(window?.kind === "check" && window.expression).toContain(
+      "OR breach_notification_delay_reason IS NOT NULL",
+    );
+    expect(names).toContain("incident_communications_delay_reason_check");
+    expect(
+      META_INCIDENT_COMMUNICATIONS.columns.find((c) => c.name === "breach_notification_delay_reason")
+        ?.notNull,
+    ).toBeFalsy();
     for (const c of META_INCIDENT_COMMUNICATIONS.constraints ?? []) {
       expect(c.name.length, c.name).toBeLessThanOrEqual(63);
     }

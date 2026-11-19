@@ -2,6 +2,13 @@ import type { Entity } from "@crossengin/types/meta-schema";
 
 const AUDITABLE = ["auditable"] as const;
 
+// Every personal field on the patient is `phi`, not `pii`. Under HIPAA a name, a birth date, a sex,
+// an email or a phone number held in a covered entity's patient record is individually
+// identifiable health information — the record itself says the person is a patient — so the
+// demographics are PHI exactly as the MRN is, and are encrypted at rest with it on the column store.
+// The cost is stated rather than discovered: an encrypted column cannot be filtered or searched in
+// SQL, so on `--store pg-columns` `?family_name=` and a `?q` over these fields are refused by name
+// (ADR-0359) and the list view's `family_name` sort is reported as unserved.
 export const PATIENT_ENTITY: Entity = {
   name: "Patient",
   traits: [...AUDITABLE],
@@ -23,29 +30,29 @@ export const PATIENT_ENTITY: Entity = {
       name: "given_name",
       type: { kind: "text", maxLength: 100 },
       required: true,
-      classification: "pii",
+      classification: "phi",
     },
     {
       name: "family_name",
       type: { kind: "text", maxLength: 100 },
       required: true,
-      classification: "pii",
+      classification: "phi",
     },
     {
       name: "date_of_birth",
       type: { kind: "date" },
       required: true,
-      classification: "pii",
+      classification: "phi",
     },
     {
       name: "sex",
       type: { kind: "enum", values: ["female", "male", "other", "unknown"] },
       required: true,
       default: { kind: "literal", value: "unknown" },
-      classification: "pii",
+      classification: "phi",
     },
-    { name: "email", type: { kind: "email" }, classification: "pii" },
-    { name: "phone", type: { kind: "phone" }, classification: "pii" },
+    { name: "email", type: { kind: "email" }, classification: "phi" },
+    { name: "phone", type: { kind: "phone" }, classification: "phi" },
     {
       name: "status",
       type: { kind: "enum", values: ["active", "inactive", "deceased"] },

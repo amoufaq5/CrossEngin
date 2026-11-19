@@ -6,7 +6,7 @@ import {
   checkCompatibility,
   requiresElevatedReview,
   resolvePermissions,
-  verifyPackSignature,
+  verifyPackPublisher,
   type InstallationStatus,
   type PackInstallation,
   type PermissionGrantSet,
@@ -42,7 +42,7 @@ function transition(installation: PackInstallation, to: InstallationStatus, patc
 
 /**
  * The admission pipeline. Runs the gates in a fixed order — already-installed →
- * signature → compatibility → elevated review — and the first failure wins.
+ * publisher → compatibility → elevated review — and the first failure wins.
  * On success it builds the `requested` installation (with its scope grants
  * seeded pending) and advances it: straight to `installing` when the pack asks
  * for no required scopes, else to `permission_pending` awaiting a grant.
@@ -60,14 +60,14 @@ export function admitInstallation(
     };
   }
 
-  // 2. Signature — the manifest must verify against the publisher's key.
-  const signed = verifyPackSignature({
+  // 2. Publisher — the manifest must be signed by a registered key whose namespace covers the pack.
+  const publisher = verifyPackPublisher({
     manifest: request.pack,
     signature: request.signature,
-    publicKeyBase64: request.publisherPublicKeyBase64,
+    registry: request.publishers,
   });
-  if (!signed) {
-    return { outcome: "rejected", reason: "signature_invalid", reasons: ["pack signature failed verification"] };
+  if (!publisher.ok) {
+    return { outcome: "rejected", reason: publisher.refusal, reasons: [publisher.detail] };
   }
 
   // 3. Compatibility — platform version / region / plan tier / compliance / dedicated-tenant.
@@ -194,3 +194,28 @@ export function completeUpdate(
     lastUpdatedAt: input.at,
   });
 }
+
+/**
+ * How an installation in each status reaches `uninstalled`, over the lifecycle's own legal edges.
+ *
+ * An admitted install sits in `installing` or `permission_pending` until something completes it, and
+ * nothing in this repository runs a pack, so a route that could only uninstall from `installed`
+ * left every recorded install stuck for good — unremovable, and blocking a reinstall as
+ * `already_installed`. `installing` has no edge to `uninstalled`, so it is failed first with
+ * {@link INSTALL_WITHDRAWN_REASON}, which records what happened rather than claiming an install that
+ * did not. `null` marks a status from which there is nothing to uninstall, or no safe path.
+ */
+export const UNINSTALL_PATH: Readonly<
+  Record<InstallationStatus, "begin_then_complete" | "fail_then_complete" | "complete" | null>
+> = Object.freeze({
+  requested: null,
+  permission_pending: "complete",
+  installing: "fail_then_complete",
+  installed: "begin_then_complete",
+  updating: null,
+  failed: "complete",
+  uninstalling: "complete",
+  uninstalled: null,
+});
+
+export const INSTALL_WITHDRAWN_REASON = "uninstalled before any installer completed it";

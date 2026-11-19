@@ -15,7 +15,7 @@ import {
   verifyEd25519,
 } from "@crossengin/crypto";
 
-import type { PrincipalResolver } from "./stores.js";
+import type { PrincipalResolver, VerifiedBearerToken } from "./stores.js";
 
 export interface ParsedJwt {
   readonly headerB64: string;
@@ -100,21 +100,30 @@ export class InMemoryJwksProvider implements JwksProvider {
 /**
  * The JWT claims whose **absence** this gateway can be made to refuse, and what each absence costs.
  *
- * Three and not four: `nbf`'s absence means *valid from issuance*, which is coherent and is what
- * most minters emit, so there is nothing to refuse. The other three are each a guarantee silently
- * dropped, and the costs differ enough that an operator relaxing one must not be taken to have
- * relaxed the others — which is why the relaxation is declared per claim rather than as a boolean.
+ * Not `nbf`: its absence means *valid from issuance*, which is coherent and is what most minters
+ * emit, so there is nothing to refuse. The others are each a guarantee silently dropped, and the
+ * costs differ enough that an operator relaxing one must not be taken to have relaxed the others —
+ * which is why the relaxation is declared per claim rather than as a boolean.
  *
  * A map rather than a list because the reason is the deliverable: this exists to be rendered into a
- * boot line and a refusal, and a fourth claim added here must say what its absence costs before it
- * can be required.
+ * boot line and a refusal, and a claim added here must say what its absence costs before it can be
+ * required.
  */
-export const REQUIRED_JWT_CLAIM_COSTS: Readonly<Record<"exp" | "iss" | "aud", string>> =
-  Object.freeze({
-    exp: "the token never expires, so --session-token-ttl and membership revocation bound nothing for it",
-    iss: "nothing establishes which issuer minted it beyond the JWKS holding its key",
-    aud: "nothing establishes which relying party it was minted for, so a token issued for another application sharing this key set is accepted here",
-  });
+export const REQUIRED_JWT_CLAIM_COSTS: Readonly<
+  Record<"exp" | "iss" | "aud" | "sub" | "tenant_id", string>
+> = Object.freeze({
+  exp: "the token never expires, so --session-token-ttl and membership revocation bound nothing for it",
+  iss: "nothing establishes which issuer minted it beyond the JWKS holding its key",
+  aud: "nothing establishes which relying party it was minted for, so a token issued for another application sharing this key set is accepted here",
+  // The principal id is derived from `sub`, so with none every such token resolves to the one id
+  // derived from the empty string: distinct callers share an identity, an audit trail and any
+  // per-person state keyed on it.
+  sub: "every token without one resolves to one shared principal id, so distinct callers share an identity and an audit trail",
+  // With no tenant claim the tenant is taken from the request's own `x-tenant-id` header, which the
+  // caller chooses. A person's membership check bounds that for this deployment's sessions; nothing
+  // bounds it for a foreign token whose subject holds no membership row.
+  tenant_id: "the tenant is taken from the request's x-tenant-id header, so the caller chooses which tenant the token acts in",
+});
 
 export type RequiredJwtClaim = keyof typeof REQUIRED_JWT_CLAIM_COSTS;
 
@@ -142,6 +151,9 @@ const CLAIM_IS_USABLE: Readonly<Record<RequiredJwtClaim, (v: unknown) => boolean
   iss: (v) => typeof v === "string",
   // Both RFC 7519 §4.1.3 forms, matching the `audOk` computation below.
   aud: (v) => typeof v === "string" || Array.isArray(v),
+  // Non-empty, because `""` is exactly the shared identity the requirement exists to refuse.
+  sub: (v) => typeof v === "string" && v.length > 0,
+  tenant_id: (v) => typeof v === "string" && v.length > 0,
 });
 
 export interface JwtVerificationOptions {
@@ -564,6 +576,8 @@ export interface ResolvePrincipalInput {
    * request header (`tenantHint`) is only a hint and must not contradict it.
    */
   readonly authenticatedTenantId?: string | null;
+  /** The verified token, for a `bearer_jwt` credential; passed to the resolver unchanged. */
+  readonly bearer?: VerifiedBearerToken;
 }
 
 export async function resolvePrincipalForCredential(
@@ -580,6 +594,7 @@ export async function resolvePrincipalForCredential(
     principalRef: input.principalRef,
     scopes: input.scopes,
     authScheme: input.scheme,
+    ...(input.bearer !== undefined ? { bearer: input.bearer } : {}),
   });
   if (resolved === null) {
     return { principal: null, outcome: "principal_not_found" };

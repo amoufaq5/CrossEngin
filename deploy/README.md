@@ -207,10 +207,13 @@ on every `up`, after `migrate` and before `api`, for the `extensions` service's 
 `/docker-entrypoint-initdb.d` fires only on a volume's first initialisation, and before `meta`
 exists. It creates the role if absent, re-asserts its attributes, sets its password from
 `POSTGRES_APP_PASSWORD`, grants every table `migrate` has created, and sets default privileges for
-one created later by the owner. Its last line reads the result back from the catalog:
+one created later by the owner. It then takes `DELETE` back on every table the catalog fences
+against a tenant delete (a restrictive `FOR DELETE USING (false)` policy), so such a `DELETE` from
+the API is refused `42501 permission denied` by name instead of answering `DELETE 0`, which looks
+exactly like an empty table. Its last line reads the result back from the catalog:
 
 ```text
-app-role: crossengin_app is ready -- superuser=f bypassrls=f; DML on 146 of 146 catalog tables in meta; owns 0 of them
+app-role: crossengin_app is ready -- superuser=f bypassrls=f; DML on 122 of 146 catalog tables in meta (DELETE withheld on 24 fenced); owns 0 of them
 ```
 
 It **refuses** — exit 3, and `api` does not start — when `POSTGRES_APP_PASSWORD` is empty, still the
@@ -407,11 +410,17 @@ meet:
 - **One issuer and one audience.** `iss` must equal `--jwt-issuer` and `aud` must equal
   `--jwt-audience` — the same pair the login mints with, since there is one of each on the command.
   A token naming another issuer is `issuer_mismatch`.
-- **No `tenant_id` claim means the caller picks the tenant.** Without one, the `x-tenant-id` request
-  header decides which tenant the token acts in (ADR-0098's recorded decision). Issue tokens that
-  carry `tenant_id`.
-- **`scope` is read as role names.** The first is the primary role and the rest are secondary, so
-  an IdP's `openid profile` scopes are read as roles.
+- **`sub` and `tenant_id` are required.** A token missing either, or carrying an empty one, is
+  refused `401 … required_claim_absent`, like a missing `exp`, `iss` or `aud`. Without `sub` every
+  such token resolved to one shared principal; without `tenant_id` the caller's own `x-tenant-id`
+  header chose the tenant (ADR-0098's recorded decision, which is now opt-in). `--jwt-optional-claim
+  sub` / `--jwt-optional-claim tenant_id` restore the old behaviour, and the boot line names what
+  each relaxation costs.
+- **`scope` is read as role names, except platform roles.** The first is the primary role and the
+  rest are secondary, so an IdP's `openid profile` scopes are read as roles. A scope naming a role
+  any platform `--*-role` flag grants (`platform_admin` on the shipped compose) is **removed** from a
+  token this deployment's own login key did not sign, so an IdP cannot grant tenant provision or
+  deletion; `--idp-platform-roles` lets it, and the boot line says which is in force.
 - **`--jwks-url` cannot be combined with the login at all**, and `--jwks-key` / `--jwks-file` can —
   but then the login's revocation check stays on, and it refuses any token subject with no active
   membership. A key-holder's `sub` must therefore name a provisioned `meta.users` id with an active
@@ -436,8 +445,35 @@ reading once after the first `up`:
 - **`[pg] database channel: PGSSLMODE=…`** — what the database wire promises. It carries
   `app.current_tenant_id`, which is the whole tenant-isolation boundary, on every query.
   Inside this compose stack the hop is a private Docker network and the default `prefer`
-  is reasonable; the moment the database is anywhere else, `PGSSLMODE=verify-full` is the
-  only mode that validates its certificate. `require` encrypts and authenticates nothing.
+  is reasonable — it offers TLS first and falls back to the clear once per pool, saying which
+  in a `[pg] PGSSLMODE=prefer negotiated …` line on first use. The moment the database is
+  anywhere else, `PGSSLMODE=verify-full` checks its certificate and that it names `PGHOST` —
+  an IP address included, which node-postgres on its own checks against `localhost`;
+  `verify-ca` checks the chain and not the hostname and needs `PGSSLROOTCERT`. Point
+  `PGSSLROOTCERT` at your provider's root certificate file (a private root such as
+  Supabase's or RDS's) and node then trusts **only** that root; leave it unset and
+  `verify-full` uses node's bundled CA store. `require` encrypts and authenticates nothing,
+  and ignores `PGSSLROOTCERT` (libpq would verify the chain there; this binding does not, and
+  the boot line says so).
+- **`[indexes] declared indexes on --store …`** and **`[indexes] declared index pass: …`** —
+  the manifest's `field.indexed` and `entity.indexes`, built as indexes (`erp-core`: 158 on the
+  JSONB table, each a partial index for its own entity; 159 on the column store, where a
+  reference column is indexed whether or not it is declared, because a parent delete checks the
+  child through it). The API owns no table, so on `--store pg` it only looks; `absent` means the
+  `document-indexes` step has not run since the manifest changed. A missing lookup index changes
+  how fast a list answers, never what it answers. Measured at 100k–200k rows: a filtered,
+  sorted list went from 22 ms to 0.6 ms and a parent delete's foreign-key check from 13 ms to
+  0.2 ms. A column-store table created before this keeps its old `idx_<table>_tenant` index,
+  which the primary key `(tenant_id, id)` already serves; it is left in place, and
+  `DROP INDEX CONCURRENTLY` removes it.
+- **`[retention] …`** — whether the four operational tables that only grow are pruned:
+  `job_runs`, `gateway_pipeline_executions`, `rate_limit_decisions`, `notification_dispatches`.
+  Off unless `--retention-sweep` is passed, because it deletes rows a deployment keeps today (an
+  in-app notice older than the period leaves its inbox). With it: hourly, per tenant, in batches,
+  defaults 90/30/30/365 days, each changeable with `--retention <table>=<days|off>`. A job's newest
+  run is never pruned (the cron scheduler reads it to avoid running the job twice), and nothing
+  unfinished is. Platform-scope gateway and rate-limit rows are not pruned by the API's confined
+  role — the line says `confined` — so on this stack they still grow; the owner can delete them.
 - **`[cursor] cursor disclosure: …`** — whether a caller can read a classified field's
   value out of an entity-list cursor. The keyset cursor carries the plaintext of every
   declared sort key, and the response body's redaction is a different code path that does
@@ -641,9 +677,14 @@ a time. What such a script meets, each measured against a running server
   sent posts to the general ledger **twice** — two journal entries carrying one entry number. On
   `--store pg-columns` the second `POST` answers **409** `unique_violation` naming the field.
 - **An `Idempotency-Key` protects a re-run for 24 hours and no longer.** Within that window a
-  repeated key answers the original status with `x-idempotent-replay: true` and **an empty body**,
-  so record the id from the first response rather than expecting it back. The record expires after
-  86,400 seconds and no flag changes that, so a re-run a day later executes every create again.
+  repeated key answers the original status and body with `x-idempotent-replay: true` — except a
+  body over 256 KiB, which is not retained and is answered empty with
+  `x-idempotent-replay-body: not-retained`. Only a success (below 400) is recorded: a refused or
+  failed request frees the key, so its retry executes. A retry sent while the first is still running
+  gets **409** with `retry-after`, and on a `POST`, `PUT`, `PATCH` or `DELETE` a key must be 8–255
+  letters, digits, `_`, `.`, `:` or `-` (else **422**; on a read the header is ignored).
+  The record expires after 86,400 seconds and no flag changes that, so a re-run a day later
+  executes every create again.
 - **A caller-supplied `id` is kept, and re-sending it is a 409.** That is the only way to preserve
   references between imported records. It must be 1–200 letters, digits, `_` or `-` (else **422**
   `record_id_malformed`), and a second `POST` with an `id` that already exists answers **409**
@@ -686,7 +727,40 @@ works today. Needs a Postgres store, since the point is that every decision is w
 
 The window itself is still counted in each process, so with several `api` replicas the
 effective ceiling is the limit times the replica count, and a restart starts a fresh window.
-What the flag buys is the limit being *yours* and every decision being on the record.
+What the flag buys is the limit being *yours* and every decision being on the record. The boot
+line `[rate-limit]` says this in so many words.
+
+That limit runs **after** authentication, keyed on the principal it resolved, so a request that
+fails to authenticate is never counted by it. `--pre-auth-rate-limit <requests>/<seconds>` is the
+bound that runs first, keyed on (client address, kind of credential presented — never its value),
+in front of the gateway and the login route — though under `--per-tenant-manifests`, which
+`--ai-design` implies, the router that picks a tenant's gateway checks a Bearer token's signature
+before it. It is **off by default**, and the boot line `[pre-auth]`
+says so, because on this stack it would not do what it says: every API request reaches the server
+from the Caddy container and every console request from the `web` container, so the "client
+address" is one of two values for everybody, and the bound would be one shared budget that a single
+noisy caller exhausts for all. `--trusted-edge-client-cert` makes the server believe Caddy's
+`X-Forwarded-For` (the rightmost entry, the one Caddy appended), which separates callers that reach
+the API through Caddy — but not console users, whose requests the `web` proxy makes server-side.
+Repeated wrong passwords are bounded regardless: the login counts each attempt before it verifies
+it, locks the account, and caps concurrent password checks.
+
+## The listener, and stopping it
+
+The API closes a request whose head takes longer than 60 s or whose whole exchange takes longer
+than 300 s, keeps idle connections 125 s (longer than Caddy's 2-minute upstream idle, so Caddy
+never reuses a socket the API is closing), and accepts at most 4,096 connections at once. On
+`docker compose stop` it stops accepting, gives running requests 8 s to finish (inside Docker's
+10 s stop timeout), closes the rest, drains its background work and closes its database pool. The
+`--http-headers-timeout-ms`, `--http-request-timeout-ms`, `--http-keep-alive-timeout-ms`,
+`--http-max-connections` and `--shutdown-grace-ms` flags change them; the `[http]` boot line prints
+all five. A 5xx from a route carries only an `x-request-id`; the cause is the `[5xx]` line in
+`docker compose logs api` with the same id. Three 503s are answered before any route and carry
+none: `/readyz` while the database is unreachable, the login when it sheds load (not logged; it carries a
+`retry-after`) or cannot reach its store, mint a session or record the sign-in (logged as
+`[auth] login store failure`), and a tenant whose own
+gateway cannot be built — that one is logged once per refusal as `[tenant-gateway]`, naming the
+tenant and the cause.
 
 ## Day-2 operations
 
@@ -860,7 +934,9 @@ restarted by `restart: unless-stopped`, which `docker compose ps` shows as a res
   the length of the build — bounded by the statement timeout, and named in the plan as
   `replace_index`. The `document-indexes` step is separate and builds its indexes non-concurrently
   on purpose — `ensureDocumentUniqueIndexes` in `operate-runtime-pg` says why: `IF NOT EXISTS`
-  would accept a failed concurrent build's invalid index as present.
+  would accept a failed concurrent build's invalid index as present. Its *lookup* indexes (the
+  manifest's declared ones) are the exception and are built `CONCURRENTLY`: a lookup index that
+  failed is found invalid by the next run and rebuilt, rather than trusted.
 
 ### If a credential was committed
 

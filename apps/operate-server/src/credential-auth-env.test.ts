@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   CREDENTIAL_AUTH_REFUSALS,
+  CREDENTIAL_PEPPER_RETIRED_PREFIX,
   CREDENTIAL_PEPPER_VAR,
+  CREDENTIAL_PEPPER_VERSION_VAR,
   TOKEN_SIGNING_KEY_VAR,
   TOKEN_SIGNING_KID,
   formatCredentialAuth,
@@ -34,7 +36,7 @@ describe("resolveCredentialAuth", () => {
         ed25519PublicKeyFromSeed(KP.privateKeyBase64),
       );
       expect(resolved.material.kid).toBe(TOKEN_SIGNING_KID);
-      expect(resolved.material.pepper).toBe(PEPPER);
+      expect(resolved.material.pepper).toEqual({ version: 1, pepper: PEPPER, retired: new Map() });
     }
   });
 
@@ -150,6 +152,8 @@ describe("resolveCredentialAuth", () => {
       { [CREDENTIAL_PEPPER_VAR]: "short" },
       { [TOKEN_SIGNING_KEY_VAR]: "" },
       { [TOKEN_SIGNING_KEY_VAR]: "zz" },
+      { [CREDENTIAL_PEPPER_VERSION_VAR]: "abc" },
+      { [`${CREDENTIAL_PEPPER_RETIRED_PREFIX}1`]: "short", [CREDENTIAL_PEPPER_VERSION_VAR]: "2" },
     ]) {
       const r = resolveCredentialAuth({ env: env(e), jwksUrlConfigured: false });
       if (!r.ok) seen.add(r.refusal);
@@ -157,5 +161,50 @@ describe("resolveCredentialAuth", () => {
     const urlCase = resolveCredentialAuth({ env: env(), jwksUrlConfigured: true });
     if (!urlCase.ok) seen.add(urlCase.refusal);
     expect([...seen].sort()).toEqual([...CREDENTIAL_AUTH_REFUSALS].sort());
+  });
+});
+
+describe("the pepper ring (M-09)", () => {
+  const RETIRED = "an-older-deployment-pepper-with-many-distinct-bytes-9876543210";
+
+  it("defaults to version 1, which every unversioned stored hash is read as", () => {
+    const r = resolveCredentialAuth({ env: env(), jwksUrlConfigured: false });
+    expect(r.ok && r.material.pepper.version).toBe(1);
+  });
+
+  it("reads the current version and every retired pepper by the version in its name", () => {
+    const r = resolveCredentialAuth({
+      env: env({ [CREDENTIAL_PEPPER_VERSION_VAR]: "3", [`${CREDENTIAL_PEPPER_RETIRED_PREFIX}2`]: RETIRED }),
+      jwksUrlConfigured: false,
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.material.pepper.version).toBe(3);
+      expect(r.material.pepper.retired.get(2)).toBe(RETIRED);
+      const line = formatCredentialAuth(r);
+      expect(line).toContain("pepper version 3");
+      expect(line).toContain("retired version(s) 2");
+      expect(line).not.toContain(RETIRED);
+      expect(line).not.toContain(PEPPER);
+    }
+  });
+
+  it("refuses a version the hash encoding cannot carry", () => {
+    for (const v of ["0", "10000", "1.5", "-1", "v2"]) {
+      const r = resolveCredentialAuth({ env: env({ [CREDENTIAL_PEPPER_VERSION_VAR]: v }), jwksUrlConfigured: false });
+      expect(r.ok ? null : r.refusal).toBe("pepper_version_malformed");
+    }
+  });
+
+  it("refuses a retired pepper under the current version, a bad name, or a weak value, naming no value", () => {
+    for (const extra of [
+      { [`${CREDENTIAL_PEPPER_RETIRED_PREFIX}1`]: RETIRED },
+      { [`${CREDENTIAL_PEPPER_RETIRED_PREFIX}x`]: RETIRED },
+      { [`${CREDENTIAL_PEPPER_RETIRED_PREFIX}2`]: "short" },
+    ]) {
+      const r = resolveCredentialAuth({ env: env(extra), jwksUrlConfigured: false });
+      expect(r.ok ? null : r.refusal).toBe("retired_pepper_refused");
+      if (!r.ok) expect(r.detail).not.toContain(RETIRED);
+    }
   });
 });

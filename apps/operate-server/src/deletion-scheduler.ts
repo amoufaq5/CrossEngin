@@ -12,12 +12,11 @@ const DEFAULT_SCHEDULER: IntervalScheduler = {
 };
 
 /**
- * The actors an unattended deletion runs as. Exported because `cli.ts` checks four-eyes against the
- * *resolved* pair — `--deletion-runner-executed-by system:retention-policy` alone would otherwise pass
- * the flag check and then throw at the runner's construction, i.e. at boot.
+ * The actor an unattended deletion executes as. There is no approver default any more (H-05): the
+ * approver is the principal who verified each request, read from the request itself, so a
+ * configured approver string — which nobody authenticated — no longer exists to default.
  */
 export const DEFAULT_DELETION_EXECUTED_BY = "system:deletion-runner";
-export const DEFAULT_DELETION_APPROVED_BY = "system:retention-policy";
 
 /**
  * The tombstone kind an unattended deletion claims, given what the deployment declared a verified

@@ -9,6 +9,8 @@ import {
 } from "./pipeline-execution-store.js";
 import {
   PostgresRateLimitChecker,
+  RATE_LIMIT_SWEEP_THRESHOLD,
+  RATE_LIMIT_WINDOW_SEMANTICS,
   type DecisionPersistFailure,
   type UndeclaredPolicyReport,
 } from "./rate-limit-checker.js";
@@ -176,6 +178,54 @@ describe("PostgresRateLimitChecker.check — allow vs deny", () => {
     const a = await checker.check({ tenantId: TENANT, principalId: USER, route: r1, request: REQ, now: NOW });
     const b = await checker.check({ tenantId: TENANT, principalId: USER, route: r2, request: REQ, now: NOW });
     expect([a.allowed, b.allowed]).toEqual([true, true]);
+  });
+});
+
+describe("PostgresRateLimitChecker — what the window is", () => {
+  it("says the count is per process, which the class name does not", () => {
+    expect(RATE_LIMIT_WINDOW_SEMANTICS).toContain("per process");
+    expect(RATE_LIMIT_WINDOW_SEMANTICS).toContain("N x the declared limit");
+  });
+
+  it("sweeps expired windows rather than holding one per principal for the life of the process", async () => {
+    const checker = new PostgresRateLimitChecker({
+      conn: mockConnection(),
+      persistDecisions: false,
+      policies: declareRateLimitPolicies({
+        defaultPolicy: { policyId: "rlp_onlyoneplease", limit: 1, windowSeconds: 60 },
+      }),
+    });
+    const route = fixtureRoute();
+    for (let i = 0; i < RATE_LIMIT_SWEEP_THRESHOLD; i += 1) {
+      await checker.check({ tenantId: TENANT, principalId: `p-${String(i)}`, route, request: REQ, now: NOW });
+    }
+    expect(checker.windowCount()).toBe(RATE_LIMIT_SWEEP_THRESHOLD);
+    // Every window above has passed by now, so adding one more sweeps them all.
+    const later = new Date(NOW.getTime() + 61_000);
+    await checker.check({ tenantId: TENANT, principalId: "fresh", route, request: REQ, now: later });
+    expect(checker.windowCount()).toBe(1);
+  });
+
+  it("keeps a window that has not passed when it sweeps", async () => {
+    const checker = new PostgresRateLimitChecker({
+      conn: mockConnection(),
+      persistDecisions: false,
+      policies: declareRateLimitPolicies({
+        defaultPolicy: { policyId: "rlp_onlyoneplease", limit: 1, windowSeconds: 60 },
+      }),
+    });
+    const route = fixtureRoute();
+    const live = new Date(NOW.getTime() + 30_000);
+    await checker.check({ tenantId: TENANT, principalId: "live", route, request: REQ, now: live });
+    for (let i = 1; i < RATE_LIMIT_SWEEP_THRESHOLD; i += 1) {
+      await checker.check({ tenantId: TENANT, principalId: `p-${String(i)}`, route, request: REQ, now: NOW });
+    }
+    const later = new Date(NOW.getTime() + 61_000);
+    await checker.check({ tenantId: TENANT, principalId: "fresh", route, request: REQ, now: later });
+    expect(checker.windowCount()).toBe(2);
+    // And the surviving window still refuses: the sweep forgot nothing it should have kept.
+    const again = await checker.check({ tenantId: TENANT, principalId: "live", route, request: REQ, now: later });
+    expect(again.allowed).toBe(false);
   });
 });
 

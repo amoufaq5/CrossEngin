@@ -23,6 +23,7 @@ import {
   formatDeadlineFinding,
   isConclusive,
   needsOperator,
+  pendingDeletionRequests,
   tombstoneStanding,
   verifyStoredEvidence,
   type DeadlineFinding,
@@ -2222,5 +2223,47 @@ describe("auditTombstones writes nothing", () => {
     const select = h.sql().find((s) => s.includes("FROM meta.gdpr_deletion_requests"));
     expect(select).toContain("WHERE request_id = $1");
     for (const column of REQUEST_COLUMNS) expect(select).toContain(column);
+  });
+});
+
+describe("pendingDeletionRequests (H-20's list)", () => {
+  const page = (records: readonly GdprDeletionRequest[], rowsRead = records.length) => ({
+    unanswered: async (limit: number) => {
+      seen.push(limit);
+      return { records, unreadable: [{ requestId: "dreq_bad000000001", detail: "status: x" }], rowsRead };
+    },
+  });
+  const seen: number[] = [];
+  const NOW = new Date("2026-10-03T00:00:00.000Z");
+
+  it("assesses every unanswered request and reports nothing", async () => {
+    const breached = requestOf({
+      id: "dreq_breached0002",
+      status: "submitted",
+      verificationMethod: null,
+      verifiedAt: null,
+      verifiedBy: null,
+      inProgressAt: null,
+      deadlineAt: "2026-09-28T00:00:00.000Z",
+    });
+    const healthy = requestOf({ id: "dreq_healthy00002", status: "verified", inProgressAt: null });
+    const result = await pendingDeletionRequests(page([breached, healthy]), {
+      now: NOW,
+      warningDays: 7,
+      limit: 10,
+    });
+    expect(result.requests.map((r) => [r.request.id, r.assessment.standing])).toEqual([
+      ["dreq_breached0002", "breached"],
+      ["dreq_healthy00002", "within_deadline"],
+    ]);
+    expect(result.unreadable).toHaveLength(1);
+    expect(result.complete).toBe(true);
+    expect(result.warningDays).toBe(7);
+  });
+
+  it("declares a page its limit filled as incomplete, counting rows and not records", async () => {
+    const result = await pendingDeletionRequests(page([], 3), { now: NOW, limit: 3 });
+    expect(result.complete).toBe(false);
+    expect(seen.at(-1)).toBe(3);
   });
 });

@@ -123,11 +123,57 @@ export function shouldRecordAudit(
   return applyEffectiveAuditPolicy(execution, resolveAuditPolicy(execution.tenantId, config));
 }
 
+/** The three knobs a tenant's live policy carries, each of which can only widen (M-19). */
+export const LIVE_AUDIT_POLICY_FIELDS = ["sampleRate", "outcomes", "operations"] as const;
+export type LiveAuditPolicyField = (typeof LIVE_AUDIT_POLICY_FIELDS)[number];
+
 /**
- * Cache-aware variant: the effective policy is the tenant's **live** policy (from `meta.operate_tenant_settings`)
- * merged per-field OVER the config-resolved policy — live `outcomes` / `operations` / `sampleRate` win when
- * present, else the config (base, then any `tenantOverrides`) value stands. A `null` (platform) tenant or a
- * tenant with no live policy behaves exactly like {@link shouldRecordAudit}.
+ * A tenant's live policy merged over the deployment's, **widening only** (M-19).
+ *
+ * The live policy is written by the tenant's own administrator through the settings route, and the
+ * request-level chain entry it governs is the only tamper-evident record of that tenant's reads,
+ * its denied and failed requests and every non-entity route — C-05 records a successful entity
+ * write in its own transaction and marks the request superseded, so what is left for sampling to
+ * decide is precisely the conduct an administrator might prefer unrecorded. A per-field override
+ * let them set `sampleRate: 0` or an `outcomes: ["pass"]` allowlist and silence it.
+ *
+ * So the deployment's policy (the config's base plus any `tenantOverrides`, both the operator's to
+ * set) is the floor: a live `sampleRate` counts only above it, a live `outcomes` or `operations`
+ * list is unioned with the deployment's allowlist and ignored outright when the deployment records
+ * every outcome or operation. `narrowingIgnored` names the fields whose live value tried to record
+ * less, so the refresh can say so instead of leaving a stored setting silently inert.
+ */
+export function widenWithLivePolicy(
+  base: EffectiveAuditPolicy,
+  live: TenantAuditPolicy | undefined,
+): { readonly effective: EffectiveAuditPolicy; readonly narrowingIgnored: readonly LiveAuditPolicyField[] } {
+  if (live === undefined) return { effective: base, narrowingIgnored: [] };
+  const narrowingIgnored: LiveAuditPolicyField[] = [];
+  let sampleRate = base.sampleRate;
+  if (live.sampleRate !== undefined) {
+    if (live.sampleRate < base.sampleRate) narrowingIgnored.push("sampleRate");
+    sampleRate = Math.max(live.sampleRate, base.sampleRate);
+  }
+  const widenList = <T extends string>(
+    field: "outcomes" | "operations",
+    baseList: readonly T[] | undefined,
+    liveList: readonly T[] | undefined,
+  ): readonly T[] | undefined => {
+    if (liveList === undefined) return baseList;
+    if (baseList === undefined || baseList.some((v) => !liveList.includes(v))) {
+      narrowingIgnored.push(field);
+    }
+    return baseList === undefined ? undefined : [...new Set([...baseList, ...liveList])];
+  };
+  const outcomes = widenList("outcomes", base.outcomes, live.outcomes);
+  const operations = widenList("operations", base.operations, live.operations);
+  return { effective: { outcomes, operations, sampleRate }, narrowingIgnored };
+}
+
+/**
+ * Cache-aware variant: the tenant's **live** policy (from `meta.operate_tenant_settings`) widens the
+ * config-resolved policy and never narrows it — see {@link widenWithLivePolicy}. A `null` (platform)
+ * tenant or a tenant with no live policy behaves exactly like {@link shouldRecordAudit}.
  */
 export function shouldRecordAuditWithLive(
   execution: PipelineExecution,
@@ -135,12 +181,7 @@ export function shouldRecordAuditWithLive(
   live: TenantAuditPolicy | undefined,
 ): boolean {
   const base = resolveAuditPolicy(execution.tenantId, config);
-  const effective: EffectiveAuditPolicy = {
-    outcomes: live?.outcomes ?? base.outcomes,
-    operations: live?.operations ?? base.operations,
-    sampleRate: live?.sampleRate ?? base.sampleRate,
-  };
-  return applyEffectiveAuditPolicy(execution, effective);
+  return applyEffectiveAuditPolicy(execution, widenWithLivePolicy(base, live).effective);
 }
 
 export function parseAuditChainConfig(json: unknown): AuditChainConfig {

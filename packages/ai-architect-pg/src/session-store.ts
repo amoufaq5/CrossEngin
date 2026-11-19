@@ -1,5 +1,7 @@
 import type { ArchitectSessionRecord } from "@crossengin/ai-architect";
-import type { PgConnection } from "@crossengin/kernel-pg";
+import { isoInstant, requireIsoInstant, type PgConnection } from "@crossengin/kernel-pg";
+
+import { withTenantContext } from "./tenant-context.js";
 
 const SCHEMA = "meta";
 const TABLE = "architect_sessions";
@@ -12,6 +14,8 @@ export interface StartSessionInput {
 }
 
 export interface EndSessionInput {
+  /** The session's tenant: the context the update runs under and a predicate beside it. */
+  readonly tenantId: string;
   readonly id: string;
   readonly turnCount: number;
   readonly inputTokens: number;
@@ -26,8 +30,8 @@ interface Row {
   readonly session_id: string;
   readonly model: string;
   readonly system_prompt_sha256: string | null;
-  readonly started_at: string;
-  readonly ended_at: string | null;
+  readonly started_at: unknown;
+  readonly ended_at: unknown;
   readonly turn_count: number;
   readonly input_tokens: number;
   readonly output_tokens: number;
@@ -42,8 +46,8 @@ function rowToRecord(row: Row): ArchitectSessionRecord {
     sessionId: row.session_id,
     model: row.model,
     systemPromptSha256: row.system_prompt_sha256,
-    startedAt: row.started_at,
-    endedAt: row.ended_at,
+    startedAt: requireIsoInstant(row.started_at, "started_at"),
+    endedAt: isoInstant(row.ended_at),
     turnCount: row.turn_count,
     inputTokens: row.input_tokens,
     outputTokens: row.output_tokens,
@@ -60,12 +64,9 @@ export class PostgresArchitectSessionStore {
       (tenant_id, session_id, model, system_prompt_sha256)
       VALUES ($1, $2, $3, $4)
       RETURNING *`;
-    const result = await this.conn.query<Row>(sql, [
-      input.tenantId,
-      input.sessionId,
-      input.model,
-      input.systemPromptSha256,
-    ]);
+    const result = await withTenantContext(this.conn, input.tenantId, (tx) =>
+      tx.query<Row>(sql, [input.tenantId, input.sessionId, input.model, input.systemPromptSha256]),
+    );
     const row = result.rows[0];
     if (row === undefined) {
       throw new Error("startSession: insert returned no row");
@@ -81,24 +82,26 @@ export class PostgresArchitectSessionStore {
           output_tokens = $4,
           cached_input_tokens = $5,
           cost_usd = $6
-      WHERE id = $1
+      WHERE id = $1 AND tenant_id = $7
       RETURNING *`;
-    const result = await this.conn.query<Row>(sql, [
-      input.id,
-      input.turnCount,
-      input.inputTokens,
-      input.outputTokens,
-      input.cachedInputTokens,
-      input.costUsd,
-    ]);
+    const result = await withTenantContext(this.conn, input.tenantId, (tx) =>
+      tx.query<Row>(sql, [
+        input.id,
+        input.turnCount,
+        input.inputTokens,
+        input.outputTokens,
+        input.cachedInputTokens,
+        input.costUsd,
+        input.tenantId,
+      ]),
+    );
     const row = result.rows[0];
     return row !== undefined ? rowToRecord(row) : null;
   }
 
-  async getById(id: string): Promise<ArchitectSessionRecord | null> {
-    const result = await this.conn.query<Row>(
-      `SELECT * FROM ${SCHEMA}.${TABLE} WHERE id = $1`,
-      [id],
+  async getById(tenantId: string, id: string): Promise<ArchitectSessionRecord | null> {
+    const result = await withTenantContext(this.conn, tenantId, (tx) =>
+      tx.query<Row>(`SELECT * FROM ${SCHEMA}.${TABLE} WHERE id = $1 AND tenant_id = $2`, [id, tenantId]),
     );
     const row = result.rows[0];
     return row !== undefined ? rowToRecord(row) : null;
@@ -109,12 +112,14 @@ export class PostgresArchitectSessionStore {
     readonly limit?: number;
   }): Promise<readonly ArchitectSessionRecord[]> {
     const limit = input.limit ?? 100;
-    const result = await this.conn.query<Row>(
-      `SELECT * FROM ${SCHEMA}.${TABLE}
-       WHERE tenant_id = $1
-       ORDER BY started_at DESC
-       LIMIT $2`,
-      [input.tenantId, limit],
+    const result = await withTenantContext(this.conn, input.tenantId, (tx) =>
+      tx.query<Row>(
+        `SELECT * FROM ${SCHEMA}.${TABLE}
+         WHERE tenant_id = $1
+         ORDER BY started_at DESC
+         LIMIT $2`,
+        [input.tenantId, limit],
+      ),
     );
     return result.rows.map(rowToRecord);
   }

@@ -13,6 +13,7 @@ import {
   type PgConnection,
   type UnreadableRow,
 } from "@crossengin/kernel-pg";
+import type { ChildRemovalQuery } from "@crossengin/operate-runtime";
 import { withTenantContext } from "@crossengin/operate-runtime-pg";
 import { z } from "zod";
 
@@ -30,6 +31,12 @@ export interface AuditLogStoreOptions {
 /** The slice of `PostgresChainLogStore` the emitter needs — an append into its own transaction. */
 export interface AuditAnchorChain {
   appendWithin(tx: PgConnection, input: ChainAppendInput): Promise<ChainedLogEntry>;
+}
+
+/** {@link PostgresAuditEmitter.childDetachments}' answer. */
+export interface ChildDetachmentRows {
+  readonly removers: readonly (string | null)[];
+  readonly withheld: boolean;
 }
 
 /** One audit row's stored anchor coordinates, as verification reads them back. */
@@ -461,6 +468,43 @@ export class PostgresAuditEmitter implements AuditEmitter {
       await tx.query(access === "write" ? SET_PLATFORM_AUDIT_WRITE_SQL : SET_PLATFORM_AUDIT_SQL);
       return fn(tx);
     });
+  }
+
+  /**
+   * Who took a child record away from its parent — a delete, or an update whose `after` names another
+   * parent — read from the rows {@link writeIn} wrote. Segregation of duties asks it, because a line
+   * the approver deleted leaves no line row carrying their name.
+   *
+   * `withheld` is true when a candidate row's parent reference is a redaction marker rather than an
+   * id: the trail then cannot say which parent the row belonged to, and the caller must treat the
+   * answer as unreadable rather than as "nobody removed anything". The read is bounded below by the
+   * parent's `created_at` less an hour — a child cannot have been taken from a parent that did not
+   * exist yet, and the hour absorbs clock skew between a replica's `occurred_at` and the database's
+   * stamp — so it rides `idx_audit_tenant_entity_occurred_at` rather than every row of the entity.
+   */
+  async childDetachments(query: ChildRemovalQuery): Promise<ChildDetachmentRows> {
+    return this.inScope(query.tenantId, "read", (tx) => this.childDetachmentsWithin(tx, query));
+  }
+
+  /** {@link childDetachments} in a transaction that already carries `query.tenantId`'s context. */
+  async childDetachmentsWithin(tx: PgConnection, query: ChildRemovalQuery): Promise<ChildDetachmentRows> {
+    const params: unknown[] = [query.tenantId, query.childEntity, query.parentField, query.parentId];
+    if (query.parentCreatedAt !== null) params.push(query.parentCreatedAt);
+    const sql =
+      `SELECT coalesce(array_agg(actor ->> 'userId') FILTER (WHERE before ->> $3 = $4` +
+      ` AND (after IS NULL OR after ->> $3 IS DISTINCT FROM $4)), '{}') AS removers,` +
+      ` coalesce(bool_or(jsonb_typeof(before -> $3) = 'object'), false) AS withheld` +
+      ` FROM ${this.table} WHERE tenant_id = $1::uuid AND entity = $2` +
+      (query.parentCreatedAt !== null ? ` AND occurred_at >= $5::timestamptz - interval '1 hour'` : "") +
+      ` AND (before ->> $3 = $4 OR jsonb_typeof(before -> $3) = 'object')`;
+    const row = (await tx.query(sql, params)).rows[0];
+    if (row === undefined) throw new Error("the child-removal read returned no row");
+    const removers: unknown = row["removers"];
+    const isRemover = (r: unknown): r is string | null => r === null || typeof r === "string";
+    if (!Array.isArray(removers) || !removers.every(isRemover)) {
+      throw new Error("the child-removal read returned a removers column that is not a text array");
+    }
+    return { removers, withheld: row["withheld"] === true };
   }
 
   /** Shared filter construction for both list paths, so they can never drift apart. */

@@ -11,15 +11,30 @@
 export interface MonthlySpendStore {
   getMonthly(tenantId: string, periodKey: string): Promise<number>;
   addMonthly(tenantId: string, periodKey: string, dollars: number): Promise<number>;
+  /** The conditional charge (`PostgresTenantCostStore.reserveMonthly`); `reserved: false` is a refusal. */
+  reserveMonthly(
+    tenantId: string,
+    periodKey: string,
+    dollars: number,
+    limitDollars: number,
+  ): Promise<{ readonly reserved: boolean; readonly dollarsUsed: number | null }>;
+}
+
+/** An estimate set aside against one month, settled once the call's real cost is known. */
+export interface SpendReservation {
+  readonly dollars: number;
+  readonly periodKey: string;
+  settle(actualDollars: number): Promise<void>;
 }
 
 export interface AiDesignBudgetOptions {
   readonly store: MonthlySpendStore;
   readonly maxUsdPerMonth: number;
-  readonly maxUsdPerRequest?: number;
   readonly now?: () => Date;
   readonly periodKeyFor?: (date: Date) => string;
   readonly onDenied?: (tenantId: string, spentUsd: number, limitUsd: number) => void;
+  /** A request whose estimate the month could not absorb, though the month was not yet spent. */
+  readonly onReservationRefused?: (tenantId: string, estimateUsd: number, limitUsd: number) => void;
   /**
    * The durable estimator correction (ADR-0330). Absent leaves `inflationFor` answering 1, which is
    * the behaviour before it existed.
@@ -50,14 +65,21 @@ export interface BudgetCheck {
 
 export interface AiDesignBudget {
   check(tenantId: string): Promise<BudgetCheck>;
-  record(tenantId: string, costUsd: number): Promise<number>;
-  readonly maxUsdPerRequest: number | null;
+  /**
+   * Charges `dollars` against the tenant's month if, and only if, the month can absorb it — one
+   * statement, so concurrent requests cannot each read the same headroom and all spend it, which
+   * a `check` before the call and a write after it allowed. `null` is a refusal; a ledger that cannot be written is
+   * a refusal too (the fail-closed direction `check` already takes). The settle is unconditional
+   * and charged to the reservation's own month, so a call that straddles midnight on the last day
+   * is not split across two.
+   */
+  reserve(tenantId: string, dollars: number): Promise<SpendReservation | null>;
   /**
    * The estimator's learned correction for this tenant, and the sink that updates it (ADR-0330).
    *
-   * On the budget rather than beside it, because the correction is an input to the *same* ceiling
-   * `maxUsdPerRequest` expresses — a caller holding one and not the other would price a request
-   * against an estimate the deployment had already learned was optimistic.
+   * On the budget rather than beside it, because the correction is an input to the *same*
+   * estimate `reserve` is charged — a caller holding one and not the other would reserve against an
+   * estimate the deployment had already learned was optimistic.
    *
    * Both are optional on the interface: a deployment with no Postgres store has no durable place
    * to keep the figure, and `inflationFor` answering 1 there is the pre-ADR-0330 behaviour.
@@ -93,16 +115,11 @@ export function buildAiDesignBudget(opts: AiDesignBudgetOptions): AiDesignBudget
   if (!Number.isFinite(limitUsd) || limitUsd <= 0) {
     throw new Error(`maxUsdPerMonth must be a finite number > 0, got ${String(opts.maxUsdPerMonth)}`);
   }
-  const perRequest = opts.maxUsdPerRequest;
-  const maxUsdPerRequest =
-    perRequest !== undefined && Number.isFinite(perRequest) && perRequest > 0 ? perRequest : null;
   const now = opts.now ?? ((): Date => new Date());
   const periodKeyFor = opts.periodKeyFor ?? defaultPeriodKey;
-  const { store, onDenied, inflationStore, onInflationFallback } = opts;
+  const { store, onDenied, onReservationRefused, inflationStore, onInflationFallback } = opts;
 
   return {
-    maxUsdPerRequest,
-
     ...(inflationStore === undefined
       ? {}
       : {
@@ -156,19 +173,24 @@ export function buildAiDesignBudget(opts: AiDesignBudgetOptions): AiDesignBudget
       return { allowed: true, reason: "ok", spentUsd, limitUsd, remainingUsd };
     },
 
-    async record(tenantId: string, costUsd: number): Promise<number> {
+    async reserve(tenantId: string, dollars: number): Promise<SpendReservation | null> {
       const periodKey = periodKeyFor(now());
-      try {
-        if (!Number.isFinite(costUsd) || costUsd <= 0) {
-          return sanitizeSpend(await store.getMonthly(tenantId, periodKey));
-        }
-        return sanitizeSpend(await store.addMonthly(tenantId, periodKey, costUsd));
-      } catch {
-        // Best-effort accounting: the design call already succeeded, so a failed
-        // ledger write must not surface as a request error; the next `check`
-        // re-reads the store and the unrecorded dollars are simply not charged.
-        return 0;
+      const amount = Number.isFinite(dollars) && dollars > 0 ? dollars : 0;
+      const outcome = await store.reserveMonthly(tenantId, periodKey, amount, limitUsd);
+      if (!outcome.reserved) {
+        onReservationRefused?.(tenantId, amount, limitUsd);
+        return null;
       }
+      return {
+        dollars: amount,
+        periodKey,
+        async settle(actualDollars: number): Promise<void> {
+          const actual = Number.isFinite(actualDollars) && actualDollars > 0 ? actualDollars : 0;
+          const delta = actual - amount;
+          if (delta === 0) return;
+          await store.addMonthly(tenantId, periodKey, delta);
+        },
+      };
     },
   };
 }

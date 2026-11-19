@@ -468,6 +468,11 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
               sealing === null || page.nextCursor === null
                 ? page.nextCursor
                 : sealing.sealer.seal(page.nextCursor, sealing.context),
+            // Field names only, which the caller already holds from the schema; omitted rather than
+            // `[]` when nothing was left out, so the common page is byte-identical to before.
+            ...(page.searchNarrowedBy !== undefined && page.searchNarrowedBy.length > 0
+              ? { searchNarrowedBy: page.searchNarrowedBy }
+              : {}),
           },
         });
       }
@@ -974,6 +979,7 @@ async function applyTransition(
           fromState: current,
           actorId,
           stampsActor: (entity) => ctx.writeSurfaces?.get(entity)?.stampsActor === true,
+          childRemovers: ctx.entityAudit?.childRemovers?.bind(ctx.entityAudit) ?? null,
         });
         if (content !== null) return json(422, { error: content.error, detail: content.detail });
       }

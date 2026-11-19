@@ -18,6 +18,7 @@ import {
   InMemoryRouteRegistry,
   MapRedactionRegistry,
   redactionRegistryFromManifest,
+  type GatewayRuntimeOptions,
   type Handler,
   type IdempotencyStore,
   type JwksProvider,
@@ -59,6 +60,7 @@ import { sequenceFieldPlans, type SequenceAllocator, type SequenceFieldPlan } fr
 import { planHasSettingsDefaults, settingsDefaultPlan, type SettingsDefaultPlan } from "./settings-defaults.js";
 import {
   journalPostingGuard,
+  currencyPrecisionGuard,
   lifecycleStateGuard,
   lockedDocumentGuard,
   postedEntryImmutabilityGuard,
@@ -77,6 +79,7 @@ import {
   recognitionGlPostingEffect,
   unrealizedFxRevaluationEffect,
   whtCertificateClearingEffect,
+  type PostingFxConfig,
   type WriteEffect,
 } from "./write-effects.js";
 import { lifecycleStateField } from "./list-query.js";
@@ -398,12 +401,6 @@ function correctionHints(
   return hints;
 }
 
-function declaresTransition(manifest: Manifest, entity: string, name: string): boolean {
-  return Object.values(manifest.workflows ?? {}).some(
-    (wf) => wf.kind === "entityLifecycle" && wf.entity === entity && wf.transitions.some((t) => t.name === name),
-  );
-}
-
 function hasLifecycle(manifest: Manifest, entity: string): boolean {
   return lifecycleStateField(manifest, entity) !== null;
 }
@@ -506,11 +503,7 @@ function defaultWriteGuards(
       }),
     );
   }
-  // A posting is corrected by reversing the journal entry it made, so every "posts no reversal"
-  // remedy below names that only where the manifest declares the `reverse` transition.
-  const jeReverses = declaresTransition(manifest, "JournalEntry", "reverse");
-  const noReversal = (act: string): string =>
-    jeReverses ? `${act} posts no reversal, so reverse its journal entry as well` : `${act} posts no reversal`;
+  if (names.has("Currency")) guards.push(currencyPrecisionGuard());
   if (names.has("JournalEntry") && names.has("JournalLine")) {
     guards.push(
       journalPostingGuard(postingPeriodsOf(manifest) !== undefined ? { postingPeriods: {} } : {}),
@@ -648,9 +641,9 @@ function defaultWriteGuards(
         nounByState: { void: "void WHT certificate" },
         hintByState:
           stateField === null
-            ? { confirmed: `set its state to 'void' instead — ${noReversal("voiding a certificate")}` }
+            ? { confirmed: "set its state to 'void' instead, which reverses its clearing" }
             : correctionHints(manifest, "WhtCertificate", lock.lockedStates, {
-                void: `void it instead — ${noReversal("voiding a certificate")}`,
+                void: "void it instead, which reverses its clearing",
               }),
       }),
     );
@@ -864,8 +857,21 @@ function defaultWriteEffectsWithStamps(
             (await settingsStore.get(tenantId)).finance?.taxAccountsByJurisdiction ?? {},
         };
 
+  // The rate a foreign-currency document posts at, where the manifest declares the rate tables: its
+  // own stamped booking rate, else the rate on its date — and refused by name, for a tenant that has
+  // declared its functional currency, when there is none.
+  const postingFx = (dateField: string): { fx?: PostingFxConfig } =>
+    hasFx ? { fx: { dateField, bookingRateField: STAMPED_BOOKING_RATE_FIELD, ...functionalResolver } } : {};
+
   if (names.has("JournalEntry") && names.has("JournalLine")) {
-    effects.push(journalReversalEffect({ ...clockOpt, ...periodsOpt }));
+    effects.push(
+      journalReversalEffect({
+        ...clockOpt,
+        ...periodsOpt,
+        // A partial credit note reverses part of its invoice's recognition and leaves it posted.
+        partialReversals: [{ sourceSuffix: "-AR", reversalSuffix: "-CN-GL" }],
+      }),
+    );
   }
   if (names.has("Invoice")) {
     effects.push(
@@ -885,7 +891,10 @@ function defaultWriteEffectsWithStamps(
           sourceValue: "invoice",
           entrySuffix: "-AR",
           numberField: "invoice_number",
-          skipDocumentType: { field: "document_type", value: "credit_note" },
+          // A credit note sent through the API posts the mirror of a sale; one a void issued is
+          // created in `sent` by the void itself, which runs no effects, and posts as `-CN-GL`.
+          contraDocumentType: { field: "document_type", value: "credit_note" },
+          ...postingFx("issue_date"),
           controlAccountRef: "accounts_receivable",
           netAccountRef: "revenue",
           taxAccountRef: "tax_payable",
@@ -946,6 +955,7 @@ function defaultWriteEffectsWithStamps(
         sourceValue: "bill",
         entrySuffix: "-GL",
         numberField: "bill_number",
+        ...postingFx("bill_date"),
         controlAccountRef: "accounts_payable",
         netAccountRef: "expense",
         taxAccountRef: "tax_input",
@@ -974,6 +984,7 @@ function defaultWriteEffectsWithStamps(
         sourceSuffix: "-GL",
         reversalSuffix: "-VOID",
         sourceLabel: "bill",
+        ...(names.has("Payment") ? { refuseWhileSettledBy: "bill_id" } : {}),
         ...clockOpt,
         ...periodsOpt,
       }),
@@ -996,6 +1007,11 @@ function defaultWriteEffectsWithStamps(
   if (names.has("Payment") && hasGl) {
     effects.push(
       paymentSettlementGlPostingEffect({
+        ...postingFx("paid_at"),
+        settledDocuments: [
+          ...(names.has("Invoice") ? [{ refField: "invoice_id", entity: "Invoice" }] : []),
+          ...(names.has("Bill") ? [{ refField: "bill_id", entity: "Bill" }] : []),
+        ],
         ...clockOpt,
         ...periodsOpt,
         ...codeResolver((f) => ({
@@ -1070,6 +1086,13 @@ function defaultWriteEffectsWithStamps(
               paymentRefField: "invoice_id",
               side: "ar" as const,
               ...(invoiceWithholdingStamped ? { withholdingField: STAMPED_WITHHOLDING_FIELD } : {}),
+              // The aging report's grouping (`creditNote` on its AR section), so the two agree.
+              creditNote: {
+                typeField: "document_type",
+                typeValue: "credit_note",
+                refField: "credit_note_of",
+                creditedStates: ["void"],
+              },
             },
           ]
         : []),
@@ -1138,12 +1161,25 @@ function defaultWriteEffectsWithStamps(
   if (names.has("WhtCertificate") && hasGl) {
     effects.push(
       whtCertificateClearingEffect({
+        ...postingFx("issue_date"),
         ...clockOpt,
         ...periodsOpt,
         ...codeResolver((f) => ({
           ...(f.whtReceivableAccountCode !== undefined ? { whtReceivable: f.whtReceivableAccountCode } : {}),
           ...(f.taxRecoverableAccountCode !== undefined ? { taxRecoverable: f.taxRecoverableAccountCode } : {}),
         })),
+      }),
+      // A void certificate no longer evidences the credit, so voiding it reverses its clearing.
+      postingReversalEffect({
+        entity: "WhtCertificate",
+        fromStates: ["confirmed"],
+        toState: "void",
+        numberField: "certificate_number",
+        sourceSuffix: "-WHT",
+        reversalSuffix: "-WHT-VOID",
+        sourceLabel: "system",
+        ...clockOpt,
+        ...periodsOpt,
       }),
     );
   }
@@ -1711,6 +1747,19 @@ export interface OperateGatewayOptions extends OperateRuntimeOptions {
    * test. Found only by a live request.
    */
   readonly requiredJwtClaims?: ReadonlySet<RequiredJwtClaim>;
+  /**
+   * The idempotency lease and the largest response body a replay stores (ADR-0449). Declared and
+   * forwarded for the reason `requiredJwtClaims` is: an option `GatewayRuntime` accepts and this
+   * interface omits is dropped in silence, and this file's own fence found all three below doing so.
+   */
+  readonly idempotencyLeaseSeconds?: number;
+  readonly idempotencyMaxStoredBodyBytes?: number;
+  /**
+   * Where a stage or handler that **threw** is reported, with the request id the caller was given.
+   * Without it the cause survived only as a truncated stage reason, so a 500 from a thrown handler
+   * left its stack in no log.
+   */
+  readonly onInternalError?: GatewayRuntimeOptions["onInternalError"];
 }
 
 export interface OperateServer extends CompiledOperateServer {
@@ -1746,6 +1795,13 @@ export function buildOperateGateway(
     ...(options.jwtIssuer !== undefined ? { jwtIssuer: options.jwtIssuer } : {}),
     ...(options.jwtAudience !== undefined ? { jwtAudience: options.jwtAudience } : {}),
     ...(options.requiredJwtClaims !== undefined ? { requiredJwtClaims: options.requiredJwtClaims } : {}),
+    ...(options.idempotencyLeaseSeconds !== undefined
+      ? { idempotencyLeaseSeconds: options.idempotencyLeaseSeconds }
+      : {}),
+    ...(options.idempotencyMaxStoredBodyBytes !== undefined
+      ? { idempotencyMaxStoredBodyBytes: options.idempotencyMaxStoredBodyBytes }
+      : {}),
+    ...(options.onInternalError !== undefined ? { onInternalError: options.onInternalError } : {}),
     ...(options.clock !== undefined ? { clock: options.clock } : {}),
   });
   return { ...compiled, runtime };

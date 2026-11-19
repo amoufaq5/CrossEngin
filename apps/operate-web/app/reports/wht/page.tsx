@@ -110,11 +110,19 @@ export default function WhtReportPage() {
 
         {data && !forbidden && !error && (
           <div className="space-y-6">
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-              <Stat label="Withheld" value={data.totals.withheld} />
-              <Stat label="Certified" value={data.totals.certified} />
-              <Stat label="Uncertified" value={data.totals.uncertified} accent />
-            </div>
+            {data.byCurrency.length > 1 ? (
+              // The top-line totals add amounts in different currencies together, so with more than
+              // one currency they are not shown — the table below totals each currency on its own.
+              <p className="text-xs text-ink-muted">
+                Withholding is recorded in {data.byCurrency.length} currencies; totals are per currency below.
+              </p>
+            ) : (
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                <Stat label="Withheld" value={data.totals.withheld} currency={data.byCurrency[0]?.currency || null} />
+                <Stat label="Certified" value={data.totals.certified} currency={data.byCurrency[0]?.currency || null} />
+                <Stat label="Uncertified" value={data.totals.uncertified} currency={data.byCurrency[0]?.currency || null} accent />
+              </div>
+            )}
 
             {data.byCurrency.length > 1 && (
               <div>
@@ -168,9 +176,9 @@ export default function WhtReportPage() {
                           )}
                           {row.currency && <span className="ml-2 text-xs text-ink-faint">{row.currency}</span>}
                         </td>
-                        <td className="px-4 py-2.5 text-right text-ink">{formatCell(row.withheld, "money")}</td>
-                        <td className="px-4 py-2.5 text-right text-ink-muted">{formatCell(row.certified, "money")}</td>
-                        <td className="px-4 py-2.5 text-right font-medium text-ink">{formatCell(row.gap, "money")}</td>
+                        <td className="px-4 py-2.5 text-right text-ink">{formatCell(row.withheld, "money", row.currency)}</td>
+                        <td className="px-4 py-2.5 text-right text-ink-muted">{formatCell(row.certified, "money", row.currency)}</td>
+                        <td className="px-4 py-2.5 text-right font-medium text-ink">{formatCell(row.gap, "money", row.currency)}</td>
                         <td className="px-4 py-2.5">
                           <span className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${STATUS_TONE[row.status]}`}>
                             {row.status}
@@ -193,18 +201,28 @@ function CurrencyRow({ row, first }: { row: WhtCurrencySubtotal; first: boolean 
   return (
     <tr className={first ? "" : "border-t border-line"}>
       <td className="px-4 py-2.5 font-medium text-ink">{row.currency || "—"}</td>
-      <td className="px-4 py-2.5 text-right text-ink">{formatCell(row.withheld, "money")}</td>
-      <td className="px-4 py-2.5 text-right text-ink-muted">{formatCell(row.certified, "money")}</td>
-      <td className="px-4 py-2.5 text-right font-medium text-brand">{formatCell(row.uncertified, "money")}</td>
+      <td className="px-4 py-2.5 text-right text-ink">{formatCell(row.withheld, "money", row.currency)}</td>
+      <td className="px-4 py-2.5 text-right text-ink-muted">{formatCell(row.certified, "money", row.currency)}</td>
+      <td className="px-4 py-2.5 text-right font-medium text-brand">{formatCell(row.uncertified, "money", row.currency)}</td>
     </tr>
   );
 }
 
-function Stat({ label, value, accent }: { label: string; value: number; accent?: boolean }) {
+function Stat({
+  label,
+  value,
+  currency,
+  accent,
+}: {
+  label: string;
+  value: number;
+  currency: string | null;
+  accent?: boolean;
+}) {
   return (
     <div className={`card p-3 ${accent ? "ring-1 ring-brand/20" : ""}`}>
       <div className="text-xs font-medium uppercase tracking-wide text-ink-faint">{label}</div>
-      <div className={`mt-1 text-base font-bold ${accent ? "text-brand" : "text-ink"}`}>{formatCell(value, "money")}</div>
+      <div className={`mt-1 text-base font-bold ${accent ? "text-brand" : "text-ink"}`}>{formatCell(value, "money", currency)}</div>
     </div>
   );
 }

@@ -5,7 +5,7 @@ import {
   UnadmittedExpressionDefaultError,
 } from "@crossengin/kernel/ddl";
 import type { Manifest } from "@crossengin/kernel/manifest";
-import { resolvedFields, toTableName } from "@crossengin/kernel/ddl";
+import { joinTableColumns, joinTableName, resolvedFields, toTableName } from "@crossengin/kernel/ddl";
 import {
   requiresEncryptionAtRest,
   type DataClassification,
@@ -109,6 +109,14 @@ const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
  */
 const UNDECIDED_SQL_TYPES: ReadonlyMap<string, string> = new Map([
   ["INTERVAL", "a 'duration' field has no decided wire type"],
+  // A `geo_point` / `geo_polygon` is the same case twice over. Without PostGIS the type does not
+  // exist, and `ensureSchema` raised `42704 type "geography" does not exist` for the whole table
+  // (ADR-0414); with it, nothing decides the wire form either — validation accepts any JSON for
+  // these kinds, node-postgres hands a geography back as hex EWKB, and the document store keeps
+  // whatever was sent, so the two stores could not agree on one value. Refused here, naming the
+  // field, until a geo kind has a declared wire format and a provisioning check.
+  ["geography(POINT)", "a 'geo_point' field has no decided wire type and needs PostGIS"],
+  ["geography(POLYGON)", "a 'geo_polygon' field has no decided wire type and needs PostGIS"],
 ]);
 
 /**
@@ -338,19 +346,17 @@ export function joinTablePlansForManifest(
   const seen = new Set<string>();
   for (const rel of manifest.relations ?? []) {
     if (rel.kind !== "many_to_many") continue;
-    const leftTable = toTableName(rel.left);
-    const rightTable = toTableName(rel.right);
-    const table = `${leftTable}_${rightTable}`;
+    const table = joinTableName(rel.left, rel.right);
     if (seen.has(table)) continue;
     seen.add(table);
-    const selfRef = rel.left === rel.right;
+    const columns = joinTableColumns(rel.left, rel.right);
     out.push({
       schema: opts.schema,
       table,
       leftEntity: rel.left,
       rightEntity: rel.right,
-      leftColumn: selfRef ? `${leftTable}_left_id` : `${leftTable}_id`,
-      rightColumn: selfRef ? `${rightTable}_right_id` : `${rightTable}_id`,
+      leftColumn: columns.left,
+      rightColumn: columns.right,
     });
   }
   return out;

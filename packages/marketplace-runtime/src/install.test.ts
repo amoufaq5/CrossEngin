@@ -1,6 +1,10 @@
 import { generateEd25519Keypair } from "@crossengin/crypto";
 import {
+  INSTALLATION_STATUSES,
+  canTransitionInstallation,
   PackManifestSchema,
+  PackPublisherRegistry,
+  parsePackPublisherSpec,
   signPackManifest,
   type PackCompatibility,
   type PackInstallation,
@@ -20,7 +24,9 @@ import {
   completeUninstall,
   completeUpdate,
   failInstallation,
+  INSTALL_WITHDRAWN_REASON,
   requestFromGrants,
+  UNINSTALL_PATH,
 } from "./install.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
@@ -56,7 +62,7 @@ function tenantContext(overrides: Partial<TenantContext> = {}): TenantContext {
 function signed(overrides: Partial<PackManifest> = {}): {
   pack: PackManifest;
   signature: PackSignature;
-  publicKeyBase64: string;
+  publishers: PackPublisherRegistry;
 } {
   const pack = manifest(overrides);
   const kp = generateEd25519Keypair();
@@ -66,7 +72,10 @@ function signed(overrides: Partial<PackManifest> = {}): {
     publicKeyBase64: kp.publicKeyBase64,
     signedAt: NOW,
   });
-  return { pack, signature, publicKeyBase64: kp.publicKeyBase64 };
+  const publishers = new PackPublisherRegistry([
+    parsePackPublisherSpec(`com.crossengin:${pack.author.kind}:${kp.publicKeyBase64}`),
+  ]);
+  return { pack, signature, publishers };
 }
 
 function request(overrides: Partial<InstallRequest> = {}): InstallRequest {
@@ -78,7 +87,7 @@ function request(overrides: Partial<InstallRequest> = {}): InstallRequest {
     version: "1.0.0",
     compatibility: compatibility(),
     signature: s.signature,
-    publisherPublicKeyBase64: s.publicKeyBase64,
+    publishers: s.publishers,
     securityReviewStatus: "passed",
     tenantContext: tenantContext(),
     existing: [],
@@ -102,7 +111,7 @@ describe("admitInstallation — gates", () => {
   it("routes a pack with required scopes to permission_pending", () => {
     const s = signed({ requiredScopes: ["records:read"] });
     const decision = admitInstallation(
-      request({ pack: s.pack, signature: s.signature, publisherPublicKeyBase64: s.publicKeyBase64 }),
+      request({ pack: s.pack, signature: s.signature, publishers: s.publishers }),
       ctx,
     );
     expect(decision.outcome).toBe("permission_pending");
@@ -112,9 +121,23 @@ describe("admitInstallation — gates", () => {
     expect(decision.installation.permissionGrants.every((g) => g.status === "pending")).toBe(true);
   });
 
-  it("rejects a bad signature", () => {
+  it("rejects a pack whose signer the platform has not registered, however valid the signature", () => {
     const other = generateEd25519Keypair();
-    const decision = admitInstallation(request({ publisherPublicKeyBase64: other.publicKeyBase64 }), ctx);
+    const unregistered = new PackPublisherRegistry([
+      parsePackPublisherSpec(`com.crossengin:crossengin_official:${other.publicKeyBase64}`),
+    ]);
+    const decision = admitInstallation(request({ publishers: unregistered }), ctx);
+    expect(decision.outcome).toBe("rejected");
+    if (decision.outcome !== "rejected") return;
+    expect(decision.reason).toBe("publisher_unregistered");
+  });
+
+  it("rejects a manifest altered after its registered publisher signed it", () => {
+    const s = signed();
+    const decision = admitInstallation(
+      request({ pack: { ...s.pack, name: "Altered" }, signature: s.signature, publishers: s.publishers }),
+      ctx,
+    );
     expect(decision.outcome).toBe("rejected");
     if (decision.outcome !== "rejected") return;
     expect(decision.reason).toBe("signature_invalid");
@@ -137,7 +160,7 @@ describe("admitInstallation — gates", () => {
       request({
         pack: s.pack,
         signature: s.signature,
-        publisherPublicKeyBase64: s.publicKeyBase64,
+        publishers: s.publishers,
         securityReviewStatus: "pending",
       }),
       ctx,
@@ -153,7 +176,7 @@ describe("admitInstallation — gates", () => {
       request({
         pack: s.pack,
         signature: s.signature,
-        publisherPublicKeyBase64: s.publicKeyBase64,
+        publishers: s.publishers,
         securityReviewStatus: "passed",
       }),
       ctx,
@@ -188,7 +211,7 @@ describe("permission grants", () => {
   it("advances to installing once every required scope is granted", () => {
     const s = signed({ requiredScopes: ["records:read", "records:write"] });
     const decision = admitInstallation(
-      request({ pack: s.pack, signature: s.signature, publisherPublicKeyBase64: s.publicKeyBase64 }),
+      request({ pack: s.pack, signature: s.signature, publishers: s.publishers }),
       ctx,
     );
     if (decision.outcome !== "permission_pending") throw new Error("expected permission_pending");
@@ -214,7 +237,7 @@ describe("permission grants", () => {
   it("reconstructs the request from grants (required vs optional)", () => {
     const s = signed({ requiredScopes: ["records:read"], optionalScopes: ["files:read"] });
     const decision = admitInstallation(
-      request({ pack: s.pack, signature: s.signature, publisherPublicKeyBase64: s.publicKeyBase64 }),
+      request({ pack: s.pack, signature: s.signature, publishers: s.publishers }),
       ctx,
     );
     if (decision.outcome !== "permission_pending") throw new Error("expected permission_pending");
@@ -264,5 +287,39 @@ describe("lifecycle transitions", () => {
     const done = completeInstallation(installing(), { version: "1.0.0", installedBy: "u", at: NOW });
     // installed → installed is not a legal transition
     expect(() => beginUpdate(beginUpdate(done))).toThrow(/illegal installation transition/);
+  });
+});
+
+
+describe("UNINSTALL_PATH", () => {
+  const STEPS = {
+    begin_then_complete: ["uninstalling", "uninstalled"],
+    fail_then_complete: ["failed", "uninstalled"],
+    complete: ["uninstalled"],
+  } as const;
+
+  it("names only paths the installation transition map permits", () => {
+    for (const status of INSTALLATION_STATUSES) {
+      const path = UNINSTALL_PATH[status];
+      if (path === null) continue;
+      let at = status;
+      for (const next of STEPS[path]) {
+        expect(canTransitionInstallation(at, next), `${status}: ${at} → ${next}`).toBe(true);
+        at = next;
+      }
+    }
+  });
+
+  it("can withdraw every status an admission leaves an install in, since nothing completes one", () => {
+    const admitted = admitInstallation(request(), ctx);
+    const s = signed({ requiredScopes: ["records:read"] });
+    const pending = admitInstallation(request({ pack: s.pack, signature: s.signature, publishers: s.publishers }), ctx);
+    if (admitted.outcome !== "admitted") throw new Error("expected admitted");
+    if (pending.outcome !== "permission_pending") throw new Error("expected permission_pending");
+    for (const d of [admitted, pending]) {
+      expect(UNINSTALL_PATH[d.installation.status], d.installation.status).not.toBeNull();
+    }
+    const withdrawn = failInstallation(admitted.installation, INSTALL_WITHDRAWN_REASON);
+    expect(completeUninstall(withdrawn, { uninstalledBy: "u", at: NOW }).status).toBe("uninstalled");
   });
 });

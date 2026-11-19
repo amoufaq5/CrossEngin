@@ -1,5 +1,14 @@
 import { NextResponse, type NextRequest } from "next/server";
 
+import {
+  CROSS_SITE_REFUSAL_DETAIL,
+  UPSTREAM_TIMEOUT,
+  crossSiteRefusal,
+  provenanceOf,
+  isUpstreamTimeout,
+  proxyLimitsFromEnv,
+  readCappedBody,
+} from "@/lib/proxy-guard";
 import { UPSTREAM_UNREACHABLE } from "@/lib/request-failure";
 import { SESSION_COOKIE } from "@/lib/session";
 import { UPSTREAM_BASE_URL } from "@/lib/upstream";
@@ -11,9 +20,12 @@ import { UPSTREAM_BASE_URL } from "@/lib/upstream";
 // could reach the domain the same principal, which in the shipped stack is a `platform_admin`
 // who can provision and delete tenants.
 //
-// Config via env: OPERATE_API_URL (see lib/upstream.ts).
+// Config via env: OPERATE_API_URL (see lib/upstream.ts), and the two proxy limits in
+// lib/proxy-guard.ts, validated and announced at startup by instrumentation.ts.
 
 export const dynamic = "force-dynamic";
+
+const LIMITS = proxyLimitsFromEnv(process.env);
 
 async function proxy(req: NextRequest, path: string[]): Promise<Response> {
   const token = (req.cookies.get(SESSION_COOKIE)?.value ?? "").trim();
@@ -26,6 +38,11 @@ async function proxy(req: NextRequest, path: string[]): Promise<Response> {
       { error: "unauthenticated", detail: "No session cookie on this request." },
       { status: 401 },
     );
+  }
+
+  const refusal = crossSiteRefusal(provenanceOf(req));
+  if (refusal !== null) {
+    return NextResponse.json({ error: refusal, detail: CROSS_SITE_REFUSAL_DETAIL }, { status: 403 });
   }
 
   const search = req.nextUrl.search;
@@ -47,23 +64,52 @@ async function proxy(req: NextRequest, path: string[]): Promise<Response> {
   if (contentType) headers["content-type"] = contentType;
 
   const method = req.method.toUpperCase();
-  const body = method === "GET" || method === "HEAD" ? undefined : await req.text();
+  let body: Uint8Array<ArrayBuffer> | undefined;
+  if (method !== "GET" && method !== "HEAD") {
+    const read = await readCappedBody(req, LIMITS.maxRequestBodyBytes);
+    if (!read.ok) {
+      return NextResponse.json(
+        {
+          error: "request_body_too_large",
+          detail: `The request body exceeds ${LIMITS.maxRequestBodyBytes.toString()} bytes.`,
+        },
+        { status: 413 },
+      );
+    }
+    body = read.bytes;
+  }
 
+  // The timeout covers the whole exchange, body included: `AbortSignal.timeout` aborts the read of
+  // `upstream.text()` too, which is where a wedged API that sent headers and then stalled is met.
+  //
+  // Neither failure body names the upstream address or the error text: both used to, and the
+  // address is an internal host and port handed to every browser that saw the API go down. The
+  // operator's half — what failed and where — goes to this process's log instead.
+  const logTarget = `${method} ${UPSTREAM_BASE_URL}/${path.join("/")}`;
+  const signal = AbortSignal.timeout(LIMITS.upstreamTimeoutMs);
   let upstream: Response;
+  let text: string;
   try {
-    upstream = await fetch(url, { method, headers, body, cache: "no-store" });
+    upstream = await fetch(url, { method, headers, body, cache: "no-store", signal });
+    text = await upstream.text();
   } catch (err) {
-    return Response.json(
-      {
-        error: UPSTREAM_UNREACHABLE,
-        detail: String(err),
-        hint: `Is operate-server running at ${UPSTREAM_BASE_URL}?`,
-      },
+    if (isUpstreamTimeout(err)) {
+      console.error(`[proxy] ${logTarget}: no answer within ${LIMITS.upstreamTimeoutMs.toString()} ms`);
+      return NextResponse.json(
+        {
+          error: UPSTREAM_TIMEOUT,
+          detail: `operate-server did not answer within ${Math.round(LIMITS.upstreamTimeoutMs / 1000).toString()} s`,
+        },
+        { status: 504 },
+      );
+    }
+    console.error(`[proxy] ${logTarget}: ${err instanceof Error ? `${err.name}: ${err.message}` : String(err)}`);
+    return NextResponse.json(
+      { error: UPSTREAM_UNREACHABLE, detail: "the API could not be reached" },
       { status: 502 },
     );
   }
 
-  const text = await upstream.text();
   return new Response(NULL_BODY_STATUSES.has(upstream.status) ? null : text, {
     status: upstream.status,
     headers: forwardedResponseHeaders(upstream),

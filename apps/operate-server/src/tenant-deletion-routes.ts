@@ -2,9 +2,11 @@ import type { PathSegment, ResolvedPrincipal, RouteDefinition } from "@crossengi
 import type { Handler, HandlerOutput, PrincipalRoles } from "@crossengin/api-gateway-runtime";
 import type { RowRead } from "@crossengin/kernel-pg";
 import type { ExtraGatewayRoute } from "@crossengin/operate-runtime";
+import type { TenantStateMover } from "./deletion-request-routes.js";
 import { z } from "zod";
 import {
   DeletionAttestationSchema,
+  deletionExecuteNotBefore,
   type DeletionAttestation,
 } from "@crossengin/tenant-lifecycle";
 
@@ -25,10 +27,14 @@ import {
  * it. One is a step the other contains, so sharing a grant would mean anybody who can do the step can
  * do the whole thing.
  *
- * **Four-eyes, structurally.** `executedBy` is the authenticated caller and is never read from the
- * body; `approvedBy` comes from the body and must differ. The pipeline refuses it too, and so does the
- * column (ADR-0318) — three layers for one rule, because this is the most destructive act the platform
- * can perform.
+ * **Four-eyes, structurally — and both eyes authenticated (H-05).** `executedBy` is the
+ * authenticated caller. `approvedBy` used to come from the body, so the "second person" was a string
+ * the first person typed. It is now the principal who **verified** the deletion request this call
+ * names (`relatedDeletionRequestId`, required) — a separate act, on a separate route, recorded from
+ * that caller's own credential — and a body naming an approver is refused. The executor must differ
+ * from that verifier, the request must belong to this tenant and be `verified`, and the declared grace
+ * period must have elapsed; the request is claimed `in_progress` before the drop and moved to
+ * `completed` or `rejected` after it, so the synchronous path and the runner cannot both run it.
  *
  * **The tenant row is retired *after* the pipeline commits, never before.** ADR-0316 found the
  * ordering the hard way: the tombstone's chain anchor references `meta.tenants`, so retiring the row
@@ -267,8 +273,39 @@ export interface TenantDeletionEvent {
  */
 export type TenantDeletionRecorder = (event: TenantDeletionEvent) => Promise<void>;
 
+/** The slice of a deletion request this route reads and moves: the approval it executes under. */
+export interface ApprovingRequestLike {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly status: string;
+  readonly verifiedBy: string | null;
+  readonly verifiedAt: string | null;
+  readonly deadlineAt: string;
+}
+
+export interface ApprovingRequestStoreLike {
+  read(requestId: string): Promise<ApprovingRequestLike | null>;
+  transition(
+    requestId: string,
+    to: "in_progress" | "completed" | "rejected",
+    fields: {
+      readonly at: string;
+      readonly tombstoneId?: string;
+      readonly completionSha256?: string;
+      readonly rejectedReason?: string;
+    },
+  ): Promise<ApprovingRequestLike | null>;
+}
+
 export interface TenantDeletionRoutesContext {
   readonly deleter: TenantDeleterLike;
+  /**
+   * Where the approval comes from. Required: without it there is no authenticated second person,
+   * only a name, and a destructive act approved by a typed name is what H-05 found.
+   */
+  readonly requests: ApprovingRequestStoreLike;
+  /** The declared wait between a verify and its execution (ms). Absent ⇒ no wait. */
+  readonly graceMs?: number;
   readonly principalRoles: (principal: ResolvedPrincipal | null) => PrincipalRoles;
   /** Roles permitted to delete a tenant. Fail-closed: empty ⇒ nobody. */
   readonly deleteRoles: ReadonlySet<string>;
@@ -283,11 +320,22 @@ export interface TenantDeletionRoutesContext {
   readonly clock?: () => Date;
   readonly onRecordError?: (err: unknown, operation: string) => void;
   readonly onRetireError?: (err: unknown, tenantId: string) => void;
+  /**
+   * Restores the tenant when a refused deletion settles its request `rejected`. The verify route
+   * moved the tenant to `pending_deletion`, and a refusal here closes the request for good, so
+   * without this the tenant sat read-only with no live request holding it — found live on the
+   * confined role, where every attempt is refused `rls_would_confine_this_session`. The reject
+   * route restores through the same mover; absent, nothing is restored and the response says so.
+   */
+  readonly tenantState?: TenantStateMover;
+  readonly onRestoreError?: (err: unknown, tenantId: string) => void;
 }
+
+/** The id shape `newRequestId` mints, which `deletion-request-routes.ts` checks the same way. */
+export const DELETION_REQUEST_ID_RE = /^dreq_[A-Za-z0-9_-]{8,40}$/;
 
 export const DeleteTenantInputSchema = z
   .object({
-    approvedBy: z.string().min(1).max(200),
     /** An irreversible act should not be one mistyped path segment away. */
     confirmTenantId: z.string().regex(UUID_RE),
     kind: z.enum(DELETABLE_TOMBSTONE_KINDS).default("tenant_deletion"),
@@ -310,7 +358,8 @@ export const DeleteTenantInputSchema = z
      * answers both at the edge, as a 400 naming the field — which is what the caller can act on.
      */
     attestations: z.array(DeletionAttestationSchema).default([]),
-    relatedDeletionRequestId: z.string().min(1).optional(),
+    /** The verified request this deletion executes; its verifier is the approver. */
+    relatedDeletionRequestId: z.string().regex(DELETION_REQUEST_ID_RE),
   })
   .strict();
 export type DeleteTenantInput = z.infer<typeof DeleteTenantInputSchema>;
@@ -411,6 +460,90 @@ export function lifecycleReceipt(
   return { recorded: true, ...event };
 }
 
+/**
+ * The approval a destructive act executes under: the verifier of a named, verified deletion request
+ * for this tenant, who is not the caller, once the declared grace has elapsed (H-05).
+ *
+ * One function for the two routes that destroy tenant data, so the schema erasure and the deletion
+ * cannot come to disagree about what counts as a second person.
+ */
+export async function resolveVerifiedApproval(
+  requests: Pick<ApprovingRequestStoreLike, "read">,
+  input: {
+    readonly requestId: string;
+    readonly tenantId: string;
+    readonly executedBy: string;
+    readonly now: Date;
+    readonly graceMs?: number;
+  },
+): Promise<
+  | { readonly ok: true; readonly approvedBy: string }
+  | { readonly ok: false; readonly status: number; readonly body: Record<string, unknown> }
+> {
+  let request: ApprovingRequestLike | null;
+  try {
+    request = await requests.read(input.requestId);
+  } catch {
+    return {
+      ok: false,
+      status: 503,
+      body: {
+        error: "deletion_request_unreadable",
+        detail: "the deletion request could not be read; nothing was changed",
+      },
+    };
+  }
+  if (request === null) {
+    return { ok: false, status: 404, body: { error: "deletion_request_not_found" } };
+  }
+  if (request.tenantId.toLowerCase() !== input.tenantId.toLowerCase()) {
+    return {
+      ok: false,
+      status: 409,
+      body: {
+        error: "deletion_request_for_another_tenant",
+        detail: "the named deletion request is not for the tenant in the path",
+      },
+    };
+  }
+  if (request.status !== "verified" || request.verifiedBy === null) {
+    return {
+      ok: false,
+      status: 409,
+      body: {
+        error: "deletion_request_not_verified",
+        detail: `the named deletion request is '${request.status}'; only a verified request authorises this`,
+      },
+    };
+  }
+  if (request.verifiedBy === input.executedBy) {
+    return {
+      ok: false,
+      status: 403,
+      body: {
+        error: "four_eyes_required",
+        detail: "the caller verified this request: acting on it needs a second authenticated person",
+      },
+    };
+  }
+  if (input.graceMs !== undefined && input.graceMs > 0) {
+    const notBefore = deletionExecuteNotBefore(request, input.graceMs);
+    if (notBefore !== null && Date.parse(notBefore) > input.now.getTime()) {
+      return {
+        ok: false,
+        status: 409,
+        body: {
+          error: "grace_period_running",
+          detail:
+            "the declared grace period after verification has not elapsed; rejecting the request cancels it",
+          executeNotBefore: notBefore,
+        },
+      };
+    }
+  }
+  return { ok: true, approvedBy: request.verifiedBy };
+}
+
 function buildDeleteHandler(ctx: TenantDeletionRoutesContext): Handler {
   return async (input) => {
     const principal = input.principal;
@@ -422,7 +555,17 @@ function buildDeleteHandler(ctx: TenantDeletionRoutesContext): Handler {
     if (!UUID_RE.test(tenantId)) {
       return json(400, { error: "invalid_request", detail: "tenant id must be a uuid" });
     }
-    const parsed = DeleteTenantInputSchema.safeParse(input.parsedBody ?? {});
+    const body = input.parsedBody;
+    if (typeof body === "object" && body !== null && "approvedBy" in body) {
+      // Refused rather than ignored: a caller who sends it believes it names the approver.
+      return json(400, {
+        error: "approver_is_the_verifier",
+        detail:
+          "approvedBy is not accepted: the approver is the principal who verified the deletion " +
+          "request named by relatedDeletionRequestId",
+      });
+    }
+    const parsed = DeleteTenantInputSchema.safeParse(body ?? {});
     if (!parsed.success) {
       return json(400, {
         error: "invalid_request",
@@ -436,26 +579,61 @@ function buildDeleteHandler(ctx: TenantDeletionRoutesContext): Handler {
       });
     }
     const executedBy = principal.principalId;
-    if (executedBy === parsed.data.approvedBy) {
-      return json(403, {
-        error: "four_eyes_required",
-        detail: "approvedBy must not be the caller: deleting a tenant needs a second person",
+    const requestId = parsed.data.relatedDeletionRequestId;
+    const nowDate = (ctx.clock ?? ((): Date => new Date()))();
+    const approval = await resolveVerifiedApproval(ctx.requests, {
+      requestId,
+      tenantId,
+      executedBy,
+      now: nowDate,
+      ...(ctx.graceMs !== undefined ? { graceMs: ctx.graceMs } : {}),
+    });
+    if (!approval.ok) return json(approval.status, approval.body);
+    const approvedBy = approval.approvedBy;
+    const at = nowDate.toISOString();
+    const tombstoneId = (ctx.newTombstoneId ?? (() => newTombstoneId(crypto.randomUUID())))();
+
+    // Claimed before the drop, under the same in-predicate guard the runner uses, so a scheduled run
+    // and this route cannot both execute one request.
+    let claimed: ApprovingRequestLike | null;
+    try {
+      claimed = await ctx.requests.transition(requestId, "in_progress", { at });
+    } catch {
+      return json(503, {
+        error: "deletion_request_unreadable",
+        detail: "the deletion request could not be claimed; nothing was deleted",
       });
     }
-    /*
-     * A guard stood here refusing `data_subject_erasure` with no `relatedDeletionRequestId`, because
-     * the contract requires the pair and the pipeline would otherwise abort *after* the drop had
-     * executed. It is **deleted** rather than kept: that kind is no longer in
-     * `DELETABLE_TOMBSTONE_KINDS`, so `parsed.data.kind` cannot hold it and the condition could
-     * never fire — and a check that cannot fire reads as coverage it does not provide
-     * (ADR-0361's reason for deleting `validateReports`' unreachable duplicate check). The
-     * typechecker found it, which is the argument for the kind set being a narrowed type rather
-     * than a runtime filter. If a kind requiring a request reference is ever offered here again,
-     * this is the shape to restore.
-     */
+    if (claimed === null) {
+      return json(409, {
+        error: "concurrent_modification",
+        detail: "the deletion request changed while this call was in flight; nothing was deleted",
+      });
+    }
+    const settle = async (
+      to: "completed" | "rejected",
+      fields: { readonly tombstoneId?: string; readonly completionSha256?: string; readonly rejectedReason?: string },
+    ): Promise<string> => {
+      try {
+        const moved = await ctx.requests.transition(requestId, to, { at, ...fields });
+        return moved === null ? "in_progress" : moved.status;
+      } catch {
+        return "in_progress";
+      }
+    };
 
-    const at = (ctx.clock ?? ((): Date => new Date()))().toISOString();
-    const tombstoneId = (ctx.newTombstoneId ?? (() => newTombstoneId(crypto.randomUUID())))();
+    // `null` when nothing was asked (no mover wired, or the request did not reach `rejected`), so a
+    // response never claims a restore that was not attempted (ADR-0331).
+    const restoreAfterRefusal = async (requestStatus: string): Promise<boolean | null> => {
+      if (requestStatus !== "rejected" || ctx.tenantState === undefined) return null;
+      try {
+        await ctx.tenantState.restore(tenantId);
+        return true;
+      } catch (err) {
+        ctx.onRestoreError?.(err, tenantId);
+        return false;
+      }
+    };
 
     let outcome: DeletionOutcomeLike;
     try {
@@ -464,20 +642,23 @@ function buildDeleteHandler(ctx: TenantDeletionRoutesContext): Handler {
         tombstoneId,
         kind: parsed.data.kind,
         executedBy,
-        approvedBy: parsed.data.approvedBy,
+        approvedBy,
         attestations: parsed.data.attestations,
-        ...(parsed.data.relatedDeletionRequestId !== undefined
-          ? { relatedDeletionRequestId: parsed.data.relatedDeletionRequestId }
-          : {}),
+        relatedDeletionRequestId: requestId,
       });
     } catch (err) {
-      // Includes `DeletionPipelineAborted`, which means the whole transaction rolled back — the
-      // tenant is exactly as it was. Reported as a 409 rather than a 500 because nothing is broken:
-      // the deletion was refused after the drop and correctly undone.
+      // Only a refusal raised inside the pipeline's own transaction proves the rollback, and only
+      // that one closes the request: anything else is unknown, so the request stays `in_progress`
+      // for the reconciler rather than being declared refused (the runner's rule, ADR-0321).
+      const proven = (err as { readonly name?: unknown } | null)?.name === "DeletionPipelineAborted";
+      const requestStatus = proven
+        ? await settle("rejected", { rejectedReason: `rolled back: ${refusalReasons(err).join("; ")}`.slice(0, 500) })
+        : "in_progress";
+      const tenantRestored = await restoreAfterRefusal(requestStatus);
       await record(ctx, {
         tenantId,
         principalId: executedBy,
-        approvedBy: parsed.data.approvedBy,
+        approvedBy,
         operation: TENANT_DELETE_REFUSED_OPERATION,
         tombstoneId: null,
         chainEntryHash: null,
@@ -486,18 +667,32 @@ function buildDeleteHandler(ctx: TenantDeletionRoutesContext): Handler {
         tenantRetired: false,
         at,
       });
+      if (!proven) {
+        return json(500, {
+          error: "deletion_outcome_unknown",
+          detail:
+            "the deletion failed and whether it committed is unknown; the request stays in_progress " +
+            "for reconciliation — do not retry this call",
+          requestStatus,
+        });
+      }
       return json(409, {
         error: "deletion_rolled_back",
         detail: "the deletion was refused and the transaction rolled back; the tenant is unchanged",
         refusals: refusalReasons(err),
+        requestStatus,
+        tenantRestored,
       });
     }
 
     if (!outcome.ok) {
+      const detail = outcome.refusals.map((r) => `${r.stage}/${r.reason}`).join("; ");
+      const requestStatus = await settle("rejected", { rejectedReason: detail.slice(0, 500) });
+      const tenantRestored = await restoreAfterRefusal(requestStatus);
       await record(ctx, {
         tenantId,
         principalId: executedBy,
-        approvedBy: parsed.data.approvedBy,
+        approvedBy,
         operation: TENANT_DELETE_REFUSED_OPERATION,
         tombstoneId: null,
         chainEntryHash: null,
@@ -506,8 +701,17 @@ function buildDeleteHandler(ctx: TenantDeletionRoutesContext): Handler {
         tenantRetired: false,
         at,
       });
-      return json(409, { error: "deletion_refused", refusals: outcome.refusals });
+      return json(409, {
+        error: "deletion_refused",
+        refusals: outcome.refusals,
+        requestStatus,
+        tenantRestored,
+      });
     }
+    const requestStatus = await settle("completed", {
+      tombstoneId: outcome.stored.record.id,
+      completionSha256: outcome.stored.record.proofSha256,
+    });
 
     // Committed. From here the data is gone and proven gone, so nothing below may report failure in a
     // way that suggests otherwise.
@@ -524,7 +728,7 @@ function buildDeleteHandler(ctx: TenantDeletionRoutesContext): Handler {
     await record(ctx, {
       tenantId,
       principalId: executedBy,
-      approvedBy: parsed.data.approvedBy,
+      approvedBy,
       operation: TENANT_DELETED_OPERATION,
       tombstoneId: outcome.stored.record.id,
       chainEntryHash: outcome.stored.chainEntryHash,
@@ -543,6 +747,9 @@ function buildDeleteHandler(ctx: TenantDeletionRoutesContext): Handler {
       tenantId,
       deleted: true,
       tenantRetired: retired,
+      // The request moves with the deletion; `in_progress` here means the deletion committed and the
+      // status write did not, which the reconciler resolves from the tombstone (ADR-0322).
+      deletionRequest: { id: requestId, status: requestStatus, approvedBy },
       lifecycleEvent: lifecycleReceipt(outcome.lifecycleEvent),
       erased: outcome.erased,
       erasedSharedTables: outcome.erasedSharedTables,

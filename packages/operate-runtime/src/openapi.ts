@@ -242,7 +242,19 @@ const listResponseSchema = (entityRef: string): JsonSchema => ({
       // declaration omitted — measured, a list answers `page: {"limit":100,"nextCursor":null}`.
       // Both keys are always present and so is `page` itself, which is why all three are required:
       // a client branching on `page === undefined` would be writing a branch the server never takes.
-      properties: { limit: { type: "integer" }, nextCursor: { type: ["string", "null"] } },
+      properties: {
+        limit: { type: "integer" },
+        nextCursor: { type: ["string", "null"] },
+        searchNarrowedBy: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Present only when a `q` search ran without some of the entity's searchable fields, " +
+            "because this deployment stores them as ciphertext. Every row returned is a genuine " +
+            "match; a match in a field named here was not looked for, so an empty page does not " +
+            "mean nothing matches.",
+        },
+      },
       required: ["limit", "nextCursor"],
     },
   },

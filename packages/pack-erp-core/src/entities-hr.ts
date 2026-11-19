@@ -51,8 +51,14 @@ export const EMPLOYEE_ENTITY: Entity = {
   traits: [...AUDITABLE],
   fields: [
     { name: "employee_number", type: { kind: "text", maxLength: 32 }, required: true, unique: true },
-    { name: "given_name", type: { kind: "text", maxLength: 100 }, required: true },
-    { name: "family_name", type: { kind: "text", maxLength: 100 }, required: true, indexed: true },
+    { name: "given_name", type: { kind: "text", maxLength: 100 }, required: true, classification: "pii" },
+    {
+      name: "family_name",
+      type: { kind: "text", maxLength: 100 },
+      required: true,
+      indexed: true,
+      classification: "pii",
+    },
     { name: "work_email", type: { kind: "email" }, required: true, classification: "pii" },
     { name: "personal_email", type: { kind: "email" }, classification: "pii" },
     { name: "phone", type: { kind: "phone" }, classification: "pii" },

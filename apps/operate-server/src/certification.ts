@@ -27,7 +27,9 @@ import {
   PostgresChainLogReader,
   foldWithContent,
   unreadableEntryVerdict,
+  verifyChainSignatures,
   type ChainRead,
+  type PublicKeyResolver,
 } from "@crossengin/forensics-pg";
 
 import type { IntervalHandle, IntervalScheduler } from "./jwks.js";
@@ -39,6 +41,11 @@ export const CertificationConfigSchema = z
     tenantId: z.string().uuid().nullable().default(null),
     intervalMs: z.number().int().positive().default(86_400_000),
     schema: z.string().regex(SCHEMA_RE).default("meta"),
+    // Where the entity tables live, which is where an at-rest column can be (H-19). The control used
+    // to ask `schema`, i.e. `meta`, which declares no at-rest column at all — so it answered
+    // `scope_absent` about the platform's own catalog on every deployment, never about the tenant
+    // data the control is for. `public` is the column store's default boot schema.
+    encryptionSchema: z.string().regex(SCHEMA_RE).default("public"),
     frameworks: z
       .array(z.enum(COMPLIANCE_FRAMEWORKS))
       .min(1)
@@ -317,21 +324,46 @@ export interface ForensicChainReader {
 export function forensicChainSource(
   reader: ForensicChainReader,
   controlId = "audit.tamper_evident_log",
+  signatures: PublicKeyResolver | null = null,
 ): EvidenceSource {
   return {
     async collect(_framework, at) {
       const read = await reader.loadChain();
       if (read.entries.length === 0 && read.unreadable.length === 0) return [];
-      return [
-        evidenceFromForensicChain(
-          controlId,
-          // The content fold and not the bare link fold (H-18): the links compare stored column
-          // against stored column, so an `entry_hash` rewritten at the tail read as an intact log.
-          unreadableEntryVerdict(read.unreadable) ?? foldWithContent(read.entries),
-          at,
-        ),
-      ];
+      // The content fold and not the bare link fold (H-18): the links compare stored column
+      // against stored column, so an `entry_hash` rewritten at the tail read as an intact log.
+      const fold = unreadableEntryVerdict(read.unreadable) ?? foldWithContent(read.entries);
+      return [evidenceFromForensicChain(controlId, await withSignatures(fold, read, signatures), at)];
     },
+  };
+}
+
+export const CHAIN_SIGNATURES_UNVERIFIED_REASON =
+  "signatures not verified: no pinned chain key was supplied, so a chain re-written and re-hashed end to end by a database writer would fold cleanly";
+
+/**
+ * A chain whose links and content fold is still not evidence of tamper-evidence until its
+ * signatures verify against a key this deployment pins (H-19): the fold recomputes each hash from
+ * its row, so a writer who rewrites a row and every hash after it produces a chain that folds. The
+ * signature is the only check binding a row to a key the writer does not hold (ADR-0371), so its
+ * absence is an unsatisfied control and never a quiet pass.
+ */
+async function withSignatures(
+  fold: { readonly valid: boolean; readonly brokenAt: number | null; readonly reason?: string | null },
+  read: ChainRead,
+  resolver: PublicKeyResolver | null,
+): Promise<{ readonly valid: boolean; readonly brokenAt: number | null; readonly reason?: string | null }> {
+  if (!fold.valid) return fold;
+  if (resolver === null) {
+    return { valid: false, brokenAt: null, reason: CHAIN_SIGNATURES_UNVERIFIED_REASON };
+  }
+  const verdict = await verifyChainSignatures(read.entries, resolver, read.unreadable);
+  if (verdict.valid) return fold;
+  const failed = verdict.results.find((r) => !r.ok);
+  return {
+    valid: false,
+    brokenAt: failed?.sequenceNumber ?? null,
+    reason: `signature ${failed?.reason ?? "unverifiable"} (${verdict.checked.toString()} checked)`,
   };
 }
 
@@ -423,6 +455,8 @@ export interface CertificationLifecycleOptions {
   readonly onReports?: (reports: readonly CertificationReport[]) => void;
   readonly onError?: (err: unknown) => void;
   readonly onSourceError?: (err: unknown) => void;
+  /** The deployment's pinned chain keys; absent, the tamper-evidence control cannot be satisfied. */
+  readonly chainSignatures?: PublicKeyResolver | null;
 }
 
 export interface CertificationLifecycle {
@@ -445,7 +479,7 @@ export function buildCertificationLifecycle(
     ...(opts.clock !== undefined ? { clock: opts.clock } : {}),
     ...(opts.ids !== undefined ? { ids: opts.ids } : {}),
   });
-  const sources = opts.sources ?? defaultLiveSources(conn, config);
+  const sources = opts.sources ?? defaultLiveSources(conn, config, opts.chainSignatures ?? null);
   const now = opts.now ?? (() => new Date());
 
   async function collect(
@@ -487,9 +521,10 @@ export function buildCertificationLifecycle(
 export function defaultLiveSources(
   conn: PgConnection,
   config: CertificationConfig,
+  chainSignatures: PublicKeyResolver | null = null,
 ): EvidenceSource[] {
   const sources: EvidenceSource[] = [
-    encryptionCoverageSource(new EncryptionApplier(conn), config.schema),
+    encryptionCoverageSource(new EncryptionApplier(conn), config.encryptionSchema),
   ];
   if (config.drReadiness) {
     sources.push(drReadinessSource(new PostgresDrReadinessStore(conn), config.tenantId));
@@ -503,7 +538,11 @@ export function defaultLiveSources(
   }
   if (config.forensicChain) {
     sources.push(
-      forensicChainSource(forensicChainReaderFor(conn, config.tenantId, config.schema)),
+      forensicChainSource(
+        forensicChainReaderFor(conn, config.tenantId, config.schema),
+        "audit.tamper_evident_log",
+        chainSignatures,
+      ),
     );
   }
   return sources;

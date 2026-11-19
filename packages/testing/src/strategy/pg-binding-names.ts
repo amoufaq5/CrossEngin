@@ -455,20 +455,7 @@ export const BINDING_NAME_DIVERGENCES: readonly BindingNameDivergence[] = Object
       "`claimed_by IS NULL OR claim_expires_at < $1` predicate.",
   },
 
-  /* --------------------------------------------- qualifier_differs (10) */
-  {
-    table: "billing_usage_records",
-    column: "synced_to_stripe_at",
-    property: "syncedAt",
-    kind: "qualifier_differs",
-    note:
-      "The snake_case of `UsageRecord.syncedToStripeAt` *is* this column's name, and the only " +
-      "reader — `listUnsynced`'s `WHERE synced_to_stripe_at IS NULL`, backed by " +
-      "`idx_billing_usage_records_unsynced` — fixes the meaning as the instant the record was " +
-      "reported to Stripe. The local is `markSynced`'s parameter, whose sole call site passes " +
-      "`this.now().toISOString()` immediately after `createUsageRecord` returns; it drops only the " +
-      "`_to_stripe` qualifier the Stripe-specific method already carries.",
-  },
+  /* ---------------------------------------------- qualifier_differs (9) */
   {
     table: "crypto_keys",
     column: "fingerprint_sha256",

@@ -82,7 +82,9 @@ const PARTIAL_COVERAGE: Readonly<Record<string, string>> = Object.freeze({
   "erp-core-overdue-invoice-reminder":
     "moves past-due invoices to 'overdue'; the reminder email its description promises is NOT sent — an account's billing_email is not a notification recipient and no channel addresses it",
   "erp-core-depreciation-run":
-    "posts straight-line depreciation only; an asset declared declining_balance or units_of_production is counted and skipped, and the run refuses until the tenant's depreciationExpenseAccountCode and accumulatedDepreciationAccountCode settings name real accounts",
+    "posts straight-line depreciation only; an asset declared declining_balance or units_of_production is counted and skipped, and the run refuses until the tenant's depreciationExpenseAccountCode and accumulatedDepreciationAccountCode settings name real accounts; a missed month is caught up only after the asset's latest posted one and at most 12 months back, and a month closed before its charge posted is posted in the run's own month",
+  "erp-core-sales-order-to-invoice":
+    "needs each tenant's finance.defaultPaymentTermsDays: an Account carries no payment terms, so that setting is the invoice's only due_date, and an order of a tenant without it fails payment_terms_unconfigured with nothing written",
   "erp-core-work-order-completion":
     "writes the issue and receipt stock movements, which move each StockLevel and post at standard cost against the inventory variance account (there is no work-in-progress account); a component issue that would take stock below zero is refused unless the tenant's inventory.allowNegativeStock is set, and the finished good is then not received until a later run consumes it, and an item with no standard_cost moves quantity and posts nothing",
 });
@@ -334,8 +336,8 @@ export function buildErpJobProviders(input: ErpJobProvidersInput): readonly JobH
           return early ?? conclude(tally);
         } catch (err) {
           // A ceiling is a property of the tenant's data and will be there next attempt too, so it
-          // is a non-retryable failure rather than a throw — a throw leaves the run pending and
-          // re-claimed for ever, re-reading the same 20,000 rows every poll.
+          // is a non-retryable failure rather than a throw — a throw is retried up to the job's
+          // attempt ceiling, re-reading the same 20,000 rows each time for an answer that cannot change.
           if (err instanceof ReadCeilingExceeded) {
             return failed("read_ceiling_exceeded", err.message, false);
           }
@@ -506,10 +508,67 @@ export function straightLineCharge(input: {
 
 const DEPRECIATING_STATES = new Set(["in_service", "under_maintenance"]);
 
+/**
+ * How many periods back a run reaches for an asset's missed charges, at most. Bounded, because the
+ * lookup is a read of every depreciation entry in the window, which is up to one entry per asset per
+ * period — see {@link depreciationCatchUpWindow} for how the window shrinks with the asset count.
+ */
+export const DEPRECIATION_CATCH_UP_PERIODS = 12;
+
+/**
+ * The catch-up window for a tenant holding `assets` fixed assets: as many periods as keep the window's
+ * entries under `JOB_READ_CEILING`, between one and {@link DEPRECIATION_CATCH_UP_PERIODS}. A fixed
+ * twelve made the entry read exceed the ceiling at 1,667 assets, so a tenant whose single-period run
+ * worked failed the whole run `read_ceiling_exceeded`; at one period the read is the old one. Counted
+ * over every asset rather than the eligible ones, since a disposed asset's entries sit in the window too.
+ */
+export function depreciationCatchUpWindow(assets: number): number {
+  return Math.max(1, Math.min(DEPRECIATION_CATCH_UP_PERIODS, Math.floor(JOB_READ_CEILING / Math.max(1, assets))));
+}
+
+type DepreciationPeriod = ReturnType<typeof depreciationPeriod>;
+
+/** The period `n` months before `p` (negative `n` moves forward). */
+export function shiftDepreciationPeriod(p: DepreciationPeriod, n: number): DepreciationPeriod {
+  const index = p.year * 12 + (p.month - 1) - n;
+  const year = Math.floor(index / 12);
+  const month = (index % 12) + 1;
+  return depreciationPeriod(new Date(Date.UTC(year, month, 1)));
+}
+
+const MARKER = /\[depreciation:([^:\]]+):(\d{4}-\d{2})\]/;
+
+/**
+ * Which periods a run charges an asset for, oldest first.
+ *
+ * The run's own period always; every period after the asset's latest **posted** entry in the window
+ * up to it, which is the catch-up for months a run failed or never ran; and every period holding a
+ * **draft** for the asset in the window, which is how a draft a refused run left behind is resumed
+ * instead of being orphaned. An asset with no posted entry in the window is charged for the run's
+ * period and its drafts only: the job does not assume what was booked before it first ran — a
+ * migrated asset's earlier depreciation may be in another system, and back-filling from acquisition
+ * would post it twice.
+ */
+export function depreciationPeriodsDue(
+  current: DepreciationPeriod,
+  posted: ReadonlySet<string>,
+  drafts: ReadonlySet<string>,
+  periods: number = DEPRECIATION_CATCH_UP_PERIODS,
+): readonly DepreciationPeriod[] {
+  const window = Array.from({ length: periods }, (_, i) => shiftDepreciationPeriod(current, i)).reverse();
+  let latestPosted = -1;
+  window.forEach((p, i) => {
+    if (posted.has(p.key)) latestPosted = i;
+  });
+  return window.filter(
+    (p, i) => p.key === current.key || drafts.has(p.key) || (latestPosted >= 0 && i > latestPosted),
+  );
+}
+
 async function depreciationRun(run: Run): Promise<JobHandlerResult | null> {
   const period = depreciationPeriod(run.at);
   const assets = await readAll(run, "FixedAsset", [], "the fixed assets to depreciate");
-  const charges: { readonly asset: EntityRecord; readonly amount: bigint }[] = [];
+  const eligible: EntityRecord[] = [];
   for (const asset of assets) {
     if (!DEPRECIATING_STATES.has(str(asset, "state") ?? "")) continue;
     const method = str(asset, "depreciation_method") ?? "straight_line";
@@ -520,20 +579,59 @@ async function depreciationRun(run: Run): Promise<JobHandlerResult | null> {
     }
     const cost = units(asset["acquisition_cost"], 2);
     const life = asset["useful_life_months"];
-    const acquired = str(asset, "acquisition_date");
-    if (cost === null || typeof life !== "number" || acquired === null) {
+    if (cost === null || typeof life !== "number" || str(asset, "acquisition_date") === null) {
       run.tally.count("missing_depreciation_basis");
       continue;
     }
-    const amount = straightLineCharge({
-      acquisitionDate: acquired,
-      cost,
-      salvage: units(asset["salvage_value"], 2) ?? 0n,
-      lifeMonths: life,
-      year: period.year,
-      month: period.month,
-    });
-    if (amount !== null) charges.push({ asset, amount });
+    eligible.push(asset);
+  }
+  if (eligible.length === 0) {
+    run.tally.count("charges_due", 0);
+    return null;
+  }
+
+  // Every depreciation entry in the catch-up window, keyed by the marker's (asset, period) rather
+  // than by its date: a catch-up for a closed month is dated into an open one, and a draft a refused
+  // run left must be found again whatever date it carries.
+  const windowPeriods = depreciationCatchUpWindow(assets.length);
+  if (windowPeriods < DEPRECIATION_CATCH_UP_PERIODS) run.tally.count("catch_up_window_periods", windowPeriods);
+  const windowStart = shiftDepreciationPeriod(period, windowPeriods - 1);
+  const existing = await readAll(
+    run,
+    "JournalEntry",
+    [
+      { field: "source", value: "depreciation" },
+      { field: "entry_date", op: "gte", value: `${windowStart.key}-01` },
+    ],
+    "the depreciation entries in the catch-up window",
+  );
+  const byMarker = new Map<string, EntityRecord>();
+  for (const je of existing) {
+    const m = MARKER.exec(str(je, "memo") ?? "");
+    if (m !== null) byMarker.set(m[0], je);
+  }
+
+  const charges: { readonly asset: EntityRecord; readonly period: DepreciationPeriod; readonly amount: bigint }[] = [];
+  for (const asset of eligible) {
+    const assetId = str(asset, "id") as string;
+    const posted = new Set<string>();
+    const drafts = new Set<string>();
+    for (const [marker, je] of byMarker) {
+      const m = MARKER.exec(marker);
+      if (m === null || m[1] !== assetId) continue;
+      (str(je, "state") === "draft" ? drafts : posted).add(m[2] as string);
+    }
+    for (const p of depreciationPeriodsDue(period, posted, drafts, windowPeriods)) {
+      const amount = straightLineCharge({
+        acquisitionDate: str(asset, "acquisition_date") as string,
+        cost: units(asset["acquisition_cost"], 2) as bigint,
+        salvage: units(asset["salvage_value"], 2) ?? 0n,
+        lifeMonths: asset["useful_life_months"] as number,
+        year: p.year,
+        month: p.month,
+      });
+      if (amount !== null) charges.push({ asset, period: p, amount });
+    }
   }
   run.tally.count("charges_due", charges.length);
   if (charges.length === 0) return null;
@@ -546,7 +644,7 @@ async function depreciationRun(run: Run): Promise<JobHandlerResult | null> {
   if (expense === null || accumulated === null) {
     return failed(
       "depreciation_accounts_unconfigured",
-      `${charges.length.toString()} asset(s) are due a charge for ${period.key} and the tenant's finance settings` +
+      `${charges.length.toString()} charge(s) are due through ${period.key} and the tenant's finance settings` +
         " do not name both depreciationExpenseAccountCode and accumulatedDepreciationAccountCode as existing" +
         " LedgerAccount codes; nothing was posted",
       false,
@@ -554,27 +652,11 @@ async function depreciationRun(run: Run): Promise<JobHandlerResult | null> {
   }
   const currency = settings.defaults?.currency;
 
-  const existing = await readAll(
-    run,
-    "JournalEntry",
-    [
-      { field: "source", value: "depreciation" },
-      { field: "entry_date", value: period.endDate },
-    ],
-    "this period's depreciation entries",
-  );
-  const byMarker = new Map<string, EntityRecord>();
-  for (const je of existing) {
-    const memo = str(je, "memo");
-    const m = memo === null ? null : /\[depreciation:[^\]]+\]/.exec(memo);
-    if (m !== null) byMarker.set(m[0], je);
-  }
-
-  for (const { asset, amount } of charges) {
+  for (const { asset, period: p, amount } of charges) {
     const stop = aborted(run);
     if (stop !== null) return stop;
     const assetId = str(asset, "id") as string;
-    const marker = `[depreciation:${assetId}:${period.key}]`;
+    const marker = `[depreciation:${assetId}:${p.key}]`;
     let entry: EntityRecord | null = byMarker.get(marker) ?? null;
     if (entry !== null && str(entry, "state") !== "draft") {
       run.tally.count("already_posted");
@@ -582,9 +664,9 @@ async function depreciationRun(run: Run): Promise<JobHandlerResult | null> {
     }
     if (entry === null) {
       const created = await run.access.create("JournalEntry", {
-        entry_date: period.endDate,
+        entry_date: p.endDate,
         source: "depreciation",
-        memo: `Depreciation ${period.key} — ${str(asset, "name") ?? str(asset, "asset_tag") ?? assetId} ${marker}`,
+        memo: `Depreciation ${p.key} — ${str(asset, "name") ?? str(asset, "asset_tag") ?? assetId} ${marker}`,
       });
       if (created.kind !== "written" || created.record === null) {
         if (created.kind === "refused") run.tally.refuse(`FixedAsset ${assetId} entry`, created);
@@ -611,7 +693,7 @@ async function depreciationRun(run: Run): Promise<JobHandlerResult | null> {
       const line = await run.access.create("JournalLine", {
         journal_entry_id: entryId,
         ledger_account_id: account,
-        description: `Depreciation ${period.key}`,
+        description: `Depreciation ${p.key}`,
         ...side,
         ...(currency !== undefined ? { currency } : {}),
       });
@@ -621,9 +703,24 @@ async function depreciationRun(run: Run): Promise<JobHandlerResult | null> {
       }
     }
     if (!linesOk) continue;
-    const posted = await run.access.transition("JournalEntry", entryId, "post");
-    if (posted.kind === "written") run.tally.count("posted");
-    else if (posted.status === 409) run.tally.count("moved_by_someone_else");
+    let posted = await run.access.transition("JournalEntry", entryId, "post");
+    // A period that was closed before its charge posted is caught up in the run's own period: the
+    // draft is re-dated there and posted, so the expense lands in the first open month instead of
+    // never, and the draft does not outlive the refusal. The marker keeps naming the month charged.
+    const lateDate = period.endDate;
+    if (posted.kind === "refused" && posted.error === "period_locked" && str(entry, "entry_date") !== lateDate) {
+      const redated = await run.access.update("JournalEntry", entryId, { entry_date: lateDate });
+      if (redated.kind === "refused") {
+        run.tally.refuse(`JournalEntry ${entryId} re-date`, redated);
+        continue;
+      }
+      posted = await run.access.transition("JournalEntry", entryId, "post");
+      if (posted.kind === "written") run.tally.count("caught_up_into_open_period");
+    }
+    if (posted.kind === "written") {
+      run.tally.count("posted");
+      if (p.key !== period.key) run.tally.count("caught_up");
+    } else if (posted.status === 409) run.tally.count("moved_by_someone_else");
     else run.tally.refuse(`JournalEntry ${entryId} post`, posted);
   }
   return null;
@@ -872,6 +969,22 @@ async function salesOrderToInvoice(run: Run): Promise<JobHandlerResult | null> {
       : await readAll(run, "Invoice", [{ field: "account_id", value: accountIdOf }], "the account's invoices");
   let invoice = candidates.find((i) => (str(i, "notes") ?? "").includes(marker)) ?? null;
   if (invoice === null) {
+    // `due_date` is required and this handler sends none: `applySettingsDefaults` fills it from the
+    // tenant's payment terms, the only place a customer's terms exist (an Account carries none). So
+    // without them the create is a 422 *after* the order was read and the lines computed, named only
+    // as `validation_failed`. Asked first and named, and deliberately not defaulted: a term is a
+    // contractual fact between the tenant and its customer, and "due on receipt" would make every
+    // invoice this job writes overdue at once — which the overdue job would then act on.
+    const terms = (await run.settings.get(run.access.tenantId)).finance?.defaultPaymentTermsDays;
+    if (terms === undefined) {
+      return failed(
+        "payment_terms_unconfigured",
+        `sales order ${soId} is ready to invoice and the tenant's finance settings name no defaultPaymentTermsDays,` +
+          " the only source of an invoice's due_date; nothing was written. Set finance.defaultPaymentTermsDays" +
+          " (PUT /v1/admin/settings), then invoke this job again for the order",
+        false,
+      );
+    }
     const created = await run.access.create("Invoice", {
       account_id: accountIdOf,
       currency: str(so, "currency"),

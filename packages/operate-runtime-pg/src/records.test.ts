@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  documentRecord,
   EntityRecordRowSchema,
   generateRecordId,
   mergeRecord,
@@ -33,6 +34,20 @@ describe("records — merge", () => {
   it("merges patch over existing and pins the id", () => {
     const merged = mergeRecord({ id: "p1", name: "A", n: 1 }, { name: "B", id: "evil" }, "p1");
     expect(merged).toEqual({ id: "p1", name: "B", n: 1 });
+  });
+
+  it("removes a field the patch writes null, as the column store's NULL column reads (ADR-0414 Q4)", () => {
+    expect(mergeRecord({ id: "p1", name: "A", n: 1 }, { name: null }, "p1")).toEqual({ id: "p1", n: 1 });
+  });
+
+  it("keeps a null inside a json value", () => {
+    expect(mergeRecord({ id: "p1" }, { doc: { a: null } }, "p1")).toEqual({ id: "p1", doc: { a: null } });
+  });
+});
+
+describe("records — a stored null", () => {
+  it("reads as absent, so a document written before nulls were dropped answers the same shape", () => {
+    expect(documentRecord({ id: "p1", note: null, n: 1 })).toEqual({ id: "p1", n: 1 });
   });
 });
 

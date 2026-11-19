@@ -1,4 +1,5 @@
 import { listRecords, runTransition } from "@/lib/api";
+import { moneyUnits, sumMoney, unitsText } from "@/lib/money";
 
 // Entity slugs (naive pluralizer: <kebab> + "s").
 const PERIOD_SLUG = "fiscal-periods";
@@ -24,6 +25,9 @@ export const OPEN_PERIOD_STATES: readonly string[] = ["open", "closing"];
  */
 const REVALUATION_LINE_MAX = 5000;
 
+/** The revaluation entries one period can hold — one per close, plus the prior period's reversals. */
+const REVALUATION_ENTRY_MAX = 500;
+
 /**
  * Rows per round trip. 500 because `MAX_PAGE_SIZE` is 500 server-side and `clampLimit` is
  * `Math.min(n, maxLimit)` — measured against the built runtime on resolved `erp-core`: `?limit=500`
@@ -47,9 +51,11 @@ export interface JournalLineRow {
   readonly ledgerAccountId: string | null;
   readonly accountName: string | null;
   readonly description: string | null;
+  /** The currency revalued — not the currency `debit` and `credit` are in, which is the functional one. */
   readonly currency: string | null;
-  readonly debit: number;
-  readonly credit: number;
+  /** Functional-currency amounts, as exact decimal text (`"0.00"` for the empty side). */
+  readonly debit: string;
+  readonly credit: string;
 }
 
 export interface RevaluationEntry {
@@ -58,8 +64,8 @@ export interface RevaluationEntry {
   readonly entryDate: string | null;
   readonly memo: string | null;
   readonly lines: readonly JournalLineRow[];
-  readonly totalDebit: number;
-  readonly totalCredit: number;
+  readonly totalDebit: string;
+  readonly totalCredit: string;
   /** Whether debits equal credits, or `null` when `linesTruncated` — see {@link summarizeLines}. */
   readonly balanced: boolean | null;
   /**
@@ -74,9 +80,14 @@ function str(v: unknown): string | null {
   return typeof v === "string" && v.length > 0 ? v : null;
 }
 
-function num(v: unknown): number {
-  const n = typeof v === "number" ? v : typeof v === "string" ? Number(v) : 0;
-  return Number.isFinite(n) ? n : 0;
+/**
+ * A line's functional amount on one side. A revaluation line moves no transaction amount — its
+ * `debit`/`credit` are 0 and only `functional_*` carry the figure — so reading `debit` showed a
+ * revaluation entry as all zeros. An entry written before lines carried a functional amount has
+ * only the transaction one, which for a functional-currency posting is the same figure.
+ */
+function functionalSide(l: Record<string, unknown>, functionalField: string, field: string): string {
+  return unitsText(moneyUnits(l[functionalField]) ?? moneyUnits(l[field]) ?? 0n);
 }
 
 /**
@@ -94,19 +105,12 @@ function num(v: unknown): number {
  * the unsafe one, since it asserts the verdict. There is one caller.
  */
 export function summarizeLines(
-  lines: readonly { readonly debit: number; readonly credit: number }[],
+  lines: readonly { readonly debit: string; readonly credit: string }[],
   complete: boolean,
-): { totalDebit: number; totalCredit: number; balanced: boolean | null } {
-  let totalDebit = 0;
-  let totalCredit = 0;
-  for (const l of lines) {
-    totalDebit += l.debit;
-    totalCredit += l.credit;
-  }
-  totalDebit = Math.round(totalDebit * 100) / 100;
-  totalCredit = Math.round(totalCredit * 100) / 100;
-  const balanced = complete ? Math.abs(totalDebit - totalCredit) < 0.005 : null;
-  return { totalDebit, totalCredit, balanced };
+): { totalDebit: string; totalCredit: string; balanced: boolean | null } {
+  const debit = sumMoney(lines.map((l) => l.debit));
+  const credit = sumMoney(lines.map((l) => l.credit));
+  return { totalDebit: unitsText(debit), totalCredit: unitsText(credit), balanced: complete ? debit === credit : null };
 }
 
 /**
@@ -159,12 +163,31 @@ function periodFromRecord(r: Record<string, unknown>): FiscalPeriodRow {
   };
 }
 
-export async function fetchPeriods(): Promise<readonly FiscalPeriodRow[]> {
-  const res = await listRecords(PERIOD_SLUG, "?limit=200");
-  return res.data
-    .map(periodFromRecord)
-    .filter((p) => p.id !== "")
-    .sort((a, b) => (b.startDate ?? "").localeCompare(a.startDate ?? ""));
+/**
+ * The most fiscal periods the screen reads. Twelve a year plus an adjustment period is ~13, so this
+ * is centuries of periods; reaching it is still *said* rather than truncated in silence, which is
+ * what the `?limit=200` this replaces did — it discarded the cursor beside it.
+ */
+const PERIOD_MAX = 5000;
+/** The chart of accounts read for line names; a chart past it shows ids for the rest. */
+const ACCOUNT_MAX = 20000;
+const PAGE_SIZE = 500;
+
+export interface PeriodRead {
+  readonly periods: readonly FiscalPeriodRow[];
+  /** Whether every period was read; false when {@link PERIOD_MAX} stopped the read with more behind it. */
+  readonly complete: boolean;
+}
+
+export async function fetchPeriods(): Promise<PeriodRead> {
+  const read = await drainRecords(PERIOD_SLUG, new URLSearchParams(), PERIOD_MAX, PAGE_SIZE);
+  return {
+    periods: read.rows
+      .map(periodFromRecord)
+      .filter((p) => p.id !== "")
+      .sort((a, b) => (b.startDate ?? "").localeCompare(a.startDate ?? "")),
+    complete: read.complete,
+  };
 }
 
 // A period's status moves only by transition since it has a lifecycle; a PATCH of it is refused.
@@ -173,51 +196,68 @@ export async function closePeriod(id: string): Promise<void> {
 }
 
 /**
- * Loads the period's posted FX revaluation entry (source=fx_revaluation) and its lines,
- * resolving ledger account ids to names best-effort. Returns null when none was posted
- * (e.g. no foreign-currency exposure at close).
+ * Loads the period's posted FX revaluation and its lines, resolving ledger account ids to names
+ * best-effort. Returns null when none was posted (no foreign-currency exposure at close).
  *
- * Only the lines are a bounded read. The entry itself is a single lookup wearing a list's clothes,
- * and the reason is the **effect's trigger** and not the column: `unrealizedFxRevaluationEffect`
- * fires on the transition *into* `closed` and nowhere else, so one close posts one entry. Both
- * filters are honoured — measured on resolved `erp-core`, `source` and `fiscal_period_id` are in
- * `JournalEntry`'s filterable set — so `?limit=50` carries slack it does not need.
- *
- * It deliberately does **not** rest on `entry_number` being a `unique` column, which was this
- * comment's first argument and is the one thing it may not say: a figure is not allowed to depend on
- * a declaration nothing checks, and ADR-0360 measures the shipped `--store pg` enforcing 0 of 32
- * unique declarations. The consequence of the honest argument is narrower and worth stating: a
- * period re-closed after being reopened posts a *second* entry, and this lookup then shows one of
- * them arbitrarily, because `sort: []` leaves the order to the id.
+ * A period can carry more than one `source = fx_revaluation` entry, and only some are its own
+ * revaluation. `unrealizedFxRevaluationEffect` numbers the first close's entry `<label>-FXREVAL`
+ * and a re-close's difference `-FXREVAL2`, `-FXREVAL3` (ADR-0429), and it reverses each one on the
+ * first day of the **next** period as `<number>R` — so a period also holds the reversal of the
+ * period before it, under the same source. Taking whichever entry the list returned first showed a
+ * prior period's reversal as this period's revaluation, or a re-close's difference as the whole of
+ * it. So the period's own entries are the ones numbered `-FXREVAL<n>` with no `R`, and they are
+ * shown together: their lines sum to what the period's closes revalued in total.
  */
-export async function fetchRevaluationEntry(periodId: string): Promise<RevaluationEntry | null> {
-  const entries = await listRecords(
-    ENTRY_SLUG,
-    `?limit=50&fiscal_period_id[eq]=${encodeURIComponent(periodId)}&source[eq]=fx_revaluation`,
-  );
-  const entryRec = entries.data.find((e) => str(e["source"]) === "fx_revaluation");
-  if (entryRec === undefined) return null;
-  const entryId = String(entryRec["id"] ?? "");
-  if (entryId === "") return null;
+const OWN_REVALUATION_NUMBER = /-FXREVAL(\d*)$/;
 
-  const [lineRead, accountsRes] = await Promise.all([
-    drainRecords(
-      LINE_SLUG,
-      new URLSearchParams({ "journal_entry_id[eq]": entryId }),
-      REVALUATION_LINE_MAX,
-      REVALUATION_LINE_PAGE_SIZE,
+export async function fetchRevaluationEntry(periodId: string): Promise<RevaluationEntry | null> {
+  const entries = await drainRecords(
+    ENTRY_SLUG,
+    new URLSearchParams({ "fiscal_period_id[eq]": periodId, "source[eq]": "fx_revaluation" }),
+    REVALUATION_ENTRY_MAX,
+    REVALUATION_LINE_PAGE_SIZE,
+  );
+  const own = entries.rows
+    .filter((e) => str(e["source"]) === "fx_revaluation" && String(e["fiscal_period_id"] ?? "") === periodId)
+    .map((e) => ({ rec: e, match: OWN_REVALUATION_NUMBER.exec(str(e["entry_number"]) ?? "") }))
+    .filter((e): e is { rec: Record<string, unknown>; match: RegExpExecArray } => e.match !== null)
+    .map((e) => ({ rec: e.rec, ordinal: e.match[1] === "" ? 1 : Number(e.match[1]) }))
+    .sort((a, b) => a.ordinal - b.ordinal);
+  if (own.length === 0) return null;
+  const entryRec = own[0]!.rec;
+  const entryIds = own.map((e) => String(e.rec["id"] ?? "")).filter((id) => id !== "");
+  if (entryIds.length === 0) return null;
+  const entryId = entryIds[0]!;
+
+  const [lineReads, accountsRes] = await Promise.all([
+    Promise.all(
+      entryIds.map((id) =>
+        drainRecords(
+          LINE_SLUG,
+          new URLSearchParams({ "journal_entry_id[eq]": id }),
+          REVALUATION_LINE_MAX,
+          REVALUATION_LINE_PAGE_SIZE,
+        ),
+      ),
     ),
-    listRecords(ACCOUNT_SLUG, "?limit=500").catch(() => ({ data: [], nextCursor: null })),
+    // Names are best-effort — an unnamed line shows its account id — but they are read in full: the
+    // `?limit=500` this replaces named the first 500 accounts and showed ids for every line past them.
+    drainRecords(ACCOUNT_SLUG, new URLSearchParams(), ACCOUNT_MAX, PAGE_SIZE).catch(() => ({ rows: [], complete: false })),
   ]);
   const accountNames = new Map<string, string>();
-  for (const a of accountsRes.data) {
+  for (const a of accountsRes.rows) {
     const id = String(a["id"] ?? "");
     const name = str(a["name"]);
     if (id !== "" && name !== null) accountNames.set(id, name);
   }
 
+  const ownIds = new Set(entryIds);
+  const lineRead = {
+    rows: lineReads.flatMap((r) => r.rows),
+    complete: lineReads.every((r) => r.complete) && entries.complete,
+  };
   const lines: JournalLineRow[] = lineRead.rows
-    .filter((l) => String(l["journal_entry_id"] ?? "") === entryId)
+    .filter((l) => ownIds.has(String(l["journal_entry_id"] ?? "")))
     .map((l) => {
       const accId = str(l["ledger_account_id"]);
       return {
@@ -226,15 +266,15 @@ export async function fetchRevaluationEntry(periodId: string): Promise<Revaluati
         accountName: accId !== null ? (accountNames.get(accId) ?? null) : null,
         description: str(l["description"]),
         currency: str(l["currency"]),
-        debit: num(l["debit"]),
-        credit: num(l["credit"]),
+        debit: functionalSide(l, "functional_debit", "debit"),
+        credit: functionalSide(l, "functional_credit", "credit"),
       };
     });
 
   const { totalDebit, totalCredit, balanced } = summarizeLines(lines, lineRead.complete);
   return {
     id: entryId,
-    entryNumber: str(entryRec["entry_number"]) ?? entryId,
+    entryNumber: own.map((e) => str(e.rec["entry_number"]) ?? String(e.rec["id"] ?? "")).join(" + "),
     entryDate: str(entryRec["entry_date"]),
     memo: str(entryRec["memo"]),
     lines,

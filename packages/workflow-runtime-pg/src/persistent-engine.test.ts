@@ -74,7 +74,7 @@ function mockConnection(
   capture?: Array<{ sql: string; params: readonly unknown[] | undefined }>,
 ): PgConnection {
   const eventRows: Array<Record<string, unknown>> = [];
-  return {
+  const conn: PgConnection = {
     query: vi.fn(async (sql: string, params?: readonly unknown[]): Promise<PgQueryResult> => {
       if (capture !== undefined) capture.push({ sql, params });
       if (sql.includes("INSERT INTO meta.workflow_instances")) {
@@ -131,10 +131,14 @@ function mockConnection(
       }
       return { rows: [], rowCount: 1 };
     }) as PgConnection["query"],
-    transaction: vi.fn() as PgConnection["transaction"],
+    // Runs its callback: every append is one transaction now, and a fake that discarded the callback
+    // would make every write in it unobservable (ADR-0389).
+    transaction: (async <T,>(fn: (tx: PgConnection) => Promise<T>): Promise<T> =>
+      fn(conn)) as PgConnection["transaction"],
     withAdvisoryLock: vi.fn() as PgConnection["withAdvisoryLock"],
     close: vi.fn() as PgConnection["close"],
   };
+  return conn;
 }
 
 describe("buildPersistentEngine", () => {
@@ -173,6 +177,12 @@ describe("buildPersistentEngine", () => {
       c.sql.includes("INSERT INTO meta.workflow_events"),
     );
     expect(eventInserts.length).toBeGreaterThan(0);
+    // One transaction per append, each opened under the event's tenant: as many context statements
+    // as events, the first of them ahead of the first write.
+    const contexts = capture.filter((c) => c.sql.includes("set_config('app.current_tenant_id'"));
+    expect(contexts.length).toBe(eventInserts.length);
+    expect(contexts.every((c) => c.params?.[0] === TENANT)).toBe(true);
+    expect(capture[0]!.sql).toContain("set_config('app.current_tenant_id'");
   });
 
   it("submitting a signal that triggers a transition writes signal_received + signal_consumed events", async () => {

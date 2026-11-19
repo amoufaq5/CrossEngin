@@ -12,6 +12,7 @@ import { PostgresEventLog } from "./event-log.js";
 import {
   ProjectingEventLog,
   buildPersistentStores,
+  transactionalAppendUnit,
   type PersistentStores,
 } from "./projecting-event-log.js";
 
@@ -58,6 +59,8 @@ export function buildPersistentEngine(
     activityStore: stores.activityStore,
     signalStore: stores.signalStore,
     timerStore: stores.timerStore,
+    appendUnit: transactionalAppendUnit(input.conn, stores),
+    instanceResolver: stores.instanceResolver,
   });
   const engine = new WorkflowEngine({
     eventLog,

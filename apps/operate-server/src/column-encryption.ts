@@ -28,7 +28,8 @@
 import { deriveTenantColumnKey, parseColumnEncryptionSecret } from "@crossengin/crypto";
 import { resolvedClassifiedFields, type Manifest } from "@crossengin/kernel";
 import type { ColumnEncryptionKeySource } from "@crossengin/operate-runtime-pg";
-import { requiresEncryptionAtRest } from "@crossengin/types/meta-schema";
+import { PGP_SYM_ENCRYPT_OPTIONS } from "@crossengin/kernel-pg";
+import { isSensitiveDataClass, requiresEncryptionAtRest } from "@crossengin/types/meta-schema";
 
 /**
  * The deployment secret every tenant's column key is derived from.
@@ -295,4 +296,60 @@ export function buildColumnKeySource(
 export function formatPhiStorageDecision(decision: PhiStorageDecision): string {
   const lead = decision.mayServe ? "phi storage" : "phi storage REFUSED";
   return `${lead}: ${decision.verdict} — ${decision.detail}`;
+}
+
+/**
+ * Sensitive-classified fields that **no store encrypts at rest** (M-10): `pii` and
+ * `commercial_sensitive`, which `isSensitiveDataClass` admits and `requiresEncryptionAtRest` does
+ * not. A classification is read by redaction and the write mask on every store, so it is easy to
+ * read as a storage promise; for these it is not one, on any store.
+ */
+export function surveyPlaintextSensitiveFields(manifest: Manifest): readonly PhiField[] {
+  const traits = manifest.traits ?? [];
+  const out: PhiField[] = [];
+  for (const entity of manifest.entities ?? []) {
+    for (const { field, classification } of resolvedClassifiedFields(entity, traits)) {
+      if (!isSensitiveDataClass(classification) || requiresEncryptionAtRest(classification)) {
+        continue;
+      }
+      out.push({ entity: entity.name, field, classification });
+    }
+  }
+  return out;
+}
+
+/**
+ * What this deployment encrypts at rest, said either way (M-10). Four facts an operator otherwise
+ * infers wrongly: which store encrypts anything at all, that `pii` is never encrypted at rest, what
+ * the cipher is — OpenPGP CFB with an SHA-1 MDC, not an AEAD — and that there is no KMS.
+ */
+export function formatAtRestHonesty(input: {
+  readonly store: "memory" | "pg" | "pg-columns";
+  readonly encryptedFields: number;
+  readonly plaintextSensitive: readonly PhiField[];
+}): string {
+  const where =
+    input.store === "pg-columns"
+      ? `--store pg-columns encrypts ${input.encryptedFields.toString()} phi/regulated column(s)` +
+        ` (pgcrypto pgp_sym_encrypt, ${PGP_SYM_ENCRYPT_OPTIONS}: OpenPGP CFB with an SHA-1 MDC` +
+        " integrity check — not an AEAD; values written before this option was set stay readable" +
+        " under their original AES-128 packets until a rekey re-encrypts them, which only" +
+        " --column-key-mode envelope can run)"
+      : `--store ${input.store} encrypts no column at rest — every value, phi included when` +
+        ` ${ALLOW_PLAINTEXT_PHI_FLAG} allows it, is stored as written`;
+  const plain =
+    input.plaintextSensitive.length === 0
+      ? "no pii/commercial_sensitive field is declared"
+      : `${input.plaintextSensitive.length.toString()} pii/commercial_sensitive field(s) are` +
+        " classified (redacted and write-masked) but stored in the clear on every store: " +
+        input.plaintextSensitive
+          .slice(0, DETAIL_FIELD_LIMIT)
+          .map((f) => `${f.entity}.${f.field} (${f.classification})`)
+          .join(", ") +
+        (input.plaintextSensitive.length > DETAIL_FIELD_LIMIT ? ", …" : "");
+  return (
+    `at rest: ${where}; ${plain}; no KMS — every derived column key and every key-encryption` +
+    ` key is derived in-process from ${COLUMN_ENCRYPTION_SECRET_VAR} (an envelope data key is` +
+    " random and stored wrapped under one), and an external KMS is out of scope"
+  );
 }

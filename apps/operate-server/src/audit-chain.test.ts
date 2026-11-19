@@ -494,19 +494,17 @@ describe("AuditChainObserver", () => {
     expect(observer.pending()).toBe(0);
   });
 
-  it("a live policyCache sampleRate 0 silences a tenant the config would otherwise record", async () => {
+  // Rewritten (M-19): this test asserted that a tenant's own `sampleRate: 0` silenced the tenant,
+  // which pinned the defect — the administrator whose conduct the entries record could switch them off.
+  it("a live policyCache sampleRate 0 cannot silence a tenant the config records", async () => {
     const store = new PostgresChainLogStore(fakeChainPg(), ed25519ChainSigner(keypair));
     const policyCache = { get: (t: string) => (t === TENANT ? { sampleRate: 0 } : undefined) };
-    // config records everything; only the live policy filters TENANT out.
     const observer = new AuditChainObserver(store, config(), { policyCache });
 
     observer.record(execution({ tenantId: TENANT, requestId: "req_aaaaaaaa11111111" }));
-    expect(observer.pending()).toBe(0);
-    expect(observer.activeScopes()).toBe(0);
-
     observer.record(execution({ tenantId: TENANT_B, requestId: "req_bbbbbbbb22222222" }));
     await observer.drain();
-    expect((await store.loadChain(TENANT)).entries).toHaveLength(0);
+    expect((await store.loadChain(TENANT)).entries).toHaveLength(1);
     expect((await store.loadChain(TENANT_B)).entries).toHaveLength(1);
   });
 
@@ -540,7 +538,9 @@ describe("AuditChainObserver", () => {
     expect((await store.loadChain(TENANT)).entries).toHaveLength(1);
   });
 
-  it("a live outcomes allowlist filters a tenant while another still appends", async () => {
+  // Rewritten (M-19): a live outcomes allowlist narrower than the deployment's used to filter the
+  // tenant; it can only add outcomes to a deployment allowlist now, never remove recorded ones.
+  it("a live outcomes allowlist cannot drop outcomes the deployment records", async () => {
     const store = new PostgresChainLogStore(fakeChainPg(), ed25519ChainSigner(keypair));
     const policyCache: LiveAuditPolicySource = {
       get: (t) => (t === TENANT ? { outcomes: ["deny", "error"] } : undefined),
@@ -550,8 +550,22 @@ describe("AuditChainObserver", () => {
     observer.record(execution({ tenantId: TENANT, finalOutcome: "pass", finalResponseStatus: 200, requestId: "req_aaaaaaaa11111111" }));
     observer.record(execution({ tenantId: TENANT_B, finalOutcome: "pass", finalResponseStatus: 200, requestId: "req_bbbbbbbb22222222" }));
     await observer.drain();
-    expect((await store.loadChain(TENANT)).entries).toHaveLength(0);
+    expect((await store.loadChain(TENANT)).entries).toHaveLength(1);
     expect((await store.loadChain(TENANT_B)).entries).toHaveLength(1);
+  });
+
+  it("a live outcomes list widens a deployment allowlist", async () => {
+    const store = new PostgresChainLogStore(fakeChainPg(), ed25519ChainSigner(keypair));
+    const policyCache: LiveAuditPolicySource = {
+      get: (t) => (t === TENANT ? { outcomes: ["pass"] } : undefined),
+    };
+    const observer = new AuditChainObserver(store, config({ outcomes: ["deny"] }), { policyCache });
+    observer.record(execution({ tenantId: TENANT, finalOutcome: "pass", finalResponseStatus: 200, requestId: "req_aaaaaaaa11111111" }));
+    observer.record(execution({ tenantId: TENANT, finalOutcome: "deny", finalResponseStatus: 403, requestId: "req_cccccccc33333333" }));
+    observer.record(execution({ tenantId: TENANT_B, finalOutcome: "pass", finalResponseStatus: 200, requestId: "req_bbbbbbbb22222222" }));
+    await observer.drain();
+    expect((await store.loadChain(TENANT)).entries).toHaveLength(2);
+    expect((await store.loadChain(TENANT_B)).entries).toHaveLength(0);
   });
 
   it("keeps a single tenant's appends strictly ordered on its own queue", async () => {
@@ -572,5 +586,38 @@ describe("AuditChainObserver", () => {
     observer.record(execution({ requestId: "req_cccccccc33333333" }));
     await observer.drain();
     expect(seen).toEqual([0, 1, 2]);
+  });
+});
+
+
+describe("widenWithLivePolicy — a tenant's live policy is floored at the deployment's (M-19)", () => {
+  it("takes the higher sample rate and names a lower one as ignored", async () => {
+    const { widenWithLivePolicy } = await import("./audit-chain.js");
+    expect(widenWithLivePolicy({ sampleRate: 0.5 }, { sampleRate: 0 })).toEqual({
+      effective: { sampleRate: 0.5, outcomes: undefined, operations: undefined },
+      narrowingIgnored: ["sampleRate"],
+    });
+    expect(widenWithLivePolicy({ sampleRate: 0.5 }, { sampleRate: 0.9 }).effective.sampleRate).toBe(0.9);
+    expect(widenWithLivePolicy({ sampleRate: 0.5 }, { sampleRate: 0.9 }).narrowingIgnored).toEqual([]);
+  });
+
+  it("ignores a live allowlist where the deployment records everything, and unions otherwise", async () => {
+    const { widenWithLivePolicy } = await import("./audit-chain.js");
+    const all = widenWithLivePolicy({ sampleRate: 1 }, { outcomes: ["pass"], operations: ["a.b"] });
+    expect(all.effective).toEqual({ sampleRate: 1, outcomes: undefined, operations: undefined });
+    expect(all.narrowingIgnored).toEqual(["outcomes", "operations"]);
+    const union = widenWithLivePolicy(
+      { sampleRate: 1, outcomes: ["deny"], operations: ["x.y"] },
+      { outcomes: ["deny", "error"], operations: ["x.y", "a.b"] },
+    );
+    expect(union.effective.outcomes).toEqual(["deny", "error"]);
+    expect(union.effective.operations).toEqual(["x.y", "a.b"]);
+    expect(union.narrowingIgnored).toEqual([]);
+  });
+
+  it("is the deployment's policy unchanged with no live policy", async () => {
+    const { widenWithLivePolicy } = await import("./audit-chain.js");
+    const base = { sampleRate: 0.2, outcomes: ["deny" as const] };
+    expect(widenWithLivePolicy(base, undefined)).toEqual({ effective: base, narrowingIgnored: [] });
   });
 });

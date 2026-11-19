@@ -173,8 +173,9 @@ export class PostgresTranscript implements Transcript {
   }
 
   async onSessionEnd(input: OnSessionEndInput): Promise<ArchitectSessionRecord | null> {
-    if (this.sessionId === null) return null;
+    if (this.sessionId === null || this.tenantId === null) return null;
     return this.sessions.endSession({
+      tenantId: this.tenantId,
       id: this.sessionId,
       turnCount: input.turnCount,
       inputTokens: input.inputTokens,

@@ -6,6 +6,7 @@ import {
   type PgConnection,
 } from "@crossengin/kernel-pg";
 import {
+  GRACE_YIELDS_TO_DEADLINE_MS,
   GdprDeletionRequestSchema,
   UNANSWERED_DELETION_REQUEST_STATUSES,
   canTransitionDeletionRequest,
@@ -394,6 +395,15 @@ export function rowToDeletionRequest(row: Record<string, unknown>): GdprDeletion
   return GdprDeletionRequestSchema.parse(candidate);
 }
 
+/**
+ * The grace a verified request waits before it is due (C-04): `graceMs` after verification, pulled
+ * in to `GRACE_YIELDS_TO_DEADLINE_MS` before the Article 12(3) deadline. `now` is the caller's clock.
+ */
+export interface DeletionGraceGate {
+  readonly now: string;
+  readonly graceMs: number;
+}
+
 export interface SubmitDeletionRequestInput {
   readonly requestId: string;
   readonly tenantId: string;
@@ -571,13 +581,33 @@ export class PostgresDeletionRequestStore {
   async dueForExecution(
     onUnreadable: UnreadableRowReporter,
     limit = 10,
+    grace?: DeletionGraceGate,
   ): Promise<readonly GdprDeletionRequest[]> {
+    const bounded = Math.max(1, Math.min(100, Math.trunc(limit)));
     return this.conn.transaction(async (tx) => {
       await tx.query("SELECT set_config('app.platform_audit', 'on', true)");
+      if (grace === undefined) {
+        const result = await tx.query<Record<string, unknown>>(
+          `SELECT ${REQUEST_COLUMNS.join(", ")} FROM ${this.table}
+            WHERE status = 'verified' ORDER BY deadline_at, request_id LIMIT $1`,
+          [bounded],
+        );
+        return readRequestRows(result.rows, onUnreadable);
+      }
+      if (!Number.isFinite(grace.graceMs) || grace.graceMs < 0) {
+        throw new Error(`deletion grace must be a non-negative number of ms, got ${String(grace.graceMs)}`);
+      }
+      // `deletionExecuteNotBefore` in SQL: the grace end, pulled in to one day before the deadline,
+      // never before verification. Compared against the caller's clock rather than `now()` so the
+      // runner and this predicate read one instant.
       const result = await tx.query<Record<string, unknown>>(
         `SELECT ${REQUEST_COLUMNS.join(", ")} FROM ${this.table}
-          WHERE status = 'verified' ORDER BY deadline_at, request_id LIMIT $1`,
-        [Math.max(1, Math.min(100, Math.trunc(limit)))],
+          WHERE status = 'verified'
+            AND GREATEST(verified_at, LEAST(verified_at + $2 * interval '1 millisecond',
+                                            deadline_at - $3 * interval '1 millisecond'))
+                <= $4::timestamptz
+          ORDER BY deadline_at, request_id LIMIT $1`,
+        [bounded, Math.trunc(grace.graceMs), GRACE_YIELDS_TO_DEADLINE_MS, grace.now],
       );
       return readRequestRows(result.rows, onUnreadable);
     });

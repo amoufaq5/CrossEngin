@@ -1,6 +1,8 @@
 import { z } from "zod";
 import {
   IncidentRecordSchema,
+  SEVERITIES,
+  SeveritySchema,
   parseIncidentId,
   type IncidentRecord,
   type IncidentCategory,
@@ -133,6 +135,9 @@ export type EnforcementFailurePhase =
   | "find_kill_switch"
   | "plan_kill_switch"
   | "record_kill_switch"
+  | "release_kill_switch"
+  | "regrade"
+  | "deliver_pages"
   | "record_enforcement_action"
   | "record_evaluation";
 
@@ -400,4 +405,135 @@ export interface EnforcementPlan {
   readonly killSwitch: KillSwitch | null;
   /** See `KillSwitchActivation.unrecorded`. Null when no rollback was declared or it was recorded. */
   readonly killSwitchUnrecorded: UnrecordedKillSwitch | null;
+}
+
+// ---------------------------------------------------------------------------
+// Escalating a breach that persists (M-23)
+// ---------------------------------------------------------------------------
+
+/**
+ * A registration's declared escalation: a breach still burning `afterMs` after it was declared is
+ * re-graded to `severity` and re-paged at that grade, once per episode. Opt-in per registration,
+ * because what grade a long burn deserves is a judgement about the surface; with none, an ongoing
+ * breach pages once, as before.
+ */
+export const BreachEscalationSchema = z
+  .object({
+    afterMs: z.number().int().min(60_000),
+    severity: SeveritySchema,
+  })
+  .strict();
+export type BreachEscalation = z.infer<typeof BreachEscalationSchema>;
+
+/** Lower is graver: `sev1` is 1. */
+export function severityRank(severity: Severity): number {
+  return SEVERITIES.indexOf(severity) + 1;
+}
+
+/**
+ * Whether an open breach is due its escalation now. Never for a breach already at or above the
+ * declared grade — an escalation that would lower or keep the grade is not one — and never twice
+ * for one episode.
+ */
+export function escalationDue(
+  escalation: BreachEscalation | undefined,
+  breach: { readonly severity: Severity; readonly openedAtMs: number; readonly escalated: boolean },
+  nowMs: number,
+): escalation is BreachEscalation {
+  if (escalation === undefined || breach.escalated) return false;
+  if (severityRank(escalation.severity) >= severityRank(breach.severity)) return false;
+  return nowMs - breach.openedAtMs >= escalation.afterMs;
+}
+
+export interface IncidentRegradeInput {
+  readonly severity: Severity;
+  readonly reason: string;
+  readonly actorUserId: string;
+  readonly at: string;
+}
+
+/**
+ * Re-grades a stored incident. Structural for `KillSwitchLookup`'s reason: the Postgres
+ * implementation is `PersistentIncidentEngine.changeSeverity`, which the engine must not depend on.
+ */
+export interface IncidentRegrader {
+  regrade(incidentId: string, input: IncidentRegradeInput): Promise<void>;
+}
+
+/**
+ * Re-grades through the regrader, reporting a failure instead of throwing. The re-page goes out
+ * either way: the page is what wakes somebody, and a record left at the old grade is a projection
+ * worth less than that (ADR-0415's rule). Answers whether the record was re-graded.
+ */
+export async function regradeEnforcementIncident(
+  regrader: IncidentRegrader | undefined,
+  incidentId: string,
+  input: IncidentRegradeInput,
+  failure: Omit<DeclarationFailure, "phase">,
+  onError?: DeclarationErrorSink,
+): Promise<boolean> {
+  if (regrader === undefined) return false;
+  try {
+    await regrader.regrade(incidentId, input);
+    return true;
+  } catch (err) {
+    onError?.(err, { ...failure, phase: "regrade" });
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Releasing a kill switch on recovery (ADR-0415)
+// ---------------------------------------------------------------------------
+
+/**
+ * How long a kill switch SLO enforcement records stays `triggered_active` if nothing releases it.
+ * A backstop and not the mechanism: the engine releases its switch when the breach recovers. It is
+ * there for the switch whose recovery this process never saw — a breach still open when the process
+ * stopped and never adopted again — which otherwise stays active for ever.
+ */
+export const DEFAULT_KILL_SWITCH_TTL_MS = 24 * 60 * 60 * 1000;
+
+export interface KillSwitchReleaseInput {
+  readonly reason: string;
+  readonly actorUserId: string;
+  readonly at: string;
+}
+
+/**
+ * Releases a recovered breach's kill switch. Answers `true` when this call released it and `false`
+ * when there was nothing active to release (already released or expired by its TTL).
+ */
+export interface KillSwitchReleaser {
+  release(
+    killSwitchId: string,
+    tenantId: string | null,
+    input: KillSwitchReleaseInput,
+  ): Promise<boolean>;
+}
+
+/**
+ * What became of a recovered breach's kill switch: `released` by this recovery, `not_active` when
+ * it had already been released or had lapsed, `no_releaser` when nothing here can release it (the
+ * in-memory engine), `failed` when the release was reported rather than made, and `none` when the
+ * breach recorded no switch.
+ */
+export type KillSwitchRelease = "released" | "not_active" | "no_releaser" | "failed" | "none";
+
+export async function releaseRecoveredKillSwitch(
+  releaser: KillSwitchReleaser | undefined,
+  killSwitchId: string | null,
+  tenantId: string | null,
+  input: KillSwitchReleaseInput,
+  failure: Omit<DeclarationFailure, "phase">,
+  onError?: DeclarationErrorSink,
+): Promise<KillSwitchRelease> {
+  if (killSwitchId === null) return "none";
+  if (releaser === undefined) return "no_releaser";
+  try {
+    return (await releaser.release(killSwitchId, tenantId, input)) ? "released" : "not_active";
+  } catch (err) {
+    onError?.(err, { ...failure, phase: "release_kill_switch" });
+    return "failed";
+  }
 }

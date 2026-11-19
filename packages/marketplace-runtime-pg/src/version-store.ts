@@ -3,6 +3,7 @@ import {
   type PackVersionRecord,
   type PackVersionStatus,
 } from "@crossengin/marketplace";
+import { PackSubmissionError } from "@crossengin/marketplace-runtime";
 import {
   readRows,
   textIdentity,
@@ -99,17 +100,23 @@ function rowToRecord(row: PackVersionRow): PackVersionRecord {
 }
 
 /**
- * Persists `PackVersionRecord`s from the submission pipeline into the platform-
- * wide `meta.pack_versions` registry. Keyed on `(pack_id, version)` — a
- * submission moving through draft → in_review → published `UPSERT`s the same row.
- * No tenant context: packs are global (the table has no `tenant_id`).
+ * Persists `PackVersionRecord`s from the submission pipeline into the platform-wide
+ * `meta.pack_versions` registry. No tenant context: packs are global (the table has no `tenant_id`).
+ *
+ * **A version is immutable once submitted.** `insertDraft` is the only statement that writes a
+ * version's content — bundle, manifest digest, signature, channel, changelog — and it refuses a
+ * `(pack_id, version)` that already exists rather than updating it, because an `ON CONFLICT DO
+ * UPDATE` there let any author re-submit a published version number with different bytes and a
+ * different key. `advance` moves the lifecycle and names none of the content columns, and it is
+ * guarded by the state it was read in, so two writers cannot both advance one version and a stale
+ * read cannot overwrite a newer one (the row is the lock, ADR-0321).
  */
 export class PostgresPackVersionStore {
   constructor(private readonly conn: PgConnection) {}
 
-  async upsert(record: PackVersionRecord): Promise<void> {
+  async insertDraft(record: PackVersionRecord): Promise<void> {
     const valid = PackVersionRecordSchema.parse(record);
-    await this.conn.query(
+    const result = await this.conn.query(
       `INSERT INTO ${SCHEMA}.${TABLE} (
          pack_id, version, status, channel, bundle_sha256, bundle_size_bytes,
          manifest_sha256, signature, changelog, published_at, published_by,
@@ -117,24 +124,7 @@ export class PostgresPackVersionStore {
          superseded_by, security_review_status, security_reviewed_at, security_reviewer
        )
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
-       ON CONFLICT (pack_id, version) DO UPDATE SET
-         status = EXCLUDED.status,
-         channel = EXCLUDED.channel,
-         bundle_sha256 = EXCLUDED.bundle_sha256,
-         bundle_size_bytes = EXCLUDED.bundle_size_bytes,
-         manifest_sha256 = EXCLUDED.manifest_sha256,
-         signature = EXCLUDED.signature,
-         changelog = EXCLUDED.changelog,
-         published_at = EXCLUDED.published_at,
-         published_by = EXCLUDED.published_by,
-         deprecated_at = EXCLUDED.deprecated_at,
-         deprecated_reason = EXCLUDED.deprecated_reason,
-         withdrawn_at = EXCLUDED.withdrawn_at,
-         withdrawn_reason = EXCLUDED.withdrawn_reason,
-         superseded_by = EXCLUDED.superseded_by,
-         security_review_status = EXCLUDED.security_review_status,
-         security_reviewed_at = EXCLUDED.security_reviewed_at,
-         security_reviewer = EXCLUDED.security_reviewer`,
+       ON CONFLICT (pack_id, version) DO NOTHING`,
       [
         valid.packId,
         valid.version,
@@ -157,6 +147,58 @@ export class PostgresPackVersionStore {
         valid.securityReviewer,
       ],
     );
+    if (result.rowCount === 0) {
+      throw new PackSubmissionError(
+        "version_exists",
+        `${valid.packId}@${valid.version} already exists; a submitted version is immutable, so submit a new version number`,
+      );
+    }
+  }
+
+  /** Writes `next`'s lifecycle fields over the row, provided it is still in `previous`'s state. */
+  async advance(previous: PackVersionRecord, next: PackVersionRecord): Promise<void> {
+    const valid = PackVersionRecordSchema.parse(next);
+    if (valid.packId !== previous.packId || valid.version !== previous.version) {
+      throw new Error("advance must name the version it was read as");
+    }
+    const result = await this.conn.query(
+      `UPDATE ${SCHEMA}.${TABLE} SET
+         status = $3,
+         published_at = $4,
+         published_by = $5,
+         deprecated_at = $6,
+         deprecated_reason = $7,
+         withdrawn_at = $8,
+         withdrawn_reason = $9,
+         superseded_by = $10,
+         security_review_status = $11,
+         security_reviewed_at = $12,
+         security_reviewer = $13
+       WHERE pack_id = $1 AND version = $2 AND status = $14 AND security_review_status = $15`,
+      [
+        valid.packId,
+        valid.version,
+        valid.status,
+        valid.publishedAt,
+        valid.publishedBy,
+        valid.deprecatedAt,
+        valid.deprecatedReason ?? null,
+        valid.withdrawnAt,
+        valid.withdrawnReason ?? null,
+        valid.supersededBy ?? null,
+        valid.securityReviewStatus,
+        valid.securityReviewedAt,
+        valid.securityReviewer,
+        previous.status,
+        previous.securityReviewStatus,
+      ],
+    );
+    if (result.rowCount === 0) {
+      throw new PackSubmissionError(
+        "version_changed",
+        `${valid.packId}@${valid.version} is no longer ${previous.status}/${previous.securityReviewStatus}; re-read it before acting`,
+      );
+    }
   }
 
   async getByPackVersion(packId: string, version: string): Promise<PackVersionRecord | null> {

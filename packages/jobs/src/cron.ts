@@ -284,13 +284,18 @@ const MAX_STEPS = 550_000;
  * `dateMatches && timeMatches`, and `dateMatches` reads only `month` / `day` / `weekday` — fields
  * that are constant across a whole local day. So when the date part fails, *every* instant in that
  * local day fails, and stepping through its remaining 1,439 minutes one at a time can only produce
- * the same answer. Skipping is therefore equivalence-preserving by construction, not an
- * approximation — and a brute-force test pins that against the naive one-step-at-a-time search.
+ * the same answer. Skipping the day is therefore equivalence-preserving; *where the jump lands* is
+ * the part that needs care (below), and a brute-force test pins both against the naive search.
  *
- * The distance is computed from the local fields the step already read, so it needs no assumption
- * about the zone's offset: a day is 1,440 local minutes whatever UTC offset it sits at, and on a DST
- * transition day the skip simply lands early or late inside the next day, which costs extra steps
- * and never a missed match.
+ * The distance is computed from the local wall-clock fields, which assume a 1,440-minute day — and a
+ * DST transition day is not one. On a 25-hour day the jump lands *early*, still inside the excluded
+ * day, and the next step skips again: extra steps, no miss. On a 23-hour day it lands *late*, past
+ * the next local midnight, and the first local hour of the next day is jumped over without being
+ * read — measured: `15 0 * * 1` in America/New_York lost a whole week across the 2026 spring-forward,
+ * and `0 0 1 * *` in Europe/Berlin lost April 2030. So a jump is not trusted: `settleSkip` walks the
+ * landing point back (or, searching backward, forward) to the true day boundary, one step at a time,
+ * which costs at most the transition's width once a year and nothing on an ordinary day, because an
+ * ordinary landing is already on the boundary.
  *
  * What it buys: the 550,000-step budget now reaches ~1,500 years for a date-sparse expression while
  * still reaching ~382 days for a time-dense one, so the budget covers every 5-field cron there is.
@@ -304,6 +309,52 @@ function minutesRemainingInLocalDay(f: CronFields, hasSeconds: boolean): number 
 function stepsElapsedInLocalDay(f: CronFields, hasSeconds: boolean): number {
   const elapsed = (f.hour * 60 + f.minute) * (hasSeconds ? 60 : 1) + (hasSeconds ? f.second : 0);
   return Math.max(elapsed + 1, 1);
+}
+
+function sameLocalDate(a: CronFields, b: CronFields): boolean {
+  return a.month === b.month && a.day === b.day;
+}
+
+function atLocalDayStart(f: CronFields, hasSeconds: boolean): boolean {
+  return f.hour === 0 && f.minute === 0 && (!hasSeconds || f.second === 0);
+}
+
+function atLocalDayEnd(f: CronFields, hasSeconds: boolean): boolean {
+  return f.hour === 23 && f.minute === 59 && (!hasSeconds || f.second === 59);
+}
+
+/** The most steps a landing is ever walked: a transition is at most a few hours wide. */
+const MAX_SETTLE_STEPS = 4 * 60 * 60;
+
+/**
+ * Moves a day-skip's landing point to the boundary of the day it skipped from — the first instant
+ * after it (`direction` +1) or the last instant before it (-1). A landing already on a boundary, or
+ * still inside the skipped day (a 25-hour day), is returned unchanged; one that overshot is walked
+ * back toward the skipped day until the next step would re-enter it.
+ *
+ * The test is "is the neighbouring instant still outside the skipped day", not "is this local
+ * midnight": in a zone whose transition is *at* midnight (America/Santiago, Asia/Beirut) local
+ * 00:00 does not exist on that day, the day's first instant is 01:00, and a midnight test would
+ * walk past it into the skipped day and loop.
+ */
+function settleSkip(
+  landing: Date,
+  skippedFrom: CronFields,
+  direction: 1 | -1,
+  stepMs: number,
+  hasSeconds: boolean,
+  timezone: string | undefined,
+): Date {
+  const f = cronFields(landing, timezone);
+  if (sameLocalDate(f, skippedFrom)) return landing;
+  if (direction === 1 ? atLocalDayStart(f, hasSeconds) : atLocalDayEnd(f, hasSeconds)) return landing;
+  let cursor = landing;
+  for (let i = 0; i < MAX_SETTLE_STEPS; i += 1) {
+    const neighbour = new Date(cursor.getTime() - direction * stepMs);
+    if (sameLocalDate(cronFields(neighbour, timezone), skippedFrom)) return cursor;
+    cursor = neighbour;
+  }
+  return cursor;
 }
 
 function floorToStep(date: Date, hasSeconds: boolean): Date {
@@ -330,7 +381,8 @@ export function cronPrevOnOrBefore(expr: string, now: Date, timezone?: string): 
       cursor = new Date(cursor.getTime() - stepMs);
     } else {
       // The whole local day is excluded, so jump behind its first instant in one step.
-      cursor = new Date(cursor.getTime() - stepsElapsedInLocalDay(f, parsed.hasSeconds) * stepMs);
+      const landing = new Date(cursor.getTime() - stepsElapsedInLocalDay(f, parsed.hasSeconds) * stepMs);
+      cursor = settleSkip(landing, f, -1, stepMs, parsed.hasSeconds, timezone);
     }
   }
   return null;
@@ -351,7 +403,8 @@ export function cronNextAfter(expr: string, after: Date, timezone?: string): Dat
       cursor = new Date(cursor.getTime() + stepMs);
     } else {
       // The whole local day is excluded, so jump past its last instant in one step.
-      cursor = new Date(cursor.getTime() + minutesRemainingInLocalDay(f, parsed.hasSeconds) * stepMs);
+      const landing = new Date(cursor.getTime() + minutesRemainingInLocalDay(f, parsed.hasSeconds) * stepMs);
+      cursor = settleSkip(landing, f, 1, stepMs, parsed.hasSeconds, timezone);
     }
   }
   return null;

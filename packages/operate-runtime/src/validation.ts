@@ -145,7 +145,7 @@ const checkEmail: FieldCheck = (rule, value) =>
     : { field: rule.name, code: "type", message: `${rule.name} must be a valid email address` };
 
 const checkEnum: FieldCheck = (rule, value) =>
-  rule.enumValues === undefined || rule.enumValues.includes(String(value))
+  rule.enumValues === undefined || (typeof value === "string" && rule.enumValues.includes(value))
     ? null
     : {
         field: rule.name,
@@ -221,6 +221,26 @@ const checkTime: FieldCheck = (rule, value) =>
 const acceptAny: FieldCheck = () => null;
 
 /**
+ * A kind the API publishes as `type: "string"`. Before this a JSON number passed every one of them
+ * (`checkTextLength` measures `String(value)`), and the two stores then disagreed about what was
+ * stored: `--store pg` kept the JSON number `42` and handed it back as a number, while
+ * `--store pg-columns` bound it into a `VARCHAR` and handed back `"42"`. Measured over `erp-core`'s
+ * 427 own fields: 327 publish a string request schema and 197 of those accepted `42` (text 97,
+ * reference 79, long_text 11, country_code 5, phone 4, url 1). The in-repo console never sends a
+ * number to one — it posts a number only for an `integer` input — so the refusal breaks no client
+ * that keeps to the published contract.
+ */
+const checkString: FieldCheck = (rule, value) =>
+  typeof value === "string"
+    ? null
+    : { field: rule.name, code: "type", message: `${rule.name} must be a string` };
+
+/** `checkString`, then `next` — for a string kind that also has a rule of its own. */
+function stringThen(next: FieldCheck): FieldCheck {
+  return (rule, value) => checkString(rule, value) ?? next(rule, value);
+}
+
+/**
  * The check for every field kind — a **total** map over `PrimitiveFieldType["kind"]`, so a
  * twenty-fourth kind is a compile error here rather than a field type that silently accepts
  * anything.
@@ -229,15 +249,16 @@ const acceptAny: FieldCheck = () => null;
  * hole exist: **14 of the 23 kinds** reached that default, so "a client can store any string in a
  * `datetime` field" was not one oversight but one member of a class with fourteen members. Three
  * are closed here — `date`, `time`, `datetime`, the kinds whose values have an *order* a store
- * must agree about. The other eleven are `acceptAny` on purpose and not by accident: a `uuid`, a
- * `reference`, a `json`, a `file`, a `currency_amount`, a `geo_point`, a `geo_polygon`, a
- * `country_code`, a `language_code`, a `timezone` and a `duration` are each a validation rule
- * nobody has written, and each narrows an input contract that is currently open. They are now
- * eleven visible lines rather than an invisible fall-through.
+ * must agree about. Five more require a string and nothing further — `uuid`, `reference`,
+ * `country_code`, `language_code`, `timezone` — because the response schema publishes them as one
+ * (see `checkString`); their *format* is still a rule nobody has written. The six left `acceptAny`
+ * — `json`, `file`, `currency_amount`, `geo_point`, `geo_polygon`, `duration` — are the kinds whose
+ * published schema carries no `type` at all, so accepting any JSON there is the contract rather
+ * than a gap in it.
  */
 const FIELD_TYPE_CHECKS: { readonly [K in PrimitiveFieldType["kind"]]: FieldCheck } = {
-  text: checkTextLength,
-  long_text: checkTextLength,
+  text: stringThen(checkTextLength),
+  long_text: stringThen(checkTextLength),
   integer: checkNumber,
   decimal: checkNumber,
   boolean: checkBoolean,
@@ -245,20 +266,20 @@ const FIELD_TYPE_CHECKS: { readonly [K in PrimitiveFieldType["kind"]]: FieldChec
   time: checkTime,
   datetime: checkDatetime,
   duration: acceptAny,
-  uuid: acceptAny,
+  uuid: checkString,
   enum: checkEnum,
-  reference: acceptAny,
+  reference: checkString,
   json: acceptAny,
   file: acceptAny,
   email: checkEmail,
-  phone: checkTextLength,
-  url: checkTextLength,
+  phone: stringThen(checkTextLength),
+  url: stringThen(checkTextLength),
   currency_amount: acceptAny,
   geo_point: acceptAny,
   geo_polygon: acceptAny,
-  country_code: acceptAny,
-  language_code: acceptAny,
-  timezone: acceptAny,
+  country_code: checkString,
+  language_code: checkString,
+  timezone: checkString,
 };
 
 /**

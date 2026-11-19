@@ -2,9 +2,10 @@ import { readFile } from "node:fs/promises";
 
 import { z } from "zod";
 import type { PipelineExecution } from "@crossengin/api-gateway";
-import { METER_IDS, USAGE_SOURCES, type UsagePeriod } from "@crossengin/billing";
+import { METER_IDS, USAGE_SOURCES, type UsagePeriod, type UsageRecord } from "@crossengin/billing";
 import {
   RandomUuidGenerator,
+  UsageMeter,
   usageRecordFrom,
   type MeteredUsageEvent,
   type UuidGenerator,
@@ -16,6 +17,8 @@ import {
 import type { PgConnection } from "@crossengin/kernel-pg";
 
 import type { IntervalHandle, IntervalScheduler } from "./jwks.js";
+
+export const DEFAULT_METERING_FLUSH_INTERVAL_MS = 60_000;
 
 /**
  * Maps a served request to a metered usage event. Only authenticated requests
@@ -31,8 +34,16 @@ export const MeteringConfigSchema = z
     tenantSubscriptions: z.record(z.string().uuid(), z.string().uuid()),
     /** Response statuses to count; omit to count every non-error (< 400) response. */
     countStatuses: z.array(z.number().int().min(100).max(599)).min(1).optional(),
-    /** Interval to flush accumulated usage to Postgres (ms); omit to flush only on demand. */
-    flushIntervalMs: z.number().int().positive().optional(),
+    /**
+     * Interval to flush accumulated usage to Postgres (ms). It was optional with "omit to flush only
+     * on demand", and nothing in the binary ever demanded — so a config without it metered every
+     * request into memory and persisted none of it. Defaulted now; usage is also flushed on shutdown.
+     */
+    flushIntervalMs: z.number().int().positive().default(DEFAULT_METERING_FLUSH_INTERVAL_MS),
+    /** How long a request id is remembered for de-duplication (ms). */
+    dedupRetentionMs: z.number().int().positive().optional(),
+    /** At most this many request ids are remembered for de-duplication. */
+    maxDedupKeys: z.number().int().positive().optional(),
   })
   .strict();
 export type MeteringConfig = z.infer<typeof MeteringConfigSchema>;
@@ -104,8 +115,7 @@ export function meteredEventFromExecution(
 /**
  * Feeds the live request stream into a billing engine: each billable request
  * accumulates (idempotently, keyed by request id) into the engine's in-memory
- * meter. Accumulated usage is flushed to Postgres by `flushUsage` / the
- * `MeteringFlushScheduler`.
+ * meter. Accumulated usage is flushed to Postgres by the `MeteringFlushScheduler`.
  */
 export class RequestMeteringObserver {
   private readonly subscriptions = new Set<string>();
@@ -131,47 +141,43 @@ export class RequestMeteringObserver {
   }
 }
 
-export interface FlushUsageOptions {
+export interface UsageWindowOptions {
   readonly period: UsagePeriod;
   readonly source: MeteredUsageEvent["source"];
   readonly recordedAt: string;
   readonly ids: UuidGenerator;
-  /** Reset each subscription's buckets after persisting (default true). */
-  readonly clear?: boolean;
 }
 
 /**
- * Persists each metered subscription's accumulated buckets as `UsageRecord`s for
- * the flush window, then clears them — so the next window starts fresh and each
- * window persists as a distinct record (distinct period ⇒ distinct idempotency
- * key). Returns the number of records written.
+ * Takes each metered subscription's accumulated buckets out of the engine **in one step** and
+ * returns them as the window's `UsageRecord`s. Taking rather than reading-then-clearing is what makes
+ * a window own its quantities: a request metered while the window is being written lands in the next
+ * window instead of in a bucket the writer is about to clear.
  */
-export async function flushUsage(
+export function takeUsageWindow(
   engine: PersistentBillingMeteringEngine,
   subscriptions: readonly string[],
-  opts: FlushUsageOptions,
-): Promise<number> {
-  let written = 0;
+  opts: UsageWindowOptions,
+): UsageRecord[] {
+  const records: UsageRecord[] = [];
   for (const subscriptionId of subscriptions) {
-    const buckets = engine.engine.usage(subscriptionId);
-    for (const bucket of buckets) {
+    for (const bucket of engine.engine.takeSubscriptionUsage(subscriptionId)) {
       if (bucket.quantity <= 0) continue;
-      const record = usageRecordFrom({
-        tenantId: bucket.tenantId,
-        subscriptionId: bucket.subscriptionId,
-        meter: bucket.meter,
-        quantity: bucket.quantity,
-        source: opts.source,
-        period: opts.period,
-        id: opts.ids.next(),
-        recordedAt: opts.recordedAt,
-      });
-      await engine.usageStore.record(record);
-      written += 1;
+      records.push(
+        usageRecordFrom({
+          tenantId: bucket.tenantId,
+          subscriptionId: bucket.subscriptionId,
+          meter: bucket.meter,
+          quantity: bucket.quantity,
+          source: opts.source,
+          period: opts.period,
+          id: opts.ids.next(),
+          recordedAt: opts.recordedAt,
+        }),
+      );
     }
-    if (opts.clear !== false) engine.engine.clearSubscription(subscriptionId);
   }
-  return written;
+  return records;
 }
 
 const DEFAULT_SCHEDULER: IntervalScheduler = {
@@ -198,15 +204,29 @@ export interface MeteringFlushSchedulerOptions {
 }
 
 /**
- * Periodically flushes accumulated usage to Postgres. Each tick persists the
- * usage since the previous tick as a `[lastFlush, now]` window (unref'd timer,
- * `onFlush`/`onError` sinks — the `PruneScheduler` shape).
+ * Periodically flushes accumulated usage to Postgres, as one record per (subscription, meter) per
+ * `[lastFlush, now]` window.
+ *
+ * Three things this did wrong before. Every window opening on one day shared one idempotency key, so
+ * the second flush of a day upserted over the first and that usage was never billed. A flush that
+ * wrote some subscriptions and failed on the next had already cleared the written ones and not
+ * advanced the window, so the retry overwrote their rows with only the newer usage. And nothing
+ * flushed on shutdown. Now a window's records are taken out of the meter when the window is cut,
+ * held as **pending** until one transaction writes them all, and retried unchanged on the next tick
+ * if it fails — the same records under the same keys, so a retry after an ambiguous commit is a
+ * no-op rather than a second count. Flushes are serialised, so the interval and a shutdown flush
+ * cannot cut two windows over one span.
+ *
+ * What it still cannot do is survive a crash: buckets and pending windows live in this process, so
+ * usage metered since the last successful flush is lost if the process dies without its shutdown.
  */
 export class MeteringFlushScheduler {
   private handle: IntervalHandle | null = null;
   private lastFlushAt: Date;
   private readonly ids: UuidGenerator;
   private readonly clock: () => Date;
+  private readonly pending: UsageRecord[][] = [];
+  private chain: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly opts: MeteringFlushSchedulerOptions) {
     this.ids = opts.ids ?? new RandomUuidGenerator();
@@ -225,24 +245,59 @@ export class MeteringFlushScheduler {
     this.handle = null;
   }
 
-  async flushOnce(): Promise<number> {
-    const now = this.clock();
+  /** Records cut into windows and not yet written. */
+  pendingRecords(): number {
+    return this.pending.reduce((n, w) => n + w.length, 0);
+  }
+
+  flushOnce(): Promise<number> {
+    const run = this.chain.then(() => this.flushNow());
+    this.chain = run.catch(() => undefined);
+    return run;
+  }
+
+  /**
+   * A pending window is written **before** a new one is cut, and no window is cut while one is still
+   * pending. Cutting on every tick regardless held one more window in memory per failed tick, so a
+   * store that stayed down grew this process by a window an interval for as long as it was down. Left
+   * uncut, the usage stays in the meter's buckets — bounded by subscriptions × meters — and the window
+   * cut once the store recovers simply spans the outage.
+   */
+  private async flushNow(): Promise<number> {
+    let written = 0;
+    let attempted = false;
     try {
-      if (now.getTime() <= this.lastFlushAt.getTime()) return 0;
-      const period: UsagePeriod = { start: this.lastFlushAt.toISOString(), end: now.toISOString() };
-      const written = await flushUsage(this.opts.engine, this.opts.observer.meteredSubscriptions(), {
-        period,
-        source: this.opts.source,
-        recordedAt: now.toISOString(),
-        ids: this.ids,
-      });
-      this.lastFlushAt = now;
-      this.opts.onFlush?.(written);
+      written += await this.drainPending();
+      const now = this.clock();
+      if (now.getTime() > this.lastFlushAt.getTime()) {
+        const period: UsagePeriod = { start: this.lastFlushAt.toISOString(), end: now.toISOString() };
+        const records = takeUsageWindow(this.opts.engine, this.opts.observer.meteredSubscriptions(), {
+          period,
+          source: this.opts.source,
+          recordedAt: now.toISOString(),
+          ids: this.ids,
+        });
+        this.lastFlushAt = now;
+        if (records.length > 0) this.pending.push(records);
+      }
+      attempted = this.pending.length > 0 || written > 0;
+      written += await this.drainPending();
+      if (attempted) this.opts.onFlush?.(written);
       return written;
     } catch (err) {
       this.opts.onError?.(err);
-      return 0;
+      return written;
     }
+  }
+
+  private async drainPending(): Promise<number> {
+    let written = 0;
+    while (this.pending.length > 0) {
+      const window = this.pending[0] as UsageRecord[];
+      written += await this.opts.engine.usageStore.recordWindow(window);
+      this.pending.shift();
+    }
+    return written;
   }
 
   private scheduler(): IntervalScheduler {
@@ -253,7 +308,7 @@ export class MeteringFlushScheduler {
 export interface RequestMetering {
   readonly engine: PersistentBillingMeteringEngine;
   readonly observer: RequestMeteringObserver;
-  readonly flushScheduler: MeteringFlushScheduler | null;
+  readonly flushScheduler: MeteringFlushScheduler;
 }
 
 export function buildRequestMetering(
@@ -261,19 +316,21 @@ export function buildRequestMetering(
   config: MeteringConfig,
   opts: { readonly onFlush?: (written: number) => void; readonly onError?: (err: unknown) => void } = {},
 ): RequestMetering {
-  const engine = buildPersistentBillingEngine(conn);
+  const engine = buildPersistentBillingEngine(conn, {
+    meter: new UsageMeter({
+      ...(config.dedupRetentionMs !== undefined ? { dedupRetentionMs: config.dedupRetentionMs } : {}),
+      ...(config.maxDedupKeys !== undefined ? { maxDedupKeys: config.maxDedupKeys } : {}),
+    }),
+  });
   const observer = new RequestMeteringObserver(engine, policyFromConfig(config));
-  const flushScheduler =
-    config.flushIntervalMs !== undefined
-      ? new MeteringFlushScheduler({
-          observer,
-          engine,
-          source: config.source,
-          intervalMs: config.flushIntervalMs,
-          ...(opts.onFlush !== undefined ? { onFlush: opts.onFlush } : {}),
-          ...(opts.onError !== undefined ? { onError: opts.onError } : {}),
-        })
-      : null;
+  const flushScheduler = new MeteringFlushScheduler({
+    observer,
+    engine,
+    source: config.source,
+    intervalMs: config.flushIntervalMs,
+    ...(opts.onFlush !== undefined ? { onFlush: opts.onFlush } : {}),
+    ...(opts.onError !== undefined ? { onError: opts.onError } : {}),
+  });
   return { engine, observer, flushScheduler };
 }
 

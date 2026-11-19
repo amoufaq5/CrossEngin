@@ -68,6 +68,7 @@ export function usageRecordFrom(input: UsageRecordInput): UsageRecord {
     recordedAt: input.recordedAt,
     idempotencyKey: buildIdempotencyKey({
       tenantId: input.tenantId,
+      subscriptionId: input.subscriptionId,
       meter: input.meter,
       periodStart: input.period.start,
     }),

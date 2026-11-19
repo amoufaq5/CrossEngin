@@ -349,3 +349,83 @@ describe("OpenAiProvider against a custom base URL", () => {
     expect(p.pricing.inputPerMillionTokens).toBe(2.5);
   });
 });
+
+describe("OpenAiProvider declared price and inactivity timeout", () => {
+  const declared = { inputUsdPerMillion: 1_000_000, cachedInputUsdPerMillion: 0, outputUsdPerMillion: 0 };
+
+  async function finalCost(p: OpenAiProvider, r: CompletionRequest): Promise<number> {
+    let cost = -1;
+    for await (const chunk of p.complete(r)) if (chunk.kind === "usage_final") cost = chunk.usage.cost;
+    return cost;
+  }
+
+  it("charges a self-hosted model nothing without a declaration and the declared price with one", async () => {
+    const fetch: FetchLike = async () => ({
+      ok: true,
+      status: 200,
+      text: async () => TEXT_STREAM,
+      body: streamFrom(TEXT_STREAM),
+    });
+    expect(await finalCost(ossProvider(fetch), req())).toBe(0);
+    const priced = new OpenAiProvider({
+      apiKey: API_KEY,
+      baseUrl: OLLAMA,
+      defaultModel: OSS_MODEL,
+      pricingOverride: declared,
+      fetch,
+    });
+    expect(priced.pricing.inputPerMillionTokens).toBe(1_000_000);
+    // 10 prompt tokens at the declared $1/token.
+    expect(await finalCost(priced, req())).toBeCloseTo(10, 6);
+  });
+
+  it("aborts a call whose response never arrives and hands fetch the signal", async () => {
+    let seen: AbortSignal | undefined;
+    const p = new OpenAiProvider({
+      apiKey: API_KEY,
+      defaultModel: "gpt-4o",
+      inactivityTimeoutMs: 30,
+      fetch: async (_url, init) => {
+        seen = init.signal;
+        return new Promise(() => undefined);
+      },
+    });
+    const err = await (async () => {
+      try {
+        for await (const _ of p.complete(req())) void _;
+        return null;
+      } catch (e) {
+        return e;
+      }
+    })();
+    expect(err).toBeInstanceOf(OpenAiError);
+    expect((err as OpenAiError).kind).toBe("timeout_error");
+    expect(seen?.aborted).toBe(true);
+    await expect(p.completeNonStreaming(req())).rejects.toMatchObject({ kind: "timeout_error" });
+  });
+
+  it("releases the body when the consumer stops early", async () => {
+    let cancelled = false;
+    let sent = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(ctrl): Promise<void> | void {
+        if (!sent) {
+          sent = true;
+          ctrl.enqueue(new TextEncoder().encode(TEXT_STREAM.split("\n\n")[0] + "\n\n"));
+          return;
+        }
+        return new Promise<void>(() => undefined);
+      },
+      cancel(): void {
+        cancelled = true;
+      },
+    });
+    const p = new OpenAiProvider({
+      apiKey: API_KEY,
+      defaultModel: "gpt-4o",
+      fetch: async () => ({ ok: true, status: 200, text: async () => "", body }),
+    });
+    for await (const chunk of p.complete(req())) if (chunk.kind === "text") break;
+    expect(cancelled).toBe(true);
+  });
+});

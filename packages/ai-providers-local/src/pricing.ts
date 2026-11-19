@@ -33,3 +33,20 @@ export function localUsage(tokens: TokenCounts): Usage {
     cost: 0,
   };
 }
+
+/**
+ * `usage` charged at a declared price. Local inference has no vendor bill, but a deployment that
+ * wants its per-request ceiling to bound something — GPU time, a shared box — declares what a
+ * token costs it, and this is the figure a cost ledger then sees in place of 0.
+ */
+export function priceLocalUsage(usage: Usage, pricing: ProviderPricing): Usage {
+  const cached = usage.cachedInputTokens ?? 0;
+  const uncached = Math.max(0, usage.inputTokens - cached);
+  const cachedRate = pricing.cachedInputPerMillionTokens ?? pricing.inputPerMillionTokens;
+  const total =
+    (uncached * pricing.inputPerMillionTokens +
+      cached * cachedRate +
+      usage.outputTokens * pricing.outputPerMillionTokens) /
+    1_000_000;
+  return { ...usage, cost: Math.round(total * 1_000_000) / 1_000_000 };
+}

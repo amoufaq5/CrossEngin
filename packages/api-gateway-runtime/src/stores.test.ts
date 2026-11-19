@@ -120,6 +120,46 @@ describe("InMemoryIdempotencyStore", () => {
     expect(updated.status).toBe("completed_success");
   });
 
+  it("reserves an unseen key once and refuses a second reservation while the first holds it", async () => {
+    const s = new InMemoryIdempotencyStore();
+    expect(await s.reserve({ tenantId: TENANT, record: fixtureIdemRecord() })).toEqual({ reserved: true });
+    const second = await s.reserve({ tenantId: TENANT, record: fixtureIdemRecord({ requestHashSha256: "b".repeat(64) }) });
+    expect(second.reserved).toBe(false);
+    if (!second.reserved) expect(second.existing.requestHashSha256).toBe("a".repeat(64));
+  });
+
+  it("takes over a reservation whose lease lapsed before this request arrived", async () => {
+    const s = new InMemoryIdempotencyStore();
+    await s.reserve({ tenantId: TENANT, record: fixtureIdemRecord({ expiresAt: "2026-05-16T12:05:00.000Z" }) });
+    const later = fixtureIdemRecord({ receivedAt: "2026-05-16T12:06:00.000Z", requestHashSha256: "c".repeat(64) });
+    expect(await s.reserve({ tenantId: TENANT, record: later })).toEqual({ reserved: true });
+  });
+
+  it("completes with a stored body that get returns, and releases only its own in-progress row", async () => {
+    const s = new InMemoryIdempotencyStore();
+    await s.reserve({ tenantId: TENANT, record: fixtureIdemRecord() });
+    await s.release({ tenantId: TENANT, key: "key-1", requestHashSha256: "b".repeat(64) });
+    expect(await s.get({ tenantId: TENANT, key: "key-1" })).not.toBeNull();
+    const body = new TextEncoder().encode('{"id":"x"}');
+    await s.complete({
+      tenantId: TENANT,
+      record: fixtureIdemRecord({ status: "completed_success", responseStatus: 201 }),
+      replay: { responseHeaders: { "content-type": "application/json" }, responseBody: body },
+    });
+    const got = await s.get({ tenantId: TENANT, key: "key-1" });
+    expect(got?.status).toBe("completed_success");
+    expect(got?.replay?.responseBody).toEqual(body);
+    await s.release({ tenantId: TENANT, key: "key-1", requestHashSha256: "a".repeat(64) });
+    expect(await s.get({ tenantId: TENANT, key: "key-1" })).not.toBeNull();
+  });
+
+  it("releases its own reservation so the next request reserves afresh", async () => {
+    const s = new InMemoryIdempotencyStore();
+    await s.reserve({ tenantId: TENANT, record: fixtureIdemRecord() });
+    await s.release({ tenantId: TENANT, key: "key-1", requestHashSha256: "a".repeat(64) });
+    expect(await s.get({ tenantId: TENANT, key: "key-1" })).toBeNull();
+  });
+
   it("rejects update of an unknown record", async () => {
     const s = new InMemoryIdempotencyStore();
     await expect(

@@ -1,4 +1,5 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
+import { withTenantContext } from "./tenant-context.js";
 
 const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
 const DEFAULT_SCHEMA = "meta";
@@ -112,18 +113,29 @@ export async function claimDueTimers(
  * it — so a worker that fails to process a claimed timer can hand it straight back for immediate
  * re-claim rather than waiting for the lease to lapse. No-op if the timer is no longer claimed by
  * this worker.
+ *
+ * Under the timer's own tenant context, with the tenant in the predicate as well: the table carries
+ * one tenant-isolation policy, so without the context a session that policy confines matches 0 rows
+ * and the release silently does nothing; the predicate keeps an exempt session to the same row.
  */
 export async function releaseTimerClaim(
   conn: PgConnection,
-  options: { readonly timerId: string; readonly workerId: string; readonly schema?: string },
+  options: {
+    readonly timerId: string;
+    readonly workerId: string;
+    readonly tenantId: string;
+    readonly schema?: string;
+  },
 ): Promise<void> {
   const schema = options.schema ?? DEFAULT_SCHEMA;
   if (!SCHEMA_RE.test(schema)) throw new Error(`invalid schema identifier: ${JSON.stringify(schema)}`);
-  await conn.query(
-    `UPDATE ${schema}.workflow_timers
-        SET claimed_by = NULL, claim_expires_at = NULL
-      WHERE timer_id = $1 AND claimed_by = $2 AND status = 'scheduled'`,
-    [options.timerId, options.workerId],
+  await withTenantContext(conn, options.tenantId, (tx) =>
+    tx.query(
+      `UPDATE ${schema}.workflow_timers
+          SET claimed_by = NULL, claim_expires_at = NULL
+        WHERE timer_id = $1 AND claimed_by = $2 AND status = 'scheduled' AND tenant_id = $3::uuid`,
+      [options.timerId, options.workerId, options.tenantId],
+    ),
   );
 }
 
@@ -139,6 +151,7 @@ export async function renewTimerClaim(
   options: {
     readonly timerId: string;
     readonly workerId: string;
+    readonly tenantId: string;
     readonly now: string;
     readonly leaseMs?: number;
     readonly schema?: string;
@@ -149,11 +162,13 @@ export async function renewTimerClaim(
   const leaseMs = options.leaseMs ?? DEFAULT_LEASE_MS;
   if (!Number.isInteger(leaseMs) || leaseMs < 1) throw new Error(`invalid leaseMs: ${String(leaseMs)}`);
   const claimExpiresAt = new Date(new Date(options.now).getTime() + leaseMs).toISOString();
-  const result = await conn.query(
-    `UPDATE ${schema}.workflow_timers
-        SET claim_expires_at = $3::timestamptz
-      WHERE timer_id = $1 AND claimed_by = $2 AND status = 'scheduled'`,
-    [options.timerId, options.workerId, claimExpiresAt],
+  const result = await withTenantContext(conn, options.tenantId, (tx) =>
+    tx.query(
+      `UPDATE ${schema}.workflow_timers
+          SET claim_expires_at = $3::timestamptz
+        WHERE timer_id = $1 AND claimed_by = $2 AND status = 'scheduled' AND tenant_id = $4::uuid`,
+      [options.timerId, options.workerId, claimExpiresAt, options.tenantId],
+    ),
   );
   return (result.rowCount ?? 0) > 0;
 }

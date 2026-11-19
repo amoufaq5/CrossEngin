@@ -39,7 +39,8 @@ export default function LoginPage(): ReactElement {
     }
 
     if (!res.ok) {
-      const detail = res.status === 502 ? "The API is not reachable. Try again shortly." : REFUSED;
+      const detail =
+        res.status === 502 || res.status === 504 ? "The API is not reachable. Try again shortly." : REFUSED;
       setError(detail);
       setPassword("");
       setBusy(false);

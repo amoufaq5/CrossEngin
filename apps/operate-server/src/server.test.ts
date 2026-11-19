@@ -10,6 +10,7 @@ import type { RawHttpRequest } from "./http.js";
 import { loadBuiltinPack } from "./manifest-source.js";
 import { parseApiKeySpec } from "./principals.js";
 import { OperateHttpServer, buildOperateHttpServer } from "./server.js";
+import { PreAuthLimiter } from "./pre-auth-limit.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 const manifest = await loadBuiltinPack("erp-retail");
@@ -291,9 +292,49 @@ describe("OperateHttpServer — data-residency edge routing", () => {
     expect(res.status).toBe(200);
   });
 
-  it("proceeds when no tenant hint is present (routing needs a hint)", async () => {
+  // Rewritten (M-20): this test pinned the defect as the specification. With no hint the pre-auth
+  // routing has nothing to look up, and before the post-auth gate that meant an eu-only tenant's own
+  // credential was served from us-east by omitting one header.
+  it("refuses an eu-only tenant's credential in a forbidden region even with no tenant hint", async () => {
     const res = await regionServer("us-east").dispatch(reqWithTenant("/v1/products", "key-manager"), null);
+    expect(res.status).toBe(421);
+    expect(res.headers["x-crossengin-region"]).toBe("eu-central");
+    expect(parse(res.body)).toMatchObject({ reason: "residency_misdirected", correctRegion: "eu-central" });
+  });
+
+  // A hint naming an unprofiled tenant passes the advisory pre-auth routing; what stops it buying a
+  // forbidden region is that the gateway refuses a hint disagreeing with the credential's tenant.
+  it("does not serve when the hint names another, unprofiled tenant", async () => {
+    const other = "00000000-0000-4000-8000-0000000000ff";
+    const res = await regionServer("us-east").dispatch(reqWithTenant("/v1/products", "key-manager", other), null);
+    expect(res.status).toBe(401);
+  });
+
+  it("still serves the verified tenant in its allowed region with no hint", async () => {
+    const res = await regionServer("eu-central").dispatch(reqWithTenant("/v1/products", "key-manager"), null);
     expect(res.status).toBe(200);
+  });
+
+  it("answers 503 rather than serving when the directory cannot be read after auth", async () => {
+    const { httpServer } = buildOperateHttpServer({
+      edgeTrust: "untrusted",
+      manifest,
+      store: new InMemoryEntityStore(),
+      apiKeys: API_KEYS,
+      regionGuard: {
+        region: "us-east" as never,
+        directory: {
+          resolve: async () => {
+            throw new Error("residency store unreachable");
+          },
+        },
+      },
+      now: () => new Date("2026-06-03T12:00:00.000Z"),
+    });
+    const res = await httpServer.dispatch(reqWithTenant("/v1/products", "key-manager"), null);
+    expect(res.status).toBe(503);
+    expect(parse(res.body)).toMatchObject({ reason: "residency_unresolved" });
+    expect(new TextDecoder().decode(res.body ?? new Uint8Array())).not.toContain("unreachable");
   });
 
   it("proceeds for a tenant with no residency profile (unconstrained)", async () => {
@@ -529,5 +570,165 @@ describe("buildOperateHttpServer's option forwarding", () => {
     expect(shared.length, "the shared option set read as empty").toBeGreaterThanOrEqual(16);
     // And the member this fence was written for is in it.
     expect(shared).toContain("allowUncoveredSettlement");
+  });
+});
+
+describe("OperateHttpServer — a fault is logged under an id and never echoed", () => {
+  function serverWith(directoryThrows: boolean, events: unknown[]): OperateHttpServer {
+    const { gateway } = buildOperateHttpServer({
+      edgeTrust: "untrusted",
+      manifest,
+      store: new InMemoryEntityStore(),
+      apiKeys: API_KEYS,
+    });
+    return new OperateHttpServer({
+      gateway,
+      edgeTrust: "untrusted",
+      onServerError: (event) => events.push(event),
+      ...(directoryThrows
+        ? {
+            regionGuard: {
+              region: "us-east" as never,
+              directory: {
+                resolve: async () => {
+                  throw new Error(`residency store unreachable for ${TENANT}`);
+                },
+              },
+            },
+          }
+        : {}),
+    });
+  }
+
+  it("answers a pre-gateway throw with a fixed 500 carrying the request id", async () => {
+    const events: Array<{ requestId: string; reason: string | null; stage: string | null }> = [];
+    const server = serverWith(true, events);
+    const res = await server.dispatch(
+      { method: "GET", url: "/v1/products", headers: { "x-tenant-id": TENANT }, remoteAddress: "203.0.113.1" },
+      null,
+    );
+    expect(res.status).toBe(500);
+    const text = new TextDecoder().decode(res.body ?? new Uint8Array());
+    expect(text).not.toContain("unreachable");
+    expect(text).not.toContain(TENANT);
+    expect(res.headers["x-request-id"]).toMatch(/^req_/);
+    expect(events).toHaveLength(1);
+    expect(events[0]!.requestId).toBe(res.headers["x-request-id"]);
+    expect(events[0]!.stage).toBe("dispatch");
+    expect(events[0]!.reason).toContain("unreachable");
+  });
+
+  it("does not report a request that did not end in a 5xx", async () => {
+    const events: unknown[] = [];
+    const server = serverWith(false, events);
+    const res = await server.dispatch(req("GET", "/v1/products", "key-manager"), null);
+    expect(res.status).toBe(200);
+    expect(res.headers["x-request-id"]).toMatch(/^req_/);
+    expect(events).toHaveLength(0);
+  });
+
+  it("logs a write that ended in a 500 under the id the caller was given", async () => {
+    class FailingStore extends InMemoryEntityStore {
+      override async create(): Promise<never> {
+        throw new Error("duplicate key value violates constraint product_secret_idx");
+      }
+    }
+    const { gateway } = buildOperateHttpServer({
+      edgeTrust: "untrusted",
+      manifest,
+      store: new FailingStore(),
+      apiKeys: API_KEYS,
+    });
+    const events: Array<{ requestId: string; status: number; operationId: string | null; stage: string | null }> = [];
+    const server = new OperateHttpServer({ gateway, edgeTrust: "untrusted", onServerError: (e) => events.push(e) });
+    const { raw, bytes } = jsonBody("POST", "/v1/products", "key-manager", PRODUCT);
+    const res = await server.dispatch(raw, bytes);
+    expect(res.status).toBe(500);
+    expect(new TextDecoder().decode(res.body ?? new Uint8Array())).not.toContain("product_secret_idx");
+    expect(events).toHaveLength(1);
+    expect(events[0]!.requestId).toBe(res.headers["x-request-id"]);
+    expect(events[0]!.status).toBe(500);
+    expect(events[0]!.operationId).toBe("product.create");
+    expect(events[0]!.stage).toBe("dispatch_handler");
+  });
+
+  it("logs a 5xx from the webhook route, which never enters the gateway, exactly once", async () => {
+    const { gateway } = buildOperateHttpServer({
+      edgeTrust: "untrusted",
+      manifest,
+      store: new InMemoryEntityStore(),
+      apiKeys: API_KEYS,
+    });
+    const events: Array<{ requestId: string; status: number; stage: string | null; path: string }> = [];
+    const server = new OperateHttpServer({
+      gateway,
+      edgeTrust: "untrusted",
+      webhookRoute: {
+        method: "POST",
+        path: "/v1/webhooks/stripe",
+        handle: async () => ({ status: 503, headers: { "content-type": "application/json" }, body: null }),
+      },
+      onServerError: (e) => events.push(e),
+    });
+    const raw: RawHttpRequest = {
+      method: "POST",
+      url: "/v1/webhooks/stripe?sig=secret",
+      headers: { host: "api.example.com" },
+      remoteAddress: "203.0.113.1",
+    };
+    const res = await server.dispatch(raw, null);
+    expect(res.status).toBe(503);
+    expect(events).toHaveLength(1);
+    expect(events[0]!.requestId).toBe(res.headers["x-request-id"]);
+    expect(events[0]!.stage).toBe("pre_gateway");
+    expect(events[0]!.path).toBe("/v1/webhooks/stripe");
+  });
+
+  it("mints a distinct id for every request, random beyond the timestamp", async () => {
+    const server = serverWith(false, []);
+    const ids = new Set<string>();
+    for (let i = 0; i < 50; i++) {
+      const res = await server.dispatch(req("GET", "/v1/products", "key-manager"), null);
+      ids.add(res.headers["x-request-id"]!);
+    }
+    expect(ids.size).toBe(50);
+    for (const id of ids) expect(id).toMatch(/^req_[a-z0-9]+[0-9a-f]{12}$/);
+  });
+});
+
+describe("OperateHttpServer — the pre-authentication bound", () => {
+  function limited(limit: number): OperateHttpServer {
+    return buildOperateHttpServer({
+      edgeTrust: "untrusted",
+      manifest,
+      store: new InMemoryEntityStore(),
+      apiKeys: API_KEYS,
+      preAuthLimiter: new PreAuthLimiter({ limit, windowSeconds: 60 }, "untrusted", () => 0),
+    }).httpServer;
+  }
+
+  it("serves up to the bound and answers 429 with retry-after past it, before any credential is checked", async () => {
+    const server = limited(2);
+    const anonymous = { method: "GET", url: "/v1/products", headers: {}, remoteAddress: "203.0.113.1" };
+    expect((await server.dispatch(anonymous, null)).status).toBe(401);
+    expect((await server.dispatch(anonymous, null)).status).toBe(401);
+    const third = await server.dispatch(anonymous, null);
+    expect(third.status).toBe(429);
+    expect(third.headers["retry-after"]).toBe("60");
+    // A caller with a credential of another shape from the same address keeps its own budget.
+    expect((await server.dispatch(req("GET", "/v1/products", "key-manager"), null)).status).toBe(200);
+  });
+
+  it("is absent unless given, which is the default", async () => {
+    const { httpServer } = buildOperateHttpServer({
+      edgeTrust: "untrusted",
+      manifest,
+      store: new InMemoryEntityStore(),
+      apiKeys: API_KEYS,
+    });
+    const anonymous = { method: "GET", url: "/v1/products", headers: {}, remoteAddress: "203.0.113.1" };
+    for (let i = 0; i < 20; i += 1) {
+      expect((await httpServer.dispatch(anonymous, null)).status).toBe(401);
+    }
   });
 });

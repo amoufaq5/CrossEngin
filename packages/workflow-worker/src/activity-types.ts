@@ -25,7 +25,11 @@ export interface ActivityClaimOptions {
 /** The durable queue the worker pulls from — satisfied by the Postgres `claimDueActivities` / `releaseActivityClaim`. */
 export interface ActivityClaimer {
   claim(opts: ActivityClaimOptions): Promise<readonly ClaimedActivity[]>;
-  release(opts: { readonly activityId: string; readonly workerId: string }): Promise<void>;
+  release(opts: {
+    readonly activityId: string;
+    readonly workerId: string;
+    readonly tenantId: string;
+  }): Promise<void>;
 }
 
 /**

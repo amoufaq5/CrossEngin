@@ -83,8 +83,45 @@ export interface RekeyOptions {
    * prints the default and says it is a default and unread.
    */
   readonly columnKeyTtlMs: number | null;
+  /**
+   * Re-wrap the tenant's current data key under the current key-encryption-key generation instead of
+   * rekeying it (M-10's rotation path). The data key — and so every ciphertext column — is untouched,
+   * which is why this needs no write-status gate and opens no stale-key window.
+   */
+  readonly rewrapKek: boolean;
   readonly format: "human" | "json";
   readonly help: boolean;
+}
+
+/** One line for a `--rewrap-kek` run. Never carries a key. */
+export function formatRewrapKek(
+  rewrap: {
+    readonly tenantId: string;
+    readonly generation: number | null;
+    readonly fromKekGeneration: number | null;
+    readonly toKekGeneration: number;
+    readonly outcome: string;
+  },
+  planned: boolean,
+): string {
+  const verb = planned ? "would re-wrap" : "re-wrapped";
+  switch (rewrap.outcome) {
+    case "rewrapped":
+      return (
+        `tenant ${rewrap.tenantId}: ${verb} data key generation ${String(rewrap.generation)} from ` +
+        `key-encryption-key generation ${String(rewrap.fromKekGeneration)} to ` +
+        `${rewrap.toKekGeneration.toString()}; no column was re-encrypted`
+      );
+    case "already_current":
+      return (
+        `tenant ${rewrap.tenantId}: data key generation ${String(rewrap.generation)} is already ` +
+        `wrapped under key-encryption-key generation ${rewrap.toKekGeneration.toString()}`
+      );
+    case "no_data_key_row":
+      return `tenant ${rewrap.tenantId}: no data key row — nothing to re-wrap`;
+    default:
+      return `tenant ${rewrap.tenantId}: ${rewrap.outcome}`;
+  }
 }
 
 export const TENANT_WRITE_STATUSES = ["blocks_writes", "permits_writes", "no_tenant_row"] as const;
@@ -156,8 +193,9 @@ export const TENANT_WRITE_STATUS_DETAIL: Readonly<Record<TenantWriteStatus, stri
   Object.freeze({
     blocks_writes:
       "this tenant's lifecycle state refuses writes — but only on a process running " +
-      "--tenant-status-gate, which is OPT-IN and off by default, so on a deployment without it " +
-      "this status is advisory and the fleet goes on accepting writes. With the gate, this is the " +
+      "the tenant-status gate — on by default on a Postgres store, off under " +
+      "--no-tenant-status-gate or --store memory — so on a deployment without it this status is " +
+      "advisory and the fleet goes on accepting writes. With the gate, this is the " +
       "state to rekey in; without it, the unconditional remedy is to stop or roll the serving " +
       "processes for the rekey and the stale-key window after it",
     permits_writes:

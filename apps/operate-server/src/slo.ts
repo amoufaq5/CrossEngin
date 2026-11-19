@@ -5,6 +5,7 @@ import {
 } from "@crossengin/incident-response-runtime";
 import type {
   EnforcementDecision,
+  KillSwitchRelease,
   LatencyEnforcementDecision,
   PageDirective,
   RequestOutcome,
@@ -76,7 +77,7 @@ export class SloRequestObserver {
 
 export interface ObservedEnforcementDecision {
   readonly signal: "availability" | "latency";
-  readonly kind: "breach_opened" | "breach_ongoing" | "recovered";
+  readonly kind: "breach_opened" | "breach_ongoing" | "breach_escalated" | "recovered";
   readonly surface: string;
   readonly sloId: string;
   readonly severity: string | null;
@@ -97,25 +98,43 @@ export interface ObservedEnforcementDecision {
    * (ADR-0326).
    */
   readonly pages: readonly PageDirective[];
+  /**
+   * Whether the persisting engine already attempted these pages before writing the action row
+   * (ADR-0415), in which case the scheduler must not page them again. They are still remembered,
+   * so the recovery resolves them.
+   */
+  readonly pagesDelivered: boolean;
+  /** On a recovery, what became of the breach's kill switch. Null otherwise. */
+  readonly killSwitchRelease: KillSwitchRelease | null;
 }
 
+/** A decision as a persisting engine returns it; a pure engine's decisions carry no such field. */
+type MaybeDelivered<D> = D & { readonly pageDelivery?: unknown };
+
 export function summarizeAvailabilityDecision(
-  decision: EnforcementDecision,
+  decision: MaybeDelivered<EnforcementDecision>,
 ): ObservedEnforcementDecision {
   return summarize("availability", decision);
 }
 
 export function summarizeLatencyDecision(
-  decision: LatencyEnforcementDecision,
+  decision: MaybeDelivered<LatencyEnforcementDecision>,
 ): ObservedEnforcementDecision {
   return summarize("latency", decision);
 }
 
 function summarize(
   signal: "availability" | "latency",
-  decision: EnforcementDecision | LatencyEnforcementDecision,
+  decision: MaybeDelivered<EnforcementDecision | LatencyEnforcementDecision>,
 ): ObservedEnforcementDecision {
-  const base = { signal, surface: decision.surface, sloId: decision.sloId, closeOut: null };
+  const base = {
+    signal,
+    surface: decision.surface,
+    sloId: decision.sloId,
+    closeOut: null,
+    pagesDelivered: decision.pageDelivery !== undefined && decision.pageDelivery !== null,
+    killSwitchRelease: null,
+  };
   if (decision.kind === "breach_opened") {
     return {
       ...base,
@@ -138,6 +157,18 @@ function summarize(
       pages: [],
     };
   }
+  if (decision.kind === "breach_escalated") {
+    // The one re-page an ongoing breach earns (M-23): its declared duration has passed, so the grade
+    // moved and the rotation that grade routes to has never been told.
+    return {
+      ...base,
+      kind: "breach_escalated",
+      severity: decision.severity,
+      incidentId: decision.incidentId,
+      killSwitchId: null,
+      pages: decision.pages,
+    };
+  }
   return {
     ...base,
     kind: "recovered",
@@ -145,6 +176,7 @@ function summarize(
     incidentId: decision.incidentId,
     killSwitchId: decision.killSwitchId,
     closeOut: decision.closeOut,
+    killSwitchRelease: decision.killSwitchRelease,
     pages: [],
   };
 }
@@ -193,7 +225,7 @@ export interface SloEvaluationSchedulerOptions {
    * that returned before its pages were sent would report a breach handled that nobody had been told
    * about (ADR-0326).
    */
-  readonly onPage?: (decision: ObservedEnforcementDecision) => Promise<void>;
+  readonly onPage?: (decision: ObservedEnforcementDecision) => Promise<unknown>;
   /**
    * Closes the alert a breach's page opened, once the breach recovers (ADR-0326).
    *
@@ -279,10 +311,14 @@ export class SloEvaluationScheduler {
           emitted.push(decision);
           this.opts.onDecision?.(decision);
           if (decision.pages.length > 0) {
-            await this.opts.onPage?.(decision);
+            if (!decision.pagesDelivered) await this.opts.onPage?.(decision);
             // Remembered only after the delivery was attempted, keyed on the id the provider
-            // dedups on.
-            if (decision.incidentId !== null) this.paged.set(decision.incidentId, decision.pages);
+            // dedups on. Appended rather than replaced: an escalation re-pages a second route, and
+            // the recovery has to close the alert on both (M-23).
+            if (decision.incidentId !== null) {
+              const earlier = this.paged.get(decision.incidentId) ?? [];
+              this.paged.set(decision.incidentId, [...earlier, ...decision.pages]);
+            }
           }
           if (decision.kind === "recovered") await this.resolvePages(decision);
         }

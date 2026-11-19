@@ -26,6 +26,7 @@ import {
   written,
   releasedKillSwitch,
   respondTo,
+  RELEASER as RELEASER_ID,
 } from "./test-fakes.js";
 
 const rows = (...records: ReturnType<typeof killSwitch>[]): {
@@ -513,5 +514,56 @@ describe("the scope predicate every read carries beside RLS", () => {
       expect(r.sql).not.toContain("IS NOT DISTINCT FROM");
       expect(where(r)).toContain("tenant_id = $2");
     }
+  });
+});
+
+describe("releaseActive — the SLO recovery path (ADR-0415)", () => {
+  const input = { at: "2026-09-30T12:00:00.000Z", actorUserId: RELEASER_ID, reason: "burn recovered" };
+
+  function store(loaded: ReturnType<typeof killSwitch> | null, updateRows = 1, diagnose: readonly Record<string, unknown>[] = []) {
+    const capture: Captured[] = [];
+    const conn = mockConnection(capture, (sql) => {
+      if (sql.includes("SELECT tenant_id FROM")) return { rows: diagnose, rowCount: diagnose.length };
+      if (sql.trimStart().startsWith("SELECT")) return loaded === null ? EMPTY : rows(loaded);
+      if (sql.trimStart().startsWith("UPDATE")) return { rows: [], rowCount: updateRows };
+      return { rows: [], rowCount: 1 };
+    });
+    return { store: new PostgresKillSwitchStore(conn), capture };
+  }
+
+  it("releases an active switch with the actor, instant and reason it was given", async () => {
+    const { store: s, capture } = store(killSwitch());
+    expect(await s.releaseActive(KILL_SWITCH_ID, null, input)).toBe(true);
+    const update = capture.find((c) => c.sql.trimStart().startsWith("UPDATE"));
+    expect(update?.params).toContain("released");
+    expect(update?.params).toContain(RELEASER_ID);
+    expect(update?.params).toContain("burn recovered");
+  });
+
+  it("answers false and writes nothing for a switch that is absent or no longer active", async () => {
+    for (const loaded of [null, releasedKillSwitch()]) {
+      const { store: s, capture } = store(loaded);
+      expect(await s.releaseActive(KILL_SWITCH_ID, null, input)).toBe(false);
+      expect(capture.some((c) => c.sql.trimStart().startsWith("UPDATE"))).toBe(false);
+    }
+  });
+
+  it("answers false when somebody else released it between the read and the write", async () => {
+    const { store: s } = store(killSwitch(), 0, [{ tenant_id: null }]);
+    expect(await s.releaseActive(KILL_SWITCH_ID, null, input)).toBe(false);
+  });
+
+  it("throws a wrong-scope refusal rather than reading it as nothing to release", async () => {
+    const { store: s } = store(killSwitch(), 0, [{ tenant_id: TENANT }]);
+    await expect(s.releaseActive(KILL_SWITCH_ID, null, input)).rejects.toBeInstanceOf(
+      KillSwitchNotFoundError,
+    );
+  });
+
+  it("refuses a release reason the contract would refuse rather than storing it", async () => {
+    const { store: s } = store(killSwitch());
+    await expect(
+      s.releaseActive(KILL_SWITCH_ID, null, { ...input, actorUserId: "not-a-uuid" }),
+    ).rejects.toThrow();
   });
 });

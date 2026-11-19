@@ -17,6 +17,7 @@
  * here beside its own variable name, the way `column-encryption.ts` owns
  * `COLUMN_ENCRYPTION_SECRET_VAR`.
  */
+import { SECRET_PLACEHOLDER_PREFIX } from "@crossengin/crypto";
 import { z } from "zod";
 
 export const API_KEY_SPECS_VAR = "OPERATE_API_KEY_SPECS";
@@ -104,4 +105,76 @@ export function formatApiKeySpecSource(resolution: ApiKeySpecResolution): string
     `api-key specs: ${counts} — a spec's token IS the credential and argv is readable via \`ps\`, ` +
     `so move it to ${API_KEY_SPECS_VAR} (newline- or comma-separated)`
   );
+}
+
+/**
+ * Why an api-key token is too weak to be a credential, or `null` when it is not.
+ *
+ * Deliberately **not** `refuseWeakSecret`, which is the remedy the audit prescribed and which was
+ * measured wrong for this input before it was written: that floor asks for 16 distinct byte values,
+ * and `deploy/ORACLE.md` generates the bootstrap token with `openssl rand -hex 24` — 48 characters
+ * drawn from a 16-symbol alphabet, which contain all 16 symbols only 45% of the time (inclusion-
+ * exclusion over the 16 digits). So that floor would refuse the documented generator's output more
+ * often than not, while each such token carries 192 bits. The floor here is an **entropy estimate**
+ * from the token's length and the character classes it uses, which credits a hex token for exactly
+ * what it is.
+ *
+ * It is an estimate and over-credits a token that uses a class sparsely (a UUID reads as 144 bits
+ * against its real 122). What it reliably refuses is the population that matters: a short word, a
+ * placeholder copied from `.env.example`, a repeated character.
+ */
+export const API_KEY_TOKEN_WEAKNESSES = [
+  "unreplaced_placeholder",
+  "too_little_entropy",
+  "too_few_distinct_characters",
+] as const;
+export type ApiKeyTokenWeakness = (typeof API_KEY_TOKEN_WEAKNESSES)[number];
+
+export const MIN_API_KEY_TOKEN_BITS = 128;
+export const MIN_API_KEY_TOKEN_DISTINCT = 8;
+
+export function estimateTokenBits(token: string): number {
+  if (/^[0-9a-fA-F]+$/.test(token)) return token.length * 4;
+  let alphabet = 0;
+  if (/[a-z]/.test(token)) alphabet += 26;
+  if (/[A-Z]/.test(token)) alphabet += 26;
+  if (/[0-9]/.test(token)) alphabet += 10;
+  if (/[^a-zA-Z0-9]/.test(token)) alphabet += 32;
+  return alphabet <= 1 ? 0 : token.length * Math.log2(alphabet);
+}
+
+export function apiKeyTokenWeakness(token: string): ApiKeyTokenWeakness | null {
+  if (token.startsWith(SECRET_PLACEHOLDER_PREFIX)) return "unreplaced_placeholder";
+  if (new Set(token).size < MIN_API_KEY_TOKEN_DISTINCT) return "too_few_distinct_characters";
+  if (estimateTokenBits(token) < MIN_API_KEY_TOKEN_BITS) return "too_little_entropy";
+  return null;
+}
+
+export interface WeakApiKeyToken {
+  /** 1-based position among the resolved specs, which is all an operator needs to find it. */
+  readonly position: number;
+  readonly role: string;
+  readonly weakness: ApiKeyTokenWeakness;
+}
+
+/** Never carries the token: the finding is printed, and the token is the credential. */
+export function surveyApiKeyTokens(
+  specs: readonly { readonly key: string; readonly role: string }[],
+): readonly WeakApiKeyToken[] {
+  const out: WeakApiKeyToken[] = [];
+  specs.forEach((spec, i) => {
+    const weakness = apiKeyTokenWeakness(spec.key);
+    if (weakness !== null) out.push({ position: i + 1, role: spec.role, weakness });
+  });
+  return out;
+}
+
+export function formatWeakApiKeyTokens(weak: readonly WeakApiKeyToken[], allowed: boolean): string {
+  const list = weak.map((w) => `#${w.position.toString()} (role ${w.role}): ${w.weakness}`).join("; ");
+  const remedy =
+    "generate one with `openssl rand -hex 32` or" +
+    " `node -e 'console.log(require(\"node:crypto\").randomBytes(32).toString(\"base64url\"))'`";
+  return allowed
+    ? `${weak.length.toString()} api-key token(s) are weaker than a credential should be and are served anyway under --allow-weak-api-keys: ${list}. ${remedy}`
+    : `${weak.length.toString()} api-key token(s) are weaker than a credential should be: ${list} (floor: ${MIN_API_KEY_TOKEN_BITS.toString()} estimated bits, ${MIN_API_KEY_TOKEN_DISTINCT.toString()} distinct characters, not the .env.example placeholder). ${remedy}, or pass --allow-weak-api-keys to serve them knowingly`;
 }

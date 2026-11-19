@@ -2,10 +2,12 @@ import { readFile } from "node:fs/promises";
 
 import { z } from "zod";
 import type { PgConnection } from "@crossengin/kernel-pg";
+import { SEVERITIES, type Severity } from "@crossengin/incident-response";
 import type { IncidentDeclarer } from "@crossengin/incident-response-runtime";
 import { PostgresIncidentDeclarer } from "@crossengin/incident-response-runtime-pg";
 import { AlertPolicySchema, SloSchema, type AlertPolicy } from "@crossengin/observability";
 import {
+  BreachEscalationSchema,
   FlagRollbackSchema,
   LatencySloEngine,
   SloEnforcementEngine,
@@ -21,6 +23,7 @@ import {
 import {
   buildPersistentLatencySloEngine,
   buildPersistentSloEnforcementEngine,
+  type EnforcementPageDeliverer,
 } from "@crossengin/observability-runtime-pg";
 
 import type { IntervalScheduler } from "./jwks.js";
@@ -43,6 +46,11 @@ export const SloRegistrationConfigSchema = z
     category: z.string().min(1).optional(),
     rollback: FlagRollbackSchema.optional(),
     tenantId: z.string().min(1).nullable().optional(),
+    /**
+     * Re-grade and re-page a breach still open this long after it was declared (M-23). Absent, a
+     * breach is paged once and stays at its declared grade however long it lasts.
+     */
+    escalation: BreachEscalationSchema.optional(),
   })
   .strict();
 
@@ -110,6 +118,7 @@ function toRegistration(config: SloRegistrationConfig): SloRegistration {
       : {}),
     ...(config.rollback !== undefined ? { rollback: config.rollback } : {}),
     ...(config.tenantId !== undefined ? { tenantId: config.tenantId } : {}),
+    ...(config.escalation !== undefined ? { escalation: config.escalation } : {}),
   };
 }
 
@@ -118,7 +127,14 @@ export interface BuildSloEnforcementOptions {
   readonly scheduler?: IntervalScheduler;
   readonly onDecision?: (decision: ObservedEnforcementDecision) => void;
   /** Delivers the pages a decision planned. Awaited by the scheduler (ADR-0326). */
-  readonly onPage?: (decision: ObservedEnforcementDecision) => Promise<void>;
+  readonly onPage?: (decision: ObservedEnforcementDecision) => Promise<unknown>;
+  /**
+   * With a connection, delivers a decision's pages **inside** the persisting engine, before the
+   * action row is written, so `paged` records what the delivery reached (ADR-0415). The scheduler
+   * then skips `onPage` for those decisions. Without a connection there is no row and `onPage`
+   * alone delivers.
+   */
+  readonly deliverPages?: EnforcementPageDeliverer;
   /**
    * Closes the alerts a recovered breach's page opened, over the directives that were actually
    * delivered — the scheduler remembers them, because a recovery has no plan to re-derive from
@@ -162,6 +178,15 @@ export interface SloEnforcement {
   };
   /** True when the engines write their evaluations, actions and incidents to Postgres. */
   readonly persisted: boolean;
+  /**
+   * The grades a persisting breach is escalated to, per engine — the `escalation.severity` of each
+   * registration that declares one. A grade here is one the engine can re-page at, so the
+   * `[incident]` boot line lists it beside the declaration thresholds' grades.
+   */
+  readonly escalationGrades: {
+    readonly availability: readonly Severity[];
+    readonly latency: readonly Severity[];
+  };
 }
 
 /**
@@ -190,6 +215,13 @@ export function buildSloEnforcement(
 
   // One declarer for both engines: ids come from a single sequence in the database, so the two
   // signals cannot name the same incident.
+  //
+  // No `FallbackIncidentDeclarer` here, and ADR-0304's refusal survives ADR-0415: an SLO declaration
+  // that fails leaves the surface unopened and the next tick declares it again, so the page is
+  // delayed by one interval rather than lost, while a fallback would page under a counter id the
+  // store may later hand to a different incident. ADR-0415 moved every step *after* a declaration
+  // off the failure path; it did not make the declaration's own failure one-shot, which is the only
+  // condition a fallback earns its collision risk for (the integrity escalator's).
   const declarer =
     opts.declarer ??
     (opts.conn !== undefined ? new PostgresIncidentDeclarer({ conn: opts.conn }) : undefined);
@@ -197,6 +229,10 @@ export function buildSloEnforcement(
   const errorOpt =
     opts.onDeclarationError !== undefined ? { onDeclarationError: opts.onDeclarationError } : {};
 
+  const deliverOpt =
+    opts.conn !== undefined && opts.deliverPages !== undefined
+      ? { deliverPages: opts.deliverPages }
+      : {};
   const availabilityOptions = {
     alertPolicy: config.alertPolicy,
     systemActorUserId: config.systemActorUserId,
@@ -218,7 +254,10 @@ export function buildSloEnforcement(
   let availabilitySource: DecisionSource<EnforcementDecision> | null = null;
   if (availabilityRegs.length > 0) {
     if (opts.conn !== undefined) {
-      const persistent = buildPersistentSloEnforcementEngine(opts.conn, availabilityOptions);
+      const persistent = buildPersistentSloEnforcementEngine(opts.conn, {
+        ...availabilityOptions,
+        ...deliverOpt,
+      });
       availability = persistent.engine;
       availabilitySource = persistent;
     } else {
@@ -231,7 +270,10 @@ export function buildSloEnforcement(
   let latencySource: DecisionSource<LatencyEnforcementDecision> | null = null;
   if (latencyRegs.length > 0) {
     if (opts.conn !== undefined) {
-      const persistent = buildPersistentLatencySloEngine(opts.conn, latencyOptions);
+      const persistent = buildPersistentLatencySloEngine(opts.conn, {
+        ...latencyOptions,
+        ...deliverOpt,
+      });
       latency = persistent.engine;
       latencySource = persistent;
     } else {
@@ -267,7 +309,18 @@ export function buildSloEnforcement(
     scheduler,
     engines: { availability, latency },
     persisted: opts.conn !== undefined,
+    escalationGrades: {
+      availability: escalationGradesOf(availabilityRegs),
+      latency: escalationGradesOf(latencyRegs),
+    },
   };
+}
+
+function escalationGradesOf(
+  registrations: readonly { readonly escalation?: { readonly severity: Severity } }[],
+): readonly Severity[] {
+  const declared = new Set(registrations.flatMap((r) => (r.escalation !== undefined ? [r.escalation.severity] : [])));
+  return SEVERITIES.filter((s) => declared.has(s));
 }
 
 /**

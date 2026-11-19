@@ -168,6 +168,8 @@ export interface CancelInstanceResult {
   readonly signalDeliveredActivityIds: readonly string[];
   readonly compensationOutcome: InstanceCancellationCompensationOutcome;
   readonly compensatedActivityIds: readonly string[];
+  /** Compensations that were attempted and did not succeed; the side effect still stands. */
+  readonly failedCompensationActivityIds: readonly string[];
   readonly unreversedActivityIds: readonly string[];
 }
 
@@ -366,6 +368,12 @@ export interface CompensationResult {
   readonly strategy: WorkflowDefinition["compensationStrategy"] | null;
   /** The source activityIds compensated by this call (empty when nothing was outstanding). */
   readonly compensatedActivityIds: readonly string[];
+  /**
+   * The source activityIds whose compensating handler failed, threw, or is not registered. They stay
+   * outstanding — no `activity_compensated` is written for them — so a later `compensateInstance`
+   * retries exactly these, and the instance ends `failed` rather than `compensated`.
+   */
+  readonly failedCompensationActivityIds: readonly string[];
 }
 
 export class WorkflowEngine {
@@ -801,6 +809,7 @@ export class WorkflowEngine {
         signalDeliveredActivityIds: [],
         compensationOutcome: plan.compensationOutcome,
         compensatedActivityIds: [],
+        failedCompensationActivityIds: [],
         unreversedActivityIds: [],
       };
     }
@@ -857,10 +866,12 @@ export class WorkflowEngine {
       );
     }
 
-    const compensatedActivityIds =
+    const rollback =
       plan.compensationOutcome === "executed" && definition !== undefined
         ? await this.compensateForCancellation(request.instanceId, definition, state)
-        : [];
+        : { compensated: [], failed: [] };
+    const compensatedActivityIds = rollback.compensated;
+    const failedCompensationActivityIds = rollback.failed;
 
     await this.appendInstanceEvent(request.instanceId, tenantId, {
       kind: "instance_cancelled",
@@ -871,6 +882,7 @@ export class WorkflowEngine {
         disposition: request.disposition,
         compensationOutcome: plan.compensationOutcome,
         compensatedActivityIds,
+        failedCompensationActivityIds,
         // What this cancellation leaves standing. On the record rather than only in a return value,
         // because the caller's process is not what a later reader has.
         unreversedActivityIds: plan.unreversedActivityIds,
@@ -885,6 +897,7 @@ export class WorkflowEngine {
       signalDeliveredActivityIds: signalDelivered,
       compensationOutcome: plan.compensationOutcome,
       compensatedActivityIds,
+      failedCompensationActivityIds,
       unreversedActivityIds: plan.unreversedActivityIds,
     };
   }
@@ -903,10 +916,10 @@ export class WorkflowEngine {
     instanceId: string,
     definition: WorkflowDefinition,
     state: ProjectedInstance,
-  ): Promise<readonly string[]> {
+  ): Promise<{ readonly compensated: readonly string[]; readonly failed: readonly string[] }> {
     const events = await this.eventLog.listByInstance(instanceId);
     const plan = planCompensation({ definition, events });
-    if (plan.steps.length === 0) return [];
+    if (plan.steps.length === 0) return { compensated: [], failed: [] };
     const kindByActivityId = compensationKindByActivityId(events);
     const inputByActivityId = new Map<string, Record<string, unknown>>();
     for (const e of events) {
@@ -918,8 +931,9 @@ export class WorkflowEngine {
       }
     }
     const compensated: string[] = [];
+    const failed: string[] = [];
     for (const step of plan.steps) {
-      await this.compensateStep(
+      const outcome = await this.compensateStep(
         instanceId,
         definition,
         state.tenantId,
@@ -928,9 +942,9 @@ export class WorkflowEngine {
         kindByActivityId.get(step.originalActivityId) ?? "compensation",
         inputByActivityId.get(step.originalActivityId) ?? {},
       );
-      compensated.push(step.originalActivityId);
+      (outcome === "succeeded" ? compensated : failed).push(step.originalActivityId);
     }
-    return compensated;
+    return { compensated, failed };
   }
 
   /** Appends one `activity_cancelled`, carrying which of the two guarantees applied. */
@@ -1870,19 +1884,20 @@ export class WorkflowEngine {
   }
 
   private async runCompensation(instanceId: string): Promise<CompensationResult> {
+    const none = { compensatedActivityIds: [], failedCompensationActivityIds: [] } as const;
     const state = await this.getInstanceState(instanceId);
-    if (state === null) return { strategy: null, compensatedActivityIds: [] };
+    if (state === null) return { strategy: null, ...none };
     const definition = this.definitions.get(state.definitionId);
-    if (definition === undefined) return { strategy: null, compensatedActivityIds: [] };
+    if (definition === undefined) return { strategy: null, ...none };
     const strategy = definition.compensationStrategy;
     // no_compensation / manual_review record nothing beyond what the plan dictates (nothing runs):
     // no_compensation yields an empty plan; manual_review defers to a human, so it is not executed.
     if (strategy !== "immediate_reverse_order" && strategy !== "parallel") {
-      return { strategy, compensatedActivityIds: [] };
+      return { strategy, ...none };
     }
     const events = await this.eventLog.listByInstance(instanceId);
     const plan = planCompensation({ definition, events });
-    if (plan.steps.length === 0) return { strategy, compensatedActivityIds: [] };
+    if (plan.steps.length === 0) return { strategy, ...none };
 
     const kindByActivityId = compensationKindByActivityId(events);
     const inputByActivityId = new Map<string, Record<string, unknown>>();
@@ -1920,8 +1935,9 @@ export class WorkflowEngine {
     });
 
     const compensatedActivityIds: string[] = [];
+    const failedCompensationActivityIds: string[] = [];
     for (const step of plan.steps) {
-      await this.compensateStep(
+      const outcome = await this.compensateStep(
         instanceId,
         definition,
         state.tenantId,
@@ -1930,15 +1946,20 @@ export class WorkflowEngine {
         kindByActivityId.get(step.originalActivityId) ?? "compensation",
         inputByActivityId.get(step.originalActivityId) ?? {},
       );
-      compensatedActivityIds.push(step.originalActivityId);
+      (outcome === "succeeded" ? compensatedActivityIds : failedCompensationActivityIds).push(
+        step.originalActivityId,
+      );
     }
 
+    // A rollback with a step that did not succeed did not roll back, so it does not end
+    // `compensated`: `compensating → failed` is the edge `INSTANCE_TRANSITIONS` gives it, and
+    // `failed → compensating` is what lets a later `compensateInstance` retry the outstanding steps.
     const doneSeq = (await this.eventLog.latestSequence(instanceId))!;
     await this.appendEvent({
       instanceId,
       tenantId: state.tenantId,
       sequenceNumber: doneSeq + 1,
-      kind: "compensation_completed",
+      kind: failedCompensationActivityIds.length === 0 ? "compensation_completed" : "instance_failed",
       occurredAt: this.clock.nowIso(),
       actorPrincipalId: null,
       actorSystemId: this.systemActorId,
@@ -1949,19 +1970,35 @@ export class WorkflowEngine {
       timerId: null,
       childInstanceId: null,
       variableName: null,
-      payload: { strategy, compensatedActivityIds },
+      payload:
+        failedCompensationActivityIds.length === 0
+          ? { strategy, compensatedActivityIds }
+          : {
+              strategy,
+              compensatedActivityIds,
+              failedCompensationActivityIds,
+              errorCode: "COMPENSATION_INCOMPLETE",
+              errorMessage: `${failedCompensationActivityIds.length.toString()} of ${plan.steps.length.toString()} compensating step(s) did not succeed`,
+            },
       correlationId: null,
       causationEventId: null,
     });
 
-    return { strategy, compensatedActivityIds };
+    return { strategy, compensatedActivityIds, failedCompensationActivityIds };
   }
 
   /**
    * Executes one compensating step: resolves the compensating handler by the source activity's kind
-   * + the plan's `compensationActivityKey` (an unregistered key is a no-op compensation, still
-   * recorded), runs it, then records an `activity_compensated` for the *source* activity so the
-   * projection marks it compensated and the planner excludes it on a re-run.
+   * + the plan's `compensationActivityKey`, runs it, and records the outcome.
+   *
+   * Only a step that **succeeded** writes `activity_compensated`, which is what marks the source
+   * compensated and drops it from the planner. A step that failed, threw, or has no registered
+   * handler writes `compensation_step_completed` carrying the failure instead, and leaves the source
+   * outstanding. It used to write `activity_compensated` for all three — so a rollback whose undo
+   * failed was indistinguishable from a clean one by status, by the planner and by the return value,
+   * and the planner's idempotence skipped exactly the steps that still needed doing. An unregistered
+   * handler is a failure rather than a no-op success: with the default registry every compensation
+   * key is unregistered, so the old reading made every saga "succeed" having undone nothing.
    */
   private async compensateStep(
     instanceId: string,
@@ -1971,7 +2008,7 @@ export class WorkflowEngine {
     step: CompensationStep,
     sourceKind: ActivityInvocation["kind"],
     input: Record<string, unknown>,
-  ): Promise<void> {
+  ): Promise<"succeeded" | "failed"> {
     const handler = this.registry.resolve({
       kind: sourceKind,
       definitionId: definition.id,
@@ -1979,7 +2016,12 @@ export class WorkflowEngine {
     });
     let outcome: ActivityOutcome;
     if (handler === null) {
-      outcome = { status: "succeeded" };
+      outcome = {
+        status: "failed",
+        errorCode: "COMPENSATION_HANDLER_UNREGISTERED",
+        errorMessage: `no compensating handler is registered for ${sourceKind}:${step.compensationActivityKey}`,
+        retryable: false,
+      };
     } else {
       try {
         outcome = await handler({
@@ -2006,12 +2048,13 @@ export class WorkflowEngine {
       }
     }
 
+    const succeeded = outcome.status === "succeeded";
     const nextSeq = (await this.eventLog.latestSequence(instanceId))!;
     await this.appendEvent({
       instanceId,
       tenantId,
       sequenceNumber: nextSeq + 1,
-      kind: "activity_compensated",
+      kind: succeeded ? "activity_compensated" : "compensation_step_completed",
       occurredAt: this.clock.nowIso(),
       actorPrincipalId: null,
       actorSystemId: this.systemActorId,
@@ -2028,11 +2071,14 @@ export class WorkflowEngine {
         compensationStatus: outcome.status,
         ...(outcome.status === "failed"
           ? { errorCode: outcome.errorCode, errorMessage: outcome.errorMessage }
-          : {}),
+          : outcome.status === "timed_out"
+            ? { errorCode: "COMPENSATION_TIMED_OUT", errorMessage: outcome.errorMessage }
+            : {}),
       },
       correlationId: null,
       causationEventId: null,
     });
+    return succeeded ? "succeeded" : "failed";
   }
 
   /**

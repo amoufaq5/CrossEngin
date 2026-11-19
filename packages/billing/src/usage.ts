@@ -49,13 +49,25 @@ export const UsageRecordSchema = z.object({
 });
 export type UsageRecord = z.infer<typeof UsageRecordSchema>;
 
+/**
+ * The natural key of one usage record: a tenant's subscription, a meter, and the **instant** its
+ * window starts.
+ *
+ * It was the start's calendar day, so every window opening on one day shared a key — two flushes of
+ * the request meter on one day upserted the same row and the second overwrote the first's quantity,
+ * and two subscriptions of one tenant on one meter collided outright. Windows a single writer emits
+ * never share a start, so the instant is unique per window and a retry of the same window carries
+ * the same key, which is the only property an idempotency key needs. The start is canonicalised so
+ * two spellings of one instant are one key.
+ */
 export function buildIdempotencyKey(input: {
   readonly tenantId: string;
+  readonly subscriptionId: string;
   readonly meter: MeterId;
   readonly periodStart: string;
 }): string {
-  const day = input.periodStart.slice(0, 10);
-  return `tenant=${input.tenantId}:meter=${input.meter}:day=${day}`;
+  const start = new Date(input.periodStart).toISOString();
+  return `tenant=${input.tenantId}:subscription=${input.subscriptionId}:meter=${input.meter}:start=${start}`;
 }
 
 export interface UsageRollupBucket {

@@ -1,6 +1,7 @@
 import { resolvedFields } from "@crossengin/kernel/ddl";
 import type { Manifest } from "@crossengin/kernel/manifest";
 
+import type { ChildRemovalQuery, ChildRemovers } from "./entity-audit.js";
 import { drainList } from "./list-drain.js";
 import type { EntityRecord, EntityStore } from "./store.js";
 import { CREATED_BY_FIELD, UPDATED_BY_FIELD } from "./write-surface.js";
@@ -197,6 +198,12 @@ export interface ApprovalContentInput {
   /** A non-null actor: a null one is refused by {@link makerCheckerRefusal} before this is asked. */
   readonly actorId: string;
   readonly stampsActor: (entity: string) => boolean;
+  /**
+   * Who removed a child record from this parent, read from the audit trail — or `null` when no trail
+   * is mounted. Required, so a caller must say which: a line the approver deleted or moved away is
+   * authorship of what is approved exactly as a line they wrote is, and leaves no row to read it from.
+   */
+  readonly childRemovers: ((query: ChildRemovalQuery) => Promise<ChildRemovers>) | null;
 }
 
 /**
@@ -244,6 +251,42 @@ export async function approvalContentRefusal(input: ApprovalContentInput): Promi
       },
     );
     const found = seen.found;
+    // A row the approver deleted or moved to another parent is not in the read above, so the trail
+    // is asked: Bob writes lines of 1.00 and 100 000.00, Alice deletes the second and approves the
+    // first — measured live as 204 then 200 before this. Asked only after the rows read clean, since
+    // either answer above already decides.
+    if (found === "none" && read.complete && input.childRemovers !== null) {
+      let removers: ChildRemovers;
+      try {
+        removers = await input.childRemovers({
+          tenantId: input.tenantId,
+          childEntity: child.entity,
+          parentField: child.parentField,
+          parentId: input.id,
+          parentCreatedAt: typeof input.record["created_at"] === "string" ? input.record["created_at"] : null,
+        });
+      } catch (err) {
+        removers = { kind: "unreadable", reason: err instanceof Error ? err.name : "unknown" };
+      }
+      if (removers.kind === "unreadable") {
+        return {
+          error: MAKER_CHECKER_ERRORS.unverifiable,
+          detail: `'${transition}' on ${entity} requires a different person from those who removed its ${child.entity} records, and the audit trail could not be read`,
+        };
+      }
+      if (removers.removers.some((r) => same(r))) {
+        return {
+          error: MAKER_CHECKER_ERRORS.same_person,
+          detail: `'${transition}' on ${entity} must be fired by someone other than anyone who deleted or moved away one of its ${child.entity} records`,
+        };
+      }
+      if (removers.removers.some((r) => r === null)) {
+        return {
+          error: MAKER_CHECKER_ERRORS.unverifiable,
+          detail: `'${transition}' on ${entity} requires a different person from those who removed its ${child.entity} records, and one removal names no person`,
+        };
+      }
+    }
     if (found === "authored") {
       return {
         error: MAKER_CHECKER_ERRORS.same_person,
@@ -269,7 +312,7 @@ export async function approvalContentRefusal(input: ApprovalContentInput): Promi
  * so its approval is refused until somebody re-creates it. Off, it names the flag and what it would
  * gate, because a control that is absent should be as legible as one that is present.
  */
-export function formatSegregationOfDuties(manifest: Manifest, enabled: boolean): string {
+export function formatSegregationOfDuties(manifest: Manifest, enabled: boolean, removalsRead: boolean): string {
   const gated = approveClassTransitions(manifest);
   const list = gated.length === 0 ? "none declared" : gated.join(", ");
   if (!enabled) {
@@ -282,7 +325,12 @@ export function formatSegregationOfDuties(manifest: Manifest, enabled: boolean):
   return (
     `[sod] segregation of duties: on — ${gated.length} approve-class transition(s) refuse the` +
     ` record's own creator, its last editor where only edits reach the state it is approved from, and` +
-    ` the author of any record it owns (${MAKER_CHECKER_ERRORS.same_person}): ${list}. A record with` +
+    ` the author of any record it owns` +
+    (removalsRead
+      ? ` or anyone who deleted or moved one away, read from the audit trail`
+      : `; a record it owns that the approver deleted or moved away is NOT checked, because this` +
+        ` deployment keeps no audit trail to read it from`) +
+    ` (${MAKER_CHECKER_ERRORS.same_person}): ${list}. A record with` +
     ` no recorded creator, or a request whose credential names no person, is refused` +
     ` (${MAKER_CHECKER_ERRORS.unverifiable}). From a state a transition enters, the last editor is not` +
     ` refused, because updated_by there names whoever fired that transition` +

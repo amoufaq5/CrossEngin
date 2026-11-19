@@ -22,8 +22,9 @@ export interface JobError {
 /**
  * What a job handler returns. `completed` finishes the run (with an optional redactable output);
  * `failed` records the error and — depending on `retryable` and the attempt ceiling — either retries
- * or dead-letters. A handler that *throws* (rather than returning `failed`) signals a transient infra
- * error: the run is left `pending` and re-claimed, without consuming a business attempt.
+ * or dead-letters. A handler that *throws* is a retryable failure (`handler_threw`) counted against
+ * the same ceiling and backoff: it used to leave the run `pending` with no attempt consumed, so a
+ * handler with a deterministic bug was re-claimed at poll speed for ever (R15-04).
  */
 export type JobHandlerResult =
   | { readonly status: "completed"; readonly output?: unknown }
@@ -162,6 +163,31 @@ export interface ExecuteJobRunResult {
 /** Per-execution inputs. `signal` is the cooperative cancellation channel handed to the handler. */
 export interface ExecuteJobRunOptions {
   readonly signal?: AbortSignal;
+  /**
+   * The worker that holds the run's claim — the fencing token. **Required**, and `null` is the
+   * explicit claim that this call holds none. With a worker id, the read and every finalizing
+   * `UPDATE` carry `claimed_by = <worker>`, so a worker whose lease lapsed and was taken by another
+   * neither starts the run nor writes its outcome over the new holder's — before this, a stale
+   * worker's retry path set `claimed_by = NULL` on a run another worker was executing, letting a
+   * third start it (R15-03). Optional-with-no-fence would be the defect kept as a default.
+   */
+  readonly claimedBy: string | null;
+}
+
+/** A thrown handler's message, bounded before it is stored on the run. */
+const THROWN_MESSAGE_BUDGET = 500;
+
+/** `AND claimed_by = $n` when the caller holds a claim, nothing when it declared it holds none. */
+function fenceClause(claimedBy: string | null, position: number): string {
+  return claimedBy === null ? "" : ` AND claimed_by = $${position.toString()}`;
+}
+
+/**
+ * The fence's bind value, spread **last** into an array literal: a spread is the one shape the
+ * workspace's binding rules cannot see past, so it must follow every positional value they check.
+ */
+function fenceParam(claimedBy: string | null): readonly string[] {
+  return claimedBy === null ? [] : [claimedBy];
 }
 
 /** A signal that is never aborted — the default when no cancellation watcher is wired. */
@@ -239,10 +265,11 @@ export class PostgresJobRunEngine {
   async executeJobRun(
     runId: string,
     tenantId: string,
-    options: ExecuteJobRunOptions = {},
+    options: ExecuteJobRunOptions,
   ): Promise<ExecuteJobRunResult> {
     const execStart = this.now().getTime();
     const signal = options.signal ?? NEVER_ABORTED;
+    const claimedBy = options.claimedBy;
 
     // **One short transaction per statement, and deliberately not one across the handler.**
     // `registration.handler(...)` below is arbitrary deployment code that may run for minutes; a
@@ -262,8 +289,8 @@ export class PostgresJobRunEngine {
       tx.query<RunRow>(
         `SELECT job_id, job_kind, attempts, trigger, input_redacted, cancel_requested_at
          FROM ${this.schema}.job_runs
-        WHERE run_id = $1 AND tenant_id = $2::uuid AND status = 'pending'`,
-        [runId, tenantId],
+        WHERE run_id = $1 AND tenant_id = $2::uuid AND status = 'pending'${fenceClause(claimedBy, 3)}`,
+        [runId, tenantId, ...fenceParam(claimedBy)],
       ),
     );
     const row = read.rows[0];
@@ -275,7 +302,7 @@ export class PostgresJobRunEngine {
     // let alone invoked, so the strongest promise the engine can make — the handler never ran — holds
     // even when the worker's own pre-flight check missed the window.
     if (row.cancel_requested_at !== null && row.cancel_requested_at !== undefined) {
-      return this.finalizeCancellation(runId, tenantId, "before_handler", null);
+      return this.finalizeCancellation(runId, tenantId, claimedBy, "before_handler", null);
     }
 
     const jobDefinitionId = str(row.job_id);
@@ -288,7 +315,7 @@ export class PostgresJobRunEngine {
       // is exactly what the dead-letter queue is for, and the declaration that would have asked for
       // silence is the thing that is missing. With `claimDueJobs`' `serves` filter in place this is
       // reachable only when a handler is deregistered between the claim and the execute.
-      return this.finalizeFailure(runId, tenantId, execStart, "failed", {
+      return this.finalizeFailure(runId, tenantId, claimedBy, execStart, "failed", {
         code: "handler_not_found",
         message: `no handler for job ${jobDefinitionId} (kind ${jobKind})`,
       }, { jobDefinitionId, attempts, input: row.input_redacted });
@@ -308,11 +335,24 @@ export class PostgresJobRunEngine {
       });
       settlement = { outcome: handled.status === "completed" ? "completed" : "failed", result: handled };
     } catch (err) {
-      // An *unaborted* throw keeps its old meaning — transient infra trouble, so the run stays
-      // `pending` for re-claim without consuming a business attempt. Only an aborted throw is a
-      // cancellation, and it is terminal: re-claiming it would restart the work someone stopped.
-      if (!signal.aborted) throw err;
-      return this.finalizeCancellation(runId, tenantId, "cooperative_abort", execStart, attempts);
+      // An aborted throw is a cancellation, and it is terminal: re-claiming it would restart the
+      // work someone stopped. An *unaborted* throw used to propagate and leave the run `pending`
+      // with no attempt consumed — "transient infra trouble" — and the batch released it and the
+      // loop re-claimed it at once, so a handler with a deterministic bug ran for ever at poll speed
+      // with nothing recorded on the row. It is a retryable failure now, under the declared ceiling
+      // and backoff, so a transient fault is retried and a permanent one is dead-lettered.
+      if (signal.aborted) {
+        return this.finalizeCancellation(runId, tenantId, claimedBy, "cooperative_abort", execStart, attempts);
+      }
+      const message = err instanceof Error ? err.message : String(err);
+      settlement = {
+        outcome: "failed",
+        result: {
+          status: "failed",
+          retryable: true,
+          error: { code: "handler_threw", message: message.slice(0, THROWN_MESSAGE_BUDGET) },
+        },
+      };
     }
 
     if (
@@ -321,7 +361,7 @@ export class PostgresJobRunEngine {
         cancelRequested: signal.aborted,
       }) === "cancelled"
     ) {
-      return this.finalizeCancellation(runId, tenantId, "cooperative_abort", execStart, attempts);
+      return this.finalizeCancellation(runId, tenantId, claimedBy, "cooperative_abort", execStart, attempts);
     }
 
     const result = settlement.result;
@@ -336,8 +376,15 @@ export class PostgresJobRunEngine {
           `UPDATE ${this.schema}.job_runs
             SET status = 'completed', completed_at = $3::timestamptz, duration_ms = $4,
                 output_redacted = $5::jsonb, claimed_by = NULL, claim_expires_at = NULL
-          WHERE run_id = $1 AND tenant_id = $2::uuid AND status = 'pending'`,
-          [runId, tenantId, completedAt.toISOString(), durationMs, JSON.stringify(result.output ?? null)],
+          WHERE run_id = $1 AND tenant_id = $2::uuid AND status = 'pending'${fenceClause(claimedBy, 6)}`,
+          [
+            runId,
+            tenantId,
+            completedAt.toISOString(),
+            durationMs,
+            JSON.stringify(result.output ?? null),
+            ...fenceParam(claimedBy),
+          ],
         ),
       );
       if ((updated.rowCount ?? 0) === 0) return { runId, executed: false, disposition: "not_claimable" };
@@ -357,8 +404,8 @@ export class PostgresJobRunEngine {
           `UPDATE ${this.schema}.job_runs
             SET attempts = attempts + 1, error = $3::jsonb, started_at = $4::timestamptz,
                 claimed_by = NULL, claim_expires_at = NULL
-          WHERE run_id = $1 AND tenant_id = $2::uuid AND status = 'pending'`,
-          [runId, tenantId, JSON.stringify(result.error), startedAt],
+          WHERE run_id = $1 AND tenant_id = $2::uuid AND status = 'pending'${fenceClause(claimedBy, 5)}`,
+          [runId, tenantId, JSON.stringify(result.error), startedAt, ...fenceParam(claimedBy)],
         ),
       );
       if ((updated.rowCount ?? 0) === 0) return { runId, executed: false, disposition: "not_claimable" };
@@ -366,7 +413,7 @@ export class PostgresJobRunEngine {
     }
 
     const disposition: "failed" | "dead-lettered" = result.retryable === true ? "dead-lettered" : "failed";
-    return this.finalizeFailure(runId, tenantId, execStart, disposition, result.error, {
+    return this.finalizeFailure(runId, tenantId, claimedBy, execStart, disposition, result.error, {
       jobDefinitionId,
       attempts,
       input: row.input_redacted,
@@ -453,6 +500,7 @@ export class PostgresJobRunEngine {
   private async finalizeCancellation(
     runId: string,
     tenantId: string,
+    claimedBy: string | null,
     checkpoint: "before_handler" | "cooperative_abort",
     execStart: number | null,
     attempts?: number,
@@ -465,6 +513,7 @@ export class PostgresJobRunEngine {
       now: completedAt.toISOString(),
       durationMs: execStart === null ? null : Math.max(0, completedAt.getTime() - execStart),
       schema: this.schema,
+      claimedBy,
     });
     const executed = checkpoint === "cooperative_abort";
     const withAttempts = attempts !== undefined ? { attempts } : {};
@@ -477,6 +526,7 @@ export class PostgresJobRunEngine {
   private async finalizeFailure(
     runId: string,
     tenantId: string,
+    claimedBy: string | null,
     execStart: number,
     disposition: "failed" | "dead-lettered",
     error: JobError,
@@ -498,8 +548,16 @@ export class PostgresJobRunEngine {
         `UPDATE ${this.schema}.job_runs
           SET status = $3, completed_at = $4::timestamptz, duration_ms = $5,
               error = $6::jsonb, claimed_by = NULL, claim_expires_at = NULL
-        WHERE run_id = $1 AND tenant_id = $2::uuid AND status = 'pending'`,
-        [runId, tenantId, disposition, completedAt.toISOString(), durationMs, JSON.stringify(error)],
+        WHERE run_id = $1 AND tenant_id = $2::uuid AND status = 'pending'${fenceClause(claimedBy, 7)}`,
+        [
+          runId,
+          tenantId,
+          disposition,
+          completedAt.toISOString(),
+          durationMs,
+          JSON.stringify(error),
+          ...fenceParam(claimedBy),
+        ],
       ),
     );
     // A lost guard means another worker already finalized this run — and wrote (or suppressed) its

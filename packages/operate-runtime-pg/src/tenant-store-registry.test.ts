@@ -29,6 +29,7 @@ import {
   TenantColumnStoreRegistry,
   TenantColumnStoreRouter,
   TenantSchemaStranded,
+  type RefusedServing,
 } from "./tenant-store-registry.js";
 
 const TENANT = "3f2a1b4c-5d6e-4f70-8192-a3b4c5d6e7f8";
@@ -278,7 +279,8 @@ describe("TenantColumnStoreRegistry — a refused re-activation keeps the last a
     const cap = capturePg();
     const seen: { applied: boolean; retained: string | null }[] = [];
     const registry = new TenantColumnStoreRegistry(cap.conn, {
-      onApplication: (a, retained) => seen.push({ applied: a.applied, retained: retained?.manifestHash ?? null }),
+      onApplication: (a, refusal) =>
+        seen.push({ applied: a.applied, retained: refusal?.kind === "retained" ? refusal.retained.manifestHash : null }),
     });
     expect((await registry.ensure(TENANT, V1)).applied).toBe(true);
     const first = registry.storeFor(TENANT);
@@ -314,12 +316,12 @@ describe("TenantColumnStoreRegistry — a refused re-activation keeps the last a
 
     const cap = capturePg();
     cap.setLive(driftedWidget());
-    const firstSeen: (string | null)[] = [];
+    const firstSeen: (RefusedServing | null)[] = [];
     const fresh = new TenantColumnStoreRegistry(cap.conn, {
-      onApplication: (_a, retained) => firstSeen.push(retained?.manifestHash ?? null),
+      onApplication: (_a, refusal) => firstSeen.push(refusal),
     });
     await fresh.ensure(TENANT, V1);
-    expect(firstSeen).toEqual([null]);
+    expect(firstSeen).toEqual([{ kind: "fallback" }]);
   });
 
   it("answers `refused` with the REQUESTED manifest when nothing was ever applied (ADR-0314's fallback)", async () => {
@@ -345,10 +347,37 @@ describe("TenantColumnStoreRegistry — a refused re-activation keeps the last a
           ? { rows: [{ occupied: true }], rowCount: 1 }
           : cap.conn.query(sql, params as unknown[])) as PgConnection["query"],
     };
-    const registry = new TenantColumnStoreRegistry(conn);
+    const told: (RefusedServing | null)[] = [];
+    const registry = new TenantColumnStoreRegistry(conn, { onApplication: (_a, refusal) => told.push(refusal) });
     const serving = await registry.ensureServing(TENANT, V1);
     expect(serving.kind).toBe("stranded");
     expect(registry.storeFor(TENANT)).toBeNull();
+    // The log is told the same answer the gateway gets. It used to be told `null`, and the line
+    // printed for `null` named the JSONB fallback beside a 503 `tenant_schema_stranded`.
+    expect(told).toEqual([{ kind: "stranded", schema: tenantSchemaName(TENANT) }]);
+  });
+
+  it("probes occupancy once per fresh refusal, so the logged answer and the served one are one read", async () => {
+    const cap = capturePg();
+    cap.setLive(driftedWidget());
+    let probes = 0;
+    const conn: PgConnection = {
+      ...cap.conn,
+      query: (async (sql: string, params?: readonly unknown[]) => {
+        if (!sql.includes("pg_catalog.pg_tables")) return cap.conn.query(sql, params as unknown[]);
+        probes += 1;
+        // A first answer of "occupied" and a later one of "empty": an answer read twice could
+        // disagree with itself, which is what a log naming one arm beside a response naming the
+        // other was.
+        return { rows: [{ occupied: probes === 1 }], rowCount: 1 };
+      }) as PgConnection["query"],
+    };
+    const told: (RefusedServing | null)[] = [];
+    const registry = new TenantColumnStoreRegistry(conn, { onApplication: (_a, refusal) => told.push(refusal) });
+    expect((await registry.ensureServing(TENANT, V1)).kind).toBe("stranded");
+    expect((await registry.ensureServing(TENANT, V1)).kind).toBe("stranded");
+    expect(probes).toBe(1);
+    expect(told.map((r) => r?.kind)).toEqual(["stranded"]);
   });
 
   it("asks the probe the tenant's own schema, and only on a refusal with nothing applied", async () => {

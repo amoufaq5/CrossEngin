@@ -3,6 +3,7 @@ import type {
   PackInstallation,
   PackInstallationSet,
   PackManifest,
+  PackPublisherRegistry,
   PackSignature,
   PermissionResolution,
   SecurityReviewStatus,
@@ -11,11 +12,14 @@ import type {
 
 /**
  * Why an install request was refused at admission. Ordered by the pipeline that
- * emits them: an already-installed pack short-circuits before signature, a bad
- * signature before compatibility, and so on — the first failing gate wins.
+ * emits them: an already-installed pack short-circuits before the publisher check, an
+ * unregistered or invalid signature before compatibility, and so on — the first failing gate wins.
  */
 export const INSTALL_REJECTION_REASONS = [
   "already_installed",
+  "publisher_unregistered",
+  "pack_outside_publisher_namespace",
+  "author_kind_not_registered",
   "signature_invalid",
   "incompatible",
   "review_required",
@@ -34,8 +38,11 @@ export interface InstallRequest {
   readonly compatibility: PackCompatibility;
   /** The publisher's detached signature over the manifest. */
   readonly signature: PackSignature;
-  /** The publisher's Ed25519 public key (base64) the signature is verified against. */
-  readonly publisherPublicKeyBase64: string;
+  /**
+   * The platform's pinned publisher keys. The signature is verified against the registered key its
+   * fingerprint names, never against a key supplied with the pack, which any author can produce.
+   */
+  readonly publishers: PackPublisherRegistry;
   /** The version's security-review status (from its PackVersionRecord). */
   readonly securityReviewStatus: SecurityReviewStatus;
   /** The installing tenant's platform/region/plan/compliance context. */

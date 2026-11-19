@@ -111,7 +111,24 @@ export interface PostgresRateLimitCheckerOptions {
 interface WindowState {
   count: number;
   windowStartMs: number;
+  windowMs: number;
 }
+
+/**
+ * What the limit counts over, stated because the class name says otherwise. The *decision row* is in
+ * Postgres; the **count is not**: each process keeps its own fixed window per
+ * (policy, tenant, principal, operation), so N replicas admit up to N × the declared limit and a
+ * restart forgets every window. Counting from `meta.rate_limit_decisions` instead would put a read
+ * and an advisory lock on the request path before the handler — the limit is cheap because it is
+ * local. Printed at boot so an operator scaling to N replicas reads the consequence before relying
+ * on the figure.
+ */
+export const RATE_LIMIT_WINDOW_SEMANTICS =
+  "fixed window per process: each replica counts on its own, so N replicas admit up to N x the" +
+  " declared limit, and a restart starts every window afresh; only the decision rows are shared";
+
+/** Past this many live windows, expired ones are swept before a new one is added. */
+export const RATE_LIMIT_SWEEP_THRESHOLD = 10_000;
 
 export class PostgresRateLimitChecker implements RateLimitChecker {
   private readonly conn: PgConnection;
@@ -184,7 +201,15 @@ export class PostgresRateLimitChecker implements RateLimitChecker {
     const nowMs = input.now.getTime();
     let bucket = this.buckets.get(bucketKey);
     if (bucket === undefined || nowMs - bucket.windowStartMs >= policy.windowSeconds * 1000) {
-      bucket = { count: 0, windowStartMs: nowMs };
+      // A window was never removed once its interval passed, so the map grew by one entry per
+      // (tenant, principal, operation) ever seen, for the life of the process. Swept here, where a
+      // new entry is about to be added, and only past a threshold so the common path does no scan.
+      if (bucket === undefined && this.buckets.size >= RATE_LIMIT_SWEEP_THRESHOLD) {
+        for (const [key, state] of this.buckets) {
+          if (nowMs - state.windowStartMs >= state.windowMs) this.buckets.delete(key);
+        }
+      }
+      bucket = { count: 0, windowStartMs: nowMs, windowMs: policy.windowSeconds * 1000 };
       this.buckets.set(bucketKey, bucket);
     }
     bucket.count += 1;
@@ -220,6 +245,11 @@ export class PostgresRateLimitChecker implements RateLimitChecker {
       });
     }
     return decision;
+  }
+
+  /** Live windows held in this process; for tests and for a reader asking what the map costs. */
+  windowCount(): number {
+    return this.buckets.size;
   }
 
   /** Which policy a route resolves to, without deciding anything. For a boot survey and for tests. */

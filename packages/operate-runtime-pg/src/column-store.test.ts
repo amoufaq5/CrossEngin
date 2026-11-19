@@ -1,4 +1,4 @@
-import type { PgConnection } from "@crossengin/kernel-pg";
+import { PGP_SYM_ENCRYPT_OPTIONS, type PgConnection } from "@crossengin/kernel-pg";
 import type { Manifest } from "@crossengin/kernel/manifest";
 import {
   encodeKeyset,
@@ -17,8 +17,14 @@ import {
   ColumnMappedEntityStore,
   DEFAULT_ENCRYPTION_KEY_REF,
   decimalSpecFromSqlType,
+  ENCRYPTED_COLUMN_TYPE_SQL,
+  EncryptedColumnNotCiphertext,
 } from "./column-store.js";
 import { SEARCH_FUNCTION_PRESENT_ROW, SEARCH_FUNCTION_PROBE_MATCH } from "./search-function.js";
+import {
+  COLUMN_SCHEMA_AUTHORITY_PROBE_MATCH,
+  COLUMN_SCHEMA_OWNER_AUTHORITY_ROW,
+} from "./column-schema-provisioning.js";
 import { SET_EXTRA_SETTING_SQL } from "./tenant-context.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
@@ -69,6 +75,11 @@ function capturePg(
       settings.push({ sql, params: params ?? [] });
       return { rows: [], rowCount: 0 };
     }
+    // The authority probe `ensureSchema` opens with, answered as an owner session and kept out of
+    // `calls` for `settings`' reason: these tests are about the DDL an owner applies.
+    if (sql.includes(COLUMN_SCHEMA_AUTHORITY_PROBE_MATCH)) {
+      return { rows: [COLUMN_SCHEMA_OWNER_AUTHORITY_ROW], rowCount: 1 };
+    }
     calls.push({ sql, params: params ?? [] });
     // Recorded *before* it throws, because the statement was issued: "the next index was still
     // attempted" is only checkable against what actually reached the connection.
@@ -93,8 +104,10 @@ function capturePg(
   }) as PgConnection["query"];
   const conn: PgConnection = {
     query,
-    transaction: (async <T>(fn: (tx: PgConnection) => Promise<T>) => fn(conn)) as PgConnection["transaction"],
-    withAdvisoryLock: (async <T>(_k: bigint, fn: () => Promise<T>) => fn()) as PgConnection["withAdvisoryLock"],
+    transaction: (async <T>(fn: (tx: PgConnection) => Promise<T>) =>
+      fn(conn)) as PgConnection["transaction"],
+    withAdvisoryLock: (async <T>(_k: bigint, fn: () => Promise<T>) =>
+      fn()) as PgConnection["withAdvisoryLock"],
     close: (async () => undefined) as PgConnection["close"],
   };
   return { conn, calls, settings, setRows: (r) => (rows = r) };
@@ -127,13 +140,24 @@ describe("ColumnMappedEntityStore — ensureSchema", () => {
 
   it("creates referenced tables first, then adds composite foreign keys", async () => {
     const account: Entity = { name: "Account", fields: [{ name: "name", type: { kind: "text" } }] };
-    const order: Entity = { name: "Order", fields: [{ name: "account", type: { kind: "reference", target: "Account" } }] };
+    const order: Entity = {
+      name: "Order",
+      fields: [{ name: "account", type: { kind: "reference", target: "Account" } }],
+    };
     const cap = capturePg();
-    const s = new ColumnMappedEntityStore(cap.conn, { entities: [order, account] } as unknown as Manifest, { schema: "tenant_app" });
+    const s = new ColumnMappedEntityStore(
+      cap.conn,
+      { entities: [order, account] } as unknown as Manifest,
+      { schema: "tenant_app" },
+    );
     await s.ensureSchema();
     const sqls = cap.calls.map((c) => c.sql);
-    const createAccount = sqls.findIndex((q) => q.includes('CREATE TABLE IF NOT EXISTS "tenant_app"."account"'));
-    const createOrder = sqls.findIndex((q) => q.includes('CREATE TABLE IF NOT EXISTS "tenant_app"."order"'));
+    const createAccount = sqls.findIndex((q) =>
+      q.includes('CREATE TABLE IF NOT EXISTS "tenant_app"."account"'),
+    );
+    const createOrder = sqls.findIndex((q) =>
+      q.includes('CREATE TABLE IF NOT EXISTS "tenant_app"."order"'),
+    );
     const addFk = sqls.findIndex((q) => q.includes('ADD CONSTRAINT "fk_order_account_id"'));
     expect(createAccount).toBeGreaterThanOrEqual(0);
     // referenced table (account) created before the referencing table (order)
@@ -145,14 +169,27 @@ describe("ColumnMappedEntityStore — ensureSchema", () => {
 
   it("drives the FK ON DELETE behavior from the manifest's relation onDelete", async () => {
     const account: Entity = { name: "Account", fields: [{ name: "name", type: { kind: "text" } }] };
-    const order: Entity = { name: "Order", fields: [{ name: "account", type: { kind: "reference", target: "Account" } }] };
+    const order: Entity = {
+      name: "Order",
+      fields: [{ name: "account", type: { kind: "reference", target: "Account" } }],
+    };
     const manifest = {
       entities: [order, account],
-      relations: [{ kind: "many_to_one", from: "Order", field: "account", to: "Account", onDelete: "cascade" }],
+      relations: [
+        {
+          kind: "many_to_one",
+          from: "Order",
+          field: "account",
+          to: "Account",
+          onDelete: "cascade",
+        },
+      ],
     } as unknown as Manifest;
     const cap = capturePg();
     await new ColumnMappedEntityStore(cap.conn, manifest, { schema: "tenant_app" }).ensureSchema();
-    const fk = cap.calls.map((c) => c.sql).find((q) => q.includes('ADD CONSTRAINT "fk_order_account_id"'))!;
+    const fk = cap.calls
+      .map((c) => c.sql)
+      .find((q) => q.includes('ADD CONSTRAINT "fk_order_account_id"'))!;
     expect(fk).toContain("ON DELETE CASCADE");
   });
 
@@ -166,18 +203,29 @@ describe("ColumnMappedEntityStore — ensureSchema", () => {
     const cap = capturePg();
     await new ColumnMappedEntityStore(cap.conn, manifest, { schema: "tenant_app" }).ensureSchema();
     const sqls = cap.calls.map((c) => c.sql);
-    const createCourse = sqls.findIndex((q) => q.includes('CREATE TABLE IF NOT EXISTS "tenant_app"."course"'));
-    const createJoin = sqls.findIndex((q) => q.includes('CREATE TABLE IF NOT EXISTS "tenant_app"."course_student"'));
+    const createCourse = sqls.findIndex((q) =>
+      q.includes('CREATE TABLE IF NOT EXISTS "tenant_app"."course"'),
+    );
+    const createJoin = sqls.findIndex((q) =>
+      q.includes('CREATE TABLE IF NOT EXISTS "tenant_app"."course_student"'),
+    );
     const joinFk = sqls.find((q) => q.includes('ADD CONSTRAINT "fk_course_student_course_id"'));
     expect(createJoin).toBeGreaterThan(createCourse); // entity tables first
-    expect(joinFk).toContain('REFERENCES "tenant_app"."course" ("tenant_id", "id") ON DELETE CASCADE');
+    expect(joinFk).toContain(
+      'REFERENCES "tenant_app"."course" ("tenant_id", "id") ON DELETE CASCADE',
+    );
   });
 });
 
 describe("ColumnMappedEntityStore — CRUD maps fields to typed columns", () => {
   it("create writes only provided fields as columns and returns the stored record", async () => {
     const cap = capturePg();
-    const created = await store(cap).create(TENANT, "Widget", { id: "w1", sku: "S1", price: 9.5, owner: "acct-1" });
+    const created = await store(cap).create(TENANT, "Widget", {
+      id: "w1",
+      sku: "S1",
+      price: 9.5,
+      owner: "acct-1",
+    });
     const insert = cap.calls.find((c) => c.sql.includes("INSERT INTO"))!;
     expect(insert.sql).toContain('"tenant_app"."widget"');
     expect(insert.sql).toContain('"owner_id"'); // reference field → _id column
@@ -187,7 +235,9 @@ describe("ColumnMappedEntityStore — CRUD maps fields to typed columns", () => 
   });
 
   it("get maps columns back to fields (owner_id → owner), nulls omitted", async () => {
-    const cap = capturePg([{ id: "w1", sku: "S1", price: "9.50", status: null, owner_id: "acct-1" }]);
+    const cap = capturePg([
+      { id: "w1", sku: "S1", price: "9.50", status: null, owner_id: "acct-1" },
+    ]);
     const record = await store(cap).get(TENANT, "Widget", "w1");
     expect(record).toEqual({ id: "w1", sku: "S1", price: "9.50", owner: "acct-1" });
     const select = cap.calls.find((c) => c.sql.includes("SELECT"))!;
@@ -199,17 +249,25 @@ describe("ColumnMappedEntityStore — CRUD maps fields to typed columns", () => 
     const updated = await store(cap).update(TENANT, "Widget", "w1", { price: 12 });
     const upd = cap.calls.find((c) => c.sql.includes("UPDATE"))!;
     expect(upd.sql).toContain('"price" = $3');
-    expect(upd.sql).toContain('"updated_at" = date_trunc(\'milliseconds\', now())');
+    expect(upd.sql).toContain("\"updated_at\" = date_trunc('milliseconds', now())");
     expect(upd.sql).toContain("RETURNING");
     expect(updated).toMatchObject({ id: "w1", price: "12.00" });
   });
 
   it("updateIf puts the precondition in the UPDATE's own WHERE, after the SET parameters", async () => {
     const cap = capturePg([{ id: "w1", sku: "S1", status: "archived" }]);
-    const out = await store(cap).updateIf(TENANT, "Widget", "w1", { status: "archived" }, { status: "active", owner: null });
+    const out = await store(cap).updateIf(
+      TENANT,
+      "Widget",
+      "w1",
+      { status: "archived" },
+      { status: "active", owner: null },
+    );
     const upd = cap.calls.find((c) => c.sql.includes("UPDATE"))!;
     expect(upd.sql).toContain('"status" = $3');
-    expect(upd.sql).toMatch(/WHERE "tenant_id" = \$1 AND "id" = \$2 AND "status" IS NOT DISTINCT FROM \$4::TEXT AND "owner_id" IS NULL/);
+    expect(upd.sql).toMatch(
+      /WHERE "tenant_id" = \$1 AND "id" = \$2 AND "status" IS NOT DISTINCT FROM \$4::TEXT AND "owner_id" IS NULL/,
+    );
     expect(upd.params).toEqual([TENANT, "w1", "archived", "active"]);
     expect(out).toEqual({ kind: "updated", record: { id: "w1", sku: "S1", status: "archived" } });
   });
@@ -235,9 +293,15 @@ describe("ColumnMappedEntityStore — CRUD maps fields to typed columns", () => 
           return inner(sql, params);
         }) as PgConnection["query"],
       };
-      conn.transaction = (async <T>(fn: (tx: PgConnection) => Promise<T>) => fn(conn)) as PgConnection["transaction"];
-      const s = new ColumnMappedEntityStore(conn, MANIFEST, { schema: "tenant_app", encryptionKey: () => KEY });
-      expect(await s.updateIf(TENANT, "Widget", "w1", { status: "archived" }, { status: "active" })).toEqual({ kind });
+      conn.transaction = (async <T>(fn: (tx: PgConnection) => Promise<T>) =>
+        fn(conn)) as PgConnection["transaction"];
+      const s = new ColumnMappedEntityStore(conn, MANIFEST, {
+        schema: "tenant_app",
+        encryptionKey: () => KEY,
+      });
+      expect(
+        await s.updateIf(TENANT, "Widget", "w1", { status: "archived" }, { status: "active" }),
+      ).toEqual({ kind });
       const probe = cap.calls.find((c) => c.sql.includes("SELECT 1"))!;
       expect(probe.params).toEqual([TENANT, "w1"]);
     }
@@ -245,12 +309,12 @@ describe("ColumnMappedEntityStore — CRUD maps fields to typed columns", () => 
 
   it("updateIf refuses a precondition it cannot express rather than dropping it", async () => {
     const cap = capturePg([{ id: "w1" }]);
-    await expect(store(cap).updateIf(TENANT, "Widget", "w1", { sku: "x" }, { mrn: "a" })).rejects.toThrow(
-      /encrypted at rest/,
-    );
-    await expect(store(cap).updateIf(TENANT, "Widget", "w1", { sku: "x" }, { nope: "a" })).rejects.toThrow(
-      /has no column/,
-    );
+    await expect(
+      store(cap).updateIf(TENANT, "Widget", "w1", { sku: "x" }, { mrn: "a" }),
+    ).rejects.toThrow(/encrypted at rest/);
+    await expect(
+      store(cap).updateIf(TENANT, "Widget", "w1", { sku: "x" }, { nope: "a" }),
+    ).rejects.toThrow(/has no column/);
     expect(cap.calls.filter((c) => c.sql.includes("UPDATE"))).toEqual([]);
   });
 
@@ -273,9 +337,13 @@ describe("ColumnMappedEntityStore — CRUD maps fields to typed columns", () => 
 
   it("removeIf puts the precondition in the DELETE's own WHERE and tells a changed row from a missing one", async () => {
     const cap = capturePg();
-    expect(await store(cap).removeIf(TENANT, "Widget", "w1", { status: "active" })).toEqual({ kind: "removed" });
+    expect(await store(cap).removeIf(TENANT, "Widget", "w1", { status: "active" })).toEqual({
+      kind: "removed",
+    });
     const del = cap.calls.find((c) => c.sql.includes("DELETE"))!;
-    expect(del.sql).toMatch(/WHERE "tenant_id" = \$1 AND "id" = \$2 AND "status" IS NOT DISTINCT FROM \$3::TEXT/);
+    expect(del.sql).toMatch(
+      /WHERE "tenant_id" = \$1 AND "id" = \$2 AND "status" IS NOT DISTINCT FROM \$3::TEXT/,
+    );
     expect(del.params).toEqual([TENANT, "w1", "active"]);
     for (const [present, kind] of [
       [true, "precondition_failed"],
@@ -297,8 +365,12 @@ describe("ColumnMappedEntityStore — CRUD maps fields to typed columns", () => 
           return inner(sql, params);
         }) as PgConnection["query"],
       };
-      conn.transaction = (async <T>(fn: (tx: PgConnection) => Promise<T>) => fn(conn)) as PgConnection["transaction"];
-      const s = new ColumnMappedEntityStore(conn, MANIFEST, { schema: "tenant_app", encryptionKey: () => KEY });
+      conn.transaction = (async <T>(fn: (tx: PgConnection) => Promise<T>) =>
+        fn(conn)) as PgConnection["transaction"];
+      const s = new ColumnMappedEntityStore(conn, MANIFEST, {
+        schema: "tenant_app",
+        encryptionKey: () => KEY,
+      });
       expect(await s.removeIf(TENANT, "Widget", "w1", { status: "active" })).toEqual({ kind });
     }
   });
@@ -438,18 +510,102 @@ describe("ColumnMappedEntityStore.listPage — typed sort + safe filter", () => 
   });
 });
 
+describe("ColumnMappedEntityStore — an encrypted column whose table predates the classification", () => {
+  // Answers the type probe and nothing else, so every other statement takes the arms it always took.
+  const withColumnType = (type: string | null): Captured => {
+    const cap = capturePg();
+    const inner = cap.conn.query;
+    const query = (async (sql: string, params?: readonly unknown[]) => {
+      if (sql === ENCRYPTED_COLUMN_TYPE_SQL) {
+        cap.calls.push({ sql, params: params ?? [] });
+        const rows =
+          type === null
+            ? []
+            : [
+                { table_name: "widget", column_name: "sku", column_type: "text" },
+                { table_name: "widget", column_name: "mrn", column_type: type },
+              ];
+        return { rows, rowCount: rows.length };
+      }
+      return inner(sql, params);
+    }) as PgConnection["query"];
+    cap.conn.query = query;
+    return cap;
+  };
+
+  it("refuses at boot, naming the column and its type, when a phi column is still text", async () => {
+    const cap = withColumnType("text");
+    const err = await store(cap)
+      .ensureSchema()
+      .then(
+        () => null,
+        (e: unknown) => e,
+      );
+    expect(err).toBeInstanceOf(EncryptedColumnNotCiphertext);
+    expect((err as EncryptedColumnNotCiphertext).columns).toEqual(["tenant_app.widget.mrn (text)"]);
+    // Refused before any DDL: an additive pass would not have changed the type anyway.
+    expect(cap.calls.some((c) => /ADD COLUMN|CREATE TABLE/.test(c.sql))).toBe(false);
+    // The remedy does not send an operator to the one-key conversion as if it were general.
+    expect((err as Error).message).toContain("no shipped command does");
+  });
+
+  it("asks about the planned encrypted tables only, in the store's own schema", async () => {
+    const cap = withColumnType("bytea");
+    await store(cap).ensureSchema();
+    const probe = cap.calls.find((c) => c.sql === ENCRYPTED_COLUMN_TYPE_SQL)!;
+    expect(probe.params).toEqual(["tenant_app", ["widget"]]);
+  });
+
+  it("boots when the column is already ciphertext, or does not exist yet", async () => {
+    await expect(store(withColumnType("bytea")).ensureSchema()).resolves.toMatchObject({
+      mode: "applied",
+    });
+    await expect(store(withColumnType(null)).ensureSchema()).resolves.toMatchObject({
+      mode: "applied",
+    });
+  });
+
+  it("issues no probe when the manifest encrypts nothing", async () => {
+    const cap = withColumnType("text");
+    const plain = {
+      entities: [{ ...WIDGET, fields: WIDGET.fields.filter((f) => f.name !== "mrn") }],
+    };
+    await new ColumnMappedEntityStore(cap.conn, plain as unknown as Manifest, {
+      schema: "tenant_app",
+    }).ensureSchema();
+    expect(cap.calls.some((c) => c.sql === ENCRYPTED_COLUMN_TYPE_SQL)).toBe(false);
+  });
+
+  it("refuses on the verifying arm too, which checks presence and not type", async () => {
+    const cap = withColumnType("text");
+    const inner = cap.conn.query;
+    cap.conn.query = (async (sql: string, params?: readonly unknown[]) => {
+      if (sql.includes(COLUMN_SCHEMA_AUTHORITY_PROBE_MATCH)) {
+        const row = { ...COLUMN_SCHEMA_OWNER_AUTHORITY_ROW, role: "serving", may_apply: false };
+        return { rows: [row], rowCount: 1 };
+      }
+      return inner(sql, params);
+    }) as PgConnection["query"];
+    await expect(store(cap).ensureSchema()).rejects.toBeInstanceOf(EncryptedColumnNotCiphertext);
+  });
+});
+
 describe("ColumnMappedEntityStore — at-rest encryption of phi columns", () => {
   it("ensureSchema provisions pgcrypto when a phi column exists", async () => {
     const cap = capturePg();
     await store(cap).ensureSchema();
-    expect(cap.calls.some((c) => /CREATE EXTENSION IF NOT EXISTS pgcrypto/i.test(c.sql))).toBe(true);
+    expect(cap.calls.some((c) => /CREATE EXTENSION IF NOT EXISTS pgcrypto/i.test(c.sql))).toBe(
+      true,
+    );
   });
 
   it("create encrypts a phi value with pgp_sym_encrypt(...::text, keyRef), binding plaintext as text", async () => {
     const cap = capturePg();
     await store(cap).create(TENANT, "Widget", { id: "w1", sku: "S1", mrn: 12345 });
     const insert = cap.calls.find((c) => c.sql.includes("INSERT INTO"))!;
-    expect(insert.sql).toContain(`pgp_sym_encrypt($4::text, ${KEY_REF})`);
+    expect(insert.sql).toContain(
+      `pgp_sym_encrypt($4::text, ${KEY_REF}, '${PGP_SYM_ENCRYPT_OPTIONS}')`,
+    );
     // tenant, id, sku, then the mrn plaintext coerced to text
     expect(insert.params).toEqual([TENANT, "w1", "S1", "12345"]);
   });
@@ -466,7 +622,9 @@ describe("ColumnMappedEntityStore — at-rest encryption of phi columns", () => 
     const cap = capturePg([{ id: "w1", mrn: "x" }]);
     await store(cap).update(TENANT, "Widget", "w1", { mrn: "new" });
     const upd = cap.calls.find((c) => c.sql.includes("UPDATE"))!;
-    expect(upd.sql).toContain(`"mrn" = pgp_sym_encrypt($3::text, ${KEY_REF})`);
+    expect(upd.sql).toContain(
+      `"mrn" = pgp_sym_encrypt($3::text, ${KEY_REF}, '${PGP_SYM_ENCRYPT_OPTIONS}')`,
+    );
     expect(upd.params).toEqual([TENANT, "w1", "new"]);
   });
 
@@ -512,6 +670,28 @@ describe("ColumnMappedEntityStore — at-rest encryption of phi columns", () => 
     expect(sel.sql).not.toContain('"mrn" ASC');
   });
 
+  it("serves a search over an encrypted column partially, and says on the page which field it left out", async () => {
+    const cap = capturePg([]);
+    const page = await store(cap).listPage(TENANT, "Widget", {
+      limit: 5,
+      cursor: null,
+      sort: [{ field: "id", direction: "asc" }],
+      filters: [],
+      search: { term: "MRN-1", fields: ["sku", "mrn"] },
+    });
+    const sel = cap.calls.find((c) => c.sql.includes("SELECT"))!;
+    expect(sel.sql).toContain('"sku"::text');
+    expect(page.searchNarrowedBy).toEqual(["mrn"]);
+    const unnarrowed = await store(capturePg([])).listPage(TENANT, "Widget", {
+      limit: 5,
+      cursor: null,
+      sort: [{ field: "id", direction: "asc" }],
+      filters: [],
+      search: { term: "S1", fields: ["sku"] },
+    });
+    expect(unnarrowed).not.toHaveProperty("searchNarrowedBy");
+  });
+
   it("serves a query that names no encrypted column, so the refusal is not a blanket one", async () => {
     // The negative control. The entity HAS an encrypted column and the query does not address it,
     // so the page is served exactly as before — which is what keeps the refusal about the surface
@@ -528,10 +708,15 @@ describe("ColumnMappedEntityStore — at-rest encryption of phi columns", () => 
 
   it("honors a custom encryptionKeyRef", async () => {
     const cap = capturePg();
-    const s = new ColumnMappedEntityStore(cap.conn, MANIFEST, { schema: "tenant_app", encryptionKeyRef: "$$kref$$" });
+    const s = new ColumnMappedEntityStore(cap.conn, MANIFEST, {
+      schema: "tenant_app",
+      encryptionKeyRef: "$$kref$$",
+    });
     await s.create(TENANT, "Widget", { id: "w1", mrn: "z" });
     const insert = cap.calls.find((c) => c.sql.includes("INSERT INTO"))!;
-    expect(insert.sql).toContain("pgp_sym_encrypt($3::text, $$kref$$)");
+    expect(insert.sql).toContain(
+      `pgp_sym_encrypt($3::text, $$kref$$, '${PGP_SYM_ENCRYPT_OPTIONS}')`,
+    );
   });
 });
 
@@ -567,8 +752,18 @@ describe("ColumnMappedEntityStore — many_to_many association links", () => {
   });
 
   it("isLinked reflects whether a row exists", async () => {
-    expect(await m2mStore(capturePg([{ "?column?": 1 }])).isLinked(TENANT, "Course", "Student", "c1", "s1")).toBe(true);
-    expect(await m2mStore(capturePg([])).isLinked(TENANT, "Course", "Student", "c1", "s1")).toBe(false);
+    expect(
+      await m2mStore(capturePg([{ "?column?": 1 }])).isLinked(
+        TENANT,
+        "Course",
+        "Student",
+        "c1",
+        "s1",
+      ),
+    ).toBe(true);
+    expect(await m2mStore(capturePg([])).isLinked(TENANT, "Course", "Student", "c1", "s1")).toBe(
+      false,
+    );
   });
 
   it("listLinks maps rows to {leftId, rightId} and narrows by one side", async () => {
@@ -582,7 +777,7 @@ describe("ColumnMappedEntityStore — many_to_many association links", () => {
       { leftId: "c1", rightId: "s2" },
     ]);
     const sel = cap.calls.find((c) => c.sql.includes("SELECT"))!;
-    expect(sel.sql).toContain('AS left_id');
+    expect(sel.sql).toContain("AS left_id");
     expect(sel.sql).toContain('"course_id" = $2');
     expect(sel.params).toEqual([TENANT, "c1"]);
   });
@@ -598,7 +793,9 @@ describe("ColumnMappedEntityStore — many_to_many association links", () => {
   });
 
   it("throws for a relation with no join table", async () => {
-    await expect(m2mStore(capturePg()).link(TENANT, "Course", "Teacher", "c1", "t1")).rejects.toThrow(/no many_to_many join table/);
+    await expect(
+      m2mStore(capturePg()).link(TENANT, "Course", "Teacher", "c1", "t1"),
+    ).rejects.toThrow(/no many_to_many join table/);
   });
 });
 
@@ -631,7 +828,9 @@ describe("ColumnMappedEntityStore — withTransaction", () => {
   it("rejects cross-tenant access inside the transaction", async () => {
     const cap = capturePg();
     await expect(
-      store(cap).withTransaction(TENANT, async (tx) => tx.get("99999999-0000-4000-8000-000000000002", "Widget", "x")),
+      store(cap).withTransaction(TENANT, async (tx) =>
+        tx.get("99999999-0000-4000-8000-000000000002", "Widget", "x"),
+      ),
     ).rejects.toThrow(/cross-tenant/);
   });
 });
@@ -683,7 +882,12 @@ describe("ColumnMappedEntityStore — an auditable entity's trait columns", () =
   // and node-postgres hands back a `Date`. Measured live against Postgres 16.
   it("renders a Date trait timestamp as the ISO text an EntityRecord holds", async () => {
     const cap = capturePg([
-      { id: "v1", reason: "checkup", created_at: new Date("2026-08-26T01:02:03.456Z"), created_by: "u1" },
+      {
+        id: "v1",
+        reason: "checkup",
+        created_at: new Date("2026-08-26T01:02:03.456Z"),
+        created_by: "u1",
+      },
     ]);
     const record = await auditedStore(cap).get(TENANT, "Visit", "v1");
     expect(typeof record?.["created_at"]).toBe("string");
@@ -730,7 +934,7 @@ describe("ColumnMappedEntityStore — an auditable entity's trait columns", () =
     const cap = capturePg([{ id: "v1", reason: "x" }]);
     await auditedStore(cap).update(TENANT, "Visit", "v1", { reason: "x" });
     const upd = cap.calls.find((c) => c.sql.includes("UPDATE"))!;
-    expect(upd.sql).toContain('"updated_at" = date_trunc(\'milliseconds\', now())');
+    expect(upd.sql).toContain("\"updated_at\" = date_trunc('milliseconds', now())");
   });
 
   it("assigns updated_at once when the patch names it, not twice", async () => {
@@ -815,7 +1019,10 @@ describe("ColumnMappedEntityStore — a JSONB column", () => {
   };
   const DOC_MANIFEST = { entities: [DOC] } as unknown as Manifest;
   const docStore = (cap: Captured): ColumnMappedEntityStore =>
-    new ColumnMappedEntityStore(cap.conn, DOC_MANIFEST, { schema: "tenant_app", encryptionKey: () => KEY });
+    new ColumnMappedEntityStore(cap.conn, DOC_MANIFEST, {
+      schema: "tenant_app",
+      encryptionKey: () => KEY,
+    });
 
   const SHAPES: readonly [string, unknown][] = [
     ["a string", "t_abc/receipts/f1.pdf"],
@@ -879,13 +1086,69 @@ describe("ColumnMappedEntityStore — a JSONB column", () => {
     expect(insert.params).toEqual([TENANT, "d1", "plain", '"plain"']);
   });
 
-  it("leaves an encrypted json column on the pgcrypto path: BYTEA, not JSONB", async () => {
+  it("leaves an encrypted json column on the pgcrypto path: BYTEA, not JSONB, encrypting JSON text", async () => {
     const cap = capturePg();
     await docStore(cap).create(TENANT, "Doc", { id: "d1", secret_blob: "s" });
     const insert = cap.calls.find((c) => c.sql.includes("INSERT INTO"))!;
-    expect(insert.sql).toContain(`pgp_sym_encrypt($3::text, ${KEY_REF})`);
+    expect(insert.sql).toContain(
+      `pgp_sym_encrypt($3::text, ${KEY_REF}, '${PGP_SYM_ENCRYPT_OPTIONS}')`,
+    );
     expect(insert.sql).not.toContain("::jsonb");
-    expect(insert.params).toEqual([TENANT, "d1", "s"]);
+    // JSON text, not `String()`: a string encrypts as `"s"` so it decrypts back to a string, and an
+    // object as `{"a":1}` rather than `[object Object]` (ADR-0414 Q1).
+    expect(insert.params).toEqual([TENANT, "d1", '"s"']);
+  });
+
+  it.each([
+    ["a string", "s"],
+    ["an empty string", ""],
+    ["JSON-shaped text", '{"a":1}'],
+    ["a number", 7],
+    ["a boolean", true],
+    ["an array", ["x", 1]],
+    ["an object", { a: 1, b: [null] }],
+  ] as const)(
+    "round-trips %s through an encrypted json column with its type",
+    async (_label, value) => {
+      const cap = capturePg();
+      await docStore(cap).create(TENANT, "Doc", { id: "d1", secret_blob: value });
+      const bound = cap.calls.find((c) => c.sql.includes("INSERT INTO"))!.params[2] as string;
+      // What the decrypt hands back is the text that was encrypted.
+      const read = capturePg([{ id: "d1", secret_blob: bound }]);
+      expect((await docStore(read).get(TENANT, "Doc", "d1"))?.["secret_blob"]).toEqual(value);
+    },
+  );
+
+  it("does not echo a null on create, since the row holds NULL and a get reads it as absent", async () => {
+    const cap = capturePg();
+    const created = await docStore(cap).create(TENANT, "Doc", {
+      id: "d1",
+      label: null,
+      payload: null,
+    });
+    const insert = cap.calls.find((c) => c.sql.includes("INSERT INTO"))!;
+    expect(insert.params).toEqual([TENANT, "d1", null, null]);
+    expect(created).toEqual({ id: "d1" });
+  });
+
+  it("binds an encrypted field with no value as SQL NULL, never as the encrypted text 'null'", async () => {
+    const cap = capturePg();
+    const created = await docStore(cap).create(TENANT, "Doc", { id: "d1", secret_blob: null });
+    const insert = cap.calls.find((c) => c.sql.includes("INSERT INTO"))!;
+    expect(insert.params).toEqual([TENANT, "d1", null]);
+    expect(created).toEqual({ id: "d1" });
+  });
+
+  it("reads a decrypted JSON null as absent, as every other column reads NULL", async () => {
+    const read = capturePg([{ id: "d1", secret_blob: "null" }]);
+    expect(await docStore(read).get(TENANT, "Doc", "d1")).toEqual({ id: "d1" });
+  });
+
+  it("reads an encrypted json value an earlier binary stored with String() as the text it is", async () => {
+    const read = capturePg([{ id: "d1", secret_blob: "[object Object]" }]);
+    expect((await docStore(read).get(TENANT, "Doc", "d1"))?.["secret_blob"]).toBe(
+      "[object Object]",
+    );
   });
 });
 
@@ -998,11 +1261,16 @@ describe("ColumnMappedEntityStore — a column type with no decided wire type", 
   it("refuses an array of them too, since the element type is the undecided one", () => {
     const cap = capturePg();
     const arrayOfSpans = {
-      entities: [{ name: "Span", fields: [{ name: "elapsed", type: { kind: "array", element: { kind: "duration" } } }] }],
+      entities: [
+        {
+          name: "Span",
+          fields: [{ name: "elapsed", type: { kind: "array", element: { kind: "duration" } } }],
+        },
+      ],
     } as unknown as Manifest;
-    expect(() => new ColumnMappedEntityStore(cap.conn, arrayOfSpans, { schema: "tenant_app" })).toThrow(
-      UndecidedColumnTypeError,
-    );
+    expect(
+      () => new ColumnMappedEntityStore(cap.conn, arrayOfSpans, { schema: "tenant_app" }),
+    ).toThrow(UndecidedColumnTypeError);
   });
 
   it("emits no DDL for it, because there is no plan to emit DDL from", async () => {
@@ -1062,8 +1330,11 @@ describe("ColumnMappedEntityStore — the at-rest column key", () => {
     await s.create(TENANT, "Widget", { id: "w1", mrn: "a" });
     await s.create(other, "Widget", { id: "w2", mrn: "b" });
     expect(seen).toEqual([TENANT, other]);
-    expect(cap.settings.filter((x) => x.params[0] === COLUMN_ENCRYPTION_KEY_SETTING).map((x) => x.params[1]))
-      .toEqual([`key-for-${TENANT}`, `key-for-${other}`]);
+    expect(
+      cap.settings
+        .filter((x) => x.params[0] === COLUMN_ENCRYPTION_KEY_SETTING)
+        .map((x) => x.params[1]),
+    ).toEqual([`key-for-${TENANT}`, `key-for-${other}`]);
   });
 
   it("awaits an async resolver before issuing any statement", async () => {
@@ -1332,8 +1603,10 @@ describe("ColumnMappedEntityStore — a declared unique field", () => {
       return new Error("duplicate rows");
     });
     await expect(
-      new ColumnMappedEntityStore(cap.conn, SHELF_MANIFEST, { schema: "tenant_app" }).ensureSchema(),
-    ).resolves.toBeUndefined();
+      new ColumnMappedEntityStore(cap.conn, SHELF_MANIFEST, {
+        schema: "tenant_app",
+      }).ensureSchema(),
+    ).resolves.toEqual({ mode: "applied", role: null, schema: "tenant_app", uniqueIndexes: [] });
     // Counted rather than assumed: "it resolved" is the claim only if a statement really failed,
     // and a hook whose predicate had stopped matching would make this pass having failed nothing.
     expect(failed).toBe(1);
@@ -1465,6 +1738,28 @@ describe("ColumnMappedEntityStore — a declared unique field", () => {
     // *store* carries the scope through, which is the measured 0-of-47 form no pack declares.
     expect(index).toContain('("tenant_id", "dept", "seat_no")');
   });
+
+  it("issues no CREATE UNIQUE INDEX for an index the catalog already holds valid", async () => {
+    // `IF NOT EXISTS` decides after taking a SHARE lock on the table, so issuing it for an index
+    // that is there blocks every boot behind an open write for nothing.
+    const SEAT: Entity = {
+      name: "Seat",
+      fields: [{ name: "seat_no", type: { kind: "text" }, unique: true }],
+    };
+    const present = capturePg([{ valid: true }]);
+    await new ColumnMappedEntityStore(present.conn, { entities: [SEAT] } as unknown as Manifest, {
+      schema: "tenant_app",
+    }).ensureSchema();
+    const probe = present.calls.find((c) => c.sql.includes("FROM pg_index x"));
+    expect(probe?.params).toEqual(['"tenant_app"."seat_seat_no_uniq"']);
+    expect(present.calls.some((c) => c.sql.includes("CREATE UNIQUE INDEX"))).toBe(false);
+    // An invalid one is still asked for, as before: `IF NOT EXISTS` was the behaviour there.
+    const invalid = capturePg([{ valid: false }]);
+    await new ColumnMappedEntityStore(invalid.conn, { entities: [SEAT] } as unknown as Manifest, {
+      schema: "tenant_app",
+    }).ensureSchema();
+    expect(invalid.calls.filter((c) => c.sql.includes("CREATE UNIQUE INDEX"))).toHaveLength(1);
+  });
 });
 
 describe("ColumnMappedEntityStore — a foreign-key violation names the reference", () => {
@@ -1474,7 +1769,10 @@ describe("ColumnMappedEntityStore — a foreign-key violation names the referenc
   const REFS = {
     entities: [
       { name: "Account", fields: [{ name: "name", type: { kind: "text" } }] },
-      { name: "Contact", fields: [{ name: "account", type: { kind: "reference", target: "Account" } }] },
+      {
+        name: "Contact",
+        fields: [{ name: "account", type: { kind: "reference", target: "Account" } }],
+      },
     ],
   } as unknown as Manifest;
   const refStore = (cap: Captured): ColumnMappedEntityStore =>
@@ -1510,7 +1808,9 @@ describe("ColumnMappedEntityStore — a foreign-key violation names the referenc
 
   it("re-throws a 23503 from a key this store did not emit, untouched", async () => {
     const original = pgError("23503", "some_other_fk");
-    const cap = capturePg([], (sql) => (sql.startsWith("INSERT") || sql.startsWith("DELETE") ? original : null));
+    const cap = capturePg([], (sql) =>
+      sql.startsWith("INSERT") || sql.startsWith("DELETE") ? original : null,
+    );
     for (const op of [
       () => refStore(cap).create(TENANT, "Contact", { id: "c1", account: "a1" }),
       () => refStore(cap).remove(TENANT, "Account", "a1"),
@@ -1534,5 +1834,46 @@ describe("ColumnMappedEntityStore — a foreign-key violation names the referenc
         (e: unknown) => e,
       );
     expect(err).toBe(original);
+  });
+});
+
+describe("ColumnMappedEntityStore — an encrypted scalar keeps its type (ADR-0414 Q1)", () => {
+  const VAULT: Entity = {
+    name: "Vault",
+    fields: [
+      { name: "count", type: { kind: "integer" }, classification: "phi" },
+      { name: "flag", type: { kind: "boolean" }, classification: "phi" },
+      { name: "code", type: { kind: "text" }, classification: "phi" },
+      { name: "tags", type: { kind: "array", element: { kind: "text" } }, classification: "phi" },
+    ],
+  };
+  const vault = (cap: Captured): ColumnMappedEntityStore =>
+    new ColumnMappedEntityStore(cap.conn, { entities: [VAULT] } as unknown as Manifest, {
+      schema: "tenant_app",
+      encryptionKey: () => KEY,
+    });
+
+  it.each([
+    ["count", 7, "7"],
+    ["count", -3, "-3"],
+    ["flag", true, "true"],
+    ["flag", false, "false"],
+    ["code", "007", "007"],
+    ["tags", ["a", "b,c"], '["a","b,c"]'],
+  ] as const)("encrypts %s = %j as %s and reads it back unchanged", async (field, value, text) => {
+    const cap = capturePg();
+    await vault(cap).create(TENANT, "Vault", { id: "v1", [field]: value });
+    expect(cap.calls.find((c) => c.sql.includes("INSERT INTO"))!.params[2]).toBe(text);
+    const read = capturePg([{ id: "v1", [field]: text }]);
+    expect((await vault(read).get(TENANT, "Vault", "v1"))?.[field]).toEqual(value);
+  });
+
+  it("leaves text that is not an integer's or a boolean's spelling as the text it is", async () => {
+    const read = capturePg([{ id: "v1", count: "seven", flag: "yes" }]);
+    expect(await vault(read).get(TENANT, "Vault", "v1")).toEqual({
+      id: "v1",
+      count: "seven",
+      flag: "yes",
+    });
   });
 });

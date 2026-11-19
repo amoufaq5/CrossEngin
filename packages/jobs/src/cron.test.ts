@@ -330,6 +330,67 @@ describe("the day-skip is equivalent to a one-step-at-a-time search", () => {
   });
 });
 
+/**
+ * The suite above passed while the day-skip lost a week a year: none of its starts made a skip land
+ * on a 23-hour day. A skip from a date-excluded spring-forward day landed an hour past the next
+ * local midnight, so a fire in the first local hour of the following day was never read. These start
+ * the search on the excluded day itself, in three zones — two with a 02:00 transition and one
+ * (America/Santiago) whose transition is at midnight, where local 00:00 does not exist at all.
+ */
+describe("the day-skip lands on the day boundary across a DST transition", () => {
+  it("does not lose the weekly Monday fire after the US spring-forward Sunday", () => {
+    // Measured before the fix: 2026-03-16T04:15Z — a whole week lost.
+    const next = cronNextAfter("15 0 * * 1", new Date("2026-03-02T05:15:00Z"), "America/New_York");
+    expect(next?.toISOString()).toBe("2026-03-09T04:15:00.000Z");
+  });
+
+  it("does not lose the monthly 1st when it follows the EU spring-forward Sunday", () => {
+    // 31 March 2030 is the transition Sunday; measured before the fix: 1 May (April skipped).
+    const next = cronNextAfter("0 0 1 * *", new Date("2030-02-28T23:00:00Z"), "Europe/Berlin");
+    expect(next?.toISOString()).toBe("2030-03-31T22:00:00.000Z");
+  });
+
+  it("does not lose last night's fire when searching back across the spring-forward day", () => {
+    // Measured before the fix: the previous week's Saturday.
+    const prev = cronPrevOnOrBefore("30 23 * * 6", new Date("2026-03-08T14:00:00Z"), "America/New_York");
+    expect(prev?.toISOString()).toBe("2026-03-08T04:30:00.000Z");
+  });
+
+  const EXPRS = ["15 0 * * 1", "59 23 * * 6", "30 0 1 * *", "45 23 * * 0"] as const;
+  const WINDOWS: readonly { zone: string; starts: readonly string[] }[] = [
+    { zone: "America/New_York", starts: ["2026-03-07T12:00:00Z", "2026-03-08T07:30:00Z", "2026-03-09T03:00:00Z", "2026-10-31T12:00:00Z", "2026-11-01T06:30:00Z"] },
+    { zone: "Europe/Berlin", starts: ["2026-03-28T12:00:00Z", "2026-03-29T00:30:00Z", "2026-03-29T21:30:00Z", "2026-10-24T12:00:00Z", "2026-10-25T01:30:00Z"] },
+    { zone: "America/Santiago", starts: ["2026-09-05T12:00:00Z", "2026-09-06T05:30:00Z", "2026-09-07T02:00:00Z", "2026-04-04T12:00:00Z", "2026-04-05T04:30:00Z"] },
+  ];
+
+  it("agrees with the naive search in both directions over each zone's transitions", () => {
+    let compared = 0;
+    for (const { zone, starts } of WINDOWS) {
+      for (const expr of EXPRS) {
+        for (const start of starts) {
+          const at = new Date(start);
+          const label = `${expr} @${start} tz=${zone}`;
+          expect(cronNextAfter(expr, at, zone)?.toISOString() ?? null, `next ${label}`).toBe(
+            naiveNextAfter(expr, at, zone, 50_000)?.toISOString() ?? null,
+          );
+          expect(cronPrevOnOrBefore(expr, at, zone)?.toISOString() ?? null, `prev ${label}`).toBe(
+            naivePrevOnOrBefore(expr, at, zone, 50_000)?.toISOString() ?? null,
+          );
+          compared += 2;
+        }
+      }
+    }
+    expect(compared).toBe(WINDOWS.length * EXPRS.length * 5 * 2);
+  });
+
+  it("terminates in a zone whose transition removes local midnight", () => {
+    // 2026-09-06 in Santiago runs 01:00-23:59: a walk back toward "00:00" would re-enter the
+    // skipped day and loop, so the settle test is "the neighbouring instant is in the skipped day".
+    const next = cronNextAfter("0 12 * * 1", new Date("2026-09-05T15:00:00Z"), "America/Santiago");
+    expect(next?.toISOString()).toBe(naiveNextAfter("0 12 * * 1", new Date("2026-09-05T15:00:00Z"), "America/Santiago")?.toISOString());
+  });
+});
+
 describe("cronCanEverMatch", () => {
   const can = (expr: string): boolean => cronExpressionCanEverMatch(expr);
 

@@ -14,7 +14,11 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildErpJobProviders,
+  DEPRECIATION_CATCH_UP_PERIODS,
+  depreciationCatchUpWindow,
   depreciationPeriod,
+  depreciationPeriodsDue,
+  JOB_READ_CEILING,
   ERP_JOB_ABSENCES,
   ERP_JOB_HANDLER_IDS,
   erpJobCoverage,
@@ -84,9 +88,13 @@ describe("erpJobCoverage", () => {
     expect(coverage.partial.map((p) => p.jobId).sort()).toEqual([
       "erp-core-depreciation-run",
       "erp-core-overdue-invoice-reminder",
+      "erp-core-sales-order-to-invoice",
       "erp-core-work-order-completion",
     ]);
     expect(coverage.partial.find((p) => p.jobId === "erp-core-overdue-invoice-reminder")?.reason).toMatch(/NOT sent/);
+    expect(coverage.partial.find((p) => p.jobId === "erp-core-sales-order-to-invoice")?.reason).toMatch(
+      /defaultPaymentTermsDays.*payment_terms_unconfigured/,
+    );
   });
 
   it("serves nothing when the actor role is not one the manifest declares, and says so per job", () => {
@@ -273,6 +281,98 @@ describe("depreciation handler", () => {
   });
 });
 
+describe("depreciation catch-up", () => {
+  async function ready(h: ReturnType<typeof harness>, acquired: string) {
+    const a = await h.seed("FixedAsset", { asset_tag: "FA-1", name: "Lathe", category: "equipment", acquisition_date: acquired, acquisition_cost: "1200.00", depreciation_method: "straight_line", useful_life_months: 12, salvage_value: "0.00", state: "in_service" });
+    await h.seed("LedgerAccount", { account_code: "6100", name: "Dep", account_type: "expense" });
+    await h.seed("LedgerAccount", { account_code: "1590", name: "Acc", account_type: "asset" });
+    await h.settings.put(TENANT, { finance: { depreciationExpenseAccountCode: "6100", accumulatedDepreciationAccountCode: "1590" } });
+    return a;
+  }
+  const entries = async (h: ReturnType<typeof harness>) =>
+    (await h.store.listPage(TENANT, "JournalEntry", { filters: [], sort: [], limit: 50, cursor: null })).records;
+
+  it("charges the run's period, every period after the latest posted one, and every draft — oldest first", () => {
+    const current = depreciationPeriod(new Date(FIRE));
+    expect(depreciationPeriodsDue(current, new Set(), new Set()).map((p) => p.key)).toEqual(["2026-02"]);
+    expect(depreciationPeriodsDue(current, new Set(["2025-11"]), new Set()).map((p) => p.key)).toEqual([
+      "2025-12",
+      "2026-01",
+      "2026-02",
+    ]);
+    expect(depreciationPeriodsDue(current, new Set(), new Set(["2025-09"])).map((p) => p.key)).toEqual(["2025-09", "2026-02"]);
+    // Outside the window nothing is reached, so the read stays bounded.
+    expect(depreciationPeriodsDue(current, new Set(["2024-01"]), new Set()).map((p) => p.key)).toEqual(["2026-02"]);
+  });
+
+  it("narrows the catch-up window as assets grow, so the entry read stays under the ceiling", () => {
+    // At a fixed twelve, 1,700 assets is 20,400 entries in the window: past JOB_READ_CEILING, and the
+    // whole run would fail read_ceiling_exceeded where its one-period form worked.
+    expect(depreciationCatchUpWindow(0)).toBe(DEPRECIATION_CATCH_UP_PERIODS);
+    expect(depreciationCatchUpWindow(1_000)).toBe(DEPRECIATION_CATCH_UP_PERIODS);
+    expect(depreciationCatchUpWindow(1_700)).toBe(11);
+    expect(depreciationCatchUpWindow(1_700) * 1_700).toBeLessThanOrEqual(JOB_READ_CEILING);
+    expect(depreciationCatchUpWindow(15_000)).toBe(1);
+    expect(depreciationCatchUpWindow(50_000)).toBe(1);
+    const current = depreciationPeriod(new Date(FIRE));
+    // A one-period window is the run's own period: the old single-period read.
+    expect(depreciationPeriodsDue(current, new Set(["2026-01"]), new Set(["2025-12"]), 1).map((p) => p.key)).toEqual([
+      "2026-02",
+    ]);
+    expect(depreciationPeriodsDue(current, new Set(["2025-12"]), new Set(), 3).map((p) => p.key)).toEqual([
+      "2026-01",
+      "2026-02",
+    ]);
+    // A posted month the narrowed window does not reach is not seen, so nothing is caught up.
+    expect(depreciationPeriodsDue(current, new Set(["2025-11"]), new Set(), 3).map((p) => p.key)).toEqual(["2026-02"]);
+  });
+
+  it("posts the months a failed run missed, after the asset's latest posted month", async () => {
+    const h = harness();
+    const a = await ready(h, "2025-10-15");
+    await h.seed("JournalEntry", { entry_number: "JE-N", entry_date: "2025-11-30", source: "depreciation", state: "posted", memo: `x [depreciation:${a["id"] as string}:2025-11]` });
+    const result = await h.run("erp-core-depreciation-run");
+    expect(result).toEqual({ status: "completed", output: { charges_due: 3, posted: 3, caught_up: 2 } });
+    const dated = (await entries(h)).map((e) => e["entry_date"]).sort();
+    expect(dated).toEqual(["2025-11-30", "2025-12-31", "2026-01-31", "2026-02-28"]);
+  });
+
+  it("does not back-fill an asset that has no posted entry, because its history may be in another system", async () => {
+    const h = harness();
+    await ready(h, "2025-06-15");
+    expect(await h.run("erp-core-depreciation-run")).toEqual({ status: "completed", output: { charges_due: 1, posted: 1 } });
+    expect((await entries(h)).map((e) => e["entry_date"])).toEqual(["2026-02-28"]);
+  });
+
+  it("re-dates a closed month's charge into the run's open month instead of leaving a draft behind", async () => {
+    const h = harness();
+    const a = await ready(h, "2025-10-15");
+    await h.seed("JournalEntry", { entry_number: "JE-N", entry_date: "2025-12-31", source: "depreciation", state: "posted", memo: `x [depreciation:${a["id"] as string}:2025-12]` });
+    await h.seed("FiscalPeriod", { name: "Jan", start_date: "2026-01-01", end_date: "2026-01-31", status: "closed" });
+    const result = await h.run("erp-core-depreciation-run");
+    expect(result).toEqual({ status: "completed", output: { charges_due: 2, caught_up_into_open_period: 1, posted: 2, caught_up: 1 } });
+    const all = await entries(h);
+    expect(all.filter((e) => e["state"] === "draft")).toHaveLength(0);
+    const jan = all.find((e) => String(e["memo"]).includes(":2026-01]"));
+    expect(jan).toMatchObject({ state: "posted", entry_date: "2026-02-28" });
+  });
+
+  it("resumes the draft a run in a closed month left behind, once that month's successor is open", async () => {
+    const h = harness();
+    await ready(h, "2025-12-15");
+    await h.seed("FiscalPeriod", { name: "Feb", start_date: "2026-02-01", end_date: "2026-02-28", status: "closed" });
+    const first = await h.run("erp-core-depreciation-run");
+    expect(first).toMatchObject({ status: "failed", error: { code: "writes_refused" } });
+    expect(first.status === "failed" ? first.error.message : "").toMatch(/period_locked/);
+    expect((await entries(h)).map((e) => [e["state"], e["entry_date"]])).toEqual([["draft", "2026-02-28"]]);
+    const next = await h.run("erp-core-depreciation-run", { trigger: { kind: "scheduled", cron: "0 1 1 * *", fireAt: "2026-04-01T01:00:00.000Z" } });
+    expect(next).toEqual({ status: "completed", output: { charges_due: 2, caught_up_into_open_period: 1, posted: 2, caught_up: 1 } });
+    const all = await entries(h);
+    expect(all).toHaveLength(2);
+    expect(all.every((e) => e["state"] === "posted")).toBe(true);
+  });
+});
+
 describe("inventory reorder handler", () => {
   it("drafts a purchase order from the last supplier for an item below its reorder point, once", async () => {
     const h = harness();
@@ -330,12 +430,17 @@ describe("sales order to invoice handler", () => {
     expect(await h.run("erp-core-sales-order-to-invoice", { input: { id: so["id"] } })).toMatchObject({ status: "failed", error: { code: "partial_fulfilment_tax_unallocable" } });
   });
 
-  it("fails naming the refusal when the tenant has no payment terms to give the invoice a due date", async () => {
+  it("names the missing payment terms before writing anything, rather than meeting a bare 422", async () => {
     const h = harness();
     const so = await order(h, [["1.000", "1.000"]]);
     const result = await h.run("erp-core-sales-order-to-invoice", { input: { id: so["id"] } });
-    expect(result).toMatchObject({ status: "failed", retryable: false, error: { code: "writes_refused" } });
+    expect(result).toMatchObject({ status: "failed", retryable: false, error: { code: "payment_terms_unconfigured" } });
+    expect(result.status === "failed" ? result.error.message : "").toMatch(/finance\.defaultPaymentTermsDays/);
+    expect((await h.store.listPage(TENANT, "Invoice", { filters: [], sort: [], limit: 10, cursor: null })).records).toHaveLength(0);
     expect((await h.store.get(TENANT, "SalesOrder", so["id"] as string))?.["state"]).toBe("fulfilled");
+    // Configured, the same order invoices: the refusal is the setting and nothing else.
+    await h.settings.put(TENANT, { finance: { defaultPaymentTermsDays: 14 } });
+    expect(await h.run("erp-core-sales-order-to-invoice", { input: { id: so["id"] } })).toMatchObject({ status: "completed" });
   });
 });
 

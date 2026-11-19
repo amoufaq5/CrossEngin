@@ -1,6 +1,12 @@
 import type { PathSegment, ResolvedPrincipal, RouteDefinition } from "@crossengin/api-gateway";
 import type { Handler, HandlerOutput, PrincipalRoles } from "@crossengin/api-gateway-runtime";
-import { hashPassword, parsePasswordHash, verifyPassword } from "@crossengin/crypto";
+import {
+  hashPassword,
+  parsePasswordHash,
+  pepperRingOf,
+  verifyPassword,
+  type PepperSource,
+} from "@crossengin/crypto";
 import type { ExtraGatewayRoute } from "@crossengin/operate-runtime";
 import { z } from "zod";
 
@@ -106,6 +112,7 @@ export const CREDENTIAL_REFUSALS = [
   "account_locked",
   "user_not_active",
   "unrecordable",
+  "password_too_short",
   // Shed before any password work, by the admission the login shares.
   ...LOGIN_ADMISSION_REFUSALS,
 ] as const;
@@ -140,6 +147,7 @@ export const CREDENTIAL_REFUSAL_STATUS: Readonly<Record<CredentialRefusal, numbe
     account_locked: 429,
     user_not_active: 403,
     unrecordable: 503,
+    password_too_short: 400,
     ...LOGIN_ADMISSION_REFUSAL_STATUS,
   },
 );
@@ -159,11 +167,12 @@ export const CREDENTIAL_REFUSAL_STATUS: Readonly<Record<CredentialRefusal, numbe
  * reactivation is a coherent act and the honest answer is to do it and **say what it does not yet
  * buy** (ADR-0322's report-rather-than-refuse rule).
  *
- * `selfMay` is false for every non-active status, and that asymmetry is deliberate: a session minted
- * before a suspension stays valid until it expires (ADR-0358), so a suspended person can still reach
- * this route -- and letting them rotate the credential they were suspended from is the one thing the
- * suspension is for. An operator doing it for them is a decision; them doing it for themselves is a
- * bypass.
+ * `selfMay` is false for every non-active status, and that asymmetry is deliberate. The per-request
+ * standing check (`session-standing.ts`) refuses a suspended person's session, but only once its
+ * cache has turned over -- up to its TTL on a replica that did not perform the suspension. Inside
+ * that window a suspended person can still reach this route, and letting them rotate the credential
+ * they were suspended from is the one thing the suspension is for. An operator doing it for them is
+ * a decision; them doing it for themselves is a bypass.
  */
 export const CREDENTIAL_WRITE_BY_STATUS: Readonly<
   Record<UserStatus, { readonly operatorMay: boolean; readonly selfMay: boolean }>
@@ -208,6 +217,25 @@ export const MAX_PASSWORD_LENGTH = 1024;
 
 const PasswordSchema = z.string().min(1).max(MAX_PASSWORD_LENGTH);
 
+/**
+ * The shortest password a new credential may have, unless a deployment declares otherwise with
+ * `--min-password-length`. It was 1 -- `PasswordSchema`'s `min(1)`, which is a presence check and
+ * not a policy -- so a one-character password was accepted for an account that can provision and
+ * delete tenants. Twelve is NIST SP 800-63B's floor for a password that is the only factor.
+ *
+ * Checked where a password is **set** and never where one is verified: a stored hash keeps working
+ * whatever its length, because refusing a login over a rule the account predates would lock out
+ * every user at once with no remedy but the one this exists to require.
+ */
+export const DEFAULT_MIN_PASSWORD_LENGTH = 12;
+/** A declared minimum below this is refused at parse: a floor of 1 is the defect restated. */
+export const MIN_MIN_PASSWORD_LENGTH = 8;
+
+/** Counts code points, so a password of emoji is measured as typed rather than as UTF-16 units. */
+export function passwordLength(password: string): number {
+  return [...password].length;
+}
+
 const SetCredentialBodySchema = z
   .object({
     password: PasswordSchema,
@@ -242,8 +270,19 @@ export type CredentialAuditor = (event: CredentialAuditEvent) => Promise<void>;
 
 export interface CredentialRoutesContext {
   readonly store: PostgresCredentialStore;
-  /** The same pepper the login verifies with, from the one `resolveCredentialAuth` result. */
-  readonly pepper: string;
+  /**
+   * The same pepper the login verifies with, from the one `resolveCredentialAuth` result -- the
+   * current one and any retired ones; new hashes are keyed with the current.
+   */
+  readonly pepper: PepperSource;
+  /** `DEFAULT_MIN_PASSWORD_LENGTH` unless declared; required so no wiring forgets the floor. */
+  readonly minPasswordLength: number;
+  /**
+   * Called after a write that ended this user's sessions, so the request path stops admitting them
+   * here at once rather than after its cache lapses. Required, because a forgotten invalidation is
+   * the silent version of the defect this exists to close.
+   */
+  readonly onSessionsEnded: (userId: string) => void;
   readonly principalRoles: (principal: ResolvedPrincipal | null) => PrincipalRoles;
   /**
    * Roles permitted to set another user's password. Fail-closed: empty ⇒ the operator route is not
@@ -289,6 +328,14 @@ function json(status: number, body: unknown): HandlerOutput {
 
 function refuse(refusal: CredentialRefusal, detail: string): HandlerOutput {
   return json(CREDENTIAL_REFUSAL_STATUS[refusal], { error: refusal, detail });
+}
+
+function tooShort(ctx: CredentialRoutesContext, password: string): HandlerOutput | null {
+  if (passwordLength(password) >= ctx.minPasswordLength) return null;
+  return refuse(
+    "password_too_short",
+    `a new password must be at least ${ctx.minPasswordLength.toString()} characters`,
+  );
 }
 
 function rolesOf(ctx: CredentialRoutesContext, principal: ResolvedPrincipal | null): string[] {
@@ -439,6 +486,8 @@ export function buildSetUserCredentialHandler(ctx: CredentialRoutesContext): Han
           " id is typed twice",
       );
     }
+    const short = tooShort(ctx, body.data.password);
+    if (short !== null) return short;
 
     // Before any store call and before any record. An operator aiming this at themselves is not a
     // write we want a row for -- it is a request that must not be expressible.
@@ -496,6 +545,7 @@ export function buildSetUserCredentialHandler(ctx: CredentialRoutesContext): Han
       admission.release();
     }
     const matched = await ctx.store.setCredential(userId, encoded);
+    if (matched) ctx.onSessionsEnded(userId);
     if (!matched) {
       // The row was there a moment ago. Retired between the read and the write, most likely.
       return recordRefusal(
@@ -514,6 +564,9 @@ export function buildSetUserCredentialHandler(ctx: CredentialRoutesContext): Han
       userId,
       credentialSet: true,
       lockCleared: true,
+      // A reset is the moment a stolen or forgotten credential stops working, so every session the
+      // previous one minted ends with it (`session_epoch`, advanced in the same statement).
+      sessionsEnded: true,
       subjectStatus: existing.status,
       loginBlocked,
       detail: loginBlocked
@@ -557,6 +610,9 @@ export function buildChangeOwnPasswordHandler(ctx: CredentialRoutesContext): Han
     // is a well-formed id naming no row. The `principalKind` gate above is what catches that, and
     // `findById` below is what catches a well-formed id whose row is gone.
     const userId = principal.principalId;
+    // Before the current password is verified, so a too-short new one costs no attempt.
+    const short = tooShort(ctx, body.data.newPassword);
+    if (short !== null) return short;
 
     const existing = await ctx.store.findById(userId);
     if (existing === null) {
@@ -565,9 +621,9 @@ export function buildChangeOwnPasswordHandler(ctx: CredentialRoutesContext): Han
     }
     const status = asUserStatus(existing.status);
     if (status === null || !CREDENTIAL_WRITE_BY_STATUS[status].selfMay) {
-      // A session minted before a suspension stays valid until it expires (ADR-0358), so a
-      // suspended person can still reach this route -- and rotating the credential they were
-      // suspended from is the one thing the suspension exists to stop. An operator may still set
+      // The standing check refuses a suspended person's session within its cache TTL, so this is
+      // the backstop for that window -- and rotating the
+      // credential they were suspended from is the one thing the suspension exists to stop. An operator may still set
       // one for them, which is a decision somebody made; this would be the person routing around
       // it. An unrecognised status takes the same arm, fail-closed.
       return refuse(
@@ -632,15 +688,65 @@ export function buildChangeOwnPasswordHandler(ctx: CredentialRoutesContext): Han
         refuse("user_unknown", "this credential names a user that no longer exists"),
       );
     }
-    // Deliberately says the sessions are NOT cut off, because they are not: a session token is
-    // verified against the JWKS and carries its own expiry, so changing the password cannot revoke
-    // one. Saying so is the alternative to a reader assuming a password change logs everyone out.
+    ctx.onSessionsEnded(userId);
+    // `true` since sessions carry a generation (`session_epoch`): the write that set the password
+    // advanced it, so every session minted before -- including the one that made this request --
+    // is refused from the next request on. It said `false` while that was true, and the reason it
+    // gave (a token is verified by signature, not against this row) is what the generation changed.
     return json(200, {
       credentialChanged: true,
-      sessionsRevoked: false,
+      sessionsRevoked: true,
       detail:
-        "password changed; existing sessions remain valid until they expire, because a session" +
-        " token is verified by signature and not against this row",
+        "password changed; every session this account held has ended, including this one, so" +
+        " sign in again with the new password",
+    });
+  };
+}
+
+export const SESSIONS_ENDED_OPERATION = "account.sessions_ended";
+
+/**
+ * `POST /v1/account/logout` — a person ends every session they hold.
+ *
+ * The console's sign-out cleared its own cookie and nothing else, so a session token copied out of
+ * the browser kept working for its whole lifetime after the person had signed out. A token is
+ * verified by signature, so the only server-side act that can end it is moving the generation it
+ * must match (`session_epoch`) -- which ends every session the person holds, not only this one.
+ * That is the stated cost of a counter over a list of revoked token ids, and the response says it.
+ *
+ * Authorised by the session itself, like the password change beside it: the viewer is always the
+ * credential, so there is no subject to name. Recorded **after** the write and best-effort, the
+ * opposite of the password routes and deliberately so: refusing a sign-out because its record could
+ * not be written would leave alive the session the person asked to end.
+ */
+export function buildLogoutHandler(ctx: CredentialRoutesContext): Handler {
+  return async ({ principal }): Promise<HandlerOutput> => {
+    if (principal === null) return json(401, { error: "authentication_required" });
+    if (principal.principalKind !== "user") {
+      return refuse("not_a_person", `a ${principal.principalKind} credential holds no session`);
+    }
+    const userId = principal.principalId;
+    const epoch = await ctx.store.endSessions(userId);
+    if (epoch === null) {
+      return refuse("user_unknown", "this credential names a user that no longer exists");
+    }
+    ctx.onSessionsEnded(userId);
+    try {
+      await ctx.audit({
+        operation: SESSIONS_ENDED_OPERATION,
+        tenantId: principal.tenantId ?? null,
+        subjectUserId: userId,
+        principalId: userId,
+        roles: rolesOf(ctx, principal),
+        detail: { self: true },
+        at: nowIso(ctx),
+      });
+    } catch {
+      /* the sessions have ended; a lost record must not make the sign-out look as if it failed */
+    }
+    return json(200, {
+      sessionsEnded: true,
+      detail: "every session this account held has ended, on every device",
     });
   };
 }
@@ -698,7 +804,7 @@ export function buildCredentialRoutes(
         "authenticates with, and such a write must be recordable before it lands",
     );
   }
-  if (ctx.pepper.trim() === "") {
+  if (pepperRingOf(ctx.pepper).pepper.trim() === "") {
     // Unreachable from `node.ts`, which builds these from the same resolved material the login
     // uses. It is a refusal rather than a comment because the alternative is hashing every password
     // under an empty key, which `hashPassword` will do without complaint.
@@ -711,6 +817,10 @@ export function buildCredentialRoutes(
     {
       route: route("account.credential.change", "POST", ["v1", "account", "password"]),
       handler: buildChangeOwnPasswordHandler(ctx),
+    },
+    {
+      route: route("account.logout", "POST", ["v1", "account", "logout"]),
+      handler: buildLogoutHandler(ctx),
     },
   ];
   if (ctx.adminRoles.size > 0) {

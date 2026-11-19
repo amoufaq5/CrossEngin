@@ -39,6 +39,24 @@ class FakeStore implements MonthlySpendStore {
     this.totals.set(key, next);
     return next;
   }
+
+  readonly reserveCalls: Array<AddCall & { readonly limit: number }> = [];
+  failReserve = false;
+
+  async reserveMonthly(
+    tenantId: string,
+    periodKey: string,
+    dollars: number,
+    limitDollars: number,
+  ): Promise<{ reserved: boolean; dollarsUsed: number | null }> {
+    this.reserveCalls.push({ tenantId, periodKey, dollars, limit: limitDollars });
+    if (this.failReserve) throw new Error("ledger unavailable");
+    const key = `${tenantId}|${periodKey}`;
+    const next = (this.totals.get(key) ?? 0) + dollars;
+    if (next > limitDollars) return { reserved: false, dollarsUsed: null };
+    this.totals.set(key, next);
+    return { reserved: true, dollarsUsed: next };
+  }
 }
 
 const TENANT = "11111111-1111-4111-8111-111111111111";
@@ -62,27 +80,18 @@ describe("buildAiDesignBudget validation", () => {
     }
   });
 
-  it("surfaces maxUsdPerRequest when configured", () => {
+  it("carries no per-request ceiling: that one is the designer's, which is the only thing that reads it", () => {
+    // It used to: `maxUsdPerRequest` was accepted here, surfaced on the budget, and read by nothing,
+    // so the shipped `--ai-max-request-dollars 2` enforced nothing (M-16). The designer takes
+    // `maxRequestDollars` directly now, and a second spelling here would be a second place to set
+    // a ceiling that is not enforced.
     const budget = buildAiDesignBudget({
       store: new FakeStore(),
       maxUsdPerMonth: 25,
+      // @ts-expect-error the option was removed with its last reader
       maxUsdPerRequest: 0.5,
     });
-    expect(budget.maxUsdPerRequest).toBe(0.5);
-  });
-
-  it("reports maxUsdPerRequest as null when omitted", () => {
-    const budget = buildAiDesignBudget({ store: new FakeStore(), maxUsdPerMonth: 25 });
-    expect(budget.maxUsdPerRequest).toBeNull();
-  });
-
-  it("reports maxUsdPerRequest as null when non-positive", () => {
-    const budget = buildAiDesignBudget({
-      store: new FakeStore(),
-      maxUsdPerMonth: 25,
-      maxUsdPerRequest: 0,
-    });
-    expect(budget.maxUsdPerRequest).toBeNull();
+    expect("maxUsdPerRequest" in budget).toBe(false);
   });
 });
 
@@ -211,25 +220,31 @@ describe("check", () => {
   });
 });
 
-describe("record", () => {
-  it("accumulates spend and returns the new monthly total", async () => {
-    const store = new FakeStore();
-    const budget = buildAiDesignBudget({ store, maxUsdPerMonth: 25, now: fixedNow(FIXED) });
-    await expect(budget.record(TENANT, 3)).resolves.toBe(3);
-    await expect(budget.record(TENANT, 4.5)).resolves.toBe(7.5);
-    expect(store.addCalls).toEqual([
-      { tenantId: TENANT, periodKey: "2026-08", dollars: 3 },
-      { tenantId: TENANT, periodKey: "2026-08", dollars: 4.5 },
-    ]);
+describe("the month is charged through reserve and settle, and nothing else", () => {
+  // `record` charged the month after the call, swallowed a failed write and returned 0, and was the
+  // only thing that moved the ledger: a design whose write failed was never charged (M-16). It is
+  // gone, and these are its cases restated against the one path that charges now.
+  it("has no after-the-fact record", () => {
+    const budget = buildAiDesignBudget({ store: new FakeStore(), maxUsdPerMonth: 25 });
+    expect("record" in budget).toBe(false);
   });
 
-  it("flips a subsequent check to denied once the ceiling is crossed", async () => {
+  it("accumulates settled spend across designs", async () => {
+    const store = new FakeStore();
+    const budget = buildAiDesignBudget({ store, maxUsdPerMonth: 25, now: fixedNow(FIXED) });
+    await (await budget.reserve(TENANT, 3))?.settle(3);
+    await (await budget.reserve(TENANT, 4.5))?.settle(4.5);
+    expect(store.totals.get(`${TENANT}|2026-08`)).toBe(7.5);
+    expect(store.addCalls).toEqual([]);
+  });
+
+  it("flips a subsequent check to denied once the ceiling is reached", async () => {
     const store = new FakeStore();
     const budget = buildAiDesignBudget({ store, maxUsdPerMonth: 10, now: fixedNow(FIXED) });
     await expect(budget.check(TENANT)).resolves.toMatchObject({ allowed: true });
-    await budget.record(TENANT, 6);
+    await (await budget.reserve(TENANT, 6))?.settle(6);
     await expect(budget.check(TENANT)).resolves.toMatchObject({ allowed: true, remainingUsd: 4 });
-    await budget.record(TENANT, 6);
+    await (await budget.reserve(TENANT, 4))?.settle(4);
     await expect(budget.check(TENANT)).resolves.toMatchObject({
       allowed: false,
       reason: "month_exceeded",
@@ -241,7 +256,7 @@ describe("record", () => {
     const store = new FakeStore();
     let clock = new Date("2026-08-31T23:00:00.000Z");
     const budget = buildAiDesignBudget({ store, maxUsdPerMonth: 25, now: () => clock });
-    await budget.record(TENANT, 25);
+    await (await budget.reserve(TENANT, 25))?.settle(25);
     await expect(budget.check(TENANT)).resolves.toMatchObject({ allowed: false, spentUsd: 25 });
     clock = new Date("2026-09-01T00:00:00.000Z");
     await expect(budget.check(TENANT)).resolves.toMatchObject({
@@ -252,53 +267,90 @@ describe("record", () => {
     expect(store.getCalls.at(-1)?.periodKey).toBe("2026-09");
   });
 
-  it("does not write for a zero cost and returns the current total", async () => {
+  it("writes nothing to settle a call that cost exactly its reservation", async () => {
+    const store = new FakeStore();
+    const budget = buildAiDesignBudget({ store, maxUsdPerMonth: 25, now: fixedNow(FIXED) });
+    await (await budget.reserve(TENANT, 2))?.settle(2);
+    expect(store.addCalls).toEqual([]);
+  });
+
+  it("reserves nothing for a zero, negative or non-finite estimate, and settles a junk actual as 0", async () => {
     const store = new FakeStore();
     store.seed(TENANT, "2026-08", 5);
     const budget = buildAiDesignBudget({ store, maxUsdPerMonth: 25, now: fixedNow(FIXED) });
-    await expect(budget.record(TENANT, 0)).resolves.toBe(5);
+    for (const bad of [0, -12, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const r = await budget.reserve(TENANT, bad);
+      expect(r?.dollars).toBe(0);
+      await r?.settle(Number.NaN);
+    }
+    expect(store.reserveCalls.map((c) => c.dollars)).toEqual([0, 0, 0, 0]);
     expect(store.addCalls).toEqual([]);
+    expect(store.totals.get(`${TENANT}|2026-08`)).toBe(5);
   });
 
-  it("does not write for a negative cost", async () => {
-    const store = new FakeStore();
-    store.seed(TENANT, "2026-08", 5);
-    const budget = buildAiDesignBudget({ store, maxUsdPerMonth: 25, now: fixedNow(FIXED) });
-    await expect(budget.record(TENANT, -12)).resolves.toBe(5);
-    expect(store.addCalls).toEqual([]);
-  });
-
-  it("does not write for NaN or Infinity", async () => {
+  it("propagates a settle that cannot be written, so the caller knows the reservation stands", async () => {
     const store = new FakeStore();
     const budget = buildAiDesignBudget({ store, maxUsdPerMonth: 25, now: fixedNow(FIXED) });
-    await expect(budget.record(TENANT, Number.NaN)).resolves.toBe(0);
-    await expect(budget.record(TENANT, Number.POSITIVE_INFINITY)).resolves.toBe(0);
-    expect(store.addCalls).toEqual([]);
-    expect(store.getCalls).toHaveLength(2);
-  });
-
-  it("resolves instead of throwing when the store write fails", async () => {
-    const store = new FakeStore();
+    const r = await budget.reserve(TENANT, 4);
     store.failAdd = true;
-    const budget = buildAiDesignBudget({ store, maxUsdPerMonth: 25, now: fixedNow(FIXED) });
-    await expect(budget.record(TENANT, 2)).resolves.toBe(0);
-  });
-
-  it("leaves a later check working after a failed write", async () => {
-    const store = new FakeStore();
-    store.seed(TENANT, "2026-08", 4);
-    store.failAdd = true;
-    const budget = buildAiDesignBudget({ store, maxUsdPerMonth: 25, now: fixedNow(FIXED) });
-    await budget.record(TENANT, 2);
-    await expect(budget.check(TENANT)).resolves.toMatchObject({ allowed: true, spentUsd: 4 });
+    await expect(r?.settle(1)).rejects.toThrow(/ledger unavailable/);
+    // The over-count stands, which is the safe direction for a ceiling.
+    expect(store.totals.get(`${TENANT}|2026-08`)).toBe(4);
   });
 
   it("keeps tenants isolated in the ledger", async () => {
     const store = new FakeStore();
     const other = "22222222-2222-4222-8222-222222222222";
     const budget = buildAiDesignBudget({ store, maxUsdPerMonth: 25, now: fixedNow(FIXED) });
-    await budget.record(TENANT, 20);
+    await (await budget.reserve(TENANT, 20))?.settle(20);
     await expect(budget.check(TENANT)).resolves.toMatchObject({ remainingUsd: 5 });
     await expect(budget.check(other)).resolves.toMatchObject({ spentUsd: 0, remainingUsd: 25 });
+  });
+});
+
+describe("buildAiDesignBudget reserve", () => {
+  it("reserves against the month and settles the difference to the actual cost", async () => {
+    const store = new FakeStore();
+    const budget = buildAiDesignBudget({ store, maxUsdPerMonth: 10, now: fixedNow(FIXED) });
+    const r = await budget.reserve(TENANT, 4);
+    expect(r?.periodKey).toBe("2026-08");
+    expect(store.reserveCalls).toEqual([{ tenantId: TENANT, periodKey: "2026-08", dollars: 4, limit: 10 }]);
+    expect(store.totals.get(`${TENANT}|2026-08`)).toBe(4);
+    await r?.settle(1.5);
+    expect(store.totals.get(`${TENANT}|2026-08`)).toBeCloseTo(1.5, 9);
+    await (await budget.reserve(TENANT, 2))?.settle(2);
+    expect(store.addCalls.filter((c) => c.dollars !== -2.5)).toEqual([]);
+  });
+
+  it("refuses the reservation the month cannot absorb, and reports it", async () => {
+    const store = new FakeStore();
+    store.seed(TENANT, "2026-08", 9);
+    const refused: number[] = [];
+    const budget = buildAiDesignBudget({
+      store,
+      maxUsdPerMonth: 10,
+      now: fixedNow(FIXED),
+      onReservationRefused: (_t, estimate) => refused.push(estimate),
+    });
+    expect(await budget.reserve(TENANT, 1.01)).toBeNull();
+    expect(refused).toEqual([1.01]);
+    expect(store.totals.get(`${TENANT}|2026-08`)).toBe(9);
+  });
+
+  it("settles into the reservation's own month even when the clock has moved on", async () => {
+    const store = new FakeStore();
+    let now = new Date("2026-08-31T23:59:59.000Z");
+    const budget = buildAiDesignBudget({ store, maxUsdPerMonth: 10, now: () => now });
+    const r = await budget.reserve(TENANT, 3);
+    now = new Date("2026-09-01T00:00:01.000Z");
+    await r?.settle(5);
+    expect(store.addCalls).toEqual([{ tenantId: TENANT, periodKey: "2026-08", dollars: 2 }]);
+  });
+
+  it("propagates a ledger that cannot be written, so the designer refuses rather than spends", async () => {
+    const store = new FakeStore();
+    store.failReserve = true;
+    const budget = buildAiDesignBudget({ store, maxUsdPerMonth: 10, now: fixedNow(FIXED) });
+    await expect(budget.reserve(TENANT, 1)).rejects.toThrow(/ledger unavailable/);
   });
 });

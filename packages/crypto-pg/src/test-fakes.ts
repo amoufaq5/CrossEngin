@@ -306,6 +306,8 @@ export interface FakeDataKeysOptions {
    * would be the fake asserting a rule about a table the statement does not touch.
    */
   readonly answer?: (sql: string, params: readonly unknown[]) => PgQueryResult | null;
+  /** What `pg_try_advisory_xact_lock` answers; `false` is a lock another transaction holds. */
+  readonly tryLockGranted?: boolean;
 }
 
 export interface FakeDataKeysPg {
@@ -383,8 +385,37 @@ export function fakeDataKeysPg(options: FakeDataKeysOptions = {}): FakeDataKeysP
         }
         return { rows: [], rowCount: 0 };
       }
+      if (sql.includes("pg_try_advisory_xact_lock")) {
+        const locked = options.tryLockGranted ?? true;
+        return { rows: [{ locked }], rowCount: 1 };
+      }
       if (sql.includes("pg_advisory_xact_lock")) {
         return { rows: [], rowCount: 0 };
+      }
+
+      if (/^\s*UPDATE\b/.test(sql) && sql.includes("tenant_data_keys")) {
+        // The re-wrap is the only UPDATE this table takes. It is applied with both of its guards —
+        // the generation and the KEK generation it read — because a fake that matched on the
+        // tenant alone would show a re-wrap overwriting a newer row and still reporting one row.
+        const scope = statementScope(sql, p, "UPDATE");
+        const set = sql.match(/wrapped_key\s*=\s*\$(\d+),\s*kek_generation\s*=\s*\$(\d+)/);
+        const gen = sql.match(/AND generation\s*=\s*\$(\d+)/);
+        const kekGen = sql.match(/AND kek_generation\s*=\s*\$(\d+)/);
+        if (set === null || gen === null || kekGen === null) {
+          throw new Error("this fake refuses a data-key UPDATE that does not pin both generations");
+        }
+        const hit = rows.filter(
+          (r) =>
+            r["tenant_id"] === scope &&
+            (owner || r["tenant_id"] === currentTenant) &&
+            r["generation"] === p[Number(gen[1]) - 1] &&
+            r["kek_generation"] === p[Number(kekGen[1]) - 1],
+        );
+        for (const r of hit) {
+          r["wrapped_key"] = p[Number(set[1]) - 1];
+          r["kek_generation"] = p[Number(set[2]) - 1];
+        }
+        return { rows: [], rowCount: hit.length };
       }
 
       if (sql.includes("INSERT INTO")) {

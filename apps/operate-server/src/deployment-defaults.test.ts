@@ -1337,18 +1337,22 @@ describe("federated identity is not documented as a path that cannot be followed
     }
   });
 
-  it("states the tenant_id fallback, which is the highest-stakes precondition", () => {
-    // A verified token with no `tenant_id` claim takes its tenant from `x-tenant-id` (ADR-0098);
-    // measured live: an EdDSA token without the claim answered 200 in whichever tenant the header
-    // named. The README sentence is fenced against the runtime that makes it true.
-    const runtime = readFileSync(
-      resolve(here, "../../../packages/api-gateway-runtime/src/runtime.ts"),
+  it("states that tenant_id is required, and what relaxing it costs, which is the highest-stakes precondition", () => {
+    // A verified token with no `tenant_id` claim used to take its tenant from `x-tenant-id`
+    // (ADR-0098); measured live, an EdDSA token without the claim answered 200 in whichever tenant
+    // the header named. H-03 made the claim required, with `--jwt-optional-claim tenant_id` as the
+    // relaxation. This assertion used to pin the old sentence ("the caller picks the tenant"),
+    // which the change made false; it is fenced now against the claim set that makes the new one
+    // true, and against the old sentence coming back.
+    const auth = readFileSync(
+      resolve(here, "../../../packages/api-gateway-runtime/src/auth.ts"),
       "utf8",
     );
-    expect(runtime).toContain('typeof jwt.payload.tenant_id === "string"');
-    expect(flat(deployDoc(README))).toContain(
-      "No `tenant_id` claim means the caller picks the tenant.",
-    );
+    expect(auth).toContain('tenant_id: (v) => typeof v === "string" && v.length > 0');
+    const readme = flat(deployDoc(README));
+    expect(readme).toContain("**`sub` and `tenant_id` are required.**");
+    expect(readme).toContain("`--jwt-optional-claim tenant_id`");
+    expect(readme).not.toContain("No `tenant_id` claim means the caller picks the tenant.");
   });
 
   it("every documented serve command carries the login, and its document the two secrets", () => {
@@ -1854,5 +1858,96 @@ describe("the scheduled backup service (audit H-22)", () => {
     expect(backup).toContain("test ! -e /backups/.last-failed &&");
     // The script reads BACKUP_RETRY_SECONDS and the README documents it, so compose must pass it.
     expect(backup).toContain("BACKUP_RETRY_SECONDS: ${BACKUP_RETRY_SECONDS:-600}");
+  });
+});
+
+/**
+ * Five flags asked P0.3's per-flag question again — does it serve what it mounts, is what it
+ * records a claim, does its failure reach anybody, does its concurrency forge a finding, can its
+ * cost be reclaimed, does it change the answer for a deployment that works today — and none passes
+ * all six, so the command carries none of them. Each absence is fenced with the clause it fails, so
+ * adding one back is a decision that has to answer the measurement rather than a line nobody read.
+ */
+describe("the five flags that stay off, each with the clause it fails", () => {
+  const args = apiCommandArgs();
+
+  it("passes no --rate-limit-policy: it refuses traffic that works today, and its record never shrinks", () => {
+    // Clause 6: the in-memory default is 10,000/60s and nothing defaults a ceiling, so any declared
+    // policy is a limit a working deployment did not have. Clause 5: every decision is an INSERT into
+    // meta.rate_limit_decisions and no statement in the workspace deletes one (api-gateway-pg's only
+    // DELETEs are the idempotency store's), so the table grows by one row per request for ever.
+    expect(args).not.toContain("--rate-limit-policy");
+    expect(args).not.toContain("--rate-limit-default-policy");
+  });
+
+  it("passes no --classified-write-mask: it changes no shipped field, and only refuses designs that omit a grant", () => {
+    // Measured with surveySensitiveFields, mask off against mask on: 0 of the 173 resolved
+    // sensitive-classified fields across the seven packs change writers, because each carries an
+    // explicit grant since ADR-0348 — so on the boot pack the flag serves nothing (clause 1). Where
+    // it does bite is a tenant design that classifies a field and grants nobody, which a model can
+    // still emit (a prompt instructs, nothing validates): the mask turns that field from write-only
+    // into a 403, and a *required* one makes its entity uncreatable, which the per-tenant survey
+    // reports and does not refuse — a create that succeeds today would start failing (clause 6).
+    // Measured on the Architect's worked example before and after it gained field grants: with no
+    // grants both classified fields went from writable by [app_admin, app_user] to writable by
+    // nobody; with grants they are unchanged, which is the case a validator would make universal.
+    expect(args).not.toContain("--classified-write-mask");
+  });
+
+  it("passes no --schedule-ms: turning it on starts writing to the ledger on a deployment that works", () => {
+    // Clause 6: the served erp-core jobs post depreciation, mark invoices overdue and raise invoices
+    // from sales orders (ADR-0430), so the flag changes what a working deployment's books say. It is
+    // also refused at parse without --schedule-tenant or --schedule-all-tenants, and which tenants a
+    // scheduler writes into is a decision for the operator rather than a default.
+    expect(args).not.toContain("--schedule-ms");
+  });
+
+  it("passes no --workflow-workers: with no producer mounted it has nothing to execute", () => {
+    // Clause 1: no producer is on this command (--schedule-ms, --enable-job-invoke and
+    // --emit-entity-events are all absent), so the job worker claims from a queue nothing fills, and
+    // the timer and activity workers refuse no_definitions because nothing publishes a workflow
+    // definition. A worker fleet that serves nothing reads, in the process list, as one that works.
+    for (const producer of ["--schedule-ms", "--enable-job-invoke", "--emit-entity-events"]) {
+      expect(args).not.toContain(producer);
+    }
+    expect(args).not.toContain("--workflow-workers");
+  });
+
+  it("declares no deletion capabilities: they mount nothing alone, and the surface they enable destroys data", () => {
+    // Clause 1: the capability map mounts no route by itself. The routes it gates need a role and,
+    // for the runner, --deletion-subject-scope, whose only servable value erases every subject in a
+    // tenant when one subject asks (ADR-0379). Which of those a deployment exposes is a product
+    // decision with an irreversible failure mode, not a default.
+    for (const flag of ["--deletion-capabilities", "--deletion-capability", "--deletion-subject-scope"]) {
+      expect(args).not.toContain(flag);
+    }
+  });
+
+  it("fences flags the binary actually parses, so a rename cannot make an absence vacuous", () => {
+    const cli = readFileSync(resolve(here, "./cli.ts"), "utf8");
+    for (const flag of [
+      "--rate-limit-policy", "--classified-write-mask", "--schedule-ms", "--workflow-workers",
+      "--enable-job-invoke", "--emit-entity-events", "--deletion-capability", "--deletion-subject-scope",
+    ]) {
+      expect(cli, flag).toContain(`"${flag}"`);
+    }
+  });
+
+  it("ships no launcher that configures a credential the console no longer reads", () => {
+    // scripts/run-dev.ps1 started the API on --store memory with `--api-key devkey:…` on argv and the
+    // console with OPERATE_API_KEY='devkey'. operate-web reads that variable nowhere since ADR-0358
+    // and --credential-login refuses --store memory, so every console request it produced was a
+    // 401. It is deleted rather than repaired: a working version is the documented bootstrap, and a
+    // second copy of that is the copy that drifts (ADR-0364's addendum).
+    const root = resolve(here, "../../..");
+    const launchers = ["scripts/run-dev.ps1", "scripts/run-dev.sh"].filter((p) => {
+      try {
+        readFileSync(resolve(root, p));
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    expect(launchers).toEqual([]);
   });
 });

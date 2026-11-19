@@ -1590,12 +1590,14 @@ describe("compileOperateServer — a posted document is locked", () => {
     expect(back.body["detail"]).toContain("set its state to 'void' instead");
     expect(await journalEntryCount(store)).toBe(1);
 
-    // The one move left open lands in a locked state and posts nothing, so it cannot be walked back.
+    // The one move left open lands in a locked state and reverses the clearing — a void certificate
+    // no longer evidences the credit — so it cannot be walked back, and posts once.
     expect((await callOperation(compiled, "whtCertificate.update", { id }, { state: "void" })).status).toBe(200);
+    expect(await journalEntryCount(store)).toBe(2);
     const again = await callOperation(compiled, "whtCertificate.update", { id }, { state: "confirmed" });
     expect(again.body["error"]).toBe("wht_certificate_locked");
     expect(again.body["detail"]).toBe("a void WHT certificate cannot be edited");
-    expect(await journalEntryCount(store)).toBe(1);
+    expect(await journalEntryCount(store)).toBe(2);
   });
 
   it("names a reversed entry's state and no impossible remedy, and a posted one's real remedy", async () => {

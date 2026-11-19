@@ -5,6 +5,14 @@ export interface AnthropicModelPricing {
   readonly cacheWriteUsdPerMillion: number;
 }
 
+/**
+ * The date the list prices below were last checked against Anthropic's published table. A list
+ * price is not a contract price and goes stale; a deployment whose figure differs declares its own
+ * (`AnthropicProviderOptions.pricingOverride`). The Opus rows were 3x too high until this date —
+ * they carried the previous generation's $15/$75.
+ */
+export const ANTHROPIC_PRICING_AS_OF = "2026-11-03";
+
 export const ANTHROPIC_MODELS = [
   "claude-opus-4-7",
   "claude-opus-4-6",
@@ -16,16 +24,16 @@ export type AnthropicModel = (typeof ANTHROPIC_MODELS)[number];
 
 export const ANTHROPIC_PRICING: Readonly<Record<AnthropicModel, AnthropicModelPricing>> = {
   "claude-opus-4-7": {
-    inputUsdPerMillion: 15,
-    cachedInputUsdPerMillion: 1.5,
-    outputUsdPerMillion: 75,
-    cacheWriteUsdPerMillion: 18.75,
+    inputUsdPerMillion: 5,
+    cachedInputUsdPerMillion: 0.5,
+    outputUsdPerMillion: 25,
+    cacheWriteUsdPerMillion: 6.25,
   },
   "claude-opus-4-6": {
-    inputUsdPerMillion: 15,
-    cachedInputUsdPerMillion: 1.5,
-    outputUsdPerMillion: 75,
-    cacheWriteUsdPerMillion: 18.75,
+    inputUsdPerMillion: 5,
+    cachedInputUsdPerMillion: 0.5,
+    outputUsdPerMillion: 25,
+    cacheWriteUsdPerMillion: 6.25,
   },
   "claude-sonnet-4-6": {
     inputUsdPerMillion: 3,
@@ -58,8 +66,12 @@ export interface UsageCostInput {
   readonly outputTokens: number;
 }
 
-export function computeUsageCost(model: AnthropicModel, usage: UsageCostInput): number {
-  const pricing = ANTHROPIC_PRICING[model];
+export function computeUsageCost(
+  model: AnthropicModel,
+  usage: UsageCostInput,
+  pricingOverride?: AnthropicModelPricing,
+): number {
+  const pricing = pricingOverride ?? ANTHROPIC_PRICING[model];
   const inputDollars =
     ((usage.inputTokens - (usage.cachedInputTokens ?? 0)) * pricing.inputUsdPerMillion) /
     1_000_000;

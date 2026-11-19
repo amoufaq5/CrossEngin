@@ -4,6 +4,13 @@ export interface OpenAiModelPricing {
   readonly outputUsdPerMillion: number;
 }
 
+/**
+ * The date this table was last written. Unlike `ANTHROPIC_PRICING_AS_OF` it has not been re-checked
+ * against the vendor's published prices since; a deployment whose price differs declares its own
+ * (`OpenAiProviderOptions.pricingOverride`).
+ */
+export const OPENAI_PRICING_AS_OF = "2026-08-26";
+
 export const OPENAI_CHAT_MODELS = [
   "gpt-4.1",
   "gpt-4.1-mini",
@@ -63,11 +70,15 @@ export interface UsageCostInput {
   readonly outputTokens: number;
 }
 
-/** Total, never throwing: an unpriced model costs 0. A self-hosted model has no
+/** Total, never throwing: an unpriced model with no declared price costs 0. A self-hosted model has no
  * per-token vendor cost, and charging OpenAI's list price for someone else's
  * endpoint would put a wrong number in a cost ledger. */
-export function computeUsageCost(model: string, usage: UsageCostInput): number {
-  const pricing = openAiPricingFor(model);
+export function computeUsageCost(
+  model: string,
+  usage: UsageCostInput,
+  pricingOverride?: OpenAiModelPricing,
+): number {
+  const pricing = pricingOverride ?? openAiPricingFor(model);
   if (pricing === undefined) return 0;
   const cached = usage.cachedInputTokens ?? 0;
   const uncachedInput = Math.max(0, usage.inputTokens - cached);

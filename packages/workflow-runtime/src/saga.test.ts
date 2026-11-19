@@ -154,6 +154,73 @@ describe("listCompensatableActivities", () => {
   });
 });
 
+describe("listCompensatableActivities admits only work that completed", () => {
+  const scheduled = (seq: number, activityId: string, attempt = 1): WorkflowEvent =>
+    event({
+      kind: "activity_scheduled",
+      sequenceNumber: seq,
+      activityId,
+      payload: { kind: "http_call", definitionActivityKey: "charge", compensationActivityKey: "refund", attemptNumber: attempt },
+    });
+
+  it("excludes an activity that failed outright, so a charge that never happened is not refunded", () => {
+    const out = listCompensatableActivities([
+      scheduled(0, "wfa_act00001"),
+      event({ kind: "activity_started", sequenceNumber: 1, activityId: "wfa_act00001" }),
+      event({ kind: "activity_failed", sequenceNumber: 2, activityId: "wfa_act00001" }),
+    ]);
+    expect(out).toEqual([]);
+  });
+
+  it("excludes an activity that timed out or was cancelled before its handler ran", () => {
+    const out = listCompensatableActivities([
+      scheduled(0, "wfa_act00001"),
+      event({ kind: "activity_timed_out", sequenceNumber: 1, activityId: "wfa_act00001" }),
+      scheduled(2, "wfa_act00002"),
+      event({ kind: "activity_cancelled", sequenceNumber: 3, activityId: "wfa_act00002", payload: { checkpoint: "before_handler" } }),
+    ]);
+    expect(out).toEqual([]);
+  });
+
+  it("counts a retried activity once — the attempt that succeeded", () => {
+    const out = listCompensatableActivities([
+      scheduled(0, "wfa_att00001", 1),
+      event({ kind: "activity_failed", sequenceNumber: 1, activityId: "wfa_att00001" }),
+      scheduled(2, "wfa_att00002", 2),
+      event({ kind: "activity_failed", sequenceNumber: 3, activityId: "wfa_att00002" }),
+      scheduled(4, "wfa_att00003", 3),
+      event({ kind: "activity_completed", sequenceNumber: 5, activityId: "wfa_att00003", occurredAt: "2026-05-16T12:05:00.000Z" }),
+    ]);
+    expect(out.map((a) => a.activityId)).toEqual(["wfa_att00003"]);
+    expect(out[0]?.completedAt).toBe("2026-05-16T12:05:00.000Z");
+  });
+
+  it("includes a completion that arrived after a cooperative cancellation — the work happened", () => {
+    const out = listCompensatableActivities([
+      scheduled(0, "wfa_act00001"),
+      event({ kind: "activity_started", sequenceNumber: 1, activityId: "wfa_act00001" }),
+      event({ kind: "activity_cancelled", sequenceNumber: 2, activityId: "wfa_act00001", payload: { checkpoint: "cooperative_abort" } }),
+      event({ kind: "activity_completed", sequenceNumber: 3, activityId: "wfa_act00001" }),
+    ]);
+    expect(out.map((a) => a.activityId)).toEqual(["wfa_act00001"]);
+  });
+
+  it("keeps an activity outstanding when its compensation step failed", () => {
+    const events = [
+      scheduled(0, "wfa_act00001"),
+      event({ kind: "activity_completed", sequenceNumber: 1, activityId: "wfa_act00001" }),
+      event({
+        kind: "compensation_step_completed",
+        sequenceNumber: 2,
+        activityId: "wfa_act00001",
+        payload: { compensationStatus: "failed" },
+      }),
+    ];
+    expect(listCompensatableActivities(events).map((a) => a.activityId)).toEqual(["wfa_act00001"]);
+    expect(hasOutstandingCompensation(events)).toBe(true);
+  });
+});
+
 describe("planCompensation", () => {
   it("returns an empty plan for no_compensation strategy", () => {
     const plan = planCompensation({

@@ -137,9 +137,24 @@ SELECT format(
   'ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA meta GRANT USAGE, SELECT ON SEQUENCES TO %I',
   current_user, :'app_user') \gexec
 
+-- A table the catalog fences against a tenant DELETE (a restrictive `FOR DELETE USING (false)`
+-- policy, ADR-0400 and after) answers a fenced DELETE with `DELETE 0` and no error code, which a
+-- caller cannot tell from an empty scope. The privilege is taken away as well, so the same statement
+-- from this role is refused `42501 permission denied` by name. Derived from the policies themselves
+-- rather than listed, so a fence `migrate` adds is followed on the next run, and re-applied after the
+-- blanket GRANT above on every run. The owner keeps DELETE, so the Article 17 erasure — which refuses
+-- a session RLS confines and so never runs as this role — is untouched.
+SELECT format('REVOKE DELETE ON %I.%I FROM %I', n.nspname, c.relname, :'app_user')
+  FROM pg_policy p
+  JOIN pg_class c ON c.oid = p.polrelid
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+ WHERE n.nspname = 'meta' AND p.polcmd = 'd' AND NOT p.polpermissive
+   AND pg_get_expr(p.polqual, p.polrelid) = 'false'
+\gexec
+
 -- The result, read back from the catalog rather than asserted: what the API's own boot line will say.
 SELECT format(
-  'app-role: %s is ready -- superuser=%s bypassrls=%s; DML on %s of %s catalog tables in meta; owns %s of them',
+  'app-role: %s is ready -- superuser=%s bypassrls=%s; DML on %s of %s catalog tables in meta (DELETE withheld on %s fenced); owns %s of them',
   r.rolname, r.rolsuper, r.rolbypassrls,
   (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE n.nspname = 'meta' AND c.relkind IN ('r', 'p') AND c.relname <> '_meta_migrations'
@@ -147,6 +162,11 @@ SELECT format(
       AND has_table_privilege(r.rolname, c.oid, 'UPDATE') AND has_table_privilege(r.rolname, c.oid, 'DELETE')),
   (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE n.nspname = 'meta' AND c.relkind IN ('r', 'p') AND c.relname <> '_meta_migrations'),
+  (SELECT count(DISTINCT c.oid) FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid
+     JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'meta' AND p.polcmd = 'd' AND NOT p.polpermissive
+      AND has_table_privilege(r.rolname, c.oid, 'SELECT')
+      AND NOT has_table_privilege(r.rolname, c.oid, 'DELETE')),
   (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE n.nspname = 'meta' AND c.relowner = r.oid)) AS app_role
   FROM pg_roles r WHERE r.rolname = :'app_user';

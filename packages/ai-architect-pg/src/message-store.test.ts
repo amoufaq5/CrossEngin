@@ -1,6 +1,6 @@
-import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
+import { tenantScopedConnection, type StatementHandler } from "./test-fakes.js";
 import { PostgresArchitectMessageStore } from "./message-store.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
@@ -8,15 +8,8 @@ const SESSION = "00000000-0000-4000-8000-000000000002";
 const MSG_ID = "00000000-0000-4000-8000-000000000003";
 const TS = "2026-05-17T12:00:00.000Z";
 
-function mockConnection(
-  handler: (sql: string, params: readonly unknown[] | undefined) => PgQueryResult<Record<string, unknown>>,
-): PgConnection {
-  return {
-    query: vi.fn(async (sql: string, params?: readonly unknown[]) => handler(sql, params)) as PgConnection["query"],
-    transaction: vi.fn() as PgConnection["transaction"],
-    withAdvisoryLock: vi.fn() as PgConnection["withAdvisoryLock"],
-    close: vi.fn() as PgConnection["close"],
-  };
+function mockConnection(handler: StatementHandler): ReturnType<typeof tenantScopedConnection> {
+  return tenantScopedConnection(handler);
 }
 
 function messageRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -64,6 +57,8 @@ describe("PostgresArchitectMessageStore.append", () => {
     });
     expect(record.role).toBe("user");
     expect(record.content).toBe("hi");
+    // The insert ran inside a transaction that set the row's own tenant first (M-17).
+    expect(conn.statements.map((st) => st.tenant)).toEqual([TENANT]);
   });
 
   it("serializes toolUses to JSONB and parses on read-back", async () => {
@@ -145,8 +140,19 @@ describe("PostgresArchitectMessageStore.listForSession", () => {
       };
     });
     const store = new PostgresArchitectMessageStore(conn);
-    const list = await store.listForSession(SESSION);
+    const list = await store.listForSession(TENANT, SESSION);
     expect(list).toHaveLength(2);
     expect(list[1]?.role).toBe("assistant");
+  });
+});
+
+describe("PostgresArchitectMessageStore runs every statement under the row's tenant (M-17)", () => {
+  it("scopes the read by predicate as well as by context", async () => {
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
+    await new PostgresArchitectMessageStore(conn).listForSession(TENANT, SESSION);
+    expect(conn.statements).toHaveLength(1);
+    expect(conn.statements[0]?.tenant).toBe(TENANT);
+    expect(conn.statements[0]?.sql).toContain("session_id = $1 AND tenant_id = $2");
+    expect(conn.statements[0]?.params).toEqual([SESSION, TENANT]);
   });
 });

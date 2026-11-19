@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   ANTHROPIC_MODELS,
+  ANTHROPIC_PRICING_AS_OF,
   ANTHROPIC_PRICING,
   computeUsageCost,
   isAnthropicModel,
@@ -18,6 +19,12 @@ describe("ANTHROPIC_MODELS", () => {
     for (const model of ANTHROPIC_MODELS) {
       expect(ANTHROPIC_PRICING[model]).toBeDefined();
     }
+  });
+});
+
+describe("ANTHROPIC_PRICING_AS_OF", () => {
+  it("is a calendar date a reader can compare against the vendor's table", () => {
+    expect(ANTHROPIC_PRICING_AS_OF).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
 });
 
@@ -76,16 +83,23 @@ describe("computeUsageCost", () => {
     expect(cost).toBeCloseTo(15, 5);
   });
 
-  it("opus is 5x sonnet input rate", () => {
-    const opus = computeUsageCost("claude-opus-4-7", {
-      inputTokens: 1_000_000,
-      outputTokens: 0,
-    });
-    const sonnet = computeUsageCost("claude-sonnet-4-6", {
-      inputTokens: 1_000_000,
-      outputTokens: 0,
-    });
-    expect(opus / sonnet).toBeCloseTo(5, 1);
+  it("prices Opus 4.6/4.7 at $5 in / $25 out, not the previous generation's $15 / $75", () => {
+    for (const model of ["claude-opus-4-7", "claude-opus-4-6"] as const) {
+      expect(computeUsageCost(model, { inputTokens: 1_000_000, outputTokens: 0 })).toBeCloseTo(5, 6);
+      expect(computeUsageCost(model, { inputTokens: 0, outputTokens: 1_000_000 })).toBeCloseTo(25, 6);
+    }
+  });
+
+  it("charges a declared price in place of the catalogue's", () => {
+    const declared = {
+      inputUsdPerMillion: 2,
+      cachedInputUsdPerMillion: 0.2,
+      outputUsdPerMillion: 10,
+      cacheWriteUsdPerMillion: 2.5,
+    };
+    expect(
+      computeUsageCost("claude-sonnet-4-6", { inputTokens: 1_000_000, outputTokens: 1_000_000 }, declared),
+    ).toBeCloseTo(12, 6);
   });
 
   it("rounds to 6 decimal places", () => {

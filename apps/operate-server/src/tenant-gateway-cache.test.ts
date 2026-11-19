@@ -195,6 +195,7 @@ function sessionFor(
     userId: "22222222-2222-4222-8222-222222222222",
     tenantId,
     roles: { primaryRole: "operator", secondaryRoles: [] },
+    sessionEpoch: 0,
     now: GATEWAY_NOW,
     lifetimeSeconds: DEFAULT_SESSION_TOKEN_SECONDS,
     kid: "login-v1",

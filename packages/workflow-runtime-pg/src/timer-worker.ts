@@ -72,6 +72,7 @@ export function buildTimerProcessor(
         renewer: renewal.renewer,
         timerId: timer.timerId,
         workerId: renewal.workerId,
+        tenantId: timer.tenantId,
         intervalMs: renewal.intervalMs,
         sleep: renewal.sleep,
         ...(renewal.onLeaseLost !== undefined ? { onLeaseLost: renewal.onLeaseLost } : {}),
@@ -106,14 +107,17 @@ export interface BuildWorkflowTimerWorkerInput {
 export function buildWorkflowTimerWorker(input: BuildWorkflowTimerWorkerInput): WorkflowTimerWorker {
   const claimer = buildTimerClaimer(input.conn, input.schema !== undefined ? { schema: input.schema } : {});
   // Optional lease renewal: heartbeat the claim while a fire runs so a slow advance isn't stolen.
+  // Built whether or not the heartbeat is on: the batch reaffirms every claim before its item starts,
+  // which is what keeps an item queued behind a slow one from running on a lease it no longer holds.
+  const claimRenewer = buildClaimRenewer(input.conn, {
+    leaseMs: input.leaseMs ?? 30_000,
+    ...(input.now !== undefined ? { now: input.now } : {}),
+    ...(input.schema !== undefined ? { schema: input.schema } : {}),
+  });
   const renewal: TimerRenewalConfig | undefined =
     input.renewIntervalMs !== undefined
       ? {
-          renewer: buildClaimRenewer(input.conn, {
-            leaseMs: input.leaseMs ?? 30_000,
-            ...(input.now !== undefined ? { now: input.now } : {}),
-            ...(input.schema !== undefined ? { schema: input.schema } : {}),
-          }),
+          renewer: claimRenewer,
           workerId: input.workerId,
           intervalMs: input.renewIntervalMs,
           sleep: input.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))),
@@ -127,6 +131,7 @@ export function buildWorkflowTimerWorker(input: BuildWorkflowTimerWorkerInput): 
     workerId: input.workerId,
     claimer,
     processor,
+    claimRenewer,
     ...(input.batchLimit !== undefined ? { batchLimit: input.batchLimit } : {}),
     ...(input.leaseMs !== undefined ? { leaseMs: input.leaseMs } : {}),
     ...(input.idlePollMs !== undefined ? { idlePollMs: input.idlePollMs } : {}),

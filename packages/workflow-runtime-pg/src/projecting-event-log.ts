@@ -1,9 +1,10 @@
-import type { PgConnection } from "@crossengin/kernel-pg";
+import { assertScopeTenantId, type PgConnection } from "@crossengin/kernel-pg";
 import type { ActivityKind, ActivityStatus, WorkflowDefinition, WorkflowEvent } from "@crossengin/workflow-engine";
 import { type EventLog, projectInstance } from "@crossengin/workflow-runtime";
 
 import { projectPersistableActivities } from "./activity-provenance.js";
 import { PostgresActivityStore } from "./activity-store.js";
+import { PostgresEventLog } from "./event-log.js";
 import {
   WorkflowDefinitionIdResolver,
   WorkflowInstanceIdResolver,
@@ -12,7 +13,69 @@ import { PostgresInstanceStore } from "./instance-store.js";
 import { projectPersistableSignals } from "./signal-provenance.js";
 import { PostgresSignalDeduplicator, PostgresSignalStore } from "./signal-store.js";
 import { projectPersistableTimers } from "./timer-provenance.js";
+import { SET_TENANT_CONTEXT_SQL } from "./tenant-context.js";
 import { PostgresTimerStore } from "./timer-store.js";
+
+/** The log and the four projection stores one append writes through. */
+export interface ProjectionWriteScope {
+  readonly inner: EventLog;
+  readonly instanceStore: PostgresInstanceStore;
+  readonly activityStore: PostgresActivityStore;
+  readonly signalStore: PostgresSignalStore;
+  readonly timerStore: PostgresTimerStore;
+}
+
+/**
+ * Runs one append — the event and every projection it moves — as one unit, under the event's tenant.
+ */
+export type AppendUnit = <T>(
+  tenantId: string,
+  work: (scope: ProjectionWriteScope) => Promise<T>,
+) => Promise<T>;
+
+/**
+ * One append, one transaction, under the event's own tenant context.
+ *
+ * The append used to be up to `2 + A + S + T` separate statements on the pool: the event committed
+ * on its own and the projections followed, so anything that failed after the `INSERT` — a refused
+ * provenance, `SignalIdempotencyConflict`, a dropped connection — left the event committed and the
+ * claim tables stale. A `timer_scheduled` whose projection write failed was never fired, and because
+ * a provenance refusal recurs on every later append of that instance, its projection never advanced
+ * again: "refuse rather than persist" was "persist the event, then throw" (R15-05). In one
+ * transaction the log and its projections commit or roll back together, which is also what makes
+ * `WorkflowReplayer.verifyInstance`'s equality comparison sound: read under one snapshot, the
+ * projection is the fold of the log by construction, and a difference is drift rather than a
+ * concurrent append caught between two reads (CLAUDE.md register P2.17).
+ *
+ * The tenant context is set because the five tables carry one isolation policy each and nothing
+ * else, so a confined session's writes are refused without it; the scope is a fact about the event,
+ * not something a caller chooses. The *reads* the engine makes outside an append are still unscoped
+ * (CLAUDE.md, "Four stores in `workflow-runtime-pg` set no tenant context"), so this does not by
+ * itself make the engine usable as a confined role.
+ */
+export function transactionalAppendUnit(
+  conn: PgConnection,
+  resolvers: {
+    readonly instanceResolver: WorkflowInstanceIdResolver;
+    readonly definitionResolver: WorkflowDefinitionIdResolver;
+  },
+): AppendUnit {
+  return async (tenantId, work) => {
+    assertScopeTenantId(tenantId);
+    return conn.transaction(async (tx) => {
+      await tx.query(SET_TENANT_CONTEXT_SQL, [tenantId]);
+      const instanceResolver = resolvers.instanceResolver.boundTo(tx);
+      const definitionResolver = resolvers.definitionResolver.boundTo(tx);
+      return work({
+        inner: new PostgresEventLog({ conn: tx, instanceResolver }),
+        instanceStore: new PostgresInstanceStore({ conn: tx, instanceResolver, definitionResolver }),
+        activityStore: new PostgresActivityStore({ conn: tx, instanceResolver }),
+        signalStore: new PostgresSignalStore({ conn: tx, instanceResolver }),
+        timerStore: new PostgresTimerStore({ conn: tx, instanceResolver }),
+      });
+    });
+  };
+}
 
 export interface ProjectingEventLogOptions {
   readonly inner: EventLog;
@@ -21,6 +84,14 @@ export interface ProjectingEventLogOptions {
   readonly activityStore: PostgresActivityStore;
   readonly signalStore: PostgresSignalStore;
   readonly timerStore: PostgresTimerStore;
+  /**
+   * Writes each append as one unit (`transactionalAppendUnit`). **Required**, and `null` is the
+   * explicit claim that the event and its projections are written as separate statements through
+   * the stores above — which is only honest for a log with no transaction to offer.
+   */
+  readonly appendUnit: AppendUnit | null;
+  /** Forgets an id mapping a rolled-back append registered; the resolver the stores above share. */
+  readonly instanceResolver?: WorkflowInstanceIdResolver;
 }
 
 export class ProjectingEventLog implements EventLog {
@@ -30,6 +101,8 @@ export class ProjectingEventLog implements EventLog {
   private readonly activityStore: PostgresActivityStore;
   private readonly signalStore: PostgresSignalStore;
   private readonly timerStore: PostgresTimerStore;
+  private readonly appendUnit: AppendUnit | null;
+  private readonly instanceResolver: WorkflowInstanceIdResolver | undefined;
   private readonly createdInstances: Set<string> = new Set();
 
   constructor(opts: ProjectingEventLogOptions) {
@@ -39,9 +112,39 @@ export class ProjectingEventLog implements EventLog {
     this.activityStore = opts.activityStore;
     this.signalStore = opts.signalStore;
     this.timerStore = opts.timerStore;
+    this.appendUnit = opts.appendUnit;
+    this.instanceResolver = opts.instanceResolver;
   }
 
   async append(event: WorkflowEvent): Promise<void> {
+    if (this.appendUnit === null) {
+      await this.appendThrough(this.ownScope(), event);
+      return;
+    }
+    try {
+      await this.appendUnit(event.tenantId, (scope) => this.appendThrough(scope, event));
+    } catch (err) {
+      // The transaction rolled back, so an instance it created does not exist: the id it registered
+      // in the shared cache would otherwise resolve to a row that was never committed.
+      if (event.kind === "instance_started") {
+        this.instanceResolver?.invalidate(event.instanceId);
+        this.createdInstances.delete(event.instanceId);
+      }
+      throw err;
+    }
+  }
+
+  private ownScope(): ProjectionWriteScope {
+    return {
+      inner: this.inner,
+      instanceStore: this.instanceStore,
+      activityStore: this.activityStore,
+      signalStore: this.signalStore,
+      timerStore: this.timerStore,
+    };
+  }
+
+  private async appendThrough(scope: ProjectionWriteScope, event: WorkflowEvent): Promise<void> {
     if (event.kind === "instance_started") {
       const initialProjection = projectInstance([event]);
       if (initialProjection === null) {
@@ -54,15 +157,15 @@ export class ProjectingEventLog implements EventLog {
       if (definitionId.length === 0) {
         throw new Error(`instance_started event missing definitionId for ${event.instanceId}`);
       }
-      await this.instanceStore.create({
+      await scope.instanceStore.create({
         projection: initialProjection,
         definitionId,
       });
       this.createdInstances.add(event.instanceId);
     }
 
-    await this.inner.append(event);
-    await this.persistProjections(event);
+    await scope.inner.append(event);
+    await this.persistProjections(scope, event);
   }
 
   async appendBatch(events: readonly WorkflowEvent[]): Promise<void> {
@@ -83,8 +186,8 @@ export class ProjectingEventLog implements EventLog {
     return this.inner.count();
   }
 
-  private async persistProjections(event: WorkflowEvent): Promise<void> {
-    const events = await this.inner.listByInstance(event.instanceId);
+  private async persistProjections(scope: ProjectionWriteScope, event: WorkflowEvent): Promise<void> {
+    const events = await scope.inner.listByInstance(event.instanceId);
     if (events.length === 0) return;
 
     const first = events[0]!;
@@ -97,7 +200,7 @@ export class ProjectingEventLog implements EventLog {
     if (event.kind !== "instance_started") {
       const projection = projectInstance(events, definition);
       if (projection !== null) {
-        await this.instanceStore.upsertProjection(projection);
+        await scope.instanceStore.upsertProjection(projection);
       }
     }
 
@@ -110,17 +213,17 @@ export class ProjectingEventLog implements EventLog {
     // open instead of letting a cast close it.
     const activities = projectPersistableActivities(events, definition);
     if (activities.length > 0) {
-      await this.activityStore.upsertMany(activities);
+      await scope.activityStore.upsertMany(activities);
     }
 
     const signals = projectPersistableSignals(events, definition);
     if (signals.length > 0) {
-      await this.signalStore.upsertMany(signals);
+      await scope.signalStore.upsertMany(signals);
     }
 
     const timers = projectPersistableTimers(events, definition);
     if (timers.length > 0) {
-      await this.timerStore.upsertMany(timers);
+      await scope.timerStore.upsertMany(timers);
     }
   }
 }

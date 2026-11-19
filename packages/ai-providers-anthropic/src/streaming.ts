@@ -1,7 +1,7 @@
 import type { CompletionChunk } from "@crossengin/ai-providers";
 
 import { normalizeUsage, type AnthropicUsage } from "./messages-api.js";
-import type { AnthropicModel } from "./pricing.js";
+import type { AnthropicModel, AnthropicModelPricing } from "./pricing.js";
 
 export interface SseEvent {
   readonly event: string;
@@ -180,6 +180,7 @@ function asInt(value: unknown): number | null {
 export async function* readSseStream(
   body: ReadableStream<Uint8Array>,
   model: AnthropicModel,
+  pricing?: AnthropicModelPricing,
 ): AsyncGenerator<CompletionChunk, void, void> {
   const decoder = new TextDecoder();
   const reader = body.getReader();
@@ -192,29 +193,41 @@ export async function* readSseStream(
     toolCallIds: new Map(),
   };
   let buffer = "";
-  while (true) {
-    const { value, done } = await reader.read();
-    if (value !== undefined) {
-      buffer += decoder.decode(value, { stream: true });
-      const splitIdx = buffer.lastIndexOf("\n\n");
-      if (splitIdx >= 0) {
-        const complete = buffer.slice(0, splitIdx + 2);
-        buffer = buffer.slice(splitIdx + 2);
-        for (const chunk of processSseEvents(complete, state)) yield chunk;
+  let finished = false;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (value !== undefined) {
+        buffer += decoder.decode(value, { stream: true });
+        const splitIdx = buffer.lastIndexOf("\n\n");
+        if (splitIdx >= 0) {
+          const complete = buffer.slice(0, splitIdx + 2);
+          buffer = buffer.slice(splitIdx + 2);
+          for (const chunk of processSseEvents(complete, state)) yield chunk;
+        }
       }
+      if (done) break;
     }
-    if (done) break;
+    finished = true;
+  } finally {
+    // A consumer that stops iterating (a cost meter aborting, an error thrown upstream) leaves the
+    // body unread; cancelling releases the connection instead of leaving it open behind us.
+    if (!finished) await reader.cancel().catch(() => undefined);
   }
   if (buffer.trim().length > 0) {
     for (const chunk of processSseEvents(buffer, state)) yield chunk;
   }
   yield {
     kind: "usage_final",
-    usage: normalizeUsage(state.model, {
-      input_tokens: state.inputTokens,
-      output_tokens: state.outputTokens,
-      cache_read_input_tokens: state.cachedInputTokens,
-      cache_creation_input_tokens: state.cacheCreationInputTokens,
-    }),
+    usage: normalizeUsage(
+      state.model,
+      {
+        input_tokens: state.inputTokens,
+        output_tokens: state.outputTokens,
+        cache_read_input_tokens: state.cachedInputTokens,
+        cache_creation_input_tokens: state.cacheCreationInputTokens,
+      },
+      pricing === undefined ? {} : { pricing },
+    ),
   };
 }

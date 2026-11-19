@@ -79,6 +79,7 @@ export interface DesignProgressLike {
 }
 
 export type ProgressingDesignerLike = (input: {
+  tenantId: string;
   description: string;
   name?: string;
   onProgress?: (progress: DesignProgressLike) => void;
@@ -93,7 +94,6 @@ export interface DesignRunnerOptions {
   readonly jobs: DesignJobStoreLike;
   readonly manifests: AiManifestStoreLike;
   readonly designer: ProgressingDesignerLike;
-  readonly budget?: { record(tenantId: string, costUsd: number): Promise<number> };
   readonly onError?: (err: unknown) => void;
 }
 
@@ -113,6 +113,9 @@ function errorMessage(err: unknown): string {
 }
 
 function failureMessage(result: DesignResultLike): string {
+  if (result.failure === "monthly_budget_exhausted") {
+    return result.issues[0] ?? "the monthly AI design budget cannot absorb this design";
+  }
   const plural = result.attempts === 1 ? "attempt" : "attempts";
   return `design failed after ${String(result.attempts)} ${plural}`;
 }
@@ -128,7 +131,7 @@ export async function runDesignJob(
   jobId: string,
   input: DesignRunnerInput,
 ): Promise<void> {
-  const { jobs, manifests, designer, budget, onError } = opts;
+  const { jobs, manifests, designer, onError } = opts;
 
   // Progress arrives synchronously from the designer but each write is async, so
   // the writes are chained on a tail promise: overlapping updates would let a
@@ -167,6 +170,7 @@ export async function runDesignJob(
 
   try {
     const result = await designer({
+      tenantId,
       description: input.description,
       name: input.name,
       onProgress: (progress: DesignProgressLike): void => {
@@ -182,14 +186,8 @@ export async function runDesignJob(
       },
     });
 
-    // Charge before branching: a failed design still burned the tokens.
-    if (budget !== undefined && result.usage !== null && result.usage.cost > 0) {
-      try {
-        await budget.record(tenantId, result.usage.cost);
-      } catch (err: unknown) {
-        onError?.(err);
-      }
-    }
+    // No charge here: the designer reserved each attempt against the month before calling the
+    // provider and settled it after, so recording `result.usage` again would charge it twice.
 
     if (!result.ok || result.manifest === null || result.manifestHash === null) {
       await settle(async () =>

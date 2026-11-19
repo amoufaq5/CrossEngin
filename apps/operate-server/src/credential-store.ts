@@ -37,6 +37,18 @@ export interface CredentialRecord {
   readonly credentialHash: string | null;
   readonly failedAttempts: number;
   readonly lockedUntil: string | null;
+  /** `meta.users.session_epoch`: the generation a session minted now is stamped with. */
+  readonly sessionEpoch: number;
+}
+
+/**
+ * What a request needs to know about the person a session names: whether they may still act, and
+ * which generation of sessions is current. Deliberately narrower than `CredentialRecord`, because
+ * this is read on the request path and must not carry the hash.
+ */
+export interface SessionStanding {
+  readonly status: string;
+  readonly sessionEpoch: number;
 }
 
 /**
@@ -53,7 +65,20 @@ export interface TenantRef {
 }
 
 const CREDENTIAL_COLUMNS =
-  "id, status, credential_hash, credential_failed_attempts, credential_locked_until";
+  "id, status, credential_hash, credential_failed_attempts, credential_locked_until, session_epoch";
+
+function rowToCredentialRecord(row: Record<string, unknown>): CredentialRecord {
+  const hash = row["credential_hash"];
+  const locked = row["credential_locked_until"];
+  return {
+    userId: String(row["id"]),
+    status: String(row["status"]),
+    credentialHash: typeof hash === "string" && hash !== "" ? hash : null,
+    failedAttempts: Number(row["credential_failed_attempts"] ?? 0),
+    lockedUntil: locked === null || locked === undefined ? null : isoInstant(locked),
+    sessionEpoch: Number(row["session_epoch"] ?? 0),
+  };
+}
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -128,16 +153,7 @@ export class PostgresCredentialStore {
       [normalizeEmail(email)],
     );
     const row = result.rows[0];
-    if (row === undefined) return null;
-    const hash = row["credential_hash"];
-    const locked = row["credential_locked_until"];
-    return {
-      userId: String(row["id"]),
-      status: String(row["status"]),
-      credentialHash: typeof hash === "string" && hash !== "" ? hash : null,
-      failedAttempts: Number(row["credential_failed_attempts"] ?? 0),
-      lockedUntil: locked === null || locked === undefined ? null : isoInstant(locked),
-    };
+    return row === undefined ? null : rowToCredentialRecord(row);
   }
 
   /**
@@ -161,16 +177,7 @@ export class PostgresCredentialStore {
       [userId.trim().toLowerCase()],
     );
     const row = result.rows[0];
-    if (row === undefined) return null;
-    const hash = row["credential_hash"];
-    const locked = row["credential_locked_until"];
-    return {
-      userId: String(row["id"]),
-      status: String(row["status"]),
-      credentialHash: typeof hash === "string" && hash !== "" ? hash : null,
-      failedAttempts: Number(row["credential_failed_attempts"] ?? 0),
-      lockedUntil: locked === null || locked === undefined ? null : isoInstant(locked),
-    };
+    return row === undefined ? null : rowToCredentialRecord(row);
   }
 
   /**
@@ -276,12 +283,67 @@ export class PostgresCredentialStore {
    * than reporting a success it did not have.
    */
   async setCredential(userId: string, credentialHash: string): Promise<boolean> {
+    // `session_epoch` advances in the same statement: a password set is the moment every session
+    // minted under the previous one must stop working, and a second statement could land between
+    // two requests that would then disagree about which sessions are current.
     const result = await this.conn.query(
       `UPDATE ${this.users} SET credential_hash = $2, credential_updated_at = now(),` +
-        " credential_failed_attempts = 0, credential_locked_until = NULL, updated_at = now()" +
+        " credential_failed_attempts = 0, credential_locked_until = NULL," +
+        " session_epoch = session_epoch + 1, updated_at = now()" +
         " WHERE id = $1::uuid",
       [userId, credentialHash],
     );
     return (result.rowCount ?? 0) > 0;
+  }
+
+  /**
+   * Replaces a hash with the same password re-hashed under current parameters or the current
+   * pepper -- which is **not** a password change, so it ends no session.
+   *
+   * It is `setCredential`'s sibling rather than a flag on it for that reason, and it is conditional
+   * on the hash it is replacing: a login that verified the old password and a password change
+   * landing in the window between that verification and this write must not have the re-hash of
+   * the old password overwrite the new one. Answers whether it landed.
+   */
+  async rehashCredential(
+    userId: string,
+    replacedHash: string,
+    credentialHash: string,
+  ): Promise<boolean> {
+    const result = await this.conn.query(
+      `UPDATE ${this.users} SET credential_hash = $3, updated_at = now()` +
+        " WHERE id = $1::uuid AND credential_hash = $2",
+      [userId, replacedHash, credentialHash],
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  /**
+   * Ends every session this user holds by advancing the generation a session must carry. Answers
+   * the new generation, or `null` when no row matched.
+   */
+  async endSessions(userId: string): Promise<number | null> {
+    const result = await this.conn.query<Record<string, unknown>>(
+      `UPDATE ${this.users} SET session_epoch = session_epoch + 1, updated_at = now()` +
+        " WHERE id = $1::uuid RETURNING session_epoch",
+      [userId],
+    );
+    const row = result.rows[0];
+    return row === undefined ? null : Number(row["session_epoch"]);
+  }
+
+  /**
+   * The two facts a request checks a session against, by id, with no hash. `null` when the id is
+   * not a uuid or names no row.
+   */
+  async sessionStanding(userId: string): Promise<SessionStanding | null> {
+    if (!UUID_RE.test(userId.trim())) return null;
+    const result = await this.conn.query<Record<string, unknown>>(
+      `SELECT status, session_epoch FROM ${this.users} WHERE id = $1::uuid`,
+      [userId.trim().toLowerCase()],
+    );
+    const row = result.rows[0];
+    if (row === undefined) return null;
+    return { status: String(row["status"]), sessionEpoch: Number(row["session_epoch"] ?? 0) };
   }
 }

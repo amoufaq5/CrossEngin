@@ -125,15 +125,28 @@ describe("insert", () => {
     expect(capture[0]?.params?.[0]).toBe("comm-0001");
   });
 
-  it("refuses a breach notification published past its deadline, before any SQL runs", async () => {
+  it("refuses a late breach notification stating no delay reason, before any SQL runs", async () => {
     const capture: Captured[] = [];
     const store = new PostgresCustomerCommsStore(mockConnection(capture));
     const bad = {
       ...breachNotification(),
       publishedAt: AFTER_DEADLINE,
     } as IncidentCommunication;
-    await expect(store.insert(bad, T0)).rejects.toThrow(/notification was late/);
+    await expect(store.insert(bad, T0)).rejects.toThrow(/breachNotificationDelayReason/);
     expect(capture).toHaveLength(0);
+  });
+
+  it("binds a late breach notification's delay reason into its own column", async () => {
+    const capture: Captured[] = [];
+    const late = {
+      ...breachNotification(),
+      publishedAt: AFTER_DEADLINE,
+      breachNotificationDelayReason: "affected scope confirmed on day 5",
+    } as IncidentCommunication;
+    await new PostgresCustomerCommsStore(mockConnection(capture)).insert(late, T0);
+    const i = COMMS_COLUMN_NAMES.indexOf("breach_notification_delay_reason");
+    expect(i).toBeGreaterThan(-1);
+    expect(capture[0]?.params?.[i]).toBe("affected scope confirmed on day 5");
   });
 });
 
@@ -350,9 +363,21 @@ describe("rowToComms re-validation", () => {
     expect(rowToComms(parsed)).toEqual(rowToComms(row));
   });
 
-  it("refuses a breach notification row whose publish date was pushed past the deadline", () => {
+  it("refuses a breach notification row pushed past its deadline with no delay reason", () => {
     const row = { ...commsRow(breachNotification()), published_at: AFTER_DEADLINE };
-    expect(() => rowToComms(row)).toThrow(/notification was late/);
+    expect(() => rowToComms(row)).toThrow(/breachNotificationDelayReason/);
+  });
+
+  it("round-trips a late breach notification and its delay reason", () => {
+    const late = IncidentCommunicationSchema.parse({
+      ...breachNotification(),
+      publishedAt: AFTER_DEADLINE,
+      legalReviewedAt: AFTER_DEADLINE,
+      breachNotificationDelayReason: "late because the processor told us on day 4",
+    });
+    expect(rowToComms(commsRow(late)).record.breachNotificationDelayReason).toBe(
+      "late because the processor told us on day 4",
+    );
   });
 
   it("refuses a breach notification row with its deadline nulled", () => {

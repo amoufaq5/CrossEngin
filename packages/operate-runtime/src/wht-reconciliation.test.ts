@@ -98,3 +98,20 @@ describe("computeWhtReconciliation", () => {
     expect(r.totals).toEqual({ withheld: 40, certified: 50, uncertified: -10 });
   });
 });
+
+describe("computeWhtReconciliation — money", () => {
+  it("sums withholding exactly across many invoices", () => {
+    const invoices = Array.from({ length: 1000 }, (_, i) => ({ id: `i${String(i)}`, invoice_number: `I-${String(i)}`, withholding_total: "0.10", currency: "USD" }));
+    const r = computeWhtReconciliation({ invoices, certifiedByInvoice: new Map(invoices.map((inv) => [inv.id, 0.1])) });
+    expect(r.totals).toEqual({ withheld: 100, certified: 100, uncertified: 0 });
+    expect(r.rows.every((row) => row.status === "certified")).toBe(true);
+  });
+
+  it("calls a one-cent gap partial rather than rounding it away", () => {
+    const r = computeWhtReconciliation({
+      invoices: [{ id: "a", invoice_number: "A", withholding_total: "5.00", currency: "USD" }],
+      certifiedByInvoice: new Map([["a", 4.99]]),
+    });
+    expect(r.rows.map((row) => [row.gap, row.status])).toEqual([[0.01, "partial"]]);
+  });
+});

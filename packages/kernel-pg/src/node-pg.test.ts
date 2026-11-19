@@ -1,14 +1,22 @@
 import { EventEmitter } from "node:events";
+import type { PeerCertificate } from "node:tls";
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { SERVING_POOL_SETTINGS, UNBOUNDED_POOL_SETTINGS, type PgConfig } from "./connection.js";
+import {
+  PG_SSL_MODES,
+  SERVING_POOL_SETTINGS,
+  UNBOUNDED_POOL_SETTINGS,
+  sslModeChecksHostname,
+  sslModeValidatesCertificate,
+  type PgConfig,
+} from "./connection.js";
 
 type Responder = (sql: string, params?: readonly unknown[]) => unknown;
 
 // Hoisted with the mock: `vi.mock` runs before this module's own declarations, so the fakes it
 // returns have to exist by then.
-const { FakeClient, FakePool } = await vi.hoisted(async () => {
+const { FakeClient, FakePool, FakeProbeClient } = await vi.hoisted(async () => {
   const { EventEmitter: Emitter } = await import("node:events");
   const { vi: hoistedVi } = await import("vitest");
   class Client extends Emitter {
@@ -41,14 +49,30 @@ const { FakeClient, FakePool } = await vi.hoisted(async () => {
       return Promise.resolve();
     }
   }
-  return { FakeClient: Client, FakePool: Pool };
+  // The probe connection `allow`/`prefer` negotiate with. `answer` decides, per `ssl` value, whether
+  // the connect succeeds — `false` is the clear, anything else is TLS.
+  class ProbeClient {
+    static constructed: Record<string, unknown>[] = [];
+    static answer: (ssl: unknown) => Error | null = () => null;
+    constructor(readonly options: Record<string, unknown>) {
+      ProbeClient.constructed.push(options);
+    }
+    connect(): Promise<void> {
+      const err = ProbeClient.answer(this.options["ssl"]);
+      return err === null ? Promise.resolve() : Promise.reject(err);
+    }
+    end(): Promise<void> {
+      return Promise.resolve();
+    }
+  }
+  return { FakeClient: Client, FakePool: Pool, FakeProbeClient: ProbeClient };
 });
 type FakeClient = InstanceType<typeof FakeClient>;
 type FakePool = InstanceType<typeof FakePool>;
 
-vi.mock("pg", () => ({ default: { Pool: FakePool } }));
+vi.mock("pg", () => ({ default: { Pool: FakePool, Client: FakeProbeClient } }));
 
-const { createNodePgConnection, PG_POOL_EVENT_KINDS } = await import("./node-pg.js");
+const { createNodePgConnection, PG_POOL_EVENT_KINDS, pgTlsPlan } = await import("./node-pg.js");
 
 const CONFIG: PgConfig = {
   host: "db",
@@ -57,6 +81,7 @@ const CONFIG: PgConfig = {
   password: "p",
   database: "d",
   ssl: "disable",
+  sslRootCert: null,
   applicationName: "t",
 };
 
@@ -353,5 +378,159 @@ describe("createNodePgConnection — pool settings", () => {
     });
     expect(err?.message).toBe("set_config refused");
     expect(events.map((e) => e.kind)).toEqual(["session_settings_failed"]);
+  });
+});
+
+describe("pgTlsPlan", () => {
+  const PEM = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n";
+  const file = { kind: "file" as const, path: "/ca.pem", pem: PEM };
+  const HOST = "db.example";
+  // A certificate naming some other host, in the shape node's check reads.
+  const elsewhere = { subject: { CN: "other.example" }, subjectaltname: "DNS:other.example" } as unknown as PeerCertificate;
+  const here = { subject: { CN: "db.example" }, subjectaltname: "DNS:db.example" } as unknown as PeerCertificate;
+
+  // node-postgres reads PGSSLMODE from the environment itself whenever `ssl` is undefined, mapping
+  // `prefer` to mandatory, fully verified TLS — so every mode must hand it an explicit value.
+  it("never leaves ssl to node-postgres's own reading of the environment", () => {
+    for (const ssl of PG_SSL_MODES) {
+      const plan = pgTlsPlan({ ssl, sslRootCert: ssl === "verify-ca" ? file : null, host: HOST });
+      const values = plan.kind === "fixed" ? [plan.ssl] : [plan.first, plan.fallback];
+      for (const v of values) expect(v).not.toBeUndefined();
+    }
+  });
+
+  it("negotiates allow plaintext-first and prefer TLS-first, unverified either way", () => {
+    expect(pgTlsPlan({ ssl: "allow", sslRootCert: null, host: HOST })).toEqual({
+      kind: "negotiated",
+      first: false,
+      fallback: { rejectUnauthorized: false },
+    });
+    expect(pgTlsPlan({ ssl: "prefer", sslRootCert: file, host: HOST })).toEqual({
+      kind: "negotiated",
+      first: { rejectUnauthorized: false },
+      fallback: false,
+    });
+  });
+
+  it("disables TLS under disable and asks for unverified TLS under require", () => {
+    expect(pgTlsPlan({ ssl: "disable", sslRootCert: null, host: HOST })).toEqual({ kind: "fixed", ssl: false });
+    expect(pgTlsPlan({ ssl: "require", sslRootCert: file, host: HOST })).toEqual({
+      kind: "fixed",
+      ssl: { rejectUnauthorized: false },
+    });
+  });
+
+  it("validates the chain against the root file and skips the hostname under verify-ca", () => {
+    const plan = pgTlsPlan({ ssl: "verify-ca", sslRootCert: file, host: HOST });
+    if (plan.kind !== "fixed" || plan.ssl === false) throw new Error("expected fixed TLS");
+    expect(plan.ssl.rejectUnauthorized).toBe(true);
+    expect(plan.ssl.ca).toBe(PEM);
+    expect(plan.ssl.checkServerIdentity?.(HOST, elsewhere)).toBeUndefined();
+  });
+
+  it("checks the hostname under verify-full, with the root file or node's own store", () => {
+    const withFile = pgTlsPlan({ ssl: "verify-full", sslRootCert: file, host: HOST });
+    expect(withFile).toMatchObject({ kind: "fixed", ssl: { rejectUnauthorized: true, ca: PEM } });
+    for (const root of [null, { kind: "system" as const }]) {
+      const plan = pgTlsPlan({ ssl: "verify-full", sslRootCert: root, host: HOST });
+      if (plan.kind !== "fixed" || plan.ssl === false) throw new Error("expected fixed TLS");
+      expect(plan.ssl.rejectUnauthorized).toBe(true);
+      expect(plan.ssl.ca).toBeUndefined();
+    }
+  });
+
+  // node-postgres hands TLS a servername only for a non-IP host, and node then checks the
+  // certificate against "localhost" — so the check must name PGHOST itself, whatever TLS is told.
+  it("checks the certificate against PGHOST under verify-full, not against what TLS was told", () => {
+    for (const host of [HOST, "127.0.0.1"]) {
+      const plan = pgTlsPlan({ ssl: "verify-full", sslRootCert: null, host });
+      if (plan.kind !== "fixed" || plan.ssl === false) throw new Error("expected fixed TLS");
+      const check = plan.ssl.checkServerIdentity!;
+      const localhost = { subject: { CN: "localhost" }, subjectaltname: "DNS:localhost" } as unknown as PeerCertificate;
+      expect(check("localhost", localhost)).toBeInstanceOf(Error);
+      expect(check("localhost", elsewhere)).toBeInstanceOf(Error);
+    }
+    const plan = pgTlsPlan({ ssl: "verify-full", sslRootCert: null, host: HOST });
+    if (plan.kind !== "fixed" || plan.ssl === false) throw new Error("expected fixed TLS");
+    expect(plan.ssl.checkServerIdentity!("localhost", here)).toBeUndefined();
+  });
+
+  it("agrees with the assurance about what is validated, for every mode", () => {
+    for (const ssl of PG_SSL_MODES) {
+      const plan = pgTlsPlan({ ssl, sslRootCert: ssl === "verify-ca" ? file : null, host: HOST });
+      const tls = plan.kind === "fixed" ? plan.ssl : plan.first === false ? plan.fallback : plan.first;
+      const rejects = tls === false ? false : tls.rejectUnauthorized;
+      const checksHost = tls === false ? false : rejects && tls.checkServerIdentity?.(HOST, elsewhere) !== undefined;
+      expect(rejects).toBe(sslModeValidatesCertificate(ssl));
+      expect(checksHost).toBe(sslModeChecksHostname(ssl));
+    }
+  });
+});
+
+describe("createNodePgConnection — negotiated TLS", () => {
+  const SSL_REFUSED = new Error("The server does not support SSL connections");
+  let negotiations: { mode: string; encrypted: boolean; firstAttemptError: string | null }[];
+  beforeEach(() => {
+    negotiations = [];
+    FakePool.last = null;
+    FakeProbeClient.constructed = [];
+    FakeProbeClient.answer = () => null;
+  });
+  const open = (ssl: "allow" | "prefer") =>
+    createNodePgConnection(
+      { ...CONFIG, ssl },
+      { onTlsNegotiated: (n) => negotiations.push({ ...n }), onPoolEvent: () => undefined },
+    );
+
+  it("builds no pool until it has negotiated, then holds the answer", async () => {
+    const conn = open("prefer");
+    expect(FakePool.last).toBeNull();
+    await conn.query("SELECT 1");
+    await conn.query("SELECT 2");
+    expect(FakeProbeClient.constructed).toHaveLength(1);
+    expect(lastPool().options["ssl"]).toEqual({ rejectUnauthorized: false });
+    expect(negotiations).toEqual([{ mode: "prefer", encrypted: true, firstAttemptError: null }]);
+  });
+
+  it("falls back to the clear under prefer when the server declines TLS", async () => {
+    FakeProbeClient.answer = (ssl) => (ssl === false ? null : SSL_REFUSED);
+    await open("prefer").query("SELECT 1");
+    expect(lastPool().options["ssl"]).toBe(false);
+    expect(negotiations).toEqual([
+      { mode: "prefer", encrypted: false, firstAttemptError: SSL_REFUSED.message },
+    ]);
+  });
+
+  it("tries the clear first under allow and moves to TLS when the server refuses it", async () => {
+    FakeProbeClient.answer = (ssl) => (ssl === false ? new Error("no pg_hba entry, SSL off") : null);
+    await open("allow").query("SELECT 1");
+    expect(FakeProbeClient.constructed.map((o) => o["ssl"])).toEqual([
+      false,
+      { rejectUnauthorized: false },
+    ]);
+    expect(lastPool().options["ssl"]).toEqual({ rejectUnauthorized: false });
+  });
+
+  it("does not remember a negotiation in which neither attempt connected", async () => {
+    FakeProbeClient.answer = () => new Error("connection refused");
+    const conn = open("prefer");
+    await expect(conn.query("SELECT 1")).rejects.toThrow(/neither attempt connected/);
+    expect(FakePool.last).toBeNull();
+    FakeProbeClient.answer = () => null;
+    await conn.query("SELECT 1");
+    expect(FakeProbeClient.constructed).toHaveLength(3);
+    expect(lastPool().options["ssl"]).toEqual({ rejectUnauthorized: false });
+  });
+
+  it("shares one negotiation between concurrent first statements", async () => {
+    const conn = open("prefer");
+    await Promise.all([conn.query("SELECT 1"), conn.query("SELECT 2"), conn.transaction(async () => 1)]);
+    expect(FakeProbeClient.constructed).toHaveLength(1);
+  });
+
+  it("builds the pool eagerly, with no probe, for a fixed mode", () => {
+    createNodePgConnection({ ...CONFIG, ssl: "require" }, { onPoolEvent: () => undefined });
+    expect(FakeProbeClient.constructed).toHaveLength(0);
+    expect(lastPool().options["ssl"]).toEqual({ rejectUnauthorized: false });
   });
 });

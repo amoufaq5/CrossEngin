@@ -53,7 +53,7 @@ import {
  */
 
 /**
- * There are deliberately **five** outcomes and not six, and the member a sixth would have been is
+ * There were deliberately **five** outcomes and not six (a sixth, `refused_four_eyes`, has since joined for a different fact — a request never claimed), and the member a sixth would have been is
  * the one this vocabulary already covers: a pipeline that committed, a status write that committed,
  * and a read-back the contract cannot represent. That is a `completed` run, because `completed` is
  * *true* of it — the deletion happened and the request is in the status it names.
@@ -146,6 +146,13 @@ export const RUN_OUTCOMES = [
   /** Another worker claimed it first. Not an error. */
   "not_claimed",
   /**
+   * Not claimed and not run, because the request's approver — its verifier — is missing or is this
+   * runner's own executor (H-05). The request stays `verified` and is reported on every tick until a
+   * human re-verifies it under a different principal or reconfigures the executor; nothing about a
+   * deletion is uncertain, which is why it is not `aborted`.
+   */
+  "refused_four_eyes",
+  /**
    * The pipeline committed and the `completed` write did not. The deletion happened; the request
    * still reads `in_progress`.
    *
@@ -173,6 +180,8 @@ export type RunOutcome = (typeof RUN_OUTCOMES)[number];
 export interface DeletionRunResult {
   readonly requestId: string;
   readonly tenantId: string;
+  /** The request's verifier — the approver the run recorded, or would have; null when it names none. */
+  readonly approvedBy: string | null;
   readonly outcome: RunOutcome;
   readonly tombstoneId: string | null;
   readonly detail: string | null;
@@ -193,10 +202,19 @@ export interface DeletionRunnerOptions {
    * The actor the scheduler runs as. It is **not** the request's `submittedBy`: a data subject asking
    * for erasure is not the party executing it, and four-eyes is between the executor and the
    * approver, not between either and the subject.
+   *
+   * There is deliberately no `approvedBy` beside it any more. The approver of an unattended
+   * deletion is the principal who **verified** the request — an authenticated act on a separate
+   * request, recorded by the verify route from the credential — and the runner reads it off the
+   * request. A configured approver string was a self-asserted name standing in for that act (H-05).
    */
   readonly executedBy: string;
-  /** Who authorised unattended execution. Must differ from `executedBy` — four-eyes still applies. */
-  readonly approvedBy: string;
+  /**
+   * How long a verified request waits before it is due (C-04). **Required**: the grace is a policy
+   * the deployment decides (`--deletion-grace-days`), and an optional field defaulting to *none*
+   * would make the destructive default the silent one. `deletionExecuteNotBefore` is the rule.
+   */
+  readonly graceMs: number;
   readonly newTombstoneId: () => string;
   /** Subsystems every deletion must cover beyond `tenant_schema`. Default none. */
   /**
@@ -238,20 +256,14 @@ function detailOf(err: unknown): string {
 }
 
 /**
- * Drives one verified request through to a terminal state.
- *
- * Refuses at construction if the executor is also the approver, rather than per request: a scheduler
- * configured to approve its own work would fail every run identically, and failing at wiring says so
- * once.
+ * Drives one verified request through to a terminal state, once its grace has elapsed.
  */
 export class DeletionRunner {
   private readonly opts: DeletionRunnerOptions;
 
   constructor(opts: DeletionRunnerOptions) {
-    if (opts.executedBy === opts.approvedBy) {
-      throw new Error(
-        "a deletion runner's executedBy must differ from approvedBy (four-eyes principle)",
-      );
+    if (!Number.isFinite(opts.graceMs) || opts.graceMs < 0) {
+      throw new Error(`a deletion runner's graceMs must be a non-negative number, got ${String(opts.graceMs)}`);
     }
     this.opts = opts;
   }
@@ -292,7 +304,7 @@ export class DeletionRunner {
    * reading of the same condition.
    */
   private reportCommittedUnreadable(
-    base: { readonly requestId: string; readonly tenantId: string },
+    base: { readonly requestId: string; readonly tenantId: string; readonly approvedBy: string | null },
     err: DeletionRequestCommittedUnreadable,
     tombstoneId: string | null,
     consequence: string,
@@ -308,7 +320,23 @@ export class DeletionRunner {
   }
 
   async runOne(request: GdprDeletionRequest): Promise<DeletionRunResult> {
-    const base = { requestId: request.id, tenantId: request.tenantId };
+    const base = { requestId: request.id, tenantId: request.tenantId, approvedBy: request.verifiedBy };
+    // The approver is the verifier, read off the request. A verified request always names one (the
+    // contract requires it), so a missing one or one equal to the executor is a request this runner
+    // must not execute: nothing here is claimed or moved, and it is reported for a human — the
+    // four-eyes rule refused at the point where the two names first meet.
+    const approvedBy = request.verifiedBy;
+    if (approvedBy === null || approvedBy === this.opts.executedBy) {
+      return this.report({
+        ...base,
+        outcome: "refused_four_eyes",
+        tombstoneId: null,
+        detail:
+          approvedBy === null
+            ? "the request names no verifier, so there is no approver to record; not executed"
+            : "the request's verifier is the runner's own executor (four-eyes); not executed",
+      });
+    }
     const claim = await this.move(request.id, "in_progress", { at: this.now() });
     if (claim.kind === "unreadable") {
       // The claim committed, so this request is nobody else's — and the row it wrote is one this
@@ -329,7 +357,7 @@ export class DeletionRunner {
         tenantId: request.tenantId,
         tombstoneId,
         executedBy: this.opts.executedBy,
-        approvedBy: this.opts.approvedBy,
+        approvedBy,
         relatedDeletionRequestId: request.id,
         capabilities: this.opts.capabilities,
       });
@@ -424,7 +452,12 @@ export class DeletionRunner {
     // A row the contract cannot represent is reported and the rest of the page still runs. It is not
     // turned into a result: `runOne` is handed a parsed `GdprDeletionRequest`, so there is no
     // request here to claim, and a run of something unreadable is not a run.
-    const due = await this.opts.store.dueForExecution(this.opts.onUnreadableRequest, limit);
+    // Only requests whose grace has elapsed are due — `deletionExecuteNotBefore` in the store's
+    // predicate, against this runner's clock.
+    const due = await this.opts.store.dueForExecution(this.opts.onUnreadableRequest, limit, {
+      now: this.now(),
+      graceMs: this.opts.graceMs,
+    });
     const results: DeletionRunResult[] = [];
     for (const request of due) {
       results.push(await this.runOne(request));
@@ -440,5 +473,7 @@ export class DeletionRunner {
 
 /** Whether a run left work a human has to look at. */
 export function needsReconciliation(outcome: RunOutcome): boolean {
-  return outcome === "aborted" || outcome === "completed_unrecorded";
+  return (
+    outcome === "aborted" || outcome === "completed_unrecorded" || outcome === "refused_four_eyes"
+  );
 }

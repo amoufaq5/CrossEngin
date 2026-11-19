@@ -6,7 +6,7 @@ import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 import {
   MeteringFlushScheduler,
   buildRequestMetering,
-  flushUsage,
+  takeUsageWindow,
   meteredEventFromExecution,
   parseMeteringConfig,
   policyFromConfig,
@@ -18,11 +18,15 @@ const SUB = "22222222-2222-2222-2222-222222222222";
 const config = parseMeteringConfig({ tenantSubscriptions: { [TENANT]: SUB } });
 const policy = policyFromConfig(config);
 
-function fakePg(): { conn: PgConnection; calls: string[] } {
+function fakePg(failInserts: () => boolean = () => false): { conn: PgConnection; calls: string[] } {
   const calls: string[] = [];
   const conn: PgConnection = {
     query: (async (sql: string) => {
       calls.push(sql);
+      if (sql.includes("INSERT INTO")) {
+        if (failInserts()) throw new Error("connection reset");
+        return { rows: [], rowCount: 1 } as PgQueryResult;
+      }
       return { rows: [], rowCount: 0 } as PgQueryResult;
     }) as PgConnection["query"],
     transaction: (async <T,>(fn: (tx: PgConnection) => Promise<T>) => fn(conn)) as PgConnection["transaction"],
@@ -118,9 +122,9 @@ describe("meteredEventFromExecution", () => {
   });
 });
 
-describe("RequestMeteringObserver + flushUsage", () => {
-  it("accumulates billable requests and flushes them as usage records", async () => {
-    const { conn, calls } = fakePg();
+describe("RequestMeteringObserver + takeUsageWindow", () => {
+  it("accumulates billable requests and takes them out of the meter as one window", () => {
+    const { conn } = fakePg();
     const { engine, observer } = buildRequestMetering(conn, config);
     for (let i = 0; i < 5; i += 1) {
       observer.observe(execution({ requestId: `req_r${i.toString().padStart(8, "0")}` }));
@@ -129,15 +133,13 @@ describe("RequestMeteringObserver + flushUsage", () => {
     expect(observer.meteredSubscriptions()).toEqual([SUB]);
     expect(engine.engine.usage(SUB)[0]?.quantity).toBe(5);
 
-    const written = await flushUsage(engine, observer.meteredSubscriptions(), {
+    const records = takeUsageWindow(engine, observer.meteredSubscriptions(), {
       period: { start: "2026-06-01T00:00:00.000Z", end: "2026-07-01T00:00:00.000Z" },
       source: "integration_calls",
       recordedAt: "2026-07-01T00:00:00.000Z",
       ids: new CountingUuidGenerator(),
     });
-    expect(written).toBe(1);
-    expect(calls.some((s) => s.includes("billing_usage_records"))).toBe(true);
-    // Cleared after flush.
+    expect(records.map((r) => r.quantity)).toEqual([5]);
     expect(engine.engine.usage(SUB)).toEqual([]);
   });
 
@@ -150,38 +152,153 @@ describe("RequestMeteringObserver + flushUsage", () => {
   });
 });
 
+function scheduler(
+  built: ReturnType<typeof buildRequestMetering>,
+  clock: () => Date,
+  sinks: { flushes?: number[]; errors?: unknown[] } = {},
+): MeteringFlushScheduler {
+  return new MeteringFlushScheduler({
+    observer: built.observer,
+    engine: built.engine,
+    source: "integration_calls",
+    intervalMs: 1_000,
+    ids: new CountingUuidGenerator(),
+    clock,
+    onFlush: (n) => sinks.flushes?.push(n),
+    onError: (err) => sinks.errors?.push(err),
+  });
+}
+
 describe("MeteringFlushScheduler", () => {
   it("flushes the window since the previous tick", async () => {
     const { conn } = fakePg();
-    const { engine, observer } = buildRequestMetering(conn, config);
-    observer.observe(execution({ requestId: "req_flush0001" }));
+    const built = buildRequestMetering(conn, config);
+    built.observer.observe(execution({ requestId: "req_flush0001" }));
     let t = new Date("2026-06-15T12:00:00.000Z");
     const flushes: number[] = [];
-    const scheduler = new MeteringFlushScheduler({
-      observer,
-      engine,
-      source: "integration_calls",
-      intervalMs: 1_000,
-      ids: new CountingUuidGenerator(),
-      clock: () => t,
-      onFlush: (n) => flushes.push(n),
-    });
+    const s = scheduler(built, () => t, { flushes });
     t = new Date("2026-06-15T12:05:00.000Z");
-    const written = await scheduler.flushOnce();
-    expect(written).toBe(1);
+    expect(await s.flushOnce()).toBe(1);
     expect(flushes).toEqual([1]);
   });
 
   it("no-ops when no time has elapsed", async () => {
     const { conn } = fakePg();
-    const { engine, observer } = buildRequestMetering(conn, config);
-    const scheduler = new MeteringFlushScheduler({
-      observer,
-      engine,
-      source: "integration_calls",
-      intervalMs: 1_000,
-      clock: () => new Date("2026-06-15T12:00:00.000Z"),
-    });
-    expect(await scheduler.flushOnce()).toBe(0);
+    const built = buildRequestMetering(conn, config);
+    expect(await scheduler(built, () => new Date("2026-06-15T12:00:00.000Z")).flushOnce()).toBe(0);
+  });
+
+  // The defect: every window opening on one day shared a key, so the second flush's upsert replaced
+  // the first's quantity and that usage was never billed.
+  it("writes two flushes on one day as two records under two keys", async () => {
+    const { conn } = fakePg();
+    const built = buildRequestMetering(conn, config);
+    const keys: string[] = [];
+    const quantities: number[] = [];
+    const original = built.engine.usageStore.recordWindow.bind(built.engine.usageStore);
+    built.engine.usageStore.recordWindow = async (records) => {
+      for (const r of records) {
+        keys.push(r.idempotencyKey);
+        quantities.push(r.quantity);
+      }
+      return original(records);
+    };
+    let t = new Date("2026-06-15T12:00:00.000Z");
+    const s = scheduler(built, () => t);
+    built.observer.observe(execution({ requestId: "req_day00001" }));
+    built.observer.observe(execution({ requestId: "req_day00002" }));
+    t = new Date("2026-06-15T12:01:00.000Z");
+    await s.flushOnce();
+    built.observer.observe(execution({ requestId: "req_day00003" }));
+    t = new Date("2026-06-15T12:02:00.000Z");
+    await s.flushOnce();
+    expect(quantities).toEqual([2, 1]);
+    expect(new Set(keys).size).toBe(2);
+  });
+
+  // The defect: a failed flush had cleared the subscriptions it wrote and not advanced the window,
+  // so the retry overwrote their rows with only the newer usage. A failed window now stays pending
+  // and is retried unchanged — same records, same keys — beside the next one.
+  it("keeps a failed window pending and retries it unchanged beside the next one", async () => {
+    let failing = true;
+    const { conn } = fakePg(() => failing);
+    const built = buildRequestMetering(conn, config);
+    const written: string[] = [];
+    const original = built.engine.usageStore.recordWindow.bind(built.engine.usageStore);
+    built.engine.usageStore.recordWindow = async (records) => {
+      const n = await original(records);
+      for (const r of records) written.push(`${r.id}:${r.quantity.toString()}`);
+      return n;
+    };
+    let t = new Date("2026-06-15T12:00:00.000Z");
+    const errors: unknown[] = [];
+    const s = scheduler(built, () => t, { errors });
+    built.observer.observe(execution({ requestId: "req_fail0001" }));
+    t = new Date("2026-06-15T12:01:00.000Z");
+    expect(await s.flushOnce()).toBe(0);
+    expect(errors).toHaveLength(1);
+    expect(s.pendingRecords()).toBe(1);
+    built.observer.observe(execution({ requestId: "req_fail0002" }));
+    failing = false;
+    t = new Date("2026-06-15T12:02:00.000Z");
+    expect(await s.flushOnce()).toBe(2);
+    expect(s.pendingRecords()).toBe(0);
+    // The first window kept its id; the second is its own record.
+    expect(written).toEqual([
+      "00000000-0000-4000-8000-000000000001:1",
+      "00000000-0000-4000-8000-000000000002:1",
+    ]);
+  });
+
+  // A store that stays down must not grow the process by a window per tick: no window is cut while
+  // one is pending, so the usage stays in the meter's bounded buckets and the next cut spans the gap.
+  it("cuts no new window while one is pending, so an outage holds one window and not one per tick", async () => {
+    let failing = true;
+    const { conn } = fakePg(() => failing);
+    const built = buildRequestMetering(conn, config);
+    const periods: string[] = [];
+    const original = built.engine.usageStore.recordWindow.bind(built.engine.usageStore);
+    built.engine.usageStore.recordWindow = async (records) => {
+      const n = await original(records);
+      for (const r of records) periods.push(`${r.period.start}>${r.period.end}:${r.quantity.toString()}`);
+      return n;
+    };
+    let t = new Date("2026-06-15T12:00:00.000Z");
+    const s = scheduler(built, () => t);
+    built.observer.observe(execution({ requestId: "req_out00001" }));
+    t = new Date("2026-06-15T12:01:00.000Z");
+    await s.flushOnce();
+    for (const [i, minute] of [[2, "02"], [3, "03"], [4, "04"]] as const) {
+      built.observer.observe(execution({ requestId: `req_out0000${i.toString()}` }));
+      t = new Date(`2026-06-15T12:${minute}:00.000Z`);
+      await s.flushOnce();
+    }
+    expect(s.pendingRecords()).toBe(1);
+    expect(built.engine.engine.usage(SUB)[0]?.quantity).toBe(3);
+    failing = false;
+    t = new Date("2026-06-15T12:05:00.000Z");
+    expect(await s.flushOnce()).toBe(2);
+    expect(periods).toEqual([
+      "2026-06-15T12:00:00.000Z>2026-06-15T12:01:00.000Z:1",
+      "2026-06-15T12:01:00.000Z>2026-06-15T12:05:00.000Z:3",
+    ]);
+  });
+
+  it("serialises overlapping flushes so two cannot cut one span twice", async () => {
+    const { conn } = fakePg();
+    const built = buildRequestMetering(conn, config);
+    let t = new Date("2026-06-15T12:00:00.000Z");
+    const s = scheduler(built, () => t);
+    built.observer.observe(execution({ requestId: "req_ser00001" }));
+    t = new Date("2026-06-15T12:01:00.000Z");
+    const [a, b] = await Promise.all([s.flushOnce(), s.flushOnce()]);
+    expect(a + b).toBe(1);
+  });
+
+  it("always builds a scheduler, defaulting the interval, since nothing else ever flushed", () => {
+    const { conn } = fakePg();
+    const built = buildRequestMetering(conn, config);
+    expect(built.flushScheduler).toBeInstanceOf(MeteringFlushScheduler);
+    expect(config.flushIntervalMs).toBe(60_000);
   });
 });

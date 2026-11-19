@@ -28,7 +28,11 @@ export interface JobClaimOptions {
 /** The durable queue the worker pulls from — satisfied by the Postgres `claimDueJobs` / `releaseJobClaim`. */
 export interface JobClaimer {
   claim(opts: JobClaimOptions): Promise<readonly ClaimedJob[]>;
-  release(opts: { readonly jobId: string; readonly workerId: string }): Promise<void>;
+  release(opts: {
+    readonly jobId: string;
+    readonly workerId: string;
+    readonly tenantId: string;
+  }): Promise<void>;
 }
 
 /**

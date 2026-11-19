@@ -582,3 +582,271 @@ describe("SloEnforcementEngine — a rollback that cannot be recorded never cost
     }
   });
 });
+
+describe("SloEnforcementEngine — a breach that persists is escalated once (M-23)", () => {
+  const escalatingPolicy: AlertPolicy = {
+    id: "default",
+    routes: [
+      { severity: "P0", channels: [{ kind: "pagerduty_phone", serviceKey: "svc-incident-cmd" }] },
+      { severity: "P1", channels: [{ kind: "pagerduty_phone", serviceKey: "svc-oncall" }] },
+    ],
+  };
+  const escalating: SloRegistration = {
+    ...registration,
+    escalation: { afterMs: 30 * 60_000, severity: "sev1" },
+  };
+
+  function engineFor(
+    clock: FixedClock,
+    regraded: { id: string; severity: string }[],
+    regrade: "ok" | "throw" | "absent" = "ok",
+    declarer?: IncidentDeclarer,
+  ): { engine: SloEnforcementEngine; phases: string[] } {
+    const phases: string[] = [];
+    const engine = new SloEnforcementEngine({
+      alertPolicy: escalatingPolicy,
+      systemActorUserId: SYSTEM_ACTOR,
+      registrations: [escalating],
+      clock,
+      onDeclarationError: (_e, f) => phases.push(f.phase),
+      ...(declarer !== undefined ? { declarer } : {}),
+      ...(regrade === "absent"
+        ? {}
+        : {
+            regrader: {
+              regrade: async (id, input): Promise<void> => {
+                if (regrade === "throw") throw new Error("revision conflict");
+                regraded.push({ id, severity: input.severity });
+              },
+            },
+          }),
+    });
+    return { engine, phases };
+  }
+
+  it("stays ongoing before the declared duration and escalates once it has passed", async () => {
+    const clock = new FixedClock(BASE);
+    const regraded: { id: string; severity: string }[] = [];
+    const { engine } = engineFor(clock, regraded);
+    burst(engine, 25, BASE.getTime());
+    const opened = (await engine.evaluate())[0];
+    if (opened?.kind !== "breach_opened") throw new Error("expected breach");
+
+    clock.advance(29 * 60_000);
+    burst(engine, 25, clock.nowMs());
+    expect((await engine.evaluate(clock.now()))[0]?.kind).toBe("breach_ongoing");
+
+    clock.advance(2 * 60_000);
+    burst(engine, 25, clock.nowMs());
+    const escalated = (await engine.evaluate(clock.now()))[0];
+    if (escalated?.kind !== "breach_escalated") throw new Error("expected escalation");
+    expect(escalated.fromSeverity).toBe("sev2");
+    expect(escalated.severity).toBe("sev1");
+    expect(escalated.regraded).toBe(true);
+    expect(escalated.pages).toHaveLength(1);
+    expect(escalated.pages[0]?.alertSeverity).toBe("P0");
+    expect(escalated.pages[0]?.incidentId).toBe(opened.plan.incident.id);
+    expect(regraded).toEqual([{ id: opened.plan.incident.id, severity: "sev1" }]);
+  });
+
+  it("escalates exactly once, however long the breach then lasts", async () => {
+    const clock = new FixedClock(BASE);
+    const { engine } = engineFor(clock, []);
+    burst(engine, 25, BASE.getTime());
+    await engine.evaluate();
+    const kinds: string[] = [];
+    for (let i = 0; i < 4; i += 1) {
+      clock.advance(31 * 60_000);
+      burst(engine, 25, clock.nowMs());
+      kinds.push((await engine.evaluate(clock.now()))[0]?.kind ?? "none");
+    }
+    expect(kinds).toEqual(["breach_escalated", "breach_ongoing", "breach_ongoing", "breach_ongoing"]);
+  });
+
+  it("still re-pages when the regrade fails, reporting the failure and not retrying each tick", async () => {
+    const clock = new FixedClock(BASE);
+    const { engine, phases } = engineFor(clock, [], "throw");
+    burst(engine, 25, BASE.getTime());
+    await engine.evaluate();
+    clock.advance(31 * 60_000);
+    burst(engine, 25, clock.nowMs());
+    const escalated = (await engine.evaluate(clock.now()))[0];
+    if (escalated?.kind !== "breach_escalated") throw new Error("expected escalation");
+    expect(escalated.regraded).toBe(false);
+    expect(escalated.pages).toHaveLength(1);
+    expect(phases).toEqual(["regrade"]);
+    clock.advance(60_000);
+    burst(engine, 25, clock.nowMs());
+    expect((await engine.evaluate(clock.now()))[0]?.kind).toBe("breach_ongoing");
+  });
+
+  it("reports regraded false with no regrader wired, and still pages", async () => {
+    const clock = new FixedClock(BASE);
+    const { engine, phases } = engineFor(clock, [], "absent");
+    burst(engine, 25, BASE.getTime());
+    await engine.evaluate();
+    clock.advance(31 * 60_000);
+    burst(engine, 25, clock.nowMs());
+    const escalated = (await engine.evaluate(clock.now()))[0];
+    expect(escalated?.kind === "breach_escalated" && escalated.regraded).toBe(false);
+    expect(escalated?.kind === "breach_escalated" && escalated.pages.length).toBe(1);
+    expect(phases).toEqual([]);
+  });
+
+  it("never escalates a registration that declares no escalation", async () => {
+    const clock = new FixedClock(BASE);
+    const engine = makeEngine(clock);
+    burst(engine, 25, BASE.getTime());
+    await engine.evaluate();
+    clock.advance(6 * 3_600_000 - 60_000);
+    burst(engine, 25, clock.nowMs());
+    expect((await engine.evaluate(clock.now()))[0]?.kind).toBe("breach_ongoing");
+  });
+
+  it("counts from the declaration, so an adopted breach escalates on time after a restart", async () => {
+    const declarer = new StubDeclarer(57);
+    const first = engineFor(new FixedClock(BASE), [], "ok", declarer).engine;
+    burst(first, 25, BASE.getTime());
+    const opened = (await first.evaluate())[0];
+    if (opened?.kind !== "breach_opened") throw new Error("expected breach");
+    declarer.open.set(`availability:${SURFACE}`, opened.plan.incident);
+
+    // Restarted 31 minutes in: the first pass adopts, the next one escalates.
+    const clock = new FixedClock(new Date(BASE.getTime() + 31 * 60_000));
+    const restarted = engineFor(clock, [], "ok", declarer).engine;
+    burst(restarted, 25, clock.nowMs());
+    expect((await restarted.evaluate(clock.now()))[0]?.kind).toBe("breach_ongoing");
+    clock.advance(60_000);
+    burst(restarted, 25, clock.nowMs());
+    expect((await restarted.evaluate(clock.now()))[0]?.kind).toBe("breach_escalated");
+  });
+
+  it("does not re-escalate an adopted incident already at the escalation grade", async () => {
+    const declarer = new StubDeclarer(57);
+    const first = engineFor(new FixedClock(BASE), [], "ok", declarer).engine;
+    burst(first, 25, BASE.getTime());
+    const opened = (await first.evaluate())[0];
+    if (opened?.kind !== "breach_opened") throw new Error("expected breach");
+    declarer.open.set(`availability:${SURFACE}`, { ...opened.plan.incident, severity: "sev1" });
+    const clock = new FixedClock(new Date(BASE.getTime() + 31 * 60_000));
+    const restarted = engineFor(clock, [], "ok", declarer).engine;
+    burst(restarted, 25, clock.nowMs());
+    await restarted.evaluate(clock.now());
+    clock.advance(60_000);
+    burst(restarted, 25, clock.nowMs());
+    expect((await restarted.evaluate(clock.now()))[0]?.kind).toBe("breach_ongoing");
+  });
+});
+
+describe("SloEnforcementEngine — a recovered breach releases its kill switch (ADR-0415)", () => {
+  function engineFor(
+    clock: FixedClock,
+    released: { id: string; tenantId: string | null; actor: string }[],
+    behaviour: "released" | "not_active" | "throw" | "absent",
+    options: { killSwitchTtlMs?: number } = {},
+  ): { engine: SloEnforcementEngine; phases: string[]; recorded: { expiresAt: string | null }[] } {
+    const phases: string[] = [];
+    const recorded: { expiresAt: string | null }[] = [];
+    const engine = new SloEnforcementEngine({
+      alertPolicy: policy,
+      systemActorUserId: SYSTEM_ACTOR,
+      registrations: [registration],
+      clock,
+      onDeclarationError: (_e, f) => phases.push(f.phase),
+      killSwitchRecorder: {
+        record: async (ks): Promise<void> => {
+          recorded.push({ expiresAt: ks.expiresAt });
+        },
+      },
+      ...options,
+      ...(behaviour === "absent"
+        ? {}
+        : {
+            killSwitchReleaser: {
+              release: async (id, tenantId, input): Promise<boolean> => {
+                if (behaviour === "throw") throw new Error("store unreachable");
+                released.push({ id, tenantId, actor: input.actorUserId });
+                return behaviour === "released";
+              },
+            },
+          }),
+    });
+    return { engine, phases, recorded };
+  }
+
+  async function openAndRecover(
+    behaviour: "released" | "not_active" | "throw" | "absent",
+  ): Promise<{ recovered: unknown; released: { id: string }[]; phases: string[]; ksId: string | null }> {
+    const clock = new FixedClock(BASE);
+    const released: { id: string; tenantId: string | null; actor: string }[] = [];
+    const { engine, phases } = engineFor(clock, released, behaviour);
+    burst(engine, 25, BASE.getTime());
+    const opened = (await engine.evaluate())[0];
+    if (opened?.kind !== "breach_opened") throw new Error("expected breach");
+    clock.advance(2 * 3_600_000);
+    const recovered = (await engine.evaluate(clock.now()))[0];
+    return { recovered, released, phases, ksId: opened.plan.killSwitch?.id ?? null };
+  }
+
+  it("releases the switch it recorded, as the system actor, when the burn clears", async () => {
+    const { recovered, released, phases, ksId } = await openAndRecover("released");
+    expect(recovered).toMatchObject({ kind: "recovered", killSwitchRelease: "released" });
+    expect(released).toEqual([{ id: ksId, tenantId: null, actor: SYSTEM_ACTOR }]);
+    expect(phases).toEqual([]);
+  });
+
+  it("reports not_active when the store no longer holds it active", async () => {
+    const { recovered } = await openAndRecover("not_active");
+    expect(recovered).toMatchObject({ killSwitchRelease: "not_active" });
+  });
+
+  it("reports failed and still recovers when the release throws", async () => {
+    const { recovered, phases } = await openAndRecover("throw");
+    expect(recovered).toMatchObject({ kind: "recovered", killSwitchRelease: "failed" });
+    expect(phases).toEqual(["release_kill_switch"]);
+  });
+
+  it("reports no_releaser when nothing can release it, rather than claiming a release", async () => {
+    const { recovered } = await openAndRecover("absent");
+    expect(recovered).toMatchObject({ killSwitchRelease: "no_releaser" });
+  });
+
+  it("reports none for a breach that recorded no switch", async () => {
+    const clock = new FixedClock(BASE);
+    const released: { id: string }[] = [];
+    const engine = new SloEnforcementEngine({
+      alertPolicy: policy,
+      systemActorUserId: SYSTEM_ACTOR,
+      registrations: [{ slo, category: "availability" }],
+      clock,
+      killSwitchReleaser: {
+        release: async (id): Promise<boolean> => {
+          released.push({ id });
+          return true;
+        },
+      },
+    });
+    burst(engine, 25, BASE.getTime());
+    await engine.evaluate();
+    clock.advance(2 * 3_600_000);
+    expect((await engine.evaluate(clock.now()))[0]).toMatchObject({ killSwitchRelease: "none" });
+    expect(released).toEqual([]);
+  });
+
+  it("records the switch with an expiry, defaulting to a day and refusing one under a minute", async () => {
+    const clock = new FixedClock(BASE);
+    const { engine, recorded } = engineFor(clock, [], "absent");
+    burst(engine, 25, BASE.getTime());
+    await engine.evaluate();
+    expect(recorded).toEqual([{ expiresAt: new Date(BASE.getTime() + 86_400_000).toISOString() }]);
+
+    const short = engineFor(new FixedClock(BASE), [], "absent", { killSwitchTtlMs: 600_000 });
+    burst(short.engine, 25, BASE.getTime());
+    await short.engine.evaluate();
+    expect(short.recorded[0]?.expiresAt).toBe(new Date(BASE.getTime() + 600_000).toISOString());
+
+    expect(() => engineFor(new FixedClock(BASE), [], "absent", { killSwitchTtlMs: 59_999 })).toThrow(
+      /killSwitchTtlMs/,
+    );
+  });
+});

@@ -276,8 +276,8 @@ export const AUTH_SCHEME_SUPPORT: Readonly<Record<AuthScheme, AuthSchemeSupport>
     recognisedFrom: "an Authorization header with the Bearer auth-scheme",
     authSchemeToken: "Bearer",
     reason:
-      "verified here: EdDSA signature against the configured JWKS, then exp, iss and aud; nbf is " +
-      "honoured when present and never required",
+      "verified here: EdDSA signature against the configured JWKS, then exp, iss, aud, sub and " +
+      "tenant_id; nbf is honoured when present and never required",
   },
   api_key_header: {
     treatment: "served",
@@ -444,15 +444,15 @@ export const AUTH_SCHEME_SECURITY_DOC: Readonly<Record<AuthScheme, SecuritySchem
       bearerFormat: "JWT",
       // `nbf` is deliberately absent from the required list, and saying "exp, nbf, iss and aud"
       // here was a false security statement in client-facing prose: `REQUIRED_JWT_CLAIM_COSTS` is
-      // keyed on `exp | iss | aud` alone, so `nbf` is neither required by default nor relaxable —
+      // keyed on `exp | iss | aud | sub | tenant_id`, so `nbf` is neither required by default nor relaxable —
       // `--jwt-optional-claim nbf` is refused **by name** with its reason, because an absent `nbf`
       // means *valid from issuance*, which is coherent. It is still checked when present. The wrong
       // list was copied from `AUTH_SCHEME_SUPPORT.bearer_jwt.reason`, which carried it too and is
       // corrected with it, so what was an internal inaccuracy did not become a published one.
       description:
         "An Ed25519-signed JWT in the Authorization header. Verified against the configured JWKS, " +
-        "then exp, iss and aud — each required unless the deployment relaxes it by name. A `nbf` " +
-        "claim is honoured when present and is never required.",
+        "then exp, iss, aud, sub and tenant_id — each required unless the deployment relaxes it by " +
+        "name. A `nbf` claim is honoured when present and is never required.",
     },
     api_key_header: {
       key: "apiKeyAuth",

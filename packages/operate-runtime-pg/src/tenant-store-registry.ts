@@ -53,14 +53,14 @@ export interface TenantColumnStoreRegistryOptions {
    */
   readonly encryptionKey?: ColumnEncryptionKeySource;
   /**
-   * Called once per *fresh* application (not on a memoised hit), for logging. `retained` names the
-   * last applied manifest still being served when this application was refused, and is `null` for
-   * an applied one and for a refusal with nothing applied before it — the two refusals are told
-   * apart because only the second sends the tenant to the fallback store.
+   * Called once per *fresh* application (not on a memoised hit), for logging. `refusal` is `null`
+   * for an applied one and otherwise says what the tenant is served while it stands — the same
+   * answer `ensureServing` gives, from the same probe, so a log line cannot name the fallback for a
+   * tenant whose requests are refused as stranded.
    */
   readonly onApplication?: (
     application: TenantSchemaApplication,
-    retained: RetainedApplication | null,
+    refusal: RefusedServing | null,
   ) => void;
   /**
    * How long a refused application is remembered before it is retried (default
@@ -84,6 +84,11 @@ interface RegistryEntry {
   readonly application: TenantSchemaApplication;
   /** When a refused entry stops being trusted; Infinity for an applied one. */
   readonly validUntil: number;
+  /**
+   * For a refusal with nothing applied before it, whether the tenant's schema already held tables
+   * when it was refused — `stranded` against `refused`. Null for every other entry.
+   */
+  readonly occupied: boolean | null;
 }
 
 /** The last application that succeeded for a tenant, and the store and manifest it serves. */
@@ -93,6 +98,15 @@ interface AppliedServing {
   readonly application: TenantSchemaApplication;
   readonly store: ColumnMappedEntityStore;
 }
+
+/**
+ * What a refused application leaves a tenant served, as {@link TenantServing}'s three refusal arms
+ * name it: the last applied pair, the fallback store, or nothing at all.
+ */
+export type RefusedServing =
+  | { readonly kind: "retained"; readonly retained: RetainedApplication }
+  | { readonly kind: "fallback" }
+  | { readonly kind: "stranded"; readonly schema: string };
 
 /** The last applied manifest a refused re-application left in service. */
 export interface RetainedApplication {
@@ -189,7 +203,7 @@ export class TenantColumnStoreRegistry {
   private readonly encryptionKeyRef: string | undefined;
   private readonly encryptionKey: ColumnEncryptionKeySource | undefined;
   private readonly onApplication:
-    | ((application: TenantSchemaApplication, retained: RetainedApplication | null) => void)
+    | ((application: TenantSchemaApplication, refusal: RefusedServing | null) => void)
     | null;
   private readonly refusalRetryMs: number;
   private readonly now: () => number;
@@ -262,11 +276,13 @@ export class TenantColumnStoreRegistry {
     if (application.applied) return { kind: "applied", manifest, application };
     const last = this.applied.get(tenantId);
     if (last === undefined) {
-      // `pg_tables` lists every table whatever the session's privileges, so a confined role reads
-      // the same answer an owner does. Asked here and not in `apply`, because it decides only what
-      // a refusal *means* and costs nothing on the applied path.
-      const probe = await this.conn.query(SCHEMA_HOLDS_TABLES_SQL, [application.schema]);
-      const occupied = (probe.rows[0] as { occupied?: unknown } | undefined)?.occupied === true;
+      // The occupancy the refusal was logged with, so the log line and this answer are one fact.
+      // Probed again only when the memo is another manifest's — a concurrent ensure replaced it.
+      const entry = this.entries.get(tenantId);
+      const occupied =
+        entry?.manifestHash === application.manifestHash && entry.occupied !== null
+          ? entry.occupied
+          : await this.schemaHoldsTables(application.schema);
       return { kind: occupied ? "stranded" : "refused", manifest, application };
     }
     return {
@@ -308,22 +324,36 @@ export class TenantColumnStoreRegistry {
     // under a new key is `rekeyTenant`'s, in one transaction per tenant — and a registry that
     // silently started serving a new key over old ciphertext would read "Wrong key or corrupt data"
     // as an ordinary read failure.
-    this.entries.set(tenantId, {
-      manifestHash: hash,
-      application,
-      validUntil: application.applied ? Number.POSITIVE_INFINITY : this.now() + this.refusalRetryMs,
-    });
     if (store !== null) {
       this.applied.set(tenantId, { manifestHash: hash, manifest, application, store });
     }
     const last = this.applied.get(tenantId);
+    // Asked only of a refusal with nothing applied, which is the one arm it decides, so the applied
+    // path costs nothing. `pg_tables` lists every table whatever the session's privileges, so a
+    // confined role reads the same answer an owner does.
+    const occupied = store === null && last === undefined ? await this.schemaHoldsTables(application.schema) : null;
+    this.entries.set(tenantId, {
+      manifestHash: hash,
+      application,
+      validUntil: application.applied ? Number.POSITIVE_INFINITY : this.now() + this.refusalRetryMs,
+      occupied,
+    });
     this.onApplication?.(
       application,
-      store === null && last !== undefined
-        ? { manifestHash: last.manifestHash, schema: last.application.schema }
-        : null,
+      store !== null
+        ? null
+        : last !== undefined
+          ? { kind: "retained", retained: { manifestHash: last.manifestHash, schema: last.application.schema } }
+          : occupied === true
+            ? { kind: "stranded", schema: application.schema }
+            : { kind: "fallback" },
     );
     return application;
+  }
+
+  private async schemaHoldsTables(schema: string): Promise<boolean> {
+    const probe = await this.conn.query(SCHEMA_HOLDS_TABLES_SQL, [schema]);
+    return (probe.rows[0] as { occupied?: unknown } | undefined)?.occupied === true;
   }
 
   /**

@@ -1,6 +1,6 @@
 import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 import type { WorkflowDefinition, WorkflowEvent } from "@crossengin/workflow-engine";
-import { InMemoryEventLog } from "@crossengin/workflow-runtime";
+import { InMemoryEventLog, projectInstance } from "@crossengin/workflow-runtime";
 import { describe, expect, it, vi } from "vitest";
 
 import { PostgresActivityStore } from "./activity-store.js";
@@ -14,6 +14,8 @@ import { PostgresTimerStore } from "./timer-store.js";
 import {
   ProjectingEventLog,
   buildPersistentStores,
+  transactionalAppendUnit,
+  type AppendUnit,
 } from "./projecting-event-log.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
@@ -161,7 +163,9 @@ function mockConnection(
   };
 }
 
-function buildSuite(opts: { definitions?: ReadonlyMap<string, WorkflowDefinition> } = {}) {
+function buildSuite(
+  opts: { definitions?: ReadonlyMap<string, WorkflowDefinition>; appendUnit?: AppendUnit } = {},
+) {
   const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
   const conn = mockConnection(capture);
   const definitionResolver = new WorkflowDefinitionIdResolver(conn);
@@ -184,8 +188,10 @@ function buildSuite(opts: { definitions?: ReadonlyMap<string, WorkflowDefinition
     activityStore,
     signalStore,
     timerStore,
+    appendUnit: opts.appendUnit ?? null,
+    instanceResolver,
   });
-  return { projecting, inner, capture, instanceResolver };
+  return { projecting, inner, capture, instanceResolver, scope: { inner, instanceStore, activityStore, signalStore, timerStore } };
 }
 
 describe("ProjectingEventLog.append — instance_started", () => {
@@ -418,5 +424,149 @@ describe("buildPersistentStores", () => {
     instanceResolver.register("wfi_existing", "00000000-0000-4000-8000-000000000200");
     const stores = buildPersistentStores({ conn, instanceResolver });
     expect(stores.instanceResolver).toBe(instanceResolver);
+  });
+});
+
+/**
+ * A connection whose `transaction` runs its callback over a second connection, so a statement issued
+ * inside the unit and one issued on the pool are distinguishable in the capture.
+ */
+function txConnection(opts: { failOn?: string } = {}) {
+  const pool: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+  const tx: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+  const answer = (sql: string): PgQueryResult => {
+    if (opts.failOn !== undefined && sql.includes(opts.failOn)) throw new Error("projection refused");
+    if (sql.includes("INSERT INTO meta.workflow_instances")) return { rows: [{ id: INSTANCE_UUID }], rowCount: 1 };
+    return { rows: [], rowCount: 1 };
+  };
+  const txConn: PgConnection = {
+    query: (async (sql: string, params?: readonly unknown[]) => {
+      tx.push({ sql, params });
+      return answer(sql);
+    }) as PgConnection["query"],
+    transaction: (async () => {
+      throw new Error("nested transaction");
+    }) as PgConnection["transaction"],
+    withAdvisoryLock: vi.fn() as PgConnection["withAdvisoryLock"],
+    close: vi.fn() as PgConnection["close"],
+  };
+  let transactions = 0;
+  const conn: PgConnection = {
+    query: (async (sql: string, params?: readonly unknown[]) => {
+      pool.push({ sql, params });
+      return answer(sql);
+    }) as PgConnection["query"],
+    transaction: (async <T,>(fn: (c: PgConnection) => Promise<T>): Promise<T> => {
+      transactions += 1;
+      return fn(txConn);
+    }) as PgConnection["transaction"],
+    withAdvisoryLock: vi.fn() as PgConnection["withAdvisoryLock"],
+    close: vi.fn() as PgConnection["close"],
+  };
+  return { conn, pool, tx, transactions: () => transactions };
+}
+
+describe("transactionalAppendUnit", () => {
+  function initialProjection() {
+    const projection = projectInstance([startedEvent()], fixtureDefinition());
+    if (projection === null) throw new Error("fixture does not project");
+    return projection;
+  }
+
+  it("writes the instance, the event and its projections inside one transaction under the event's tenant", async () => {
+    const { conn, pool, tx, transactions } = txConnection();
+    const stores = buildPersistentStores({ conn });
+    stores.definitionResolver.register("wfd_def00001", DEF_UUID);
+    const unit = transactionalAppendUnit(conn, stores);
+    await unit(TENANT, async (scope) => {
+      await scope.instanceStore.create({ projection: initialProjection(), definitionId: "wfd_def00001" });
+      await scope.inner.append(startedEvent());
+    });
+    expect(transactions()).toBe(1);
+    expect(tx[0]!.sql).toContain("set_config('app.current_tenant_id'");
+    expect(tx[0]!.params).toEqual([TENANT]);
+    expect(tx.some((c) => c.sql.includes("INSERT INTO meta.workflow_instances"))).toBe(true);
+    expect(tx.some((c) => c.sql.includes("INSERT INTO meta.workflow_events"))).toBe(true);
+    // Nothing the unit wrote went to the pool, where it would have committed on its own.
+    expect(pool).toEqual([]);
+    // The id the transaction registered is in the pool resolver's map: one cache, two connections.
+    expect(await stores.instanceResolver.resolve("wfi_inst0001")).toBe(INSTANCE_UUID);
+    expect(pool).toEqual([]);
+  });
+
+  it("lets a failure inside the unit escape, so the transaction rolls the event back with it", async () => {
+    const { conn } = txConnection({ failOn: "INSERT INTO meta.workflow_events" });
+    const stores = buildPersistentStores({ conn });
+    stores.definitionResolver.register("wfd_def00001", DEF_UUID);
+    const unit = transactionalAppendUnit(conn, stores);
+    await expect(
+      unit(TENANT, async (scope) => {
+        await scope.instanceStore.create({ projection: initialProjection(), definitionId: "wfd_def00001" });
+        await scope.inner.append(startedEvent());
+      }),
+    ).rejects.toThrow("projection refused");
+  });
+
+  it("refuses a malformed tenant before opening a transaction", async () => {
+    const { conn, transactions } = txConnection();
+    const unit = transactionalAppendUnit(conn, buildPersistentStores({ conn }));
+    await expect(unit("not-a-tenant", async () => undefined)).rejects.toThrow();
+    expect(transactions()).toBe(0);
+  });
+});
+
+describe("ProjectingEventLog.append — atomic with its projections", () => {
+  it("runs the instance creation, the event and the projections through the unit's scope", async () => {
+    let calls = 0;
+    const suite: { scope?: Parameters<Parameters<AppendUnit>[1]>[0] } = {};
+    const unit: AppendUnit = async (tenantId, work) => {
+      calls += 1;
+      expect(tenantId).toBe(TENANT);
+      return work(suite.scope!);
+    };
+    const built = buildSuite({ appendUnit: unit });
+    suite.scope = built.scope;
+    await built.projecting.append(startedEvent());
+    await built.projecting.append(signalReceivedEvent());
+    expect(calls).toBe(2);
+    expect(await built.inner.count()).toBe(2);
+  });
+
+  it("forgets a created instance whose transaction rolled back, so a retry creates it again", async () => {
+    let fail = true;
+    const suite: { scope?: Parameters<Parameters<AppendUnit>[1]>[0] } = {};
+    // A rolled-back unit: its event goes to a log that is then thrown away, as the transaction's is.
+    const unit: AppendUnit = async (_tenantId, work) => {
+      if (!fail) return work(suite.scope!);
+      await work({ ...suite.scope!, inner: new InMemoryEventLog() });
+      throw new Error("commit refused");
+    };
+    const built = buildSuite({ appendUnit: unit });
+    suite.scope = built.scope;
+    await expect(built.projecting.append(startedEvent())).rejects.toThrow("commit refused");
+    // The row the rolled-back transaction created does not exist, so its id must not resolve from
+    // the shared cache — the mock answers the fall-through lookup with no row.
+    expect(await built.instanceResolver.resolve("wfi_inst0001")).toBeNull();
+
+    fail = false;
+    built.capture.length = 0;
+    await built.projecting.append(startedEvent());
+    expect(built.capture.some((c) => c.sql.includes("INSERT INTO meta.workflow_instances"))).toBe(true);
+  });
+
+  it("does not forget an instance when a later event's transaction fails", async () => {
+    let fail = false;
+    const suite: { scope?: Parameters<Parameters<AppendUnit>[1]>[0] } = {};
+    const unit: AppendUnit = async (_tenantId, work) => {
+      const out = await work(suite.scope!);
+      if (fail) throw new Error("commit refused");
+      return out;
+    };
+    const built = buildSuite({ appendUnit: unit });
+    suite.scope = built.scope;
+    await built.projecting.append(startedEvent());
+    fail = true;
+    await expect(built.projecting.append(signalReceivedEvent())).rejects.toThrow("commit refused");
+    expect(await built.instanceResolver.resolve("wfi_inst0001")).toBe(INSTANCE_UUID);
   });
 });

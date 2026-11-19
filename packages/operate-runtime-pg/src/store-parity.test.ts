@@ -19,14 +19,15 @@ import { VALUE_TYPE_COMPARABLE } from "./list-sql.js";
 const TENANT = "00000000-0000-4000-8000-000000000001";
 
 /**
- * Every field kind a manifest can declare, minus `duration` — which has no wire form and is refused
- * at plan time (see `UNDECIDED_SQL_TYPES`), so there is no parity to assert about it.
+ * Every field kind a manifest can declare, minus `duration`, `geo_point` and `geo_polygon` — which
+ * have no wire form and are refused at plan time (see `UNDECIDED_SQL_TYPES`), so there is no parity
+ * to assert about them.
  *
  * Built from `FIELD_LIST_VALUE_TYPES`'s own keys rather than from a list written here, so a
  * twenty-fourth field kind lands in this test the moment the kernel declares one.
  */
 const KINDS = (Object.keys(FIELD_LIST_VALUE_TYPES) as PrimitiveFieldType["kind"][]).filter(
-  (k) => k !== "duration",
+  (k) => k !== "duration" && k !== "geo_point" && k !== "geo_polygon",
 );
 
 function fieldTypeFor(kind: PrimitiveFieldType["kind"]): PrimitiveFieldType {

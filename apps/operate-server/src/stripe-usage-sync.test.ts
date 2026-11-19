@@ -52,7 +52,10 @@ function record(id: string) {
  * statement". ADR-0370's lesson in a second place: a fake keyed on the exact shape of a statement
  * stops modelling it the moment the statement legitimately changes.
  */
-function fakePg(rows: Record<string, unknown>[]): { conn: PgConnection; sql: string[] } {
+function fakePg(
+  rows: Record<string, unknown>[],
+  opts: { markSyncedMatches?: boolean } = {},
+): { conn: PgConnection; sql: string[] } {
   const sql: string[] = [];
   let served = false;
   const conn: PgConnection = {
@@ -61,6 +64,11 @@ function fakePg(rows: Record<string, unknown>[]): { conn: PgConnection; sql: str
       if (/^\s*SELECT[\s\S]*FROM\s+meta\.billing_usage_records/i.test(q) && !served) {
         served = true;
         return { rows, rowCount: rows.length } as PgQueryResult;
+      }
+      // `markSynced` refuses a statement that matched no row (H-30), so the fake has to model the
+      // row the UPDATE finds — answering 0 for every UPDATE made the success path a throw.
+      if (/^\s*UPDATE\s+meta\.billing_usage_records/i.test(q) && opts.markSyncedMatches !== false) {
+        return { rows: [{ id: ROW_ID }], rowCount: 1 } as PgQueryResult;
       }
       return { rows: [], rowCount: 0 } as PgQueryResult;
     }) as PgConnection["query"],
@@ -112,6 +120,22 @@ describe("StripeUsageSyncScheduler", () => {
     expect(results).toHaveLength(2);
     expect(reporter.calls[0]?.subscriptionItemId).toBe("si_ai");
     expect(outcomes.some((o) => o.startsWith(TENANT_A))).toBe(true);
+  });
+
+  it("reports a sync whose mark matched no row as an error, not as a synced record", async () => {
+    const { conn } = fakePg(
+      [{ id: ROW_ID, record: JSON.stringify(record("44444444-4444-4444-4444-444444444444")) }],
+      { markSyncedMatches: false },
+    );
+    const errors: unknown[] = [];
+    const { scheduler } = buildStripeUsageSync(conn, new RecordingReporter(), config, {
+      now: () => new Date("2026-07-02T00:00:00.000Z"),
+      onError: (e) => errors.push(e),
+      onUnreadable: noUnreadable,
+    });
+    const results = await scheduler.syncOnce();
+    expect(results.map((r) => r.tenant)).toEqual([TENANT_B]);
+    expect(errors).toHaveLength(1);
   });
 
   it("reports an unreadable usage row and carries the count into the outcome", async () => {

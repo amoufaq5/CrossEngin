@@ -7,7 +7,9 @@ import {
 import { describe, expect, it } from "vitest";
 
 import type { StoreKind } from "./cli.js";
+import { addressFor } from "./delivery-drain.js";
 import {
+  CHANNEL_ADDRESS_SOURCE,
   NOTIFICATION_CHANNEL_VERDICT_DISPOSITION,
   formatNotificationChannelSurvey,
   surveyNotificationChannels,
@@ -169,6 +171,31 @@ describe("surveyNotificationChannels", () => {
  * deliberately do not key on a receiver's variable name or on a `channel: "…"` literal anywhere,
  * since a template's content carries one and the digest summary takes its channel from a variable.
  */
+describe("the address source map (H-31)", () => {
+  it("agrees with addressFor on which channels have an address at all", () => {
+    const r = {
+      userId: "22222222-2222-4222-8222-222222222222",
+      email: "a@x.test",
+      phoneE164: "+15550100",
+      displayName: null,
+      primaryRole: "erp_admin",
+      secondaryRoles: [],
+    };
+    for (const channel of NOTIFICATION_CHANNELS) {
+      expect(addressFor(channel, r) === null, channel).toBe(CHANNEL_ADDRESS_SOURCE[channel] === null);
+    }
+  });
+
+  it("warns that a registered push sender can address nobody, and says nothing for an unregistered one", () => {
+    const withPush = { ...SHIPPED, registeredChannels: ["in_app", "push_mobile"] } as const;
+    expect(text(withPush)).toContain(
+      "[notify] push_mobile: no device-token table exists, so no push recipient has an address",
+    );
+    expect(text(withPush)).toContain("recorded dropped (recipient_unaddressable), never sent");
+    expect(text(SHIPPED)).not.toContain("recipient_unaddressable");
+  });
+});
+
 describe("the producer map against the workspace", () => {
   const sources = readWorkspaceSources().files.filter((f) => !f.file.endsWith(".test.ts"));
 

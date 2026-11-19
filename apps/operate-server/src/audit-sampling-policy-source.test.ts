@@ -222,3 +222,38 @@ describe("buildTenantAuditPolicyCache", () => {
     expect(refresher).toBeInstanceOf(TenantAuditPolicyRefresher);
   });
 });
+
+describe("TenantAuditPolicyCache — a stored policy that narrows is named (M-19)", () => {
+  it("names the fields that would record less than the floor, per tenant, on refresh", async () => {
+    const store = fakeSettingsStore({
+      [TENANT_A]: { auditSampling: { sampleRate: 0, outcomes: ["pass"] } },
+      [TENANT_B]: { auditSampling: { sampleRate: 1 } },
+    });
+    const named: { tenantId: string; fields: readonly string[] }[] = [];
+    const cache = new TenantAuditPolicyCache({
+      settingsStore: store,
+      tenants: tenantSource([TENANT_A, TENANT_B]),
+      floor: () => ({ sampleRate: 0.25 }),
+      onNarrowingIgnored: (tenantId, fields) => named.push({ tenantId, fields }),
+    });
+    await cache.refresh();
+    expect(named).toEqual([{ tenantId: TENANT_A, fields: ["sampleRate", "outcomes"] }]);
+  });
+
+  it("says nothing without a floor, and nothing for a policy that only widens", async () => {
+    const store = fakeSettingsStore({ [TENANT_A]: { auditSampling: { sampleRate: 0 } } });
+    const named: string[] = [];
+    await new TenantAuditPolicyCache({
+      settingsStore: store,
+      tenants: tenantSource([TENANT_A]),
+      onNarrowingIgnored: (t) => named.push(t),
+    }).refresh();
+    await new TenantAuditPolicyCache({
+      settingsStore: fakeSettingsStore({ [TENANT_A]: { auditSampling: { sampleRate: 1 } } }),
+      tenants: tenantSource([TENANT_A]),
+      floor: () => ({ sampleRate: 0.5 }),
+      onNarrowingIgnored: (t) => named.push(t),
+    }).refresh();
+    expect(named).toEqual([]);
+  });
+});

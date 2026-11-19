@@ -189,31 +189,52 @@ export class PostgresTenantStore {
     return row === undefined ? null : this.rowToTenant(row);
   }
 
-  async create(input: CreateTenantInput): Promise<TenantRecord> {
+  /**
+   * `within`, when given, runs in the same transaction as the INSERT and after it, with the new row in
+   * hand — so a record the caller writes about the creation commits with the tenant or not at all.
+   * A throw from it rolls the tenant back.
+   */
+  async create(
+    input: CreateTenantInput,
+    within?: (tx: PgConnection, tenant: TenantRecord) => Promise<void>,
+  ): Promise<TenantRecord> {
     const schemaName = input.schemaName ?? deriveSchemaName(input.slug);
     const sql =
       `INSERT INTO ${this.table} (slug, name, status, tier, region, schema_name, search_locale)` +
       ` VALUES ($1, $2, 'active', $3, $4, $5, $6) RETURNING ${SELECT_COLUMNS}`;
-    try {
-      const result = await this.conn.query(sql, [
-        input.slug,
-        input.name,
-        input.tier,
-        input.region,
-        schemaName,
-        input.searchLocale,
-      ]);
+    // The duplicate classification wraps the INSERT alone: `within` writes other tables, and a
+    // unique violation there is not this tenant already existing.
+    const insert = async (conn: PgConnection): Promise<TenantRecord> => {
+      let result;
+      try {
+        // An array literal at the call, not a variable: the workspace's binding rules read the
+        // parameter list here, and a `params` variable is a statement they cannot see.
+        result = await conn.query(sql, [
+          input.slug,
+          input.name,
+          input.tier,
+          input.region,
+          schemaName,
+          input.searchLocale,
+        ]);
+      } catch (err) {
+        if (isUniqueViolation(err)) {
+          throw new DuplicateTenantError(
+            `tenant already exists (slug=${input.slug} schema_name=${schemaName})`,
+          );
+        }
+        throw err;
+      }
       const row = result.rows[0];
       if (row === undefined) throw new Error("INSERT did not return a row");
       return this.rowToTenant(row);
-    } catch (err) {
-      if (isUniqueViolation(err)) {
-        throw new DuplicateTenantError(
-          `tenant already exists (slug=${input.slug} schema_name=${schemaName})`,
-        );
-      }
-      throw err;
-    }
+    };
+    if (within === undefined) return insert(this.conn);
+    return this.conn.transaction(async (tx) => {
+      const tenant = await insert(tx);
+      await within(tx, tenant);
+      return tenant;
+    });
   }
 
   async setStatus(id: string, status: TenantStatus): Promise<TenantRecord | null> {
@@ -363,6 +384,30 @@ export interface PlatformAdminContext {
   readonly newEventId?: () => string;
   readonly clock?: () => Date;
   readonly onLifecycleError?: (err: unknown, action: LifecycleAction) => void;
+  /**
+   * Records a tenant's creation, inside the transaction that inserts it. **Required**: creating a
+   * tenant is a privileged platform act, and before this it left no audit row at all — the
+   * lifecycle trail starts at the first transition, so nothing in the database said who created a
+   * tenant or when. A throw rolls the tenant back and the route answers 503, ADR-0313's rule that
+   * an unrecordable privileged write is refused rather than performed unrecorded.
+   */
+  readonly recordCreation: (tx: PgConnection, event: TenantCreationEvent) => Promise<void>;
+}
+
+/** What a tenant's creation record carries: the row as inserted and who inserted it. */
+export interface TenantCreationEvent {
+  readonly tenant: TenantRecord;
+  readonly principalId: string;
+  readonly at: string;
+}
+
+export const TENANT_CREATED_OPERATION = "platform.tenant_created";
+
+class CreationUnrecordable extends Error {
+  constructor(readonly underlying: unknown) {
+    super("tenant creation could not be recorded");
+    this.name = "CreationUnrecordable";
+  }
 }
 
 function json(status: number, body: unknown): HandlerOutput {
@@ -430,12 +475,28 @@ function buildCreateHandler(ctx: PlatformAdminContext): Handler {
     if (denial !== null) return denial;
     const parsed = CreateTenantInputSchema.safeParse(parsedBody ?? {});
     if (!parsed.success) return json(400, { error: "invalid_request", detail: parsed.error.issues });
+    if (principal === null) return json(401, { error: "authentication_required" });
+    const actor = principal.principalId;
+    const at = (ctx.clock ?? ((): Date => new Date()))().toISOString();
     try {
-      const tenant = await ctx.store.create(parsed.data);
+      const tenant = await ctx.store.create(parsed.data, async (tx, created) => {
+        try {
+          await ctx.recordCreation(tx, { tenant: created, principalId: actor, at });
+        } catch (err) {
+          throw new CreationUnrecordable(err);
+        }
+      });
       return json(201, { tenant });
     } catch (err) {
       if (err instanceof DuplicateTenantError) {
         return json(409, { error: "tenant_exists", detail: err.message });
+      }
+      if (err instanceof CreationUnrecordable) {
+        console.error("[platform] tenant creation not recorded, so not performed:", err.underlying);
+        return json(503, {
+          error: "audit_unavailable",
+          detail: "a tenant cannot be created while its creation cannot be recorded",
+        });
       }
       throw err;
     }
@@ -459,10 +520,9 @@ function buildGetHandler(ctx: PlatformAdminContext): Handler {
  * this transition is not in it", `true` is recorded. Collapsing the first two would put back in the
  * response the confusion the table exists to resolve.
  *
- * `fromState` is the status the gate above read and `canTransitionTenant` approved — the same value,
- * not a second read. The write is a `setStatus` with no source predicate, so a concurrent change
- * between the two is possible and pre-dates this: the trail then records the transition the console
- * believed it was making, which is also what the 200 reports.
+ * `fromState` is the status the guarded write moved the row out of, read under the same row lock,
+ * so the trail records the transition that happened rather than the one the console believed it was
+ * making.
  */
 async function recordConsoleTransition(
   ctx: PlatformAdminContext,
@@ -528,8 +588,20 @@ function buildTransitionHandler(ctx: PlatformAdminContext, target: TenantStatus)
         detail: `${current.status} -> ${target}`,
       });
     }
-    const tenant = await ctx.store.setStatus(id, target);
-    if (tenant === null) return json(404, { error: "tenant_not_found", detail: id });
+    // Guarded on the status just read and approved (ADR-0321's "the row is the lock"). An unguarded
+    // write let two consoles race: an archive landing between this read and the write was
+    // overwritten by a reactivation `canTransitionTenant` had approved for the state the tenant was
+    // no longer in, and the trail recorded a `fromState` the row never held.
+    const moved = await ctx.store.transitionStatus(id, target, [current.status]);
+    if (moved === null) {
+      const now = await ctx.store.getById(id);
+      if (now === null) return json(404, { error: "tenant_not_found", detail: id });
+      return json(409, {
+        error: "concurrent_transition",
+        detail: `tenant moved from ${current.status} to ${now.status} while this request ran; nothing was changed`,
+      });
+    }
+    const tenant = moved.tenant;
     const action = CONSOLE_ACTION[target];
     // Non-null for every state the console can reach, which is a property of `CONSOLE_ACTION` and
     // `TENANT_STATUS_TRANSITIONS` together rather than of this call site — so a `null` here means
@@ -541,7 +613,7 @@ function buildTransitionHandler(ctx: PlatformAdminContext, target: TenantStatus)
         : await recordConsoleTransition(ctx, {
             tenantId: id,
             action,
-            fromState: current.status,
+            fromState: moved.previousStatus,
             reason: parsed.data.reason,
             actorUserId: principal.principalId,
           });

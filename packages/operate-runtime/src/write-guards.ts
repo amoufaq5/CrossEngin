@@ -9,6 +9,7 @@ import {
   withinOneUnitAtScale,
 } from "./decimal.js";
 import { drainList } from "./list-drain.js";
+import { LEDGER_MONEY_SCALE, unitsOf, unitsToNumber } from "./money.js";
 import {
   isAdjustmentPeriodCovering,
   periodLockedDetail,
@@ -51,6 +52,51 @@ export async function runWriteGuards(
     if (result !== null) return result;
   }
   return null;
+}
+
+// ---- Currency precision guard --------------------------------------------------
+
+export interface CurrencyPrecisionGuardConfig {
+  readonly currencyEntity?: string;
+  readonly decimalPlacesField?: string;
+}
+
+/**
+ * Refuses a currency whose minor unit is finer than the ledger can hold.
+ *
+ * Every money column a posting writes is `decimal(_, 2)` (`LEDGER_MONEY_SCALE`), so a currency
+ * declaring three decimal places — KWD, BHD, OMR, JOD, TND — would have every amount silently rounded
+ * to the hundredth on write, and the GL, the aging report and the WHT certificate would all agree on a
+ * figure the currency does not have. Holding it would take a schema change to every money column
+ * (and their CHECKs), which is a decision rather than a guard. Until then the honest answer is to
+ * refuse to declare the currency at all, by name, rather than let `decimal_places` be a number
+ * nothing reads. Only a value that is new or changed is refused, so a row stored before this guard
+ * can still be read and deleted.
+ */
+export function currencyPrecisionGuard(config: CurrencyPrecisionGuardConfig = {}): WriteGuard {
+  const entity = config.currencyEntity ?? "Currency";
+  const field = config.decimalPlacesField ?? "decimal_places";
+  return async (input) => {
+    if (input.entity !== entity) return null;
+    if (input.operation !== "create" && input.operation !== "update") return null;
+    // As a number whatever its spelling: an `integer` field admits the string `"3"`, which the
+    // document store keeps as a string — a `typeof … === "number"` test let it through.
+    const places = (v: unknown): number | null => {
+      const n = typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? Number(v) : NaN;
+      return Number.isFinite(n) ? n : null;
+    };
+    const declared = places(input.after[field]);
+    if (declared === null || declared <= LEDGER_MONEY_SCALE) return null;
+    if (input.operation === "update" && places(input.before?.[field]) === declared) return null;
+    return {
+      status: 422,
+      error: "currency_precision_unsupported",
+      detail:
+        `${field} is ${String(declared)}, and this deployment's ledger holds money to ` +
+        `${String(LEDGER_MONEY_SCALE)} decimal places; every amount in this currency would be rounded ` +
+        `on write. Currencies with a finer minor unit are not supported yet.`,
+    };
+  };
 }
 
 // ---- Journal posting guard ---------------------------------------------------
@@ -114,10 +160,6 @@ const DEFAULTS = {
   maxLines: 50_000,
 } as const;
 
-function num(v: unknown): number {
-  const n = typeof v === "number" ? v : Number(v);
-  return Number.isFinite(n) ? n : 0;
-}
 
 // ---- Applied payments, read once ---------------------------------------------
 
@@ -205,7 +247,9 @@ async function foldCompletedPayments(
   config: AppliedPaymentsConfig,
 ): Promise<{ readonly applied: readonly ReadonlyMap<string, number>[]; readonly complete: boolean }> {
   const c = { ...APPLIED_PAYMENT_FALLBACKS, ...config };
-  const applied = refFields.map(() => new Map<string, number>());
+  // Summed in exact ledger units and handed back as numbers only at the end: a double running total
+  // over a tenant's whole payment history drifts by the representation error of every addend.
+  const units = refFields.map(() => new Map<string, bigint>());
   const outcome = await drainList(
     store,
     tenantId,
@@ -222,12 +266,13 @@ async function foldCompletedPayments(
         for (let i = 0; i < refFields.length; i += 1) {
           const ref = p[refFields[i]!];
           if (typeof ref !== "string" || ref.length === 0) continue;
-          const bucket = applied[i]!;
-          bucket.set(ref, (bucket.get(ref) ?? 0) + num(p[c.amountField]));
+          const bucket = units[i]!;
+          bucket.set(ref, (bucket.get(ref) ?? 0n) + unitsOf(p[c.amountField]));
         }
       }
     },
   );
+  const applied = units.map((bucket) => new Map([...bucket].map(([k, v]) => [k, unitsToNumber(v)] as const)));
   return { applied, complete: outcome.complete };
 }
 
@@ -303,7 +348,7 @@ export const APPLIED_PAYMENT_EPSILON = 0.005;
  * guard admits and nothing reconciles.
  *
  * A `total` of zero or less is **covered**, which is the right answer for all three of its causes:
- * a nil document, a field the entity does not declare (`num(undefined)` is 0), and a negative
+ * a nil document, a field the entity does not declare (an absent amount reads as 0), and a negative
  * total. There is nothing owed, so there is nothing to refuse. The second cause is why an entity
  * with no total field is *declared uncoverable* rather than guarded — a guard over it would pass
  * every write and read as a control.
@@ -325,10 +370,10 @@ export function settlementIsCovered(total: number, applied: number): boolean {
  * record, owes the total.
  */
 export function amountOwed(document: EntityRecord, totalField: string, withholdingField: string | undefined): number {
-  const total = num(document[totalField]);
-  if (withholdingField === undefined) return total;
-  const withheld = num(document[withholdingField]);
-  return withheld > 0 ? Math.round((total - withheld) * 100) / 100 : total;
+  const total = unitsOf(document[totalField]);
+  if (withholdingField === undefined) return unitsToNumber(total);
+  const withheld = unitsOf(document[withholdingField]);
+  return unitsToNumber(withheld > 0n ? total - withheld : total);
 }
 
 /**
@@ -536,6 +581,14 @@ class JournalTotals {
       return parsed === null || parsed.units !== 0n;
     };
     if (!stated(fDebit) && !stated(fCredit)) return;
+    // The other half of the same rule: a line moving **no** transaction amount and a stated
+    // functional one is a functional-only adjustment — a realized or unrealized FX difference, which
+    // exists only in the base currency and so has no transaction amount for a rate to multiply. Its
+    // currency bucket nets to nothing and the functional legs must still balance, so admitting it
+    // cannot let an entry move value it does not account for; refusing it made realized and
+    // unrealized FX inexpressible except by stating the difference as a transaction amount, which is
+    // the `amount = functional` lie the revaluation posted (ADR-0429's open question).
+    if (!stated(debit) && !stated(credit)) return;
     const rate = fxRate === undefined || fxRate === null ? { negative: false, units: 1n, scale: 0 } : parseDecimal(fxRate);
     if (rate === null) {
       // A stated functional amount beside a rate that is not a decimal cannot be shown right or

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { CREDENTIAL_PEPPER_VAR } from "./credential-auth-env.js";
+import { CREDENTIAL_PEPPER_VAR, CREDENTIAL_PEPPER_VERSION_VAR } from "./credential-auth-env.js";
+import { DEFAULT_MIN_PASSWORD_LENGTH } from "./credential-routes.js";
 import {
   NEW_PASSWORD_VAR,
   SET_CREDENTIAL_OUTCOMES,
@@ -52,13 +53,14 @@ describe("runSetCredential", () => {
   it("does not trim the password", async () => {
     // A trailing space is part of a password. Trimming would set a credential the operator cannot
     // type back, and the failure would present as "the password is wrong".
-    // The observable consequence of not trimming: a password of three spaces is a password, so
-    // the run proceeds to open a connection instead of refusing `password_absent`. There is no
-    // PGHOST in this suite, so proceeding is exactly what the throw proves.
+    // The observable consequence of not trimming: a password of spaces at the floor's length is a
+    // password, so the run proceeds to open a connection instead of refusing `password_absent` or
+    // `password_too_short`. There is no PGHOST in this suite, so proceeding is exactly what the
+    // throw proves.
     await expect(
       runSetCredential(opts, {
         [CREDENTIAL_PEPPER_VAR]: PEPPER,
-        [NEW_PASSWORD_VAR]: "   ",
+        [NEW_PASSWORD_VAR]: " ".repeat(DEFAULT_MIN_PASSWORD_LENGTH),
       }),
     ).rejects.toThrow(/PGHOST/);
     // ...where the empty string refuses before any connection is attempted.
@@ -67,6 +69,30 @@ describe("runSetCredential", () => {
       [NEW_PASSWORD_VAR]: "",
     });
     expect(absent.outcome).toBe("password_absent");
+  });
+
+  it("refuses a password under the routes' floor before opening a connection", async () => {
+    const r = await runSetCredential(opts, {
+      [CREDENTIAL_PEPPER_VAR]: PEPPER,
+      [NEW_PASSWORD_VAR]: "x".repeat(DEFAULT_MIN_PASSWORD_LENGTH - 1),
+    });
+    expect(r.outcome).toBe("password_too_short");
+    expect(r.detail).toContain(DEFAULT_MIN_PASSWORD_LENGTH.toString());
+    const declared = await runSetCredential(
+      { ...opts, minPasswordLength: 30 },
+      { [CREDENTIAL_PEPPER_VAR]: PEPPER, [NEW_PASSWORD_VAR]: "x".repeat(29) },
+    );
+    expect(declared.outcome).toBe("password_too_short");
+  });
+
+  it("refuses a malformed pepper version before opening a connection", async () => {
+    const r = await runSetCredential(opts, {
+      [CREDENTIAL_PEPPER_VAR]: PEPPER,
+      [CREDENTIAL_PEPPER_VERSION_VAR]: "0",
+      [NEW_PASSWORD_VAR]: "x".repeat(DEFAULT_MIN_PASSWORD_LENGTH),
+    });
+    expect(r.outcome).toBe("pepper_refused");
+    expect(r.detail).toContain(CREDENTIAL_PEPPER_VERSION_VAR);
   });
 
   it("never prints the password, the pepper or the hash", async () => {

@@ -1,5 +1,6 @@
 import { IdempotencyRecordSchema, type IdempotencyRecord } from "@crossengin/api-gateway";
 import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
+import { assertBindArity } from "@crossengin/testing";
 import { describe, expect, it, vi } from "vitest";
 
 import { PostgresIdempotencyStore } from "./idempotency-store.js";
@@ -39,6 +40,7 @@ function mockConnection(
           `connection refuses this write (42501) and reads nothing: ${sql.slice(0, 48)}`,
       );
     }
+    assertBindArity(sql, params);
     return handler(sql, params);
   }) as PgConnection["query"];
   return {
@@ -292,6 +294,111 @@ describe("PostgresIdempotencyStore.put", () => {
   });
 });
 
+describe("PostgresIdempotencyStore.reserve", () => {
+  it("wins an unseen key with one conditional upsert that writes an in-progress row", async () => {
+    const captured: Statement[] = [];
+    const conn = mockConnection(() => ({ rows: [{ record_id: "idem_abcdefghijklmn" }], rowCount: 1 }), {
+      capture: captured,
+    });
+    const result = await new PostgresIdempotencyStore(conn).reserve({ tenantId: TENANT, record: fixtureRecord() });
+    expect(result).toEqual({ reserved: true });
+    const stmt = issued(captured);
+    expect(stmt.sql).toContain("ON CONFLICT (record_id) DO UPDATE");
+    expect(stmt.sql).toContain("'in_progress'");
+    // Takeover only once the holder's lease or retention has lapsed: without this clause two
+    // concurrent retries both win and both execute, which is the defect the reservation closes.
+    expect(stmt.sql).toContain("expires_at <= EXCLUDED.received_at");
+    expect(stmt.sql).toContain("RETURNING record_id");
+    expect(captured.filter((c) => !c.sql.includes("set_config"))).toHaveLength(1);
+  });
+
+  it("loses to a live holder and returns that holder's row", async () => {
+    const holder = fixtureRecord({ requestHashSha256: "c".repeat(64) });
+    const conn = mockConnection((sql) =>
+      sql.includes("INSERT") ? { rows: [], rowCount: 0 } : { rows: [recordToRow(holder)], rowCount: 1 },
+    );
+    const result = await new PostgresIdempotencyStore(conn).reserve({ tenantId: TENANT, record: fixtureRecord() });
+    expect(result.reserved).toBe(false);
+    if (!result.reserved) expect(result.existing.requestHashSha256).toBe("c".repeat(64));
+  });
+
+  it("does not claim a reservation when the holder vanished between the two statements", async () => {
+    const conn = mockConnection((sql) => (sql.includes("INSERT") ? { rows: [], rowCount: 0 } : { rows: [], rowCount: 0 }));
+    const result = await new PostgresIdempotencyStore(conn).reserve({ tenantId: TENANT, record: fixtureRecord() });
+    expect(result.reserved).toBe(false);
+    if (!result.reserved) expect(result.existing.status).toBe("in_progress");
+  });
+});
+
+describe("PostgresIdempotencyStore.complete", () => {
+  it("stores the replay's headers and body, conditional on its own request hash", async () => {
+    const captured: Statement[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 1 }), { capture: captured });
+    const body = new TextEncoder().encode('{"id":"tenant_1"}');
+    await new PostgresIdempotencyStore(conn).complete({
+      tenantId: TENANT,
+      record: fixtureRecord({ status: "completed_success", responseStatus: 201, completedAt: "2026-05-16T12:00:01.000Z" }),
+      replay: { responseHeaders: { "content-type": "application/json" }, responseBody: body },
+    });
+    const stmt = issued(captured);
+    expect(stmt.sql).toContain("request_hash_sha256 = EXCLUDED.request_hash_sha256");
+    expect(stmt.sql).toContain("response_body = EXCLUDED.response_body");
+    expect(stmt.params?.[16]).toBe('{"content-type":"application/json"}');
+    expect(stmt.params?.[17]).toBe(body);
+  });
+
+  it("writes NULL for both replay columns when no body was retained", async () => {
+    const captured: Statement[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 1 }), { capture: captured });
+    await new PostgresIdempotencyStore(conn).complete({
+      tenantId: TENANT,
+      record: fixtureRecord({ status: "completed_success", responseStatus: 201 }),
+      replay: null,
+    });
+    const stmt = issued(captured);
+    expect(stmt.params?.[16]).toBeNull();
+    expect(stmt.params?.[17]).toBeNull();
+  });
+});
+
+describe("PostgresIdempotencyStore.release", () => {
+  it("deletes only this request's own in-progress row", async () => {
+    const captured: Statement[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 1 }), { capture: captured });
+    await new PostgresIdempotencyStore(conn).release({ tenantId: TENANT, key: "key-1", requestHashSha256: "a".repeat(64) });
+    const stmt = issued(captured);
+    expect(stmt.sql).toContain("status = 'in_progress'");
+    expect(stmt.sql).toContain("request_hash_sha256 = $3");
+    expect(stmt.params).toEqual([TENANT, "key-1", "a".repeat(64)]);
+  });
+});
+
+describe("PostgresIdempotencyStore.get with a retained replay", () => {
+  it("attaches the stored headers and body, and none when the headers column is NULL", async () => {
+    const body = Buffer.from('{"id":"tenant_1"}');
+    const withReplay = {
+      ...recordToRow(fixtureRecord({ status: "completed_success", responseStatus: 201 })),
+      response_headers: { "content-type": "application/json" },
+      response_body: body,
+    };
+    const conn = mockConnection(() => ({ rows: [withReplay], rowCount: 1 }));
+    const got = await new PostgresIdempotencyStore(conn).get({ tenantId: TENANT, key: "key-1" });
+    expect(got?.replay?.responseHeaders).toEqual({ "content-type": "application/json" });
+    expect(new TextDecoder().decode(got?.replay?.responseBody ?? new Uint8Array())).toBe('{"id":"tenant_1"}');
+
+    const bare = mockConnection(() => ({ rows: [recordToRow(fixtureRecord())], rowCount: 1 }));
+    const none = await new PostgresIdempotencyStore(bare).get({ tenantId: TENANT, key: "key-1" });
+    expect(none?.replay).toBeUndefined();
+  });
+
+  it("treats a headers value that is not an object of strings as no retained body", async () => {
+    const row = { ...recordToRow(fixtureRecord()), response_headers: { "x-n": 5 }, response_body: Buffer.from("x") };
+    const conn = mockConnection(() => ({ rows: [row], rowCount: 1 }));
+    const got = await new PostgresIdempotencyStore(conn).get({ tenantId: TENANT, key: "key-1" });
+    expect(got?.replay).toBeUndefined();
+  });
+});
+
 describe("PostgresIdempotencyStore.update", () => {
   it("reads, mutates, and re-puts the record", async () => {
     let stored = fixtureRecord({ status: "in_progress" });
@@ -381,5 +488,7 @@ function recordToRow(r: IdempotencyRecord): Record<string, unknown> {
     completed_at: r.completedAt,
     error_code: r.errorCode,
     error_message: r.errorMessage,
+    response_headers: null,
+    response_body: null,
   };
 }

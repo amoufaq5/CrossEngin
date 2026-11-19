@@ -177,7 +177,7 @@ function fakeRecipientDb(): FakeDb {
 
 function seedDirectory(db: FakeDb): void {
   db.users.push(
-    { id: ADMIN, email: "admin@a.example", display_name: "A Admin", status: "active" },
+    { id: ADMIN, email: "admin@a.example", phone_e164: "+15550100", display_name: "A Admin", status: "active" },
     { id: SECONDARY_ADMIN, email: "second@a.example", display_name: null, status: "active" },
     { id: VIEWER, email: "viewer@a.example", display_name: "A Viewer", status: "active" },
     { id: SUSPENDED, email: "suspended@a.example", display_name: null, status: "suspended" },
@@ -809,7 +809,7 @@ describe("recipient-resolver — activeSuppressions", () => {
 
 describe("recipient-resolver — addressHashesFor", () => {
   it("hashes both the user id and the email a person is reachable at", () => {
-    const hashes = addressHashesFor({ userId: ADMIN, email: "admin@a.example" });
+    const hashes = addressHashesFor({ userId: ADMIN, email: "admin@a.example", phoneE164: null });
     expect(hashes).toContain(sha256(ADMIN));
     expect(hashes).toContain(sha256("admin@a.example"));
     expect(hashes).toHaveLength(2);
@@ -819,38 +819,44 @@ describe("recipient-resolver — addressHashesFor", () => {
     const recipient = {
       userId: ADMIN,
       email: "admin@a.example",
+      phoneE164: "+15550100",
       displayName: null,
       primaryRole: "erp_admin",
       secondaryRoles: [],
     };
     const hashes = addressHashesFor(recipient);
     const expected = new Set(
-      NOTIFICATION_CHANNELS.map((channel) => sha256(addressFor(channel, recipient))),
+      NOTIFICATION_CHANNELS.flatMap((channel) => {
+        const address = addressFor(channel, recipient);
+        return address === null ? [] : [sha256(address)];
+      }),
     );
     expect(new Set(hashes)).toEqual(expected);
+    // A phone is a destination of its own, so its hash joins the set.
+    expect(hashes).toContain(sha256("+15550100"));
   });
 
   it("returns a sorted, duplicate-free array", () => {
-    const hashes = addressHashesFor({ userId: VIEWER, email: "viewer@a.example" });
+    const hashes = addressHashesFor({ userId: VIEWER, email: "viewer@a.example", phoneE164: null });
     expect([...hashes]).toEqual([...hashes].sort());
     expect(new Set(hashes).size).toBe(hashes.length);
   });
 
   it("collapses to a single hash when the email happens to equal the user id", () => {
-    const hashes = addressHashesFor({ userId: ADMIN, email: ADMIN });
+    const hashes = addressHashesFor({ userId: ADMIN, email: ADMIN, phoneE164: null });
     expect(hashes).toEqual([sha256(ADMIN)]);
   });
 
   it("is deterministic across calls and emits 64-char lowercase hex", () => {
-    const first = addressHashesFor({ userId: ADMIN, email: "admin@a.example" });
-    const second = addressHashesFor({ userId: ADMIN, email: "admin@a.example" });
+    const first = addressHashesFor({ userId: ADMIN, email: "admin@a.example", phoneE164: null });
+    const second = addressHashesFor({ userId: ADMIN, email: "admin@a.example", phoneE164: null });
     expect(first).toEqual(second);
     for (const hash of first) expect(hash).toMatch(/^[0-9a-f]{64}$/);
   });
 
   it("gives two different people disjoint hash sets", () => {
-    const mine = addressHashesFor({ userId: ADMIN, email: "admin@a.example" });
-    const theirs = addressHashesFor({ userId: VIEWER, email: "viewer@a.example" });
+    const mine = addressHashesFor({ userId: ADMIN, email: "admin@a.example", phoneE164: null });
+    const theirs = addressHashesFor({ userId: VIEWER, email: "viewer@a.example", phoneE164: null });
     expect(mine.some((h) => theirs.includes(h))).toBe(false);
   });
 });
@@ -866,7 +872,7 @@ describe("recipient-resolver — identityFor", () => {
     expect(identity?.displayName).toBe("A Admin");
     expect(identity?.addressHashes).toEqual([sha256(ADMIN), sha256("admin@a.example")].sort());
     expect(identity?.addressHashes).toEqual(
-      addressHashesFor({ userId: ADMIN, email: "admin@a.example" }),
+      addressHashesFor({ userId: ADMIN, email: "admin@a.example", phoneE164: null }),
     );
   });
 
@@ -1007,7 +1013,7 @@ describe("recipient-resolver — identitiesFor", () => {
     expect([...identities.keys()].sort()).toEqual([ADMIN, SECONDARY_ADMIN, VIEWER].sort());
     expect(db.captured.filter((c) => isRead(c))).toHaveLength(1);
     expect(identities.get(VIEWER)?.addressHashes).toEqual(
-      addressHashesFor({ userId: VIEWER, email: "viewer@a.example" }),
+      addressHashesFor({ userId: VIEWER, email: "viewer@a.example", phoneE164: null }),
     );
   });
 

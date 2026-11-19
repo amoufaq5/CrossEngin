@@ -4,6 +4,7 @@ import {
   NotificationTemplateSchema,
   TemplateContentSchema,
   TemplateVariableSchema,
+  renderTemplateContent,
   templatePlaceholders,
   validateRenderInput,
   type DigestBatch,
@@ -26,6 +27,7 @@ import {
   renderDigest,
   templateLabel,
 } from "./digest-template.js";
+import { htmlMarkupRefusals } from "./notification-template-routes.js";
 
 const TENANT = "11111111-1111-4111-8111-111111111111";
 const USER = "22222222-2222-4222-8222-222222222222";
@@ -407,6 +409,66 @@ describe("renderDigest", () => {
     expect(rendered.title).toBe("1 notifications");
     expect(rendered.severity).toBe("info");
     expect(rendered.body).toContain("<p>");
+  });
+
+  // A stored override the authoring routes never vetted reaches a browser as markup, so the
+  // allowlist is re-applied at render time. Each shape is one the contract parses.
+  it.each([
+    ["a script tag", "<p>{{summaryLine}}</p><script>fetch('/api/x')</script>"],
+    ["an event handler", '<p>{{summaryLine}}</p><img src="https://cdn.example.test/x.png" onerror="alert(1)">'],
+    ["a javascript: link", '<p><a href="javascript:alert(1)">{{summaryLine}}</a></p>'],
+    ["an iframe", '<p>{{summaryLine}}</p><iframe src="https://evil.example.test/"></iframe>'],
+    ["a style attribute", '<p style="position:fixed;inset:0">{{summaryLine}}</p>'],
+    ["a data: URI", '<p><a href="data:text/html,x">{{summaryLine}}</a></p>'],
+  ])("falls back to the built-in content for an override carrying %s", (_name, htmlBody) => {
+    const override = TemplateContentSchema.parse({ channel: "in_app", title: "Mine", htmlBody, severity: "warning" });
+    const rendered = renderDigest({ digest: digest(), members: [member(1), member(2)], content: override });
+    expect(rendered.title).toBe("2 notifications");
+    expect(rendered.severity).toBe("info");
+    expect(rendered.body).toBe(renderDigest({ digest: digest(), members: [member(1), member(2)] }).body);
+  });
+
+  // The case only the source can see: rendered, `https://app{{channelLabel}}` becomes a URL with a
+  // literal host and passes, while the authoring route refuses it because the origin is templated.
+  it("falls back for a templated origin the authoring route would refuse, though its rendering passes", () => {
+    const htmlBody = '<p><a href="https://app{{channelLabel}}">{{summaryLine}}</a></p>';
+    expect(htmlMarkupRefusals("htmlBody", htmlBody).length).toBeGreaterThan(0);
+    const override = TemplateContentSchema.parse({ channel: "in_app", title: "Mine", htmlBody, severity: "warning" });
+    const asRendered = renderTemplateContent(override, digestRenderContext({ digest: digest(), members: [member(1)] }));
+    expect(htmlMarkupRefusals("htmlBody", asRendered.rendered.body)).toEqual([]);
+    const rendered = renderDigest({ digest: digest(), members: [member(1)], content: override });
+    expect(rendered.title).toBe("1 notifications");
+    expect(rendered.body).not.toContain("https://app");
+  });
+
+  // And the case only the rendering can see: a placeholder in a tag-name position is not a tag in
+  // the source (`<{` opens nothing), and becomes one once substituted.
+  it("falls back for a placeholder that renders into a tag name the source scan cannot read", () => {
+    const htmlBody = "<p>{{summaryLine}}</p><{{channelLabel}}>";
+    expect(htmlMarkupRefusals("htmlBody", htmlBody)).toEqual([]);
+    const override = TemplateContentSchema.parse({ channel: "in_app", title: "Mine", htmlBody, severity: "warning" });
+    const rendered = renderDigest({ digest: digest(), members: [member(1)], content: override });
+    expect(rendered.title).toBe("1 notifications");
+    expect(rendered.body).not.toContain("<Email>");
+  });
+
+  it("keeps an override whose markup is all on the authoring allowlist", () => {
+    const override = TemplateContentSchema.parse({
+      channel: "in_app",
+      title: "Mine",
+      htmlBody:
+        '<p><strong>{{summaryLine}}</strong></p><pre>{{itemLines}}</pre>' +
+        '<p><a href="https://app.example.test/notifications" rel="noopener">Open</a></p>',
+      severity: "warning",
+    });
+    const rendered = renderDigest({ digest: digest(), members: [member(1)], content: override });
+    expect(rendered.title).toBe("Mine");
+    expect(rendered.body).toContain('<a href="https://app.example.test/notifications"');
+  });
+
+  it("the built-in content passes the allowlist it falls back to", () => {
+    const rendered = renderDigest({ digest: digest(), members: [member(1), member(2)] });
+    expect(htmlMarkupRefusals("htmlBody", rendered.body)).toEqual([]);
   });
 
   it("escapes HTML coming from a member template id", () => {

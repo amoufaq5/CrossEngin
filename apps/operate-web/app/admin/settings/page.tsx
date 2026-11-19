@@ -180,7 +180,7 @@ export default function SettingsPage() {
             </div>
           </Section>
 
-          <Section title="Regional &amp; operational defaults">
+          <Section title="Regional & operational defaults">
             <div className="grid grid-cols-2 gap-4 md:grid-cols-3">
               <Text label="Default currency (ISO-3)" value={defaults.currency ?? ""} maxLength={3} uppercase onChange={(v) => setD(setDefaults, "currency", v)} />
               <Text label="Locale (e.g. en-US)" value={defaults.locale ?? ""} onChange={(v) => setD(setDefaults, "locale", v)} />
@@ -196,7 +196,7 @@ export default function SettingsPage() {
             </div>
           </Section>
 
-          <Section title="Finance &amp; tax">
+          <Section title="Finance & tax">
             <div className="grid grid-cols-2 gap-4 md:grid-cols-3">
               <Select label="Accounting standard" value={finance.accountingStandard ?? ""} onChange={(v) => setD(setFinance, "accountingStandard", v)}
                 options={ACCOUNTING_STANDARDS.map((a) => ({ value: a, label: a === "" ? "default" : a.replace("_", " ").toUpperCase() }))} />
@@ -438,7 +438,7 @@ function jurisdictionRowsToMap(rows: readonly JurisdictionRow[]): Record<string,
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <section className="rounded-xl border border-line bg-white p-6">
-      <h2 className="mb-4 text-sm font-semibold uppercase tracking-wide text-ink-faint" dangerouslySetInnerHTML={{ __html: title }} />
+      <h2 className="mb-4 text-sm font-semibold uppercase tracking-wide text-ink-faint">{title}</h2>
       {children}
     </section>
   );

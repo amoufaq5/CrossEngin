@@ -359,12 +359,38 @@ export function resolveColumnEncryptionKey(
 }
 
 /**
+ * The OpenPGP options every new ciphertext is written with.
+ *
+ * pgcrypto's own defaults are AES-128 (`cipher-algo=aes128`) and a SHA-1 string-to-key digest,
+ * measured on PG 16 from the packet header (`c30d 04 07 03 02` — algorithm 7, S2K mode 3, digest 2).
+ * With these options the header reads `c30d 04 09 03 08`: AES-256, the same iterated-and-salted S2K,
+ * SHA-256. Three properties make the change safe to take for new writes alone:
+ *
+ * - **Old ciphertext stays readable**, because `pgp_sym_decrypt` reads the algorithm from the packet
+ *   rather than from an argument; so a column written before and a column written after decrypt
+ *   under one key, and a rekey re-encrypts the old ones under these options as a side effect.
+ * - **The S2K mode is unchanged** (3, iterated and salted, pgcrypto's default). `s2k-mode=1` is 20x
+ *   cheaper (2,000 rows: 12.9 ms against 254 ms) and buys nothing for the 256-bit derived and data
+ *   keys this platform supplies, but `crossengin-pg encrypt` accepts an operator's own
+ *   `COLUMN_ENCRYPTION_KEY`, which may be a passphrase — and for that key the iteration is the only
+ *   protection. Measured cost of this constant against the defaults: 254 ms against 301 ms per 2,000.
+ * - **Compression stays off** (`compress-algo` defaults to 0), so a ciphertext's length is not a
+ *   function of how compressible the plaintext is.
+ *
+ * What it does **not** buy is an AEAD. OpenPGP symmetric encryption is CFB with a modification-detection
+ * code (SHA-1 over the plaintext), and pgcrypto offers no other mode; integrity is that MDC, which
+ * `pgp_sym_decrypt` checks and refuses on (`Wrong key or corrupt data`).
+ */
+export const PGP_SYM_ENCRYPT_OPTIONS = "cipher-algo=aes256, s2k-digest-algo=sha256";
+
+/**
  * Builds the pgcrypto symmetric-encryption expression for a value. `keyRef`
  * is a SQL expression yielding the key (e.g. a bind param or
  * `current_setting('app.column_encryption_key')`), never the raw key text.
+ * The options are a constant of this module and travel as a literal, never a parameter.
  */
 export function pgpSymEncryptExpr(valueExpr: string, keyRef: string): string {
-  return `pgp_sym_encrypt(${valueExpr}, ${keyRef})`;
+  return `pgp_sym_encrypt(${valueExpr}, ${keyRef}, '${PGP_SYM_ENCRYPT_OPTIONS}')`;
 }
 
 export function pgpSymDecryptExpr(columnExpr: string, keyRef: string): string {

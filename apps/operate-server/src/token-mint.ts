@@ -50,7 +50,20 @@ export interface SessionTokenClaims {
   readonly iat: number;
   readonly nbf: number;
   readonly exp: number;
+  /**
+   * `meta.users.session_epoch` when the session was minted. A request whose token carries an older
+   * value than the row now holds is refused (`session-standing.ts`), which is how a password change,
+   * an operator's reset and a sign-out end sessions already issued: a token is verified by
+   * signature, so nothing about it can change after it is minted, and the row is what moves.
+   *
+   * A private claim (RFC 7519 §4.3) read only by this deployment, and only on a token this
+   * deployment's own key signed.
+   */
+  readonly sep: number;
 }
+
+/** The private claim a session's generation travels in. */
+export const SESSION_EPOCH_CLAIM = "sep";
 
 /**
  * The roles one session carries, as the membership row holds them.
@@ -82,6 +95,8 @@ export interface MintSessionTokenInput {
   readonly userId: string;
   readonly tenantId: string;
   readonly roles: SessionRoles;
+  /** Required, so a mint cannot forget it and stamp a generation of zero for a user past it. */
+  readonly sessionEpoch: number;
   readonly now: Date;
   readonly lifetimeSeconds: number;
   readonly kid: string;
@@ -258,6 +273,9 @@ export function mintSessionToken(input: MintSessionTokenInput): MintedSessionTok
         ` and ${MAX_SESSION_TOKEN_SECONDS.toString()} seconds, got ${String(input.lifetimeSeconds)}`,
     );
   }
+  if (!Number.isInteger(input.sessionEpoch) || input.sessionEpoch < 0) {
+    throw new Error(`session epoch must be a non-negative integer, got ${String(input.sessionEpoch)}`);
+  }
   const iat = Math.floor(input.now.getTime() / 1000);
   const claims: SessionTokenClaims = {
     iss: input.issuer,
@@ -268,6 +286,7 @@ export function mintSessionToken(input: MintSessionTokenInput): MintedSessionTok
     iat,
     nbf: iat - TOKEN_NOT_BEFORE_SKEW_SECONDS,
     exp: iat + input.lifetimeSeconds,
+    sep: input.sessionEpoch,
   };
   const header = { alg: "EdDSA", typ: "JWT", kid: input.kid };
   const signingInput = `${B64URL_JSON(header)}.${B64URL_JSON(claims)}`;

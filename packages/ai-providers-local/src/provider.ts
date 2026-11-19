@@ -1,3 +1,9 @@
+import {
+  ProviderInactivityTimeout,
+  resolveInactivityTimeoutMs,
+  startInactivityWatchdog,
+  type InactivityWatchdog,
+} from "@crossengin/ai-providers";
 import type {
   CompletionChunk,
   CompletionRequest,
@@ -12,7 +18,7 @@ import type {
 
 import { buildLocalRequest, type LocalResponse } from "./chat-api.js";
 import { LocalProviderError, fromHttpResponse, fromNetworkError } from "./errors.js";
-import { LOCAL_ZERO_PRICING } from "./pricing.js";
+import { LOCAL_ZERO_PRICING, priceLocalUsage } from "./pricing.js";
 import { chunksFromSse, readSseStream } from "./streaming.js";
 
 /** Ollama's OpenAI-compatible endpoint. Includes the `/v1` version segment. */
@@ -50,6 +56,14 @@ export interface LocalLlmProviderOptions {
   readonly residency?: readonly Region[];
   readonly capabilities?: Partial<ProviderCapabilities>;
   readonly fetch?: FetchLike;
+  /**
+   * Abort a call the server sends nothing for this long (`startInactivityWatchdog`). A CPU-served
+   * model can take minutes over a long reply, which an inactivity clock tolerates as long as tokens
+   * keep arriving.
+   */
+  readonly inactivityTimeoutMs?: number;
+  /** What a token costs this deployment; absent, every call costs 0 (`priceLocalUsage`). */
+  readonly pricingOverride?: ProviderPricing;
 }
 
 interface LocalEmbeddingApiResponse {
@@ -82,7 +96,7 @@ export class LocalLlmProvider implements LlmProvider {
   readonly models: readonly string[];
   readonly capabilities: ProviderCapabilities;
   readonly residency: readonly Region[];
-  readonly pricing: ProviderPricing = LOCAL_ZERO_PRICING;
+  readonly pricing: ProviderPricing;
 
   private readonly defaultModel: string;
   private readonly defaultEmbeddingModel: string;
@@ -90,6 +104,8 @@ export class LocalLlmProvider implements LlmProvider {
   private readonly baseUrl: string;
   private readonly apiKey: string | undefined;
   private readonly fetchImpl: FetchLike;
+  private readonly inactivityTimeoutMs: number;
+  private readonly pricingOverride: ProviderPricing | undefined;
 
   constructor(opts: LocalLlmProviderOptions = {}) {
     this.defaultModel = opts.defaultModel ?? DEFAULT_LOCAL_MODEL;
@@ -98,6 +114,9 @@ export class LocalLlmProvider implements LlmProvider {
     this.baseUrl = (opts.baseUrl ?? DEFAULT_LOCAL_BASE_URL).replace(/\/+$/, "");
     this.apiKey = opts.apiKey;
     this.fetchImpl = opts.fetch ?? (globalThis.fetch as FetchLike);
+    this.inactivityTimeoutMs = resolveInactivityTimeoutMs(opts.inactivityTimeoutMs);
+    this.pricingOverride = opts.pricingOverride;
+    this.pricing = opts.pricingOverride ?? LOCAL_ZERO_PRICING;
     this.id = opts.id ?? "local";
     this.models = opts.models ?? [this.defaultModel];
     this.residency = opts.residency ?? ALL_REGIONS;
@@ -113,45 +132,31 @@ export class LocalLlmProvider implements LlmProvider {
       defaultMaxTokens: this.defaultMaxTokens,
       stream: true,
     });
-    let response;
+    const watchdog = startInactivityWatchdog(this.inactivityTimeoutMs);
     try {
-      response = await this.fetchImpl(this.url("/chat/completions"), {
-        method: "POST",
-        headers: this.headers({ stream: true }),
-        body: JSON.stringify(built),
-      });
+      const response = await this.send(watchdog, "/chat/completions", built, true);
+      if (response.body === null) {
+        throw new LocalProviderError({
+          kind: "server_error",
+          message: "local streaming response had no body",
+          status: response.status,
+        });
+      }
+      for await (const chunk of readSseStream(watchdog.watch(response.body))) {
+        yield chunk.kind === "usage_final" && this.pricingOverride !== undefined
+          ? { ...chunk, usage: priceLocalUsage(chunk.usage, this.pricingOverride) }
+          : chunk;
+      }
     } catch (err) {
-      throw fromNetworkError(err);
+      throw asTimeout(err);
+    } finally {
+      watchdog.dispose();
     }
-    if (!response.ok) {
-      throw fromHttpResponse({ status: response.status, body: await response.text() });
-    }
-    if (response.body === null) {
-      throw new LocalProviderError({
-        kind: "server_error",
-        message: "local streaming response had no body",
-        status: response.status,
-      });
-    }
-    yield* readSseStream(response.body);
   }
 
   async embed(req: EmbeddingRequest): Promise<EmbeddingResponse> {
     const model = req.model ?? this.defaultEmbeddingModel;
-    let response;
-    try {
-      response = await this.fetchImpl(this.url("/embeddings"), {
-        method: "POST",
-        headers: this.headers({ stream: false }),
-        body: JSON.stringify({ model, input: req.texts }),
-      });
-    } catch (err) {
-      throw fromNetworkError(err);
-    }
-    if (!response.ok) {
-      throw fromHttpResponse({ status: response.status, body: await response.text() });
-    }
-    const text = await response.text();
+    const { response, text } = await this.sendForText("/embeddings", { model, input: req.texts });
     let parsed: LocalEmbeddingApiResponse;
     try {
       parsed = JSON.parse(text) as LocalEmbeddingApiResponse;
@@ -186,20 +191,7 @@ export class LocalLlmProvider implements LlmProvider {
       defaultMaxTokens: this.defaultMaxTokens,
       stream: false,
     });
-    let response;
-    try {
-      response = await this.fetchImpl(this.url("/chat/completions"), {
-        method: "POST",
-        headers: this.headers({ stream: false }),
-        body: JSON.stringify(built),
-      });
-    } catch (err) {
-      throw fromNetworkError(err);
-    }
-    if (!response.ok) {
-      throw fromHttpResponse({ status: response.status, body: await response.text() });
-    }
-    const text = await response.text();
+    const { response, text } = await this.sendForText("/chat/completions", built);
     try {
       return JSON.parse(text) as LocalResponse;
     } catch (err) {
@@ -215,6 +207,48 @@ export class LocalLlmProvider implements LlmProvider {
     return [...chunksFromSse(sse)];
   }
 
+  /** POST under `watchdog`; a non-2xx is thrown as a `LocalProviderError`. */
+  private async send(
+    watchdog: InactivityWatchdog,
+    path: string,
+    body: unknown,
+    stream: boolean,
+  ): ReturnType<FetchLike> {
+    let response;
+    try {
+      response = await watchdog.guard(
+        this.fetchImpl(this.url(path), {
+          method: "POST",
+          headers: this.headers({ stream }),
+          body: JSON.stringify(body),
+          signal: watchdog.signal,
+        }),
+      );
+    } catch (err) {
+      if (err instanceof ProviderInactivityTimeout) throw err;
+      throw fromNetworkError(err);
+    }
+    if (!response.ok) {
+      throw fromHttpResponse({ status: response.status, body: await watchdog.guard(response.text()) });
+    }
+    return response;
+  }
+
+  private async sendForText(
+    path: string,
+    body: unknown,
+  ): Promise<{ response: Awaited<ReturnType<FetchLike>>; text: string }> {
+    const watchdog = startInactivityWatchdog(this.inactivityTimeoutMs);
+    try {
+      const response = await this.send(watchdog, path, body, false);
+      return { response, text: await watchdog.guard(response.text()) };
+    } catch (err) {
+      throw asTimeout(err);
+    } finally {
+      watchdog.dispose();
+    }
+  }
+
   private url(path: string): string {
     return `${this.baseUrl}${path}`;
   }
@@ -226,4 +260,10 @@ export class LocalLlmProvider implements LlmProvider {
     }
     return headers;
   }
+}
+
+function asTimeout(err: unknown): unknown {
+  return err instanceof ProviderInactivityTimeout
+    ? new LocalProviderError({ kind: "timeout_error", message: err.message })
+    : err;
 }

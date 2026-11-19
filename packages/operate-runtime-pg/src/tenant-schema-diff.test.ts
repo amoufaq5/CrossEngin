@@ -235,9 +235,15 @@ describe("diffTenantSchema", () => {
   });
 
   it("does not compare a type it cannot spell — undetermined must not read as drift", () => {
-    const geo: Entity = { name: "Place", fields: [{ name: "at", type: { kind: "geo_point" } }] };
+    // The planner refuses a geography column now (ADR-0414 Q2), so the plan is built by hand: the
+    // rule is about a type outside the table, wherever a plan holding one came from.
+    const base = columnPlanForEntity({ name: "Place", fields: [{ name: "label", type: { kind: "text" } }] }, { schema: SCHEMA });
+    const label = base.columns[0]!;
+    const geoPlan = new Map([
+      ["Place", { ...base, columns: [{ ...label, field: "at", column: "at", sqlType: "geography(POINT)" }] }],
+    ]);
     const changes = diffTenantSchema(
-      planOf(geo),
+      geoPlan,
       NO_JOINS,
       live("place", [{ column: "at", formattedType: "geography(Point,4326)", notNull: false }]),
     );

@@ -40,7 +40,21 @@ export interface DueRetry {
 
 export interface DeliveryStoreOptions {
   readonly schema?: string;
+  /**
+   * How long a claimed dispatch may sit in `rendering` before another drain may take it again. A
+   * claim moved the row out of `queued` and nothing ever moved it back, so a process that died
+   * between the claim and its last write left the dispatch stuck for ever.
+   */
+  readonly claimLeaseMs?: number;
+  /**
+   * How far a claimed retry's `next_retry_at` is pushed, so no other drain (and no later tick of this
+   * one) re-sends it while the send is in flight, and so a crash mid-send hands it back afterwards.
+   */
+  readonly retryLeaseMs?: number;
 }
+
+export const DEFAULT_CLAIM_LEASE_MS = 10 * 60 * 1000;
+export const DEFAULT_RETRY_LEASE_MS = 5 * 60 * 1000;
 
 /**
  * Written to the superseded attempt's `error_message` so the audit trail says
@@ -167,6 +181,14 @@ function audienceOf(value: unknown): Record<string, unknown> {
   return (value ?? {}) as Record<string, unknown>;
 }
 
+function positiveMs(value: number | undefined, fallback: number, name: string): number {
+  if (value === undefined) return fallback;
+  if (!Number.isInteger(value) || value < 1000) {
+    throw new Error(`${name} must be an integer of at least 1000 ms, got ${String(value)}`);
+  }
+  return value;
+}
+
 function clampLimit(limit: number | undefined): number {
   if (limit === undefined || !Number.isFinite(limit)) return DEFAULT_LIMIT;
   const n = Math.floor(limit);
@@ -226,6 +248,8 @@ export function dispatchFromRow(row: Record<string, unknown>): NotificationDispa
 export class PostgresDeliveryStore {
   private readonly conn: PgConnection;
   private readonly schema: string;
+  private readonly claimLeaseMs: number;
+  private readonly retryLeaseMs: number;
 
   constructor(conn: PgConnection, opts: DeliveryStoreOptions = {}) {
     const schema = opts.schema ?? "meta";
@@ -234,6 +258,8 @@ export class PostgresDeliveryStore {
     }
     this.conn = conn;
     this.schema = schema;
+    this.claimLeaseMs = positiveMs(opts.claimLeaseMs, DEFAULT_CLAIM_LEASE_MS, "claimLeaseMs");
+    this.retryLeaseMs = positiveMs(opts.retryLeaseMs, DEFAULT_RETRY_LEASE_MS, "retryLeaseMs");
   }
 
   private get dispatchTable(): string {
@@ -276,10 +302,12 @@ export class PostgresDeliveryStore {
     return withTenantContext(this.conn, tenantId, async (tx) => {
       const selectSql =
         `SELECT ${dispatchColumnList(null)} FROM ${this.dispatchTable}` +
-        ` WHERE tenant_id = $1 AND status = '${CLAIM_FROM_STATUS}'` +
+        ` WHERE tenant_id = $1 AND (status = '${CLAIM_FROM_STATUS}'` +
+        ` OR (status = '${CLAIM_TO_STATUS}'` +
+        ` AND (started_at IS NULL OR started_at < now() - ($3::bigint * interval '1 millisecond'))))` +
         ` ORDER BY ${PRIORITY_RANK_SQL}, queued_at ASC, dispatch_id ASC` +
         ` LIMIT $2 FOR UPDATE SKIP LOCKED`;
-      const selected = await tx.query(selectSql, [tenantId, batch]);
+      const selected = await tx.query(selectSql, [tenantId, batch, this.claimLeaseMs]);
       if (selected.rows.length === 0) return [];
       const claimed = readRows(
         selected.rows,
@@ -289,7 +317,7 @@ export class PostgresDeliveryStore {
       );
       if (claimed.length === 0) return [];
       const updateSql =
-        `UPDATE ${this.dispatchTable} SET status = '${CLAIM_TO_STATUS}'` +
+        `UPDATE ${this.dispatchTable} SET status = '${CLAIM_TO_STATUS}', started_at = now()` +
         ` WHERE tenant_id = $1 AND id = ANY($2::uuid[])`;
       await tx.query(updateSql, [
         tenantId,
@@ -364,10 +392,14 @@ export class PostgresDeliveryStore {
   /**
    * The retries whose time has come, with a report for every dispatch the contract refuses.
    *
-   * Unlike `claimQueued` this issues **one statement** — a `SELECT … JOIN … LIMIT`, with no `UPDATE`
-   * and no `FOR UPDATE` — so it claims nothing and locks nothing, and dropping a refused row from
-   * the page leaves no state behind to go stale. The rows were put into their retryable state by an
-   * earlier attempt, so what a refusal costs is that one recipient's retry, not the batch.
+   * It **claims** what it returns, which it did not. It was a bare `SELECT`, and nothing retired the
+   * row it had selected: a retry's new attempt is a new row, the old one kept its `next_retry_at`, and
+   * the parent stayed `sending` because nothing reconciled it — so a due retry was re-sent on every
+   * tick for ever, including after it had been delivered. Now only a recipient's **latest** attempt
+   * can be due (the rule `reconcile` already counts by), and the selected rows have their
+   * `next_retry_at` pushed by the retry lease in the same statement: no concurrent drain re-sends one
+   * while it is in flight, and a process that dies mid-send hands it back once the lease lapses. A
+   * refused row is leased too, so it is re-reported once per lease rather than once per tick.
    *
    * A dispatch appears once per due delivery row, so one page can report the same `dispatch_id`
    * identity several times; de-duplicating across rows is the caller's problem, since
@@ -380,16 +412,31 @@ export class PostgresDeliveryStore {
     limit?: number,
   ): Promise<readonly DueRetry[]> {
     const batch = clampLimit(limit);
+    // The lease *is* the next retry time: if the send does not settle the row before it lapses, the
+    // row is due again then — so the value is what the column has always meant.
+    const nextRetryAt = new Date(now.getTime() + this.retryLeaseMs);
     return withTenantContext(this.conn, tenantId, async (tx) => {
       const sql =
-        `SELECT ${dispatchColumnList("d")}, v.recipient_address_sha256, v.attempt_number` +
-        ` FROM ${this.deliveryTable} v` +
+        `WITH due AS (` +
+        `SELECT v.id AS delivery_row FROM ${this.deliveryTable} v` +
         ` JOIN ${this.dispatchTable} d ON d.id = v.dispatch_id AND d.tenant_id = v.tenant_id` +
         ` WHERE v.tenant_id = $1 AND v.next_retry_at IS NOT NULL AND v.next_retry_at <= $2` +
         ` AND v.outcome IN (${RETRYABLE_OUTCOME_LIST})` +
         ` AND d.status = '${RETRY_PARENT_STATUS}'` +
-        ` ORDER BY v.next_retry_at ASC, v.delivery_id ASC LIMIT $3`;
-      const result = await tx.query(sql, [tenantId, now, batch]);
+        ` AND NOT EXISTS (SELECT 1 FROM ${this.deliveryTable} w` +
+        ` WHERE w.tenant_id = v.tenant_id AND w.dispatch_id = v.dispatch_id` +
+        ` AND w.recipient_address_sha256 = v.recipient_address_sha256` +
+        ` AND w.attempt_number > v.attempt_number)` +
+        ` ORDER BY v.next_retry_at ASC, v.delivery_id ASC LIMIT $3` +
+        ` FOR UPDATE OF v SKIP LOCKED),` +
+        ` leased AS (UPDATE ${this.deliveryTable} l SET next_retry_at = $4 FROM due` +
+        ` WHERE l.id = due.delivery_row` +
+        ` RETURNING l.dispatch_id, l.tenant_id, l.recipient_address_sha256, l.attempt_number,` +
+        ` l.delivery_id)` +
+        ` SELECT ${dispatchColumnList("d")}, leased.recipient_address_sha256, leased.attempt_number` +
+        ` FROM leased JOIN ${this.dispatchTable} d ON d.id = leased.dispatch_id` +
+        ` AND d.tenant_id = leased.tenant_id ORDER BY leased.delivery_id ASC`;
+      const result = await tx.query(sql, [tenantId, now, batch, nextRetryAt]);
       return readRows(
         result.rows,
         (row) => ({
@@ -401,6 +448,44 @@ export class PostgresDeliveryStore {
         (row) => textIdentity(row, "dispatch_id"),
         onUnreadable,
       );
+    });
+  }
+
+  /**
+   * Which recipients of a dispatch already have an attempt on record. A dispatch taken again after
+   * its claim lapsed may have sent to some of them before the previous holder died, and sending to
+   * them again would be the duplicate the claim exists to prevent.
+   */
+  async attemptedRecipients(tenantId: string, rowId: string): Promise<ReadonlySet<string>> {
+    return withTenantContext(this.conn, tenantId, async (tx) => {
+      const sql =
+        `SELECT DISTINCT recipient_address_sha256 FROM ${this.deliveryTable}` +
+        ` WHERE tenant_id = $1 AND dispatch_id = $2`;
+      const result = await tx.query(sql, [tenantId, rowId]);
+      return new Set(result.rows.map((r) => String(r["recipient_address_sha256"])));
+    });
+  }
+
+  /**
+   * Dispatches still `sending` whose every recipient's latest attempt is settled — the state a retry
+   * that delivered leaves behind when nothing reconciles its parent, which is what kept such a
+   * dispatch selectable for retries for ever.
+   */
+  async unsettledSending(tenantId: string, limit?: number): Promise<readonly string[]> {
+    const batch = clampLimit(limit);
+    return withTenantContext(this.conn, tenantId, async (tx) => {
+      const sql =
+        `SELECT d.id FROM ${this.dispatchTable} d` +
+        ` WHERE d.tenant_id = $1 AND d.status = '${RETRY_PARENT_STATUS}'` +
+        ` AND NOT EXISTS (SELECT 1 FROM ${this.deliveryTable} v` +
+        ` WHERE v.tenant_id = d.tenant_id AND v.dispatch_id = d.id AND v.next_retry_at IS NOT NULL` +
+        ` AND NOT EXISTS (SELECT 1 FROM ${this.deliveryTable} w` +
+        ` WHERE w.tenant_id = v.tenant_id AND w.dispatch_id = v.dispatch_id` +
+        ` AND w.recipient_address_sha256 = v.recipient_address_sha256` +
+        ` AND w.attempt_number > v.attempt_number))` +
+        ` ORDER BY d.queued_at ASC, d.id ASC LIMIT $2`;
+      const result = await tx.query(sql, [tenantId, batch]);
+      return result.rows.map((r) => String(r["id"]));
     });
   }
 
@@ -484,7 +569,19 @@ export class PostgresDeliveryStore {
         changed: false,
       });
 
-      if (pending > 0) return unchanged(pending);
+      if (pending > 0) {
+        // A dispatch with a retry outstanding is `sending`, whatever drain left it — a dispatch
+        // taken again after its claim lapsed arrives here still `rendering`, and only a `sending`
+        // parent has its retries selected.
+        const sendingSql =
+          `UPDATE ${this.dispatchTable} SET status = '${RETRY_PARENT_STATUS}'` +
+          ` WHERE id = $2 AND tenant_id = $1 AND status IN ('${CLAIM_TO_STATUS}', 'rendered')`;
+        const moved = await tx.query(sendingSql, [tenantId, rowId]);
+        if (moved.rowCount > 0) {
+          return { ...unchanged(pending), status: RETRY_PARENT_STATUS, changed: true };
+        }
+        return unchanged(pending);
+      }
 
       // `failed` means recipients genuinely failed, not that nobody was sent to: a dispatch whose
       // notices were all withheld by policy — a preference opt-out, or a digest that carried them

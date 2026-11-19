@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 
 import { Topbar } from "@/components/Topbar";
-import { formatCell } from "@/lib/format";
+import { formatCell, functionalCurrency } from "@/lib/format";
 import {
   closePeriod,
   fetchPeriods,
@@ -15,6 +15,7 @@ import {
 
 export default function PeriodClosePage() {
   const [periods, setPeriods] = useState<readonly FiscalPeriodRow[] | null>(null);
+  const [periodsComplete, setPeriodsComplete] = useState(true);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [forbidden, setForbidden] = useState(false);
@@ -30,8 +31,9 @@ export default function PeriodClosePage() {
     setError(null);
     setForbidden(false);
     fetchPeriods()
-      .then((rows) => {
-        setPeriods(rows);
+      .then((read) => {
+        setPeriods(read.periods);
+        setPeriodsComplete(read.complete);
         setLoading(false);
       })
       .catch((e: unknown) => {
@@ -98,6 +100,12 @@ export default function PeriodClosePage() {
           </div>
         )}
 
+        {periods && !forbidden && !periodsComplete && (
+          <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+            This tenant has more fiscal periods than this screen reads ({periods.length} were read), so some
+            periods are missing from the list below.
+          </div>
+        )}
         {periods && !forbidden && (
           <div className="grid grid-cols-1 gap-8 lg:grid-cols-2">
             <PeriodList
@@ -265,9 +273,10 @@ function EntryPanel({
                   <td className="px-4 py-2.5">
                     <div className="text-ink">{l.accountName ?? l.ledgerAccountId ?? "—"}</div>
                     {l.description && <div className="text-xs text-ink-faint">{l.description}</div>}
+                    {l.currency && <div className="text-xs text-ink-faint">revalues {l.currency}</div>}
                   </td>
-                  <td className="px-4 py-2.5 text-right text-ink">{l.debit ? formatCell(l.debit, "money") : "—"}</td>
-                  <td className="px-4 py-2.5 text-right text-ink">{l.credit ? formatCell(l.credit, "money") : "—"}</td>
+                  <td className="px-4 py-2.5 text-right text-ink">{l.debit !== "0.00" ? formatCell(l.debit, "money", functionalCurrency()) : "—"}</td>
+                  <td className="px-4 py-2.5 text-right text-ink">{l.credit !== "0.00" ? formatCell(l.credit, "money", functionalCurrency()) : "—"}</td>
                 </tr>
               ))}
             </tbody>
@@ -283,8 +292,8 @@ function EntryPanel({
                     <span className="text-brand-700">⚠ unbalanced</span>
                   )}
                 </td>
-                <td className="px-4 py-2.5 text-right">{formatCell(entry.totalDebit, "money")}</td>
-                <td className="px-4 py-2.5 text-right">{formatCell(entry.totalCredit, "money")}</td>
+                <td className="px-4 py-2.5 text-right">{formatCell(entry.totalDebit, "money", functionalCurrency())}</td>
+                <td className="px-4 py-2.5 text-right">{formatCell(entry.totalCredit, "money", functionalCurrency())}</td>
               </tr>
             </tfoot>
           </table>

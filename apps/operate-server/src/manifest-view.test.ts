@@ -178,12 +178,13 @@ describe("projectManifestView — the design example", () => {
     ]);
   });
 
-  // 12 grants, not 10 and 7: the example declares a lifecycle, and `countGrantsForRole` counts
-  // each transition grant beside the five CRUD operations.
+  // 17 and 11: the example declares a lifecycle, so `countGrantsForRole` counts each transition
+  // grant beside the five CRUD operations, and since ADR-0450 (P2.2) it grants each classified
+  // field too — a design that classified and did not grant shipped fields nobody could read.
   it("projects roles with i18n labels and grant counts", () => {
     expect(view.roles).toEqual([
-      { name: "app_admin", label: "Administrator", description: "Full access to every entity.", grantCount: 12 },
-      { name: "app_user", label: "Staff User", description: "Day-to-day operational access.", grantCount: 8 },
+      { name: "app_admin", label: "Administrator", description: "Full access to every entity.", grantCount: 17 },
+      { name: "app_user", label: "Staff User", description: "Day-to-day operational access.", grantCount: 11 },
     ]);
   });
 

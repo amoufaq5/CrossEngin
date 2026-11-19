@@ -5,7 +5,11 @@ import {
   PASSWORD_KDF,
   PASSWORD_OUTCOME_ADMITS,
   PASSWORD_SALT_BYTES,
+  LEGACY_PEPPER_VERSION,
+  MAX_PEPPER_VERSION,
+  PASSWORD_DEFAULT_WORK,
   PASSWORD_SCRYPT_DEFAULTS,
+  PASSWORD_WORK_CEILING,
   PASSWORD_VERIFY_OUTCOMES,
   type PasswordScryptParams,
   encodePasswordHash,
@@ -43,9 +47,20 @@ describe("password constants", () => {
     expect(admitting).toEqual(["matched"]);
   });
 
-  it("defaults to N=2^15, r=8, p=1", () => {
-    expect(PASSWORD_SCRYPT_DEFAULTS).toEqual({ n: 32768, r: 8, p: 1 });
+  it("defaults to N=2^15, r=8, p=3: OWASP's lowest-memory equivalent configuration", () => {
+    expect(PASSWORD_SCRYPT_DEFAULTS).toEqual({ n: 32768, r: 8, p: 3 });
     expect(Math.log2(PASSWORD_SCRYPT_DEFAULTS.n)).toBe(15);
+    // Memory is set by n and r, so raising p left the per-derivation footprint where it was.
+    const mib = (q: number) => (128 * 8 * (32768 + q + 2)) / 1048576;
+    expect(Math.round(mib(3))).toBe(Math.round(mib(1)));
+  });
+
+  it("holds the work ceiling where ADR-0398 put it, so raising the default loosened nothing", () => {
+    expect(PASSWORD_WORK_CEILING).toBe(32768 * 8 * 1 * 16);
+    // The old default's hostile-row bound is unchanged, and the new default is under it.
+    expect(PASSWORD_DEFAULT_WORK).toBeLessThan(PASSWORD_WORK_CEILING);
+    expect(passwordParamsAreDerivable({ n: 32768, r: 8, p: 16 })).toBe(true);
+    expect(passwordParamsAreDerivable({ n: 32768, r: 8, p: 17 })).toBe(false);
   });
 
   it("pins the salt and hash widths the column CHECK encodes as hex", () => {
@@ -66,7 +81,9 @@ describe("scryptMaxmem", () => {
     const measuredMinimum = 128 * r * (n + p + 2);
     expect(128 * n * r).toBe(NODE_DEFAULT_MAXMEM);
     expect(measuredMinimum).toBeGreaterThan(NODE_DEFAULT_MAXMEM);
-    expect(measuredMinimum - 128 * n * r).toBe(3072);
+    // 3,072 bytes at the old p=1; the gap is 128*r*(p+2), so it grows with p and never closes.
+    expect(measuredMinimum - 128 * n * r).toBe(128 * r * (p + 2));
+    expect(128 * r * (1 + 2)).toBe(3072);
   });
 
   it("clears the measured minimum with headroom at every parameter set", () => {
@@ -144,7 +161,7 @@ describe("scryptMaxmem", () => {
     // And it is a no-op where every real hash lives: 6,144 bytes of extra allowance at the
     // shipped defaults, which is why the correction carries no behaviour change for them.
     const { n, r, p } = PASSWORD_SCRYPT_DEFAULTS;
-    expect(scryptMaxmem(n, r, p) - oldForm(n, r)).toBe(6144);
+    expect(scryptMaxmem(n, r, p) - oldForm(n, r)).toBe(256 * r * (p + 2));
   });
 
   it("the default parameters really do derive, which is what the headroom buys", async () => {
@@ -160,12 +177,18 @@ describe("encode / parse", () => {
     const parsed = {
       kdf: PASSWORD_KDF,
       params: CHEAP,
+      pepperVersion: LEGACY_PEPPER_VERSION,
       saltHex: "a".repeat(32),
       hashHex: "b".repeat(128),
     } as const;
     const encoded = encodePasswordHash(parsed);
+    // Version 1 keeps the legacy shape byte for byte, so a deployment that never rotates writes
+    // what it always wrote.
     expect(encoded).toBe(`scrypt$1024$8$1$${"a".repeat(32)}$${"b".repeat(128)}`);
     expect(parsePasswordHash(encoded)).toEqual(parsed);
+    const v7 = { ...parsed, pepperVersion: 7 };
+    expect(encodePasswordHash(v7)).toBe(`scrypt$1024$8$1$k7$${"a".repeat(32)}$${"b".repeat(128)}`);
+    expect(parsePasswordHash(encodePasswordHash(v7))).toEqual(v7);
   });
 
   it("answers null and never throws for anything it did not produce", () => {
@@ -276,7 +299,7 @@ describe("encode / parse", () => {
     // The shipped defaults are not refused, which is the non-vacuity floor for the two above.
     await expect(
       hashPassword("pw", PEPPER, { params: PASSWORD_SCRYPT_DEFAULTS }),
-    ).resolves.toMatch(/^scrypt\$32768\$8\$1\$/);
+    ).resolves.toMatch(/^scrypt\$32768\$8\$3\$/);
   });
 
   it("the write path and the read path refuse the same parameter sets", () => {
@@ -302,14 +325,26 @@ describe("encode / parse", () => {
   it("matches the shape META_USERS.credential_hash constrains", () => {
     // The same regex the catalog carries. Pinned here so the two cannot drift: a hash this module
     // produces that the column refuses would be a 23514 on every password set.
-    const columnCheck = /^scrypt\$[0-9]+\$[0-9]+\$[0-9]+\$[0-9a-f]{32}\$[0-9a-f]{128}$/;
-    const encoded = encodePasswordHash({
-      kdf: PASSWORD_KDF,
-      params: PASSWORD_SCRYPT_DEFAULTS,
-      saltHex: FIXED_SALT.toString("hex"),
-      hashHex: "c".repeat(128),
-    });
-    expect(encoded).toMatch(columnCheck);
+    const columnCheck =
+      /^scrypt\$[0-9]{1,8}\$[0-9]{1,8}\$[0-9]{1,8}\$(k[1-9][0-9]{0,3}\$)?[0-9a-f]{32}\$[0-9a-f]{128}$/;
+    for (const pepperVersion of [LEGACY_PEPPER_VERSION, 2, MAX_PEPPER_VERSION]) {
+      const encoded = encodePasswordHash({
+        kdf: PASSWORD_KDF,
+        params: PASSWORD_SCRYPT_DEFAULTS,
+        pepperVersion,
+        saltHex: FIXED_SALT.toString("hex"),
+        hashHex: "c".repeat(128),
+      });
+      expect(encoded).toMatch(columnCheck);
+    }
+  });
+
+  it("bounds the parameter digits and the version, as the column does", () => {
+    const tail = `${"a".repeat(32)}$${"b".repeat(128)}`;
+    expect(parsePasswordHash(`scrypt$000032768$8$1$${tail}`)).toBeNull(); // nine digits
+    expect(parsePasswordHash(`scrypt$32768$8$1$k0$${tail}`)).toBeNull();
+    expect(parsePasswordHash(`scrypt$32768$8$1$k10000$${tail}`)).toBeNull();
+    expect(parsePasswordHash(`scrypt$32768$8$1$k9999$${tail}`)?.pepperVersion).toBe(9999);
   });
 });
 
@@ -430,5 +465,43 @@ describe("passwordHashIsStale", () => {
     // wrong fix.
     expect(passwordHashIsStale("a".repeat(64))).toBe(false);
     expect(passwordHashIsStale("")).toBe(false);
+  });
+});
+
+describe("a pepper ring", () => {
+  // Built by interpolation so no literal here is shaped like a deployment secret.
+  const OLD = ["old", "pepper", "with", "plenty", "of", "distinct", "bytes", "ABCDEFGH"].join("-");
+  const NEW = ["new", "pepper", "with", "plenty", "of", "distinct", "bytes", "IJKLMNOP"].join("-");
+  const v2 = { version: 2, pepper: NEW, retired: new Map([[1, OLD]]) };
+
+  it("writes the version into the hash and verifies under the pepper it names", async () => {
+    const encoded = await hashPassword(PASSWORD, v2, { params: CHEAP });
+    expect(encoded).toMatch(/^scrypt\$1024\$8\$1\$k2\$/);
+    await expect(verifyPassword(PASSWORD, encoded, v2)).resolves.toBe("matched");
+    await expect(verifyPassword("wrong", encoded, v2)).resolves.toBe("mismatched");
+  });
+
+  it("still verifies a hash keyed with a retired pepper, and calls it stale so login re-keys it", async () => {
+    const legacy = await hashPassword(PASSWORD, OLD, { params: CHEAP });
+    await expect(verifyPassword(PASSWORD, legacy, v2)).resolves.toBe("matched");
+    expect(passwordHashIsStale(legacy, CHEAP, v2)).toBe(true);
+    expect(passwordHashIsStale(legacy, CHEAP, OLD)).toBe(false);
+    expect(passwordHashIsStale(legacy, CHEAP)).toBe(false);
+  });
+
+  it("answers unreadable_hash, never mismatched, for a version whose pepper is gone", async () => {
+    // Deriving under another pepper would tell the owner their correct password is wrong and count
+    // it against their lockout; `unreadable_hash` is the fact a caller must not count.
+    const legacy = await hashPassword(PASSWORD, OLD, { params: CHEAP });
+    const dropped = { version: 2, pepper: NEW, retired: new Map<number, string>() };
+    await expect(verifyPassword(PASSWORD, legacy, dropped)).resolves.toBe("unreadable_hash");
+  });
+
+  it("refuses to write a version the column cannot hold", async () => {
+    for (const version of [0, MAX_PEPPER_VERSION + 1, 1.5]) {
+      await expect(
+        hashPassword(PASSWORD, { version, pepper: NEW, retired: new Map() }, { params: CHEAP }),
+      ).rejects.toThrow(/pepper version/);
+    }
   });
 });

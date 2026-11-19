@@ -14,9 +14,14 @@ export interface FakeConn {
 /**
  * A fake `PgConnection` recording every `{sql, params}`; `transaction` runs the
  * callback with the same conn so a `withTenantContext` `set_config` call is
- * observable. `rows` supplies canned SELECT results in order (default empty).
+ * observable. `rows` supplies canned SELECT results in order (default empty); a write affects one
+ * row unless `writeRowCount` says otherwise, since a store that checks `rowCount` must be testable
+ * on both arms.
  */
-export function fakePg(rows: readonly Record<string, unknown>[][] = []): FakeConn {
+export function fakePg(
+  rows: readonly Record<string, unknown>[][] = [],
+  options: { readonly writeRowCount?: (sql: string) => number } = {},
+): FakeConn {
   const calls: CapturedQuery[] = [];
   let selectIndex = 0;
   const conn: PgConnection = {
@@ -28,7 +33,9 @@ export function fakePg(rows: readonly Record<string, unknown>[][] = []): FakeCon
         selectIndex += 1;
         return { rows: next, rowCount: next.length } as PgQueryResult;
       }
-      return { rows: [], rowCount: 0 } as PgQueryResult;
+      if (sql.includes("set_config")) return { rows: [], rowCount: 1 } as PgQueryResult;
+      const affected = options.writeRowCount?.(sql) ?? 1;
+      return { rows: [], rowCount: affected } as PgQueryResult;
     }) as PgConnection["query"],
     transaction: (async <T,>(fn: (tx: PgConnection) => Promise<T>) => fn(conn)) as PgConnection["transaction"],
     withAdvisoryLock: (async <T,>(_k: bigint, fn: () => Promise<T>) => fn()) as PgConnection["withAdvisoryLock"],

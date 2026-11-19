@@ -18,6 +18,7 @@ import {
   lifecycleReceipt,
   newTombstoneId,
   tombstoneReceipt,
+  type ApprovingRequestLike,
   type DeletionOutcomeLike,
   type StoredTombstoneLike,
   type TenantDeletionEvent,
@@ -30,6 +31,7 @@ const APPROVER = "22222222-2222-2222-2222-222222222222";
 const AT = "2026-10-03T13:00:00.000Z";
 const TOMB = "tomb_aaaabbbbccccdddd";
 const HASH = "f".repeat(64);
+const REQ = "dreq_abcdefgh1234";
 
 /** A v4 declaration: typed per-entity relations, so it names the schema they are in (ADR-0351). */
 const RECORD_STORAGE: NonNullable<StoredTombstoneLike["record"]["recordStorage"]> = {
@@ -129,6 +131,20 @@ interface Harness {
   readonly events: TenantDeletionEvent[];
   readonly deleteCalls: Array<Record<string, unknown>>;
   readonly retireCalls: string[];
+  readonly requestMoves: Array<{ to: string; fields: Record<string, unknown> }>;
+}
+
+/** The verified request a deletion executes under: its verifier is the approver (H-05). */
+function approvingOf(over: Partial<ApprovingRequestLike> = {}): ApprovingRequestLike {
+  return {
+    id: REQ,
+    tenantId: TENANT,
+    status: "verified",
+    verifiedBy: APPROVER,
+    verifiedAt: "2026-09-01T13:00:00.000Z",
+    deadlineAt: "2026-10-31T13:00:00.000Z",
+    ...over,
+  };
 }
 
 function harness(
@@ -141,12 +157,27 @@ function harness(
     readonly listThrows?: boolean;
     readonly listUnreadable?: readonly { readonly identity: string | null; readonly detail: string }[];
     readonly recordThrows?: boolean;
+    readonly request?: ApprovingRequestLike | null;
+    readonly requestReadThrows?: boolean;
+    readonly claimReturnsNull?: boolean;
   } = {},
 ): Harness {
   const events: TenantDeletionEvent[] = [];
   const deleteCalls: Array<Record<string, unknown>> = [];
   const retireCalls: string[] = [];
+  const requestMoves: Array<{ to: string; fields: Record<string, unknown> }> = [];
   const ctx: TenantDeletionRoutesContext = {
+    requests: {
+      read: async (): Promise<ApprovingRequestLike | null> => {
+        if (behaviour.requestReadThrows === true) throw new Error("row no longer parses");
+        return behaviour.request === undefined ? approvingOf() : behaviour.request;
+      },
+      transition: async (_id, to, fields): Promise<ApprovingRequestLike | null> => {
+        requestMoves.push({ to, fields: { ...fields } });
+        if (to === "in_progress" && behaviour.claimReturnsNull === true) return null;
+        return approvingOf({ status: to });
+      },
+    },
     deleter: {
       delete: async (input): Promise<DeletionOutcomeLike> => {
         deleteCalls.push({ ...input });
@@ -178,12 +209,12 @@ function harness(
     clock: () => new Date(AT),
     ...over,
   };
-  return { ctx, events, deleteCalls, retireCalls };
+  return { ctx, events, deleteCalls, retireCalls, requestMoves };
 }
 
 const DELETE = "platform.tenants.delete";
 const LIST = "platform.tenants.tombstones";
-const BODY = { approvedBy: APPROVER, confirmTenantId: TENANT };
+const BODY = { confirmTenantId: TENANT, relatedDeletionRequestId: REQ };
 
 function handlerFor(ctx: TenantDeletionRoutesContext, op: string): Handler {
   const found = buildTenantDeletionRoutes(ctx).find((r) => r.route.operationId === op);
@@ -402,25 +433,96 @@ describe("the delete route", () => {
     expect(seen).toEqual([TENANT]);
   });
 
-  it("takes executedBy from the credential and refuses a self-approval", async () => {
-    const h = harness();
-    const res = await call(h.ctx, DELETE, { parsedBody: { ...BODY, approvedBy: CALLER } });
+  it("refuses an executor who verified the request (four-eyes between two credentials)", async () => {
+    const h = harness({}, { request: approvingOf({ verifiedBy: CALLER }) });
+    const res = await call(h.ctx, DELETE, { parsedBody: BODY });
     expect(res.status).toBe(403);
     expect(res.body["error"]).toBe("four_eyes_required");
     expect(h.deleteCalls).toEqual([]);
+    expect(h.requestMoves).toEqual([]);
+  });
+
+  it("refuses a body that names an approver, rather than trusting or ignoring it (H-05)", async () => {
+    for (const approvedBy of [APPROVER, CALLER]) {
+      const h = harness();
+      const res = await call(h.ctx, DELETE, { parsedBody: { ...BODY, approvedBy } });
+      expect(res.status).toBe(400);
+      expect(res.body["error"]).toBe("approver_is_the_verifier");
+      expect(h.deleteCalls).toEqual([]);
+    }
+  });
+
+  it("refuses without a verified request for this tenant, before anything is claimed", async () => {
+    const cases: Array<[Parameters<typeof harness>[1], number, string]> = [
+      [{ request: null }, 404, "deletion_request_not_found"],
+      [{ request: approvingOf({ tenantId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" }) }, 409, "deletion_request_for_another_tenant"],
+      [{ request: approvingOf({ status: "submitted", verifiedBy: null }) }, 409, "deletion_request_not_verified"],
+      [{ requestReadThrows: true }, 503, "deletion_request_unreadable"],
+    ];
+    for (const [behaviour, status, error] of cases) {
+      const h = harness({}, behaviour);
+      const res = await call(h.ctx, DELETE, { parsedBody: BODY });
+      expect([res.status, res.body["error"]]).toEqual([status, error]);
+      expect(h.deleteCalls).toEqual([]);
+      expect(h.requestMoves).toEqual([]);
+    }
+    const missing = harness();
+    const res = await call(missing.ctx, DELETE, { parsedBody: { confirmTenantId: TENANT } });
+    expect(res.status).toBe(400);
+  });
+
+  it("waits out the declared grace period, naming when it ends", async () => {
+    const h = harness(
+      { graceMs: 7 * 86_400_000 },
+      { request: approvingOf({ verifiedAt: "2026-10-01T13:00:00.000Z" }) },
+    );
+    const res = await call(h.ctx, DELETE, { parsedBody: BODY });
+    expect(res.status).toBe(409);
+    expect(res.body["error"]).toBe("grace_period_running");
+    expect(res.body["executeNotBefore"]).toBe("2026-10-08T13:00:00.000Z");
+    expect(h.deleteCalls).toEqual([]);
+    // Elapsed: the default request was verified a month before AT.
+    expect((await call(harness({ graceMs: 7 * 86_400_000 }).ctx, DELETE, { parsedBody: BODY })).status).toBe(200);
+  });
+
+  it("claims the request before the drop and completes it with the proof after", async () => {
+    const h = harness();
+    const res = await call(h.ctx, DELETE, { parsedBody: BODY });
+    expect(res.status).toBe(200);
+    expect(h.requestMoves.map((m) => m.to)).toEqual(["in_progress", "completed"]);
+    expect(h.requestMoves[1]?.fields).toMatchObject({ tombstoneId: TOMB, completionSha256: "b".repeat(64) });
+    expect(res.body["deletionRequest"]).toEqual({ id: REQ, status: "completed", approvedBy: APPROVER });
+  });
+
+  it("deletes nothing when another caller claimed the request first", async () => {
+    const h = harness({}, { claimReturnsNull: true });
+    const res = await call(h.ctx, DELETE, { parsedBody: BODY });
+    expect(res.status).toBe(409);
+    expect(res.body["error"]).toBe("concurrent_modification");
+    expect(h.deleteCalls).toEqual([]);
+  });
+
+  it("leaves the request in_progress when whether the deletion committed is unknown", async () => {
+    const h = harness({}, { deleteThrows: new Error("connection terminated") });
+    const res = await call(h.ctx, DELETE, { parsedBody: BODY });
+    expect(res.status).toBe(500);
+    expect(res.body["error"]).toBe("deletion_outcome_unknown");
+    expect(res.body["requestStatus"]).toBe("in_progress");
+    expect(h.requestMoves.map((m) => m.to)).toEqual(["in_progress"]);
   });
 
   it("passes the authenticated principal as executedBy", async () => {
     const h = harness();
     await call(h.ctx, DELETE, { parsedBody: BODY });
     expect(h.deleteCalls[0]?.["executedBy"]).toBe(CALLER);
+    // The verifier of the named request, never a body field.
     expect(h.deleteCalls[0]?.["approvedBy"]).toBe(APPROVER);
   });
 
   it("requires the body to confirm the tenant in the path", async () => {
     const h = harness();
     const res = await call(h.ctx, DELETE, {
-      parsedBody: { approvedBy: APPROVER, confirmTenantId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" },
+      parsedBody: { ...BODY, confirmTenantId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" },
     });
     expect(res.status).toBe(400);
     expect(h.deleteCalls).toEqual([]);
@@ -436,7 +538,7 @@ describe("the delete route", () => {
   it("refuses a data_subject_erasure outright, whether or not it names a request", async () => {
     for (const body of [
       { ...BODY, kind: "data_subject_erasure" },
-      { ...BODY, kind: "data_subject_erasure", relatedDeletionRequestId: "del_1" },
+      { ...BODY, kind: "data_subject_erasure", relatedDeletionRequestId: REQ },
     ]) {
       const h = harness();
       const res = await call(h.ctx, DELETE, { parsedBody: body });
@@ -453,10 +555,10 @@ describe("the delete route", () => {
     // erasure reached only them.
     const h = harness();
     const res = await call(h.ctx, DELETE, {
-      parsedBody: { ...BODY, kind: "tenant_deletion", relatedDeletionRequestId: "del_1" },
+      parsedBody: { ...BODY, kind: "tenant_deletion" },
     });
     expect(res.status).toBe(200);
-    expect(h.deleteCalls[0]?.["relatedDeletionRequestId"]).toBe("del_1");
+    expect(h.deleteCalls[0]?.["relatedDeletionRequestId"]).toBe(REQ);
     expect(h.deleteCalls[0]?.["kind"]).toBe("tenant_deletion");
   });
 
@@ -472,6 +574,9 @@ describe("the delete route", () => {
     expect(res.body["error"]).toBe("deletion_rolled_back");
     expect(res.body["refusals"]).toEqual(["assemble/subsystem_unattested"]);
     expect(h.retireCalls).toEqual([]);
+    // The rollback is proven, so the request is closed rather than stranded.
+    expect(h.requestMoves.map((m) => m.to)).toEqual(["in_progress", "rejected"]);
+    expect(res.body["requestStatus"]).toBe("rejected");
   });
 
   it("reports a returned refusal as 409 without retiring the tenant", async () => {
@@ -489,6 +594,38 @@ describe("the delete route", () => {
     expect(res.body["error"]).toBe("deletion_refused");
     expect(h.retireCalls).toEqual([]);
     expect(h.events[0]?.operation).toBe(TENANT_DELETE_REFUSED_OPERATION);
+  });
+
+  it("restores the tenant when a refusal settles its request rejected", async () => {
+    // Found live on the confined role: every attempt is refused `rls_would_confine_this_session`,
+    // the refusal closes the verified request for good, and the tenant the verify route made
+    // read-only sat in `pending_deletion` with nothing left holding it. The reject route restores
+    // through the same mover, so this path must too.
+    const restored: string[] = [];
+    const tenantState = {
+      markPendingDeletion: async () => ({ moved: false, fromState: null }),
+      restore: async (id: string) => {
+        restored.push(id);
+        return { moved: true, fromState: "pending_deletion" as const };
+      },
+    };
+    const refusal = {
+      outcome: {
+        ok: false as const,
+        refusals: [{ stage: "erase", reason: "rls_would_confine_this_session", detail: "meta.x" }],
+      },
+    };
+    const h = harness({}, refusal);
+    const res = await call({ ...h.ctx, tenantState }, DELETE, { parsedBody: BODY });
+    expect(res.status).toBe(409);
+    expect(res.body["requestStatus"]).toBe("rejected");
+    expect(res.body["tenantRestored"]).toBe(true);
+    expect(restored).toHaveLength(1);
+
+    // With no mover wired the response claims nothing rather than a restore it did not attempt.
+    const bare = harness({}, refusal);
+    const unwired = await call(bare.ctx, DELETE, { parsedBody: BODY });
+    expect(unwired.body["tenantRestored"]).toBeNull();
   });
 
   it("records the deletion with its tombstone and chain hash", async () => {

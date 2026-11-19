@@ -23,15 +23,25 @@ import {
   type BurnRateVerdict,
 } from "./burn-rate.js";
 import {
+  DEFAULT_KILL_SWITCH_TTL_MS,
   activateKillSwitch,
   closeOutEnforcementIncident,
+  escalationDue,
+  severityRank,
+  regradeEnforcementIncident,
+  releaseRecoveredKillSwitch,
   declareEnforcementIncident,
   findAdoptedKillSwitch,
   findOpenEnforcementIncident,
   killSwitchIdForIncident,
   planPageDirective,
+  type BreachEscalation,
   type DeclarationErrorSink,
   type EnforcementPlan,
+  type IncidentRegrader,
+  type KillSwitchRelease,
+  type KillSwitchReleaser,
+  type PageDirective,
   type KillSwitchActivation,
   type FlagRollback,
   type KillSwitchLookup,
@@ -43,6 +53,8 @@ export interface SloRegistration {
   readonly category?: IncidentCategory;
   readonly rollback?: FlagRollback;
   readonly tenantId?: string | null;
+  /** Re-grade and re-page a breach still burning this long after it was declared (M-23). */
+  readonly escalation?: BreachEscalation;
 }
 
 export interface SloEnforcementEngineOptions {
@@ -69,6 +81,12 @@ export interface SloEnforcementEngineOptions {
    * the decision but stored nowhere — the in-memory engine's meaning of a kill switch.
    */
   readonly killSwitchRecorder?: KillSwitchRecorder;
+  /** Releases a recovered breach's kill switch. Absent, a recovered switch stays recorded active. */
+  readonly killSwitchReleaser?: KillSwitchReleaser;
+  /** How long a recorded kill switch stays active if no recovery releases it. */
+  readonly killSwitchTtlMs?: number;
+  /** Re-grades a stored incident when a registration's escalation is due. */
+  readonly regrader?: IncidentRegrader;
   readonly onDeclarationError?: DeclarationErrorSink;
 }
 
@@ -77,6 +95,8 @@ interface ActiveBreach {
   readonly killSwitchId: string | null;
   readonly severity: Severity;
   readonly thresholdId: string;
+  readonly openedAtMs: number;
+  readonly escalated: boolean;
 }
 
 export type EnforcementDecision =
@@ -95,6 +115,18 @@ export type EnforcementDecision =
       readonly incidentId: string;
     }
   | {
+      readonly kind: "breach_escalated";
+      readonly surface: string;
+      readonly sloId: string;
+      readonly incidentId: string;
+      readonly fromSeverity: Severity;
+      readonly severity: Severity;
+      /** The re-page at the new grade, planned against the alert policy. */
+      readonly pages: readonly PageDirective[];
+      /** Whether the stored incident now carries the new grade; the re-page does not depend on it. */
+      readonly regraded: boolean;
+    }
+  | {
       readonly kind: "recovered";
       readonly surface: string;
       readonly sloId: string;
@@ -102,6 +134,8 @@ export type EnforcementDecision =
       readonly killSwitchId: string | null;
       /** What became of the declared incident: cancelled, left to a human, or never stored. */
       readonly closeOut: IncidentCloseOut;
+      /** What became of the breach's kill switch. */
+      readonly killSwitchRelease: KillSwitchRelease;
     };
 
 function availabilityTarget(slo: Slo): SloAvailabilityTarget | null {
@@ -123,6 +157,9 @@ export class SloEnforcementEngine {
   private readonly declarer: IncidentDeclarer;
   private readonly killSwitches: KillSwitchLookup | undefined;
   private readonly killSwitchRecorder: KillSwitchRecorder | undefined;
+  private readonly killSwitchReleaser: KillSwitchReleaser | undefined;
+  private readonly killSwitchTtlMs: number;
+  private readonly regrader: IncidentRegrader | undefined;
   private readonly onDeclarationError: DeclarationErrorSink | undefined;
   private readonly active: Map<string, ActiveBreach> = new Map();
   /**
@@ -142,6 +179,12 @@ export class SloEnforcementEngine {
     this.declarer = options.declarer ?? new CountingIncidentDeclarer({ clock: this.clock });
     this.killSwitches = options.killSwitches;
     this.killSwitchRecorder = options.killSwitchRecorder;
+    this.killSwitchReleaser = options.killSwitchReleaser;
+    this.killSwitchTtlMs = options.killSwitchTtlMs ?? DEFAULT_KILL_SWITCH_TTL_MS;
+    if (!Number.isInteger(this.killSwitchTtlMs) || this.killSwitchTtlMs < 60_000) {
+      throw new Error("killSwitchTtlMs must be an integer of at least 60000");
+    }
+    this.regrader = options.regrader;
     this.onDeclarationError = options.onDeclarationError;
   }
 
@@ -187,6 +230,10 @@ export class SloEnforcementEngine {
         // declares it instead of this pass abandoning every surface after it.
         if (opened !== null) decisions.push(opened);
       } else if (verdict.breached && existing !== undefined) {
+        if (escalationDue(reg.escalation, existing, nowMs)) {
+          decisions.push(await this.escalate(reg, surface, existing, reg.escalation, nowIso));
+          continue;
+        }
         decisions.push({
           kind: "breach_ongoing",
           surface,
@@ -206,6 +253,20 @@ export class SloEnforcementEngine {
           { surface, sloId: slo.id },
           this.onDeclarationError,
         );
+        // Released whatever became of the incident: the burn that justified the switch is over,
+        // and a switch nobody releases stays `triggered_active` for ever (ADR-0415's open end).
+        const killSwitchRelease = await releaseRecoveredKillSwitch(
+          this.killSwitchReleaser,
+          existing.killSwitchId,
+          reg.tenantId ?? null,
+          {
+            reason: `error-budget burn on ${surface} recovered (incident ${existing.incidentId})`,
+            actorUserId: this.systemActorUserId,
+            at: nowIso,
+          },
+          { surface, sloId: slo.id },
+          this.onDeclarationError,
+        );
         decisions.push({
           kind: "recovered",
           surface,
@@ -213,6 +274,7 @@ export class SloEnforcementEngine {
           incidentId: existing.incidentId,
           killSwitchId: existing.killSwitchId,
           closeOut,
+          killSwitchRelease,
         });
       }
     }
@@ -258,8 +320,49 @@ export class SloEnforcementEngine {
       ),
       severity: open.severity,
       thresholdId: verdict.worstThresholdId ?? "unknown",
+      // The episode began when the incident was declared, not when this process adopted it, so a
+      // restart does not reset the escalation clock.
+      openedAtMs: Date.parse(open.declaredAt),
+      escalated:
+        reg.escalation !== undefined &&
+        severityRankAtOrAbove(open.severity, reg.escalation.severity),
     });
     return { kind: "breach_ongoing", surface, sloId: reg.slo.id, incidentId: open.id };
+  }
+
+  private async escalate(
+    reg: SloRegistration,
+    surface: string,
+    existing: ActiveBreach,
+    escalation: BreachEscalation,
+    nowIso: string,
+  ): Promise<EnforcementDecision> {
+    const regraded = await regradeEnforcementIncident(
+      this.regrader,
+      existing.incidentId,
+      {
+        severity: escalation.severity,
+        reason: `error-budget burn on ${surface} has persisted past ${escalation.afterMs.toString()}ms`,
+        actorUserId: this.declaredBy,
+        at: nowIso,
+      },
+      { surface, sloId: reg.slo.id },
+      this.onDeclarationError,
+    );
+    // Marked escalated whether or not the record took the grade, so a failing regrader cannot turn
+    // the re-page into one per tick.
+    this.active.set(surface, { ...existing, severity: escalation.severity, escalated: true });
+    const page = planPageDirective(this.alertPolicy, escalation.severity, existing.incidentId);
+    return {
+      kind: "breach_escalated",
+      surface,
+      sloId: reg.slo.id,
+      incidentId: existing.incidentId,
+      fromSeverity: existing.severity,
+      severity: escalation.severity,
+      pages: page === null ? [] : [page],
+      regraded,
+    };
   }
 
   private async openBreach(
@@ -320,6 +423,7 @@ export class SloEnforcementEngine {
               incidentId,
               nowIso,
               justification: `SLO enforcement recorded a kill switch for ${reg.rollback.flagId} after ${thresholdId} burn on ${surface}.`,
+              expiresAtIso: new Date(Date.parse(nowIso) + this.killSwitchTtlMs).toISOString(),
             },
             this.killSwitchRecorder,
             { surface, sloId: reg.slo.id },
@@ -327,7 +431,14 @@ export class SloEnforcementEngine {
           );
     const killSwitchId = activation.killSwitch?.id ?? null;
 
-    this.active.set(surface, { incidentId, killSwitchId, severity, thresholdId });
+    this.active.set(surface, {
+      incidentId,
+      killSwitchId,
+      severity,
+      thresholdId,
+      openedAtMs: Date.parse(nowIso),
+      escalated: false,
+    });
 
     return {
       kind: "breach_opened",
@@ -343,4 +454,8 @@ export class SloEnforcementEngine {
       },
     };
   }
+}
+
+function severityRankAtOrAbove(current: Severity, target: Severity): boolean {
+  return severityRank(current) <= severityRank(target);
 }

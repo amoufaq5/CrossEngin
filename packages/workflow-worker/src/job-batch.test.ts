@@ -57,6 +57,25 @@ describe("processJobBatch", () => {
     expect(result.failed).toEqual([{ jobId: "b", error: "boom" }]);
   });
 
+  it("releases under the claimed run's own tenant, so a confined session can find the row", async () => {
+    const seen: string[] = [];
+    const other: ClaimedJob = { ...job("b"), tenantId: "00000000-0000-4000-8000-000000000002" };
+    const claimer: JobClaimer = {
+      claim: async () => [job("a"), other],
+      release: async ({ jobId, tenantId }) => void seen.push(`${jobId}@${tenantId}`),
+    };
+    const processor: JobProcessor = {
+      process: async () => {
+        throw new Error("boom");
+      },
+    };
+    await processJobBatch(claimer, processor, OPTS);
+    expect(seen).toEqual([
+      "a@00000000-0000-4000-8000-000000000001",
+      "b@00000000-0000-4000-8000-000000000002",
+    ]);
+  });
+
   it("swallows a release that itself throws (the lease recovers the run)", async () => {
     const processor: JobProcessor = {
       process: async () => {
@@ -207,5 +226,58 @@ describe("processJobBatch — a stopping worker starts nothing further", () => {
       cancellation: watcher(new Set(), probed),
     });
     expect(probed).toEqual([]);
+  });
+});
+
+describe("processJobBatch — each run's claim is reaffirmed before it starts", () => {
+  function renewerOf(held: ReadonlySet<string>, asked: string[] = [], throws = false) {
+    return {
+      renew: async (o: { timerId: string; workerId: string; tenantId: string }) => {
+        asked.push(`${o.timerId}|${o.workerId}|${o.tenantId}`);
+        if (throws) throw new Error("connection reset");
+        return held.has(o.timerId);
+      },
+    };
+  }
+
+  it("skips a run whose claim another worker took while an earlier run was executing", async () => {
+    const processed: string[] = [];
+    const released: string[] = [];
+    const asked: string[] = [];
+    const result = await processJobBatch(
+      claimerOf([job("a"), job("b")], released),
+      { process: async (j) => void processed.push(j.jobId) },
+      OPTS,
+      { claimRenewer: renewerOf(new Set(["a"]), asked) },
+    );
+    expect(processed).toEqual(["a"]);
+    expect(result.skipped).toEqual([{ jobId: "b", reason: "lease_lost" }]);
+    // The claim is somebody else's now, so nothing of this worker's is handed back.
+    expect(released).toEqual([]);
+    expect(asked).toEqual([
+      "a|worker-A|00000000-0000-4000-8000-000000000001",
+      "b|worker-A|00000000-0000-4000-8000-000000000001",
+    ]);
+  });
+
+  it("does not start a run when the renew itself fails — a lease nobody established is not held", async () => {
+    const processed: string[] = [];
+    const result = await processJobBatch(
+      claimerOf([job("a")]),
+      { process: async (j) => void processed.push(j.jobId) },
+      OPTS,
+      { claimRenewer: renewerOf(new Set(["a"]), [], true) },
+    );
+    expect(processed).toEqual([]);
+    expect(result.skipped).toEqual([{ jobId: "a", reason: "lease_lost" }]);
+  });
+
+  it("does not spend a renew on a run it will not start", async () => {
+    const asked: string[] = [];
+    await processJobBatch(claimerOf([job("a")]), { process: async () => undefined }, OPTS, {
+      shouldContinue: () => false,
+      claimRenewer: renewerOf(new Set(["a"]), asked),
+    });
+    expect(asked).toEqual([]);
   });
 });

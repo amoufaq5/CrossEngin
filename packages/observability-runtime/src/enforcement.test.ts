@@ -488,3 +488,62 @@ describe("killSwitchIdForIncident", () => {
     expect(() => killSwitchIdForIncident("not-an-incident")).toThrow();
   });
 });
+
+describe("enforcement — escalation and release helpers (M-23, ADR-0415)", () => {
+  it("escalationDue is false before the duration, true after, and false once escalated", async () => {
+    const { escalationDue } = await import("./enforcement.js");
+    const esc = { afterMs: 60_000, severity: "sev1" as const };
+    const breach = { severity: "sev2" as const, openedAtMs: 0, escalated: false };
+    expect(escalationDue(esc, breach, 59_999)).toBe(false);
+    expect(escalationDue(esc, breach, 60_000)).toBe(true);
+    expect(escalationDue(esc, { ...breach, escalated: true }, 60_000)).toBe(false);
+    expect(escalationDue(undefined, breach, 1e12)).toBe(false);
+  });
+
+  it("escalationDue never escalates to a grade at or below the current one", async () => {
+    const { escalationDue } = await import("./enforcement.js");
+    const breach = { severity: "sev2" as const, openedAtMs: 0, escalated: false };
+    expect(escalationDue({ afterMs: 60_000, severity: "sev2" }, breach, 1e9)).toBe(false);
+    expect(escalationDue({ afterMs: 60_000, severity: "sev3" }, breach, 1e9)).toBe(false);
+  });
+
+  it("BreachEscalationSchema refuses an escalation sooner than a minute and an unknown grade", async () => {
+    const { BreachEscalationSchema } = await import("./enforcement.js");
+    expect(BreachEscalationSchema.safeParse({ afterMs: 60_000, severity: "sev1" }).success).toBe(true);
+    expect(BreachEscalationSchema.safeParse({ afterMs: 59_999, severity: "sev1" }).success).toBe(false);
+    expect(BreachEscalationSchema.safeParse({ afterMs: 60_000, severity: "P0" }).success).toBe(false);
+  });
+
+  it("releaseRecoveredKillSwitch answers each of its five outcomes", async () => {
+    const { releaseRecoveredKillSwitch } = await import("./enforcement.js");
+    const input = { reason: "r", actorUserId: "a", at: "2026-01-01T00:00:00.000Z" };
+    const failure = { surface: "s", sloId: "x" };
+    const phases: string[] = [];
+    const sink = (_e: unknown, f: { phase: string }): void => {
+      phases.push(f.phase);
+    };
+    expect(await releaseRecoveredKillSwitch(undefined, null, null, input, failure)).toBe("none");
+    expect(await releaseRecoveredKillSwitch(undefined, "ks", null, input, failure)).toBe("no_releaser");
+    expect(
+      await releaseRecoveredKillSwitch({ release: async () => true }, "ks", null, input, failure),
+    ).toBe("released");
+    expect(
+      await releaseRecoveredKillSwitch({ release: async () => false }, "ks", null, input, failure),
+    ).toBe("not_active");
+    expect(
+      await releaseRecoveredKillSwitch(
+        {
+          release: async () => {
+            throw new Error("x");
+          },
+        },
+        "ks",
+        null,
+        input,
+        failure,
+        sink,
+      ),
+    ).toBe("failed");
+    expect(phases).toEqual(["release_kill_switch"]);
+  });
+});

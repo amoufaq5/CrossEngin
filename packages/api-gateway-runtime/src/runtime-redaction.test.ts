@@ -581,3 +581,64 @@ describe("GatewayRuntime — the per-record pass is one evaluator call", () => {
     expect(parseBody(response.bodyBytes)).toEqual(FAN_OUT_BODY);
   });
 });
+
+function erroringRuntime(spec: ResponseRedactionSpec, status: number, body: unknown): GatewayRuntime {
+  const routes = new InMemoryRouteRegistry().register(publicRoute());
+  const handlers = new HandlerRegistry().register("patients.list", () => ({ kind: "json", status, body }));
+  return new GatewayRuntime({
+    routes,
+    handlers,
+    principalResolver: new InMemoryPrincipalResolver(),
+    idempotencyStore: new InMemoryIdempotencyStore(),
+    rateLimitChecker: new InMemoryRateLimitChecker({ limit: 100 }),
+    clock: { now: () => new Date("2026-06-03T12:00:00.000Z") },
+    redactionRegistry: new MapRedactionRegistry().register("patients.list", spec),
+  });
+}
+
+describe("GatewayRuntime — a handler's own error body is redacted too", () => {
+  const conflict = {
+    error: "conflict",
+    detail: "the record changed",
+    record: { id: "p1", mrn: "MRN-001", given_name: "Ada", status: "active" },
+  };
+
+  it("strips classified fields from a 409 body for a non-privileged principal", async () => {
+    const spec = { ...specForRole("front_desk"), recordShape: "record" as const };
+    const { response, execution } = await erroringRuntime(spec, 409, conflict).handleRequest(getRequest());
+    expect(response.status).toBe(409);
+    const body = parseBody(response.bodyBytes);
+    expect(body["record"]).toEqual({ id: "p1", status: "active" });
+    expect(body["error"]).toBe("conflict");
+    expect(Number(response.headers["content-length"])).toBe((response.bodyBytes ?? new Uint8Array()).byteLength);
+    const dispatch = execution.stages.find((s) => s.stage === "dispatch_handler");
+    expect(dispatch?.outcome).toBe("deny");
+    expect(dispatch?.reason).toBe("handler_returned_409_redacted_2_fields");
+  });
+
+  it("leaves the error body whole for a privileged principal, and the reason unchanged", async () => {
+    const spec = { ...specForRole("clinician"), recordShape: "record" as const };
+    const { response, execution } = await erroringRuntime(spec, 422, conflict).handleRequest(getRequest());
+    expect(parseBody(response.bodyBytes)["record"]).toEqual(conflict.record);
+    expect(execution.stages.find((s) => s.stage === "dispatch_handler")?.reason).toBe("handler_returned_422");
+  });
+
+  it("redacts a 5xx body the same way", async () => {
+    const spec = { ...specForRole("front_desk"), recordShape: "record" as const };
+    const { response } = await erroringRuntime(spec, 500, conflict).handleRequest(getRequest());
+    expect(response.status).toBe(500);
+    expect(parseBody(response.bodyBytes)["record"]).toEqual({ id: "p1", status: "active" });
+  });
+});
+
+describe("GatewayRuntime — a role the manifest does not declare", () => {
+  // b184ffd made `resolveEffectiveRoles` skip an undeclared name rather than throw. This pins it at
+  // the gateway, where the redaction stage resolves roles on every response: an undeclared role is
+  // a principal with no grants, so the answer is the redacted body and not a 500.
+  it("answers with the classified fields withheld rather than failing the request", async () => {
+    const { response } = await buildRuntime("platform_admin").handleRequest(getRequest());
+    expect(response.status).toBe(200);
+    const rows = parseBody(response.bodyBytes)["data"] as Array<Record<string, unknown>>;
+    expect(rows[0]).toEqual({ id: "p1", status: "active" });
+  });
+});

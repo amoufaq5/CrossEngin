@@ -51,10 +51,15 @@ describe("healthcare entities", () => {
     });
   });
 
-  it("classifies the MRN as PHI and demographics as PII", () => {
-    expect(PATIENT_ENTITY.fields.find((f) => f.name === "mrn")?.classification).toBe("phi");
-    expect(PATIENT_ENTITY.fields.find((f) => f.name === "date_of_birth")?.classification).toBe("pii");
-    expect(PATIENT_ENTITY.fields.find((f) => f.name === "email")?.classification).toBe("pii");
+  it("classifies the MRN and every demographic as PHI — a patient record's identifiers are PHI under HIPAA", () => {
+    for (const field of ["mrn", "given_name", "family_name", "date_of_birth", "sex", "email", "phone"]) {
+      expect(PATIENT_ENTITY.fields.find((f) => f.name === field)?.classification, field).toBe("phi");
+    }
+    // `status` stays unclassified, as `Encounter.state` does: the pack encrypts the identifiers and
+    // the clinical content, and a lifecycle value every list filters on is neither an identifier nor
+    // narrative. A deployment holding `deceased` to be PHI in its own right must classify it itself.
+    expect(PATIENT_ENTITY.fields.find((f) => f.name === "status")?.classification).toBeUndefined();
+    expect(PATIENT_ENTITY.fields.filter((f) => f.classification === "pii")).toEqual([]);
   });
 
   it("classifies Observation clinical values as PHI", () => {

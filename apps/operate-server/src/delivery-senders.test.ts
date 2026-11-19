@@ -24,6 +24,7 @@ import {
   type SendRequest,
   type SendResult,
   type SendTimer,
+  dispatchContentOf,
 } from "./delivery-senders.js";
 
 const TENANT_ID = "6f1b1a1e-0f5a-4d7a-9a1c-2b3c4d5e6f70";
@@ -37,6 +38,7 @@ const IN_APP_REQUEST: SendRequest = {
   locale: "en",
   recipientAddress: "user:11111111-2222-4333-8444-555555555555",
   attemptNumber: 1,
+  content: null,
 };
 
 interface ScheduledTimer {
@@ -426,5 +428,26 @@ describe("every producible SendResult", () => {
       expect(PROVIDER_KINDS).toContain(result.provider);
       expect(DELIVERY_OUTCOMES).toContain(result.outcome);
     }
+  });
+});
+
+describe("dispatchContentOf", () => {
+  const content = { subject: "Invoice approved", body: "It is approved.", htmlBody: null };
+
+  it("reads well-formed content back off a request", () => {
+    expect(dispatchContentOf({ ...IN_APP_REQUEST, content })).toEqual(content);
+    expect(dispatchContentOf({ content: { ...content, htmlBody: "<p>x</p>" } })?.htmlBody).toBe(
+      "<p>x</p>",
+    );
+  });
+
+  it("answers null for a request carrying no content or a malformed one", () => {
+    expect(dispatchContentOf(IN_APP_REQUEST)).toBeNull();
+    expect(dispatchContentOf({})).toBeNull();
+    expect(dispatchContentOf({ content: "body" })).toBeNull();
+    expect(dispatchContentOf({ content: { subject: "s", body: 7, htmlBody: null } })).toBeNull();
+    expect(dispatchContentOf({ content: { subject: "s", body: "b" } })).toBeNull();
+    expect(dispatchContentOf({ content: { subject: "s", body: "b", htmlBody: 1 } })).toBeNull();
+    expect(dispatchContentOf({ content: { subject: "s", body: "", htmlBody: null } })).toBeNull();
   });
 });

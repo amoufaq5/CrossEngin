@@ -6,7 +6,15 @@ import {
   type LatencyEnforcementDecision,
   type LatencySloEngineOptions,
 } from "@crossengin/observability-runtime";
-import { killSwitchLookup, persistReported } from "./persisting-engine.js";
+import {
+  deliverReported,
+  incidentRegrader,
+  killSwitchLookup,
+  killSwitchReleaser,
+  persistReported,
+  type EnforcementPageDeliverer,
+  type PersistedDecision,
+} from "./persisting-engine.js";
 import { PostgresSloEnforcementActionStore } from "./enforcement-action-store.js";
 import { PostgresSloLatencyEvaluationStore } from "./latency-evaluation-store.js";
 import {
@@ -16,6 +24,8 @@ import {
 
 export interface PersistentLatencySloEngineOptions extends LatencySloEngineOptions {
   readonly resolveTenantId?: (surface: string) => string | null;
+  /** See the availability engine's option. */
+  readonly deliverPages?: EnforcementPageDeliverer;
 }
 
 export interface PersistentLatencySloEngine {
@@ -24,7 +34,7 @@ export interface PersistentLatencySloEngine {
   readonly enforcementStore: PostgresSloEnforcementActionStore;
   readonly killSwitchStore: PostgresKillSwitchStore;
   recordOutcome: LatencySloEngine["recordOutcome"];
-  evaluate(now?: Date): Promise<readonly LatencyEnforcementDecision[]>;
+  evaluate(now?: Date): Promise<readonly PersistedDecision<LatencyEnforcementDecision>[]>;
 }
 
 function buildTenantMap(
@@ -49,6 +59,8 @@ export function buildPersistentLatencySloEngine(
     declarer: options.declarer ?? new PostgresIncidentDeclarer({ conn }),
     killSwitches: options.killSwitches ?? killSwitchLookup(killSwitchStore),
     killSwitchRecorder: options.killSwitchRecorder ?? killSwitchStore,
+    killSwitchReleaser: options.killSwitchReleaser ?? killSwitchReleaser(killSwitchStore),
+    regrader: options.regrader ?? incidentRegrader(conn),
   });
   const latencyEvaluationStore = new PostgresSloLatencyEvaluationStore(conn);
   const enforcementStore = new PostgresSloEnforcementActionStore(conn);
@@ -63,12 +75,17 @@ export function buildPersistentLatencySloEngine(
     return fallback;
   }
 
-  async function evaluate(now?: Date): Promise<readonly LatencyEnforcementDecision[]> {
+  async function evaluate(
+    now?: Date,
+  ): Promise<readonly PersistedDecision<LatencyEnforcementDecision>[]> {
     const at = now ?? clock?.now() ?? new Date();
     const occurredAt = at.toISOString();
     const decisions = await engine.evaluate(at);
+    const out: PersistedDecision<LatencyEnforcementDecision>[] = [];
 
     for (const decision of decisions) {
+      const pageDelivery = await deliverReported(decision, options.deliverPages, onError);
+      out.push({ ...decision, pageDelivery });
       const killSwitchTenant =
         decision.kind === "breach_opened"
           ? decision.plan.killSwitch?.tenantId ?? null
@@ -83,6 +100,7 @@ export function buildPersistentLatencySloEngine(
             tenantId,
             occurredAt,
             signal: "latency",
+            pageDelivery,
           }),
         ),
       );
@@ -102,7 +120,7 @@ export function buildPersistentLatencySloEngine(
       }
     }
 
-    return decisions;
+    return out;
   }
 
   return {

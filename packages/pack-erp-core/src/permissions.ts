@@ -6,12 +6,19 @@ const ALL_ROLES = ["erp_admin", "erp_accountant", "erp_viewer"];
 const WRITE_ROLES = ["erp_admin", "erp_accountant"];
 const ADMIN_ONLY = ["erp_admin"];
 
+// The billing address and a contact's name, email and phone are a person's data, so they are `pii`
+// — which is what keeps their values out of the retained audit trail after an erasure (ADR-0428).
+// Every role that reads the record works from them, so the grants are the entity's own: the
+// classification changes what is recorded about the value, not who may see it.
+const CUSTOMER_PERSONAL_DATA = { read: { roles: ALL_ROLES }, update: { roles: WRITE_ROLES } };
+
 export const ACCOUNT_PERMISSIONS: EntityPermissions = {
   list: { roles: ALL_ROLES },
   read: { roles: ALL_ROLES },
   create: { roles: WRITE_ROLES },
   update: { roles: WRITE_ROLES },
   delete: { roles: ADMIN_ONLY },
+  fields: { billing_email: CUSTOMER_PERSONAL_DATA },
 };
 
 export const CONTACT_PERMISSIONS: EntityPermissions = {
@@ -20,6 +27,12 @@ export const CONTACT_PERMISSIONS: EntityPermissions = {
   create: { roles: WRITE_ROLES },
   update: { roles: WRITE_ROLES },
   delete: { roles: ADMIN_ONLY },
+  fields: {
+    given_name: CUSTOMER_PERSONAL_DATA,
+    family_name: CUSTOMER_PERSONAL_DATA,
+    email: CUSTOMER_PERSONAL_DATA,
+    phone: CUSTOMER_PERSONAL_DATA,
+  },
 };
 
 export const INVOICE_PERMISSIONS: EntityPermissions = {
@@ -268,6 +281,10 @@ export const EMPLOYEE_PERMISSIONS: EntityPermissions = {
   update: { roles: HR_WRITERS },
   delete: { roles: ADMIN_ONLY },
   fields: {
+    // The name is the directory entry the org chart shows, so every employee reader keeps it; it is
+    // classified so its value stays out of the retained audit trail (ADR-0428), not to narrow it.
+    given_name: { read: { roles: HR_READERS }, update: { roles: HR_WRITERS } },
+    family_name: { read: { roles: HR_READERS }, update: { roles: HR_WRITERS } },
     // The employee record is readable by `erp_viewer` for the org chart — the directory entry,
     // the reporting line, the position. None of the personal or pay fields are part of that, so
     // every arm below is HR and the admin, which is `HR_WRITERS` read as a population.

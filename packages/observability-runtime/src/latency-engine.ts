@@ -23,15 +23,25 @@ import {
   type LatencyVerdict,
 } from "./latency.js";
 import {
+  DEFAULT_KILL_SWITCH_TTL_MS,
   activateKillSwitch,
   closeOutEnforcementIncident,
+  escalationDue,
+  regradeEnforcementIncident,
+  releaseRecoveredKillSwitch,
+  severityRank,
   declareEnforcementIncident,
   findAdoptedKillSwitch,
   findOpenEnforcementIncident,
   killSwitchIdForIncident,
   planPageDirective,
+  type BreachEscalation,
   type DeclarationErrorSink,
   type EnforcementPlan,
+  type IncidentRegrader,
+  type KillSwitchRelease,
+  type KillSwitchReleaser,
+  type PageDirective,
   type KillSwitchActivation,
   type FlagRollback,
   type KillSwitchLookup,
@@ -43,6 +53,8 @@ export interface LatencyRegistration {
   readonly category?: IncidentCategory;
   readonly rollback?: FlagRollback;
   readonly tenantId?: string | null;
+  /** Re-grade and re-page a breach still over budget this long after it was declared (M-23). */
+  readonly escalation?: BreachEscalation;
 }
 
 export interface LatencySloEngineOptions {
@@ -64,6 +76,10 @@ export interface LatencySloEngineOptions {
   readonly killSwitches?: KillSwitchLookup;
   /** Stores the kill switch a declared rollback plans — see the availability engine's option. */
   readonly killSwitchRecorder?: KillSwitchRecorder;
+  /** Releases a recovered breach's kill switch — see the availability engine's option. */
+  readonly killSwitchReleaser?: KillSwitchReleaser;
+  readonly killSwitchTtlMs?: number;
+  readonly regrader?: IncidentRegrader;
   readonly onDeclarationError?: DeclarationErrorSink;
 }
 
@@ -71,6 +87,8 @@ interface ActiveBreach {
   readonly incidentId: string;
   readonly killSwitchId: string | null;
   readonly severity: Severity;
+  readonly openedAtMs: number;
+  readonly escalated: boolean;
 }
 
 export type LatencyEnforcementDecision =
@@ -89,6 +107,16 @@ export type LatencyEnforcementDecision =
       readonly incidentId: string;
     }
   | {
+      readonly kind: "breach_escalated";
+      readonly surface: string;
+      readonly sloId: string;
+      readonly incidentId: string;
+      readonly fromSeverity: Severity;
+      readonly severity: Severity;
+      readonly pages: readonly PageDirective[];
+      readonly regraded: boolean;
+    }
+  | {
       readonly kind: "recovered";
       readonly surface: string;
       readonly sloId: string;
@@ -96,6 +124,7 @@ export type LatencyEnforcementDecision =
       readonly killSwitchId: string | null;
       /** What became of the declared incident: cancelled, left to a human, or never stored. */
       readonly closeOut: IncidentCloseOut;
+      readonly killSwitchRelease: KillSwitchRelease;
     };
 
 function latencyTarget(slo: Slo): SloLatencyTarget | null {
@@ -116,6 +145,9 @@ export class LatencySloEngine {
   private readonly declarer: IncidentDeclarer;
   private readonly killSwitches: KillSwitchLookup | undefined;
   private readonly killSwitchRecorder: KillSwitchRecorder | undefined;
+  private readonly killSwitchReleaser: KillSwitchReleaser | undefined;
+  private readonly killSwitchTtlMs: number;
+  private readonly regrader: IncidentRegrader | undefined;
   private readonly onDeclarationError: DeclarationErrorSink | undefined;
   private readonly active: Map<string, ActiveBreach> = new Map();
   /**
@@ -136,6 +168,12 @@ export class LatencySloEngine {
     this.declarer = options.declarer ?? new CountingIncidentDeclarer({ clock: this.clock });
     this.killSwitches = options.killSwitches;
     this.killSwitchRecorder = options.killSwitchRecorder;
+    this.killSwitchReleaser = options.killSwitchReleaser;
+    this.killSwitchTtlMs = options.killSwitchTtlMs ?? DEFAULT_KILL_SWITCH_TTL_MS;
+    if (!Number.isInteger(this.killSwitchTtlMs) || this.killSwitchTtlMs < 60_000) {
+      throw new Error("killSwitchTtlMs must be an integer of at least 60000");
+    }
+    this.regrader = options.regrader;
     this.onDeclarationError = options.onDeclarationError;
   }
 
@@ -178,6 +216,10 @@ export class LatencySloEngine {
         // declares it instead of this pass abandoning every surface after it.
         if (opened !== null) decisions.push(opened);
       } else if (verdict.breached && existing !== undefined) {
+        if (escalationDue(reg.escalation, existing, nowMs)) {
+          decisions.push(await this.escalate(reg, surface, existing, reg.escalation, nowIso));
+          continue;
+        }
         decisions.push({
           kind: "breach_ongoing",
           surface,
@@ -197,6 +239,18 @@ export class LatencySloEngine {
           { surface, sloId: reg.slo.id },
           this.onDeclarationError,
         );
+        const killSwitchRelease = await releaseRecoveredKillSwitch(
+          this.killSwitchReleaser,
+          existing.killSwitchId,
+          reg.tenantId ?? null,
+          {
+            reason: `latency on ${surface} recovered (incident ${existing.incidentId})`,
+            actorUserId: this.systemActorUserId,
+            at: nowIso,
+          },
+          { surface, sloId: reg.slo.id },
+          this.onDeclarationError,
+        );
         decisions.push({
           kind: "recovered",
           surface,
@@ -204,6 +258,7 @@ export class LatencySloEngine {
           incidentId: existing.incidentId,
           killSwitchId: existing.killSwitchId,
           closeOut,
+          killSwitchRelease,
         });
       }
     }
@@ -240,8 +295,45 @@ export class LatencySloEngine {
         this.onDeclarationError,
       ),
       severity: open.severity,
+      openedAtMs: Date.parse(open.declaredAt),
+      escalated:
+        reg.escalation !== undefined &&
+        severityRank(open.severity) <= severityRank(reg.escalation.severity),
     });
     return { kind: "breach_ongoing", surface, sloId: reg.slo.id, incidentId: open.id };
+  }
+
+  private async escalate(
+    reg: LatencyRegistration,
+    surface: string,
+    existing: ActiveBreach,
+    escalation: BreachEscalation,
+    nowIso: string,
+  ): Promise<LatencyEnforcementDecision> {
+    const regraded = await regradeEnforcementIncident(
+      this.regrader,
+      existing.incidentId,
+      {
+        severity: escalation.severity,
+        reason: `latency on ${surface} has stayed over budget past ${escalation.afterMs.toString()}ms`,
+        actorUserId: this.declaredBy,
+        at: nowIso,
+      },
+      { surface, sloId: reg.slo.id },
+      this.onDeclarationError,
+    );
+    this.active.set(surface, { ...existing, severity: escalation.severity, escalated: true });
+    const page = planPageDirective(this.alertPolicy, escalation.severity, existing.incidentId);
+    return {
+      kind: "breach_escalated",
+      surface,
+      sloId: reg.slo.id,
+      incidentId: existing.incidentId,
+      fromSeverity: existing.severity,
+      severity: escalation.severity,
+      pages: page === null ? [] : [page],
+      regraded,
+    };
   }
 
   private async openBreach(
@@ -303,6 +395,7 @@ export class LatencySloEngine {
               incidentId,
               nowIso,
               justification: `Latency enforcement recorded a kill switch for ${reg.rollback.flagId} after a ${verdict.worstThresholdId} breach on ${surface}.`,
+              expiresAtIso: new Date(Date.parse(nowIso) + this.killSwitchTtlMs).toISOString(),
             },
             this.killSwitchRecorder,
             { surface, sloId: reg.slo.id },
@@ -310,7 +403,13 @@ export class LatencySloEngine {
           );
     const killSwitchId = activation.killSwitch?.id ?? null;
 
-    this.active.set(surface, { incidentId, killSwitchId, severity });
+    this.active.set(surface, {
+      incidentId,
+      killSwitchId,
+      severity,
+      openedAtMs: Date.parse(nowIso),
+      escalated: false,
+    });
 
     return {
       kind: "breach_opened",

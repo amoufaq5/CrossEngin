@@ -4,10 +4,21 @@ const SCHEMA = "meta";
 
 export class WorkflowInstanceIdResolver {
   private readonly conn: PgConnection;
-  private readonly cache: Map<string, string> = new Map();
+  private readonly cache: Map<string, string>;
 
-  constructor(conn: PgConnection) {
+  constructor(conn: PgConnection, cache: Map<string, string> = new Map()) {
     this.conn = conn;
+    this.cache = cache;
+  }
+
+  /**
+   * The same id map, read through another connection — an append's transaction. An instance created
+   * inside that transaction is not visible to the pool until it commits, and a confined session sees
+   * a row only under the tenant context the transaction set, so a lookup made on the pool there
+   * would answer "not found" for a row that exists.
+   */
+  boundTo(conn: PgConnection): WorkflowInstanceIdResolver {
+    return new WorkflowInstanceIdResolver(conn, this.cache);
   }
 
   register(instanceId: string, uuid: string): void {
@@ -46,10 +57,21 @@ export class WorkflowInstanceIdResolver {
 
 export class WorkflowDefinitionIdResolver {
   private readonly conn: PgConnection;
-  private readonly cache: Map<string, string> = new Map();
+  private readonly cache: Map<string, string>;
 
-  constructor(conn: PgConnection) {
+  constructor(conn: PgConnection, cache: Map<string, string> = new Map()) {
     this.conn = conn;
+    this.cache = cache;
+  }
+
+  /**
+   * The same id map, read through another connection — an append's transaction. An instance created
+   * inside that transaction is not visible to the pool until it commits, and a confined session sees
+   * a row only under the tenant context the transaction set, so a lookup made on the pool there
+   * would answer "not found" for a row that exists.
+   */
+  boundTo(conn: PgConnection): WorkflowDefinitionIdResolver {
+    return new WorkflowDefinitionIdResolver(conn, this.cache);
   }
 
   register(definitionId: string, uuid: string): void {

@@ -7,7 +7,9 @@ import {
   DEADLINE_STANDINGS,
   DEADLINE_STANDING_FACTS,
   DEFAULT_DEADLINE_WARNING_DAYS,
+  DEFAULT_DELETION_GRACE_DAYS,
   DELETION_REQUEST_STATUSES,
+  GRACE_YIELDS_TO_DEADLINE_MS,
   GDPR_LEGAL_BASES,
   GdprDeletionRequestSchema,
   RETENTION_OBLIGATIONS,
@@ -17,6 +19,7 @@ import {
   assessDeadline,
   canTransitionDeletionRequest,
   daysUntilDeadline,
+  deletionExecuteNotBefore,
   hasRetainedData,
   isDeadlineFinding,
   isOverdue,
@@ -905,5 +908,42 @@ describe("the extension", () => {
     const parsed = requestIn("verified");
     expect(parsed.deadlineExtendedAt).toBeNull();
     expect(parsed.deadlineExtensionReason).toBeUndefined();
+  });
+});
+
+describe("deletionExecuteNotBefore", () => {
+  const DAY = 86_400_000;
+  const verifiedAt = "2026-01-01T00:00:00.000Z";
+  const deadlineAt = "2026-01-31T00:00:00.000Z";
+
+  it("is verifiedAt plus the grace when the deadline is far", () => {
+    expect(deletionExecuteNotBefore({ verifiedAt, deadlineAt }, 7 * DAY)).toBe(
+      "2026-01-08T00:00:00.000Z",
+    );
+  });
+
+  it("is pulled in to one day before the deadline when the grace would cross it", () => {
+    expect(deletionExecuteNotBefore({ verifiedAt, deadlineAt }, 40 * DAY)).toBe(
+      new Date(new Date(deadlineAt).getTime() - GRACE_YIELDS_TO_DEADLINE_MS).toISOString(),
+    );
+  });
+
+  it("never precedes verification, even for a request verified on its last day", () => {
+    const late = { verifiedAt: "2026-01-30T12:00:00.000Z", deadlineAt };
+    expect(deletionExecuteNotBefore(late, 7 * DAY)).toBe("2026-01-30T12:00:00.000Z");
+  });
+
+  it("is verifiedAt itself with no grace", () => {
+    expect(deletionExecuteNotBefore({ verifiedAt, deadlineAt }, 0)).toBe(verifiedAt);
+  });
+
+  it("answers null for an unverified request and refuses a negative grace", () => {
+    expect(deletionExecuteNotBefore({ verifiedAt: null, deadlineAt }, DAY)).toBeNull();
+    expect(() => deletionExecuteNotBefore({ verifiedAt, deadlineAt }, -1)).toThrow(/non-negative/);
+  });
+
+  it("defaults to a working week, inside the default Article 12(3) month", () => {
+    expect(DEFAULT_DELETION_GRACE_DAYS).toBe(7);
+    expect(DEFAULT_DELETION_GRACE_DAYS).toBeLessThan(30);
   });
 });

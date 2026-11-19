@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { EntityRecord } from "@crossengin/operate-runtime";
+import { withoutNullFields, type EntityRecord } from "@crossengin/operate-runtime";
 
 /**
  * The persisted shape of one entity record in `meta.operate_entity_records`:
@@ -43,12 +43,23 @@ export function resolveRecordId(record: EntityRecord): string {
   return typeof own === "string" && RECORD_ID_RE.test(own) ? own : generateRecordId();
 }
 
-/** Pure merge for `update`: existing ⊕ patch, with the id pinned (never patched away). */
+/**
+ * Pure merge for `update`: existing ⊕ patch, with the id pinned (never patched away). A field the
+ * patch sets `null` is removed rather than stored as JSON `null` — see `withoutNullFields`.
+ */
 export function mergeRecord(existing: EntityRecord, patch: EntityRecord, id: string): EntityRecord {
-  return { ...existing, ...patch, id };
+  return withoutNullFields({ ...existing, ...patch, id });
+}
+
+/**
+ * A stored document as the record it is served as. A document written before nulls were dropped
+ * may still hold one, so the read drops it too and every document reads in one shape.
+ */
+export function documentRecord(document: EntityRecord): EntityRecord {
+  return withoutNullFields(document);
 }
 
 /** Maps a full DB row to the live `EntityRecord` (the stored document). */
 export function rowToRecord(row: EntityRecordRow): EntityRecord {
-  return row.document;
+  return documentRecord(row.document);
 }

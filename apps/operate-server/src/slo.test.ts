@@ -368,6 +368,8 @@ describe("the pages an SLO decision planned (ADR-0326)", () => {
             killSwitchId: null,
             closeOut: "cancelled" as const,
             pages: [],
+            pagesDelivered: false,
+            killSwitchRelease: null,
           },
         ],
       ],
@@ -403,6 +405,8 @@ describe("resolving an SLO breach's page on recovery (ADR-0326)", () => {
       killSwitchId: null,
       closeOut: "cancelled",
       pages: [],
+      pagesDelivered: false,
+      killSwitchRelease: null,
       ...over,
     } as ObservedEnforcementDecision;
   }
@@ -690,5 +694,121 @@ describe("resolving an SLO breach's page on recovery (ADR-0326)", () => {
       expect(rec.asked).toHaveLength(1);
       expect(resolved).toEqual([[RECOVERED]]);
     });
+  });
+});
+
+describe("escalation and delivered pages through the scheduler (M-23, ADR-0415)", () => {
+  const INC = "INC-2026-0002";
+  const SEV2 = { incidentId: INC, severity: "sev2", channels: [{ kind: "slack", channel: "#sre" }] } as unknown as PageDirective;
+  const SEV1 = {
+    incidentId: INC,
+    severity: "sev1",
+    channels: [{ kind: "pagerduty_phone", serviceKey: "svc" }],
+  } as unknown as PageDirective;
+
+  function decision(over: Partial<ObservedEnforcementDecision>): ObservedEnforcementDecision {
+    return {
+      signal: "availability",
+      kind: "breach_opened",
+      surface: SURFACE,
+      sloId: "slo_1",
+      severity: "sev2",
+      incidentId: INC,
+      killSwitchId: null,
+      closeOut: null,
+      pages: [],
+      pagesDelivered: false,
+      killSwitchRelease: null,
+      ...over,
+    };
+  }
+
+  function run(passes: ObservedEnforcementDecision[][]) {
+    const paged: ObservedEnforcementDecision[] = [];
+    const resolved: Array<readonly PageDirective[]> = [];
+    let pass = 0;
+    const s = new SloEvaluationScheduler({
+      evaluators: [
+        async () => {
+          const out = passes[pass] ?? [];
+          pass += 1;
+          return out;
+        },
+      ],
+      intervalMs: 1_000,
+      onPage: async (d) => {
+        paged.push(d);
+      },
+      onResolvePage: async (_d, pages) => {
+        resolved.push(pages);
+      },
+    });
+    return { s, paged, resolved };
+  }
+
+  it("does not page a decision the persisting engine already delivered, but still resolves it", async () => {
+    const { s, paged, resolved } = run([
+      [decision({ pages: [SEV2], pagesDelivered: true })],
+      [decision({ kind: "recovered", severity: null, closeOut: "cancelled" })],
+    ]);
+    await s.evaluateOnce();
+    expect(paged).toEqual([]);
+    expect(s.pagedFor(INC)).toEqual([SEV2]);
+    await s.evaluateOnce();
+    expect(resolved).toEqual([[SEV2]]);
+  });
+
+  it("pages an escalation and resolves both routes when the breach recovers", async () => {
+    const { s, paged, resolved } = run([
+      [decision({ pages: [SEV2] })],
+      [decision({ kind: "breach_escalated", severity: "sev1", pages: [SEV1] })],
+      [decision({ kind: "recovered", severity: null, closeOut: "cancelled" })],
+    ]);
+    await s.evaluateOnce();
+    await s.evaluateOnce();
+    expect(paged.map((d) => d.kind)).toEqual(["breach_opened", "breach_escalated"]);
+    await s.evaluateOnce();
+    // Replacing the remembered pages would close only the sev1 alert and leave the sev2 one up.
+    expect(resolved).toEqual([[SEV2, SEV1]]);
+  });
+});
+
+describe("summarizing an escalation and a release", () => {
+  it("carries an escalation's grade and pages, and a recovery's kill-switch release", async () => {
+    const { summarizeAvailabilityDecision } = await import("./slo.js");
+    const page = { incidentId: "INC-2026-0003" } as unknown as PageDirective;
+    const escalated = summarizeAvailabilityDecision({
+      kind: "breach_escalated",
+      surface: SURFACE,
+      sloId: "slo_1",
+      incidentId: "INC-2026-0003",
+      fromSeverity: "sev3",
+      severity: "sev2",
+      pages: [page],
+      regraded: true,
+    });
+    expect(escalated).toMatchObject({ kind: "breach_escalated", severity: "sev2", pages: [page], pagesDelivered: false });
+    const delivered = summarizeAvailabilityDecision({
+      kind: "breach_escalated",
+      surface: SURFACE,
+      sloId: "slo_1",
+      incidentId: "INC-2026-0003",
+      fromSeverity: "sev3",
+      severity: "sev2",
+      pages: [page],
+      regraded: true,
+      pageDelivery: { deliveredChannels: 1 },
+    });
+    expect(delivered.pagesDelivered).toBe(true);
+    const recovered = summarizeAvailabilityDecision({
+      kind: "recovered",
+      surface: SURFACE,
+      sloId: "slo_1",
+      incidentId: "INC-2026-0003",
+      killSwitchId: null,
+      closeOut: "cancelled",
+      killSwitchRelease: "no_releaser",
+    });
+    expect(recovered.killSwitchRelease).toBe("no_releaser");
   });
 });

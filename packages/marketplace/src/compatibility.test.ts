@@ -219,6 +219,70 @@ describe("checkCompatibility", () => {
   });
 });
 
+describe("checkCompatibility over unknown facts", () => {
+  const unknown: TenantContext = {
+    platformVersion: null,
+    region: null,
+    planTier: null,
+    compliancePacks: null,
+    isDedicatedTenant: null,
+  };
+  const unconstrained: PackCompatibility = PackCompatibilitySchema.parse({ minPlatformVersion: "0.0.0" });
+
+  it("admits a pack that constrains nothing the deployment does not know", () => {
+    const r = checkCompatibility(unconstrained, unknown);
+    expect(r).toEqual({ compatible: true, reasons: [], undetermined: [] });
+  });
+
+  it("refuses a region-blocking pack when the tenant's region is unknown, rather than guessing one", () => {
+    const r = checkCompatibility(
+      PackCompatibilitySchema.parse({ minPlatformVersion: "0.0.0", blockedRegions: ["eu-central"] }),
+      unknown,
+    );
+    expect(r.compatible).toBe(false);
+    expect(r.undetermined).toEqual(["region"]);
+  });
+
+  it("names every constrained unknown fact and only those", () => {
+    const r = checkCompatibility(
+      PackCompatibilitySchema.parse({
+        minPlatformVersion: "1.0.0",
+        requiredPlanTier: "professional",
+        requiredCompliancePacks: ["hipaa"],
+        requiresDedicatedTenant: true,
+      }),
+      unknown,
+    );
+    expect(r.undetermined).toEqual(["platformVersion", "planTier", "compliancePacks", "isDedicatedTenant"]);
+    expect(r.reasons).toHaveLength(4);
+  });
+
+  it("treats a trial plan requirement as unconstrained, since every tier meets it", () => {
+    const r = checkCompatibility(
+      PackCompatibilitySchema.parse({ minPlatformVersion: "0.0.0", requiredPlanTier: "trial" }),
+      unknown,
+    );
+    expect(r.compatible).toBe(true);
+  });
+
+  it("treats a declared maxPlatformVersion as a constraint even from a 0.0.0 minimum", () => {
+    const r = checkCompatibility(
+      PackCompatibilitySchema.parse({ minPlatformVersion: "0.0.0", maxPlatformVersion: "9.0.0" }),
+      unknown,
+    );
+    expect(r.undetermined).toEqual(["platformVersion"]);
+  });
+
+  it("still applies the known facts beside an unknown one", () => {
+    const r = checkCompatibility(
+      PackCompatibilitySchema.parse({ minPlatformVersion: "0.0.0", blockedRegions: ["eu-central"] }),
+      { ...unknown, region: "eu-central" },
+    );
+    expect(r.undetermined).toEqual([]);
+    expect(r.reasons).toEqual(["region 'eu-central' is blocked"]);
+  });
+});
+
 describe("packMatchesPlatform", () => {
   const minOnly = {
     id: "com.crossengin.x" as const,

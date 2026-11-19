@@ -129,8 +129,184 @@ describe("AnthropicProvider — constructor", () => {
       apiKey: API_KEY,
       defaultModel: "claude-opus-4-7",
     });
-    expect(provider.pricing.inputPerMillionTokens).toBe(15);
-    expect(provider.pricing.outputPerMillionTokens).toBe(75);
+    expect(provider.pricing.inputPerMillionTokens).toBe(5);
+    expect(provider.pricing.outputPerMillionTokens).toBe(25);
+  });
+
+  it("reports a declared price, and charges it on the default model only", async () => {
+    const declared = {
+      inputUsdPerMillion: 1_000_000,
+      cachedInputUsdPerMillion: 0,
+      outputUsdPerMillion: 0,
+      cacheWriteUsdPerMillion: 0,
+    };
+    const provider = new AnthropicProvider({
+      apiKey: API_KEY,
+      defaultModel: "claude-sonnet-4-6",
+      pricingOverride: declared,
+      fetch: buildFetch({ asStream: true }),
+    });
+    expect(provider.pricing.inputPerMillionTokens).toBe(1_000_000);
+    const finalCost = async (req: CompletionRequest): Promise<number> => {
+      let cost = -1;
+      for await (const chunk of provider.complete(req)) {
+        if (chunk.kind === "usage_final") cost = chunk.usage.cost;
+      }
+      return cost;
+    };
+    // 15 input tokens at the declared $1/token.
+    expect(await finalCost(fixtureRequest())).toBeCloseTo(15, 6);
+    // Another model is charged its catalogue price, not the price declared for the default.
+    expect(await finalCost(fixtureRequest({ model: "claude-haiku-4-5" }))).toBeLessThan(0.001);
+  });
+
+  it("refuses an inactivity timeout that is not a positive number", () => {
+    expect(
+      () =>
+        new AnthropicProvider({ apiKey: API_KEY, defaultModel: "claude-sonnet-4-6", inactivityTimeoutMs: 0 }),
+    ).toThrow(/inactivity timeout/);
+  });
+});
+
+describe("AnthropicProvider — inactivity timeout", () => {
+  it("aborts a call whose response headers never arrive, and passes the signal to fetch", async () => {
+    let seen: AbortSignal | undefined;
+    const provider = new AnthropicProvider({
+      apiKey: API_KEY,
+      defaultModel: "claude-sonnet-4-6",
+      inactivityTimeoutMs: 30,
+      fetch: async (_url, init) => {
+        seen = init.signal;
+        return new Promise(() => undefined);
+      },
+    });
+    const err = await (async () => {
+      try {
+        for await (const _ of provider.complete(fixtureRequest())) void _;
+        return null;
+      } catch (e) {
+        return e;
+      }
+    })();
+    expect(err).toBeInstanceOf(AnthropicError);
+    expect((err as AnthropicError).kind).toBe("timeout_error");
+    expect(seen?.aborted).toBe(true);
+  });
+
+  it("aborts the non-streaming call the same way, and passes it the signal", async () => {
+    let seen: AbortSignal | undefined;
+    const provider = new AnthropicProvider({
+      apiKey: API_KEY,
+      defaultModel: "claude-sonnet-4-6",
+      inactivityTimeoutMs: 30,
+      fetch: async (_url, init) => {
+        seen = init.signal;
+        return new Promise(() => undefined);
+      },
+    });
+    const err = await provider.completeNonStreaming(fixtureRequest()).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(AnthropicError);
+    expect((err as AnthropicError).kind).toBe("timeout_error");
+    expect(seen).toBeInstanceOf(AbortSignal);
+    expect(seen?.aborted).toBe(true);
+  });
+
+  it("aborts a stream that goes silent after its first event and releases the body", async () => {
+    let cancelled = false;
+    const enc = new TextEncoder();
+    let sent = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(ctrl): Promise<void> | void {
+        if (!sent) {
+          sent = true;
+          ctrl.enqueue(enc.encode(STREAM_SAMPLE.split("\n\n").slice(0, 3).join("\n\n") + "\n\n"));
+          return;
+        }
+        return new Promise<void>(() => undefined);
+      },
+      cancel(): void {
+        cancelled = true;
+      },
+    });
+    const provider = new AnthropicProvider({
+      apiKey: API_KEY,
+      defaultModel: "claude-sonnet-4-6",
+      inactivityTimeoutMs: 30,
+      fetch: async () => ({ ok: true, status: 200, text: async () => "", body }),
+    });
+    const texts: string[] = [];
+    const err = await (async () => {
+      try {
+        for await (const chunk of provider.complete(fixtureRequest())) {
+          if (chunk.kind === "text") texts.push(chunk.text);
+        }
+        return null;
+      } catch (e) {
+        return e;
+      }
+    })();
+    expect(texts).toEqual(["Hello"]);
+    expect((err as AnthropicError).kind).toBe("timeout_error");
+    expect(cancelled).toBe(true);
+  });
+
+  it("cancels the body when the consumer stops iterating early", async () => {
+    let cancelled = false;
+    const enc = new TextEncoder();
+    let sent = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(ctrl): Promise<void> | void {
+        if (!sent) {
+          sent = true;
+          ctrl.enqueue(enc.encode(STREAM_SAMPLE.split("\n\n").slice(0, 3).join("\n\n") + "\n\n"));
+          return;
+        }
+        return new Promise<void>(() => undefined);
+      },
+      cancel(): void {
+        cancelled = true;
+      },
+    });
+    const provider = new AnthropicProvider({
+      apiKey: API_KEY,
+      defaultModel: "claude-sonnet-4-6",
+      inactivityTimeoutMs: 60_000,
+      fetch: async () => ({ ok: true, status: 200, text: async () => "", body }),
+    });
+    for await (const chunk of provider.complete(fixtureRequest())) {
+      if (chunk.kind === "text") break;
+    }
+    expect(cancelled).toBe(true);
+  });
+
+  it("does not fire on a slow stream that never pauses for the full timeout", async () => {
+    const enc = new TextEncoder();
+    const events = STREAM_SAMPLE.split("\n\n").filter((e) => e.trim().length > 0);
+    let i = 0;
+    const body = new ReadableStream<Uint8Array>({
+      async pull(ctrl): Promise<void> {
+        if (i >= events.length) {
+          ctrl.close();
+          return;
+        }
+        await new Promise((r) => setTimeout(r, 15));
+        ctrl.enqueue(enc.encode(`${events[i] ?? ""}\n\n`));
+        i += 1;
+      },
+    });
+    const provider = new AnthropicProvider({
+      apiKey: API_KEY,
+      defaultModel: "claude-sonnet-4-6",
+      inactivityTimeoutMs: 60,
+      fetch: async () => ({ ok: true, status: 200, text: async () => "", body }),
+    });
+    const chunks: CompletionChunk[] = [];
+    for await (const chunk of provider.complete(fixtureRequest())) chunks.push(chunk);
+    // 7 events x 15ms is longer than the 60ms timeout in total, and it completes.
+    expect(chunks.some((c) => c.kind === "usage_final")).toBe(true);
   });
 });
 

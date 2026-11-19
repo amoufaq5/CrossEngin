@@ -12,6 +12,7 @@ import {
 } from "@crossengin/kernel-pg";
 import {
   KILL_SWITCH_STATUSES,
+  KillSwitchSchema,
   canTransitionKillSwitch,
   type KillSwitch,
 } from "@crossengin/feature-flags";
@@ -317,6 +318,39 @@ export class PostgresKillSwitchStore {
         );
       }
     });
+  }
+
+  /**
+   * Releases a switch if it is still `triggered_active`, answering whether this call released it.
+   *
+   * The SLO engines' recovery path (ADR-0415's open end): every switch they record used to stay
+   * active for ever, because `release` needs a caller to build the released record and nothing did.
+   * `false` covers the three states in which there is nothing to release here — no row in this
+   * scope, a row already released or expired, and a row released by somebody else between the read
+   * and the write (`guard_refused`) — because each means the switch is no longer this caller's to
+   * close. Every other refusal is thrown: a `wrong_scope` answer is a fault, not an absence.
+   */
+  async releaseActive(
+    killSwitchId: string,
+    tenantId: string | null,
+    input: { readonly at: string; readonly actorUserId: string; readonly reason: string },
+  ): Promise<boolean> {
+    const current = await this.load(killSwitchId, tenantId);
+    if (current === null || current.status !== "triggered_active") return false;
+    const released = KillSwitchSchema.parse({
+      ...current,
+      status: "released",
+      releasedAt: input.at,
+      releasedByUserId: input.actorUserId,
+      releasedReason: input.reason.slice(0, 500),
+    });
+    try {
+      await this.release(released);
+      return true;
+    } catch (err) {
+      if (err instanceof KillSwitchNotFoundError && err.reason === "guard_refused") return false;
+      throw err;
+    }
   }
 
   /**

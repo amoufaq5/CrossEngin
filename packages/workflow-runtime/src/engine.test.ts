@@ -1629,7 +1629,9 @@ describe("saga compensation", () => {
     expect(order).toEqual([]);
   });
 
-  it("records a no-op activity_compensated when no compensating handler is registered", async () => {
+  it("fails the rollback, rather than recording it compensated, when no compensating handler is registered", async () => {
+    // This test used to pin the defect: an unregistered compensation was a recorded success, so with
+    // the default registry every saga ended `compensated` having undone nothing.
     const completed = [{ key: "charge", comp: "refund" }];
     const def = sagaDef("immediate_reverse_order", completed, "ship");
     const order: string[] = [];
@@ -1637,10 +1639,79 @@ describe("saga compensation", () => {
     const { engine } = makeEngine({ definition: def, registry });
     const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
 
+    const events = await engine.listEvents(state.instanceId);
+    expect((await engine.getInstanceState(state.instanceId))?.status).toBe("failed");
+    expect(events.some((e) => e.kind === "activity_compensated")).toBe(false);
+    expect(events.some((e) => e.kind === "compensation_completed")).toBe(false);
+    const step = events.find((e) => e.kind === "compensation_step_completed")!;
+    expect(step.payload["handlerRegistered"]).toBe(false);
+    expect(step.payload["compensationStatus"]).toBe("failed");
+    expect(step.payload["errorCode"]).toBe("COMPENSATION_HANDLER_UNREGISTERED");
+    const last = events[events.length - 1]!;
+    expect(last.kind).toBe("instance_failed");
+    expect(last.payload["errorCode"]).toBe("COMPENSATION_INCOMPLETE");
+    expect(last.payload["failedCompensationActivityIds"]).toEqual([step.activityId]);
+  });
+
+  it("leaves a failed compensation outstanding and completes it on a later compensateInstance", async () => {
+    const completed = [{ key: "charge", comp: "refund" }];
+    const def = sagaDef("immediate_reverse_order", completed, "ship");
+    const order: string[] = [];
+    const registry = sagaRegistry(def, completed, "ship", order, false);
+    let refundAttempts = 0;
+    registry.registerForActivity(def.id, "refund", () => {
+      refundAttempts += 1;
+      if (refundAttempts === 1) throw new Error("payment gateway unavailable");
+      order.push("refund");
+      return { status: "succeeded", output: {} };
+    });
+    const { engine } = makeEngine({ definition: def, registry });
+    const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    expect((await engine.getInstanceState(state.instanceId))?.status).toBe("failed");
+    expect(order).toEqual([]);
+
+    const retry = await engine.compensateInstance(state.instanceId);
+    expect(retry.compensatedActivityIds).toHaveLength(1);
+    expect(retry.failedCompensationActivityIds).toEqual([]);
+    expect(order).toEqual(["refund"]);
     expect((await engine.getInstanceState(state.instanceId))?.status).toBe("compensated");
-    const compEvent = (await engine.listEvents(state.instanceId)).find((e) => e.kind === "activity_compensated")!;
-    expect(compEvent.payload["handlerRegistered"]).toBe(false);
-    expect(compEvent.payload["compensationStatus"]).toBe("succeeded");
+
+    // And nothing is left: a third call runs no handler.
+    const again = await engine.compensateInstance(state.instanceId);
+    expect(again.compensatedActivityIds).toEqual([]);
+    expect(refundAttempts).toBe(2);
+  });
+
+  it("does not compensate the activity that failed, even when it carries a compensation key", async () => {
+    const completed = [{ key: "charge", comp: "refund" }];
+    const def = sagaDef("immediate_reverse_order", completed, "ship");
+    const failState = def.states.find((st) => st.name === "s_fail")!;
+    const withKey: WorkflowDefinition = {
+      ...def,
+      states: def.states.map((st) =>
+        st === failState
+          ? {
+              ...st,
+              onEntryActions: [
+                {
+                  kind: "schedule_activity",
+                  parameters: { activityKey: "ship", kind: "http_call", input: {}, compensationActivityKey: "unship" },
+                },
+              ],
+            }
+          : st,
+      ),
+    };
+    const order: string[] = [];
+    const registry = sagaRegistry(withKey, completed, "ship", order);
+    registry.registerForActivity(withKey.id, "unship", () => {
+      order.push("unship");
+      return { status: "succeeded", output: {} };
+    });
+    const { engine } = makeEngine({ definition: withKey, registry });
+    const state = await engine.startInstance({ definitionId: withKey.id, tenantId: TENANT });
+    expect(order).toEqual(["refund"]);
+    expect((await engine.getInstanceState(state.instanceId))?.status).toBe("compensated");
   });
 
   it("is idempotent — compensateInstance twice compensates each activity only once", async () => {
@@ -2952,6 +3023,26 @@ describe("cancelInstance — the guarantee", () => {
     // the caller asked for and `compensated` would be indistinguishable from unwinding a failure.
     expect(events.map((e) => e.kind)).not.toContain("compensation_started");
     expect((await engine.getInstanceState(state.instanceId))?.status).toBe("cancelled");
+  });
+
+  it("reports a compensating step that failed during cancellation, on the result and the record", async () => {
+    const def = sagaDef();
+    const r = createDefaultRegistry();
+    r.registerForKind("http_call", () => ({ status: "succeeded", output: { charged: true } }));
+    r.registerForActivity("wfd_def00001", "refund_card", () => {
+      throw new Error("card network down");
+    });
+    const { engine } = makeEngine({ definition: def, registry: r });
+    const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    const result = await engine.cancelInstance({ ...compensate, instanceId: state.instanceId });
+    expect(result.compensationOutcome).toBe("executed");
+    expect(result.compensatedActivityIds).toEqual([]);
+    expect(result.failedCompensationActivityIds).toHaveLength(1);
+    const events = await engine.listEvents(state.instanceId);
+    expect(events.map((e) => e.kind)).not.toContain("activity_compensated");
+    expect(events.at(-1)?.payload["failedCompensationActivityIds"]).toEqual(
+      result.failedCompensationActivityIds,
+    );
   });
 
   it("leaves the side effect standing when the request abandons, and says which", async () => {

@@ -7,8 +7,10 @@ import {
   type IdempotencyRecord,
   type IncomingRequest,
   type PipelineExecution,
+  type PipelineStage,
   type ResolvedPrincipal,
   type RouteMatchOutcome,
+  IdempotencyKeyShapeSchema,
   computeRequestHashInputs,
   evaluateIdempotency,
 } from "@crossengin/api-gateway";
@@ -49,19 +51,23 @@ import { PipelineRecorder } from "./pipeline-runner.js";
 import {
   authenticationRequired,
   forbidden,
+  idempotencyInProgress,
   idempotencyMismatch,
   internalServerError,
   notFound,
   serviceUnavailable,
   tooManyRequests,
+  unprocessableEntity,
   weakTlsRejected,
   type ProblemEnvelope,
 } from "./problems.js";
 import {
+  type IdempotencyLookup,
   type IdempotencyStore,
   type PrincipalResolver,
   type RateLimitChecker,
   type RouteRegistry,
+  type VerifiedBearerToken,
 } from "./stores.js";
 
 export interface OpaqueTokenLookupResult {
@@ -181,7 +187,17 @@ export interface GatewayRuntimeOptions {
   readonly clock?: { now(): Date };
   readonly defaultApiVersion?: string;
   readonly idempotencyTtlSeconds?: number;
+  /** See `DEFAULT_IDEMPOTENCY_LEASE_SECONDS`. */
+  readonly idempotencyLeaseSeconds?: number;
+  /** See `DEFAULT_IDEMPOTENCY_MAX_STORED_BODY_BYTES`. */
+  readonly idempotencyMaxStoredBodyBytes?: number;
   readonly redactionRegistry?: RedactionRegistry;
+  /**
+   * Receives every exception the pipeline caught — a handler that threw, or a stage that did — with
+   * the request id the caller was handed. The caller's 500 names nothing else, so this is where the
+   * diagnosis goes. Absent, the message survives only in the recorded stage reason.
+   */
+  readonly onInternalError?: (err: unknown, at: { readonly requestId: string; readonly stage: PipelineStage }) => void;
 }
 
 export interface HandleResult {
@@ -213,6 +229,63 @@ const HANDLER_THREW_CLIENT_DETAIL =
  */
 const HANDLER_THREW_REASON_BUDGET = 480;
 
+/** What a caller is told when a pipeline stage — not the handler — threw. */
+const STAGE_THREW_CLIENT_DETAIL =
+  "the request could not be completed; quote this response's x-request-id when reporting it";
+
+function internalErrorReason(prefix: string, err: unknown): string {
+  return err instanceof Error
+    ? `${prefix}: ${err.message.slice(0, HANDLER_THREW_REASON_BUDGET)}`
+    : `${prefix}_unknown`;
+}
+
+/**
+ * How long an `in_progress` reservation holds a key before a retry may take it over. Bounds the
+ * cost of a process that died mid-request: its key is not stuck for the whole replay TTL.
+ */
+export const DEFAULT_IDEMPOTENCY_LEASE_SECONDS = 300;
+
+/**
+ * The largest response body a completed keyed mutation retains for replay. Over it the record is
+ * still completed — a retry is still deduplicated — and the replay says the body was not retained.
+ */
+export const DEFAULT_IDEMPOTENCY_MAX_STORED_BODY_BYTES = 262_144;
+
+/** The header a replay carries when the original response body was not retained. */
+export const IDEMPOTENT_REPLAY_BODY_HEADER = "x-idempotent-replay-body";
+
+/** Response headers a replay sets itself, so a stored copy of them is never replayed. */
+const UNSTORED_RESPONSE_HEADERS = new Set(["content-length", "x-request-id", "x-idempotent-replay"]);
+
+/**
+ * The longest `retry-after` an in-progress answer gives. The holder's lease end is when the key is
+ * *certainly* free, not when it is likely to be — most holders finish in milliseconds — so quoting
+ * the lease (up to five minutes) told a client honouring the header to wait that long for a replay
+ * it could have had on its next attempt.
+ */
+export const IDEMPOTENCY_IN_PROGRESS_RETRY_AFTER_SECONDS = 2;
+
+/** The methods `evaluateIdempotency` keys; every other one ignores the header. */
+const KEYED_METHODS: ReadonlySet<string> = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+function retryAfterFor(expiresAtIso: string, now: Date): number {
+  const remaining = Math.ceil((Date.parse(expiresAtIso) - now.getTime()) / 1000);
+  if (!Number.isFinite(remaining) || remaining <= 0) return 1;
+  return Math.min(remaining, IDEMPOTENCY_IN_PROGRESS_RETRY_AFTER_SECONDS);
+}
+
+/** The six default security headers merged under whatever the response already set. */
+export function withDefaultSecurityHeaders(resp: OutgoingResponse): OutgoingResponse {
+  const merged = { ...resp.headers };
+  merged["strict-transport-security"] = merged["strict-transport-security"] ?? DEFAULT_SECURITY_HEADERS.strict_transport_security;
+  merged["content-security-policy"] = merged["content-security-policy"] ?? DEFAULT_SECURITY_HEADERS.content_security_policy;
+  merged["x-content-type-options"] = merged["x-content-type-options"] ?? DEFAULT_SECURITY_HEADERS.x_content_type_options;
+  merged["x-frame-options"] = merged["x-frame-options"] ?? DEFAULT_SECURITY_HEADERS.x_frame_options;
+  merged["referrer-policy"] = merged["referrer-policy"] ?? DEFAULT_SECURITY_HEADERS.referrer_policy;
+  merged["permissions-policy"] = merged["permissions-policy"] ?? DEFAULT_SECURITY_HEADERS.permissions_policy;
+  return { ...resp, headers: merged };
+}
+
 export class GatewayRuntime {
   private readonly routes: RouteRegistry;
   private readonly handlers: HandlerRegistry;
@@ -231,7 +304,12 @@ export class GatewayRuntime {
   private readonly clock: { now(): Date };
   private readonly defaultApiVersion: string;
   private readonly idempotencyTtlSeconds: number;
+  private readonly idempotencyLeaseSeconds: number;
+  private readonly idempotencyMaxStoredBodyBytes: number;
   private readonly redactionRegistry: RedactionRegistry | null;
+  private readonly onInternalError:
+    | ((err: unknown, at: { readonly requestId: string; readonly stage: PipelineStage }) => void)
+    | null;
 
   constructor(opts: GatewayRuntimeOptions) {
     this.routes = opts.routes;
@@ -252,7 +330,11 @@ export class GatewayRuntime {
     this.clock = opts.clock ?? { now: () => new Date() };
     this.defaultApiVersion = opts.defaultApiVersion ?? "v1";
     this.idempotencyTtlSeconds = opts.idempotencyTtlSeconds ?? 86_400;
+    this.idempotencyLeaseSeconds = opts.idempotencyLeaseSeconds ?? DEFAULT_IDEMPOTENCY_LEASE_SECONDS;
+    this.idempotencyMaxStoredBodyBytes =
+      opts.idempotencyMaxStoredBodyBytes ?? DEFAULT_IDEMPOTENCY_MAX_STORED_BODY_BYTES;
     this.redactionRegistry = opts.redactionRegistry ?? null;
+    this.onInternalError = opts.onInternalError ?? null;
   }
 
   async handleRequest(request: IncomingRequest): Promise<HandleResult> {
@@ -267,6 +349,8 @@ export class GatewayRuntime {
       idempotencyOutcome: null,
       idempotencyRecord: null,
       idempotencyKey: null,
+      idempotencyReserved: false,
+      redactionApplied: null,
       requestHash: null,
       routeOperationId: null,
       resolvedApiVersion: null,
@@ -277,29 +361,64 @@ export class GatewayRuntime {
       finalResponse: null,
     };
 
-    const stages: Array<() => Promise<ProblemEnvelope | null>> = [
-      () => this.stageReceive(ctx, recorder),
-      () => this.stageParseRequest(ctx, recorder),
-      () => this.stageValidateTls(ctx, recorder),
-      () => this.stageParseAuthCredential(ctx, recorder),
-      () => this.stageAuthenticate(ctx, recorder),
-      () => this.stageResolvePrincipal(ctx, recorder),
-      () => this.stageMatchRoute(ctx, recorder),
-      () => this.stageNegotiateVersion(ctx, recorder),
-      () => this.stageNegotiateContent(ctx, recorder),
-      () => this.stageCheckIdempotency(ctx, recorder),
-      () => this.stageCheckRateLimit(ctx, recorder),
-      () => this.stageValidateRequestSignature(ctx, recorder),
-      () => this.stageValidateRequestSchema(ctx, recorder),
-      () => this.stageDispatchHandler(ctx, recorder),
-      () => this.stageTransformResponse(ctx, recorder),
-      () => this.stageApplySecurityHeaders(ctx, recorder),
-      () => this.stageEmitAudit(ctx, recorder),
+    const stages: ReadonlyArray<readonly [PipelineStage, () => Promise<ProblemEnvelope | null>]> = [
+      ["receive", () => this.stageReceive(ctx, recorder)],
+      ["parse_request", () => this.stageParseRequest(ctx, recorder)],
+      ["validate_tls", () => this.stageValidateTls(ctx, recorder)],
+      ["parse_auth_credential", () => this.stageParseAuthCredential(ctx, recorder)],
+      ["authenticate", () => this.stageAuthenticate(ctx, recorder)],
+      ["resolve_principal", () => this.stageResolvePrincipal(ctx, recorder)],
+      ["match_route", () => this.stageMatchRoute(ctx, recorder)],
+      ["negotiate_version", () => this.stageNegotiateVersion(ctx, recorder)],
+      ["negotiate_content", () => this.stageNegotiateContent(ctx, recorder)],
+      ["check_idempotency", () => this.stageCheckIdempotency(ctx, recorder)],
+      ["check_rate_limit", () => this.stageCheckRateLimit(ctx, recorder)],
+      ["validate_request_signature", () => this.stageValidateRequestSignature(ctx, recorder)],
+      ["validate_request_schema", () => this.stageValidateRequestSchema(ctx, recorder)],
+      ["dispatch_handler", () => this.stageDispatchHandler(ctx, recorder)],
+      ["transform_response", () => this.stageTransformResponse(ctx, recorder)],
+      ["apply_security_headers", () => this.stageApplySecurityHeaders(ctx, recorder)],
+      ["emit_audit", () => this.stageEmitAudit(ctx, recorder)],
     ];
 
-    for (const stage of stages) {
-      const denial = await stage();
+    // Every stage runs inside one catch. Before this a throw from any of them — a store that could
+    // not be reached, a resolver that raised, a row that failed its parse — escaped the whole
+    // pipeline: no `PipelineExecution`, no problem document, and the HTTP listener wrote the
+    // exception's own message into a 500 body that an unauthenticated caller could provoke. The
+    // message goes to the operator here (the stage reason and `onInternalError`) and the caller gets
+    // a fixed sentence plus the request id that finds it.
+    for (const [stage, run] of stages) {
+      let denial: ProblemEnvelope | null;
+      try {
+        denial = await run();
+      } catch (err) {
+        await this.abandonReservation(ctx);
+        this.reportInternalError(err, ctx.request.id, stage);
+        const env = internalServerError({
+          reason: STAGE_THREW_CLIENT_DETAIL,
+          correlationId: ctx.request.correlationId ?? undefined,
+          requestId: ctx.request.id,
+        });
+        try {
+          recorder.record({
+            stage,
+            outcome: "error",
+            startedAt: this.now(),
+            completedAt: this.now(),
+            reason: internalErrorReason("stage_threw", err),
+            problemTypeUri: env.body.type,
+            responseStatus: env.body.status,
+          });
+        } catch {
+          // The stage recorded its own outcome before it threw; the response is still the 500.
+        }
+        denial = env;
+      }
       if (denial !== null) {
+        // A stage between `check_idempotency` and the handler — the rate limit, the signature, the
+        // schema — can refuse a request whose key it already reserved. Nothing ran, so the key is
+        // given back; otherwise the retry a 429 invites is answered "in progress" until the lease.
+        await this.abandonReservation(ctx);
         ctx.finalResponse = denial.response;
         break;
       }
@@ -311,6 +430,18 @@ export class GatewayRuntime {
         body: serviceUnavailable({ reason: "no_response_assembled" }).body,
       });
     }
+    // Every response this gateway emits carries the security headers, not only one that reached
+    // `apply_security_headers`. That stage is fifteenth of seventeen, so before this every denial —
+    // a 401 from `authenticate`, a 404 from `match_route`, a 429, a handler's own 4xx — broke out of
+    // the loop above with none, which is exactly the population an attacker gets to choose. Merged
+    // with `??`, so a header a stage or handler set deliberately wins, and idempotent, so the pass
+    // path that already ran the stage is unchanged.
+    ctx.finalResponse = withDefaultSecurityHeaders(ctx.finalResponse);
+    // The handle every 5xx body tells the caller to quote, on every response so it is there to quote.
+    ctx.finalResponse = {
+      ...ctx.finalResponse,
+      headers: { ...ctx.finalResponse.headers, "x-request-id": request.id },
+    };
 
     const completedAt = this.clock.now();
     const execution = recorder.build({
@@ -602,6 +733,8 @@ export class GatewayRuntime {
       ctx.authScheme = "bearer_jwt";
       const jwt = verifyResult.jwt!;
       ctx.authPrincipalRef = jwt.payload.sub ?? "";
+      // `kid` is present: `verifyBearerJwt` refuses a token without one before it can authenticate.
+      ctx.authBearer = { kid: jwt.header.kid ?? "", claims: jwt.payload };
       const scope = jwt.payload.scope;
       const scp = jwt.payload.scp;
       ctx.authScopes =
@@ -949,6 +1082,7 @@ export class GatewayRuntime {
       resolver: this.principalResolver,
       nowIso: this.now().toISOString(),
       authenticatedTenantId: ctx.tenantId,
+      ...(ctx.authBearer !== undefined ? { bearer: ctx.authBearer } : {}),
     });
     if (result.outcome !== "authenticated" || result.principal === null) {
       ctx.authOutcome = result.outcome;
@@ -1049,6 +1183,15 @@ export class GatewayRuntime {
   private async stageNegotiateContent(ctx: PipelineState, rec: PipelineRecorder): Promise<ProblemEnvelope | null> {
     const startedAt = this.now();
     if (ctx.request.method === "OPTIONS") {
+      // Deliberately no `Access-Control-Allow-Origin`, here or on any response: with none, a browser
+      // refuses every cross-origin read of this API, which is the fail-closed answer while nothing
+      // declares which origins may make one. The console never needs it — it calls its own
+      // same-origin `/api` proxy, which reaches this API server-side. `CorsPolicySchema` and
+      // `evaluateCors` in `@crossengin/api-gateway` model an allow-list and have no reader outside
+      // that package; wiring them is a deployment decision (which origins), not a default this
+      // runtime can choose. This arm runs after `match_route`, so it is reached only by a route
+      // registered for OPTIONS, and no route in the workspace is: a real preflight is answered by the
+      // matcher's 404, which is the same refusal.
       ctx.finalResponse = {
         status: 204,
         headers: {
@@ -1094,10 +1237,31 @@ export class GatewayRuntime {
       });
       return null;
     }
-    const existing =
-      ctx.idempotencyKey !== null
-        ? await this.idempotencyStore.get({ tenantId: ctx.tenantId, key: ctx.idempotencyKey })
-        : null;
+    if (
+      ctx.idempotencyKey !== null &&
+      KEYED_METHODS.has(ctx.request.method) &&
+      !IdempotencyKeyShapeSchema.safeParse(ctx.idempotencyKey).success
+    ) {
+      // Refused rather than ignored. A key the store cannot hold (8–255 characters of
+      // `[A-Za-z0-9_.:-]`) was accepted before and then silently not stored, so the retry the caller
+      // sent it to protect re-executed — a guarantee the response implied and nothing kept. Only on
+      // a method the key applies to: on a GET it is ignored, as it always was, so a client that
+      // sends the header on every request is not refused a read over a header nothing reads.
+      const env = unprocessableEntity({
+        reason: "Idempotency-Key must be 8 to 255 characters of letters, digits, '_', '.', ':' or '-'",
+        correlationId: ctx.request.correlationId ?? undefined,
+      });
+      rec.record({
+        stage: "check_idempotency",
+        outcome: "deny",
+        startedAt,
+        completedAt: this.now(),
+        reason: "idempotency_key_malformed",
+        problemTypeUri: env.body.type,
+        responseStatus: env.body.status,
+      });
+      return env;
+    }
     const requestHashInput = computeRequestHashInputs({
       method: ctx.request.method,
       path: ctx.request.path,
@@ -1105,7 +1269,11 @@ export class GatewayRuntime {
       bodySha256: ctx.request.bodySha256,
     });
     ctx.requestHash = sha256(requestHashInput);
-    const decision = evaluateIdempotency({
+    let existing: IdempotencyLookup | null =
+      ctx.idempotencyKey !== null
+        ? await this.idempotencyStore.get({ tenantId: ctx.tenantId, key: ctx.idempotencyKey })
+        : null;
+    let decision = evaluateIdempotency({
       key: ctx.idempotencyKey,
       method: ctx.request.method,
       operationIdempotencyRequired: route.idempotencyRequired,
@@ -1113,6 +1281,30 @@ export class GatewayRuntime {
       currentRequestHashSha256: ctx.requestHash,
       now: this.now(),
     });
+    if (
+      (decision.outcome === "first_seen" || decision.outcome === "replay_expired") &&
+      ctx.idempotencyKey !== null
+    ) {
+      // The reservation is what makes two concurrent retries execute once: before it, both read
+      // "unseen" between this read and a write that came only after the handler.
+      const reservation = await this.idempotencyStore.reserve({
+        tenantId: ctx.tenantId,
+        record: this.reservationRecord(ctx, route.operationId),
+      });
+      if (reservation.reserved) {
+        ctx.idempotencyReserved = true;
+      } else {
+        existing = reservation.existing;
+        decision = evaluateIdempotency({
+          key: ctx.idempotencyKey,
+          method: ctx.request.method,
+          operationIdempotencyRequired: route.idempotencyRequired,
+          existing,
+          currentRequestHashSha256: ctx.requestHash,
+          now: this.now(),
+        });
+      }
+    }
     ctx.idempotencyOutcome = decision.outcome;
     if (decision.outcome === "no_key_provided") {
       const env = authenticationRequired({
@@ -1149,26 +1341,49 @@ export class GatewayRuntime {
       });
       return env;
     }
+    if (decision.outcome === "replay_in_progress" || (decision.outcome === "first_seen" && !ctx.idempotencyReserved && ctx.idempotencyKey !== null) || (decision.outcome === "replay_expired" && !ctx.idempotencyReserved)) {
+      // The last two arms are a reservation that lost to a row the re-read then could not show as
+      // live — a holder that finished and was pruned in between. Answered as in progress rather than
+      // executed, because the one thing this stage must not do is run the handler unreserved.
+      const holder = existing;
+      const env = idempotencyInProgress({
+        retryAfterSeconds: holder === null ? 1 : retryAfterFor(holder.expiresAt, this.now()),
+        correlationId: ctx.request.correlationId ?? undefined,
+      });
+      ctx.idempotencyOutcome = "replay_in_progress";
+      rec.record({
+        stage: "check_idempotency",
+        outcome: "deny",
+        startedAt,
+        completedAt: this.now(),
+        reason: "replay_in_progress",
+        problemTypeUri: env.body.type,
+        responseStatus: env.body.status,
+      });
+      return env;
+    }
     if (decision.outcome === "replay_hit_match" && decision.replayedRecord !== null) {
       ctx.idempotencyRecord = decision.replayedRecord;
       const status = decision.replayedRecord.responseStatus ?? 200;
-      const replayResponse: OutgoingResponse = {
-        status,
-        headers: {
-          "x-idempotent-replay": "true",
-          "content-length": "0",
-        },
-        bodyBytes: null,
-      };
+      const replay = (decision.replayedRecord as IdempotencyLookup).replay;
+      const headers: Record<string, string> = { ...(replay?.responseHeaders ?? {}) };
+      headers["x-idempotent-replay"] = "true";
+      if (replay === undefined) headers[IDEMPOTENT_REPLAY_BODY_HEADER] = "not-retained";
+      const body = replay?.responseBody ?? null;
+      headers["content-length"] = (body?.byteLength ?? 0).toString();
+      ctx.finalResponse = { status, headers, bodyBytes: body };
+      // Redacted again on the way out: the stored body was redacted for this principal when it was
+      // produced, and a grant narrowed since must not be widened by a replay.
+      this.applyResponseRedaction(ctx);
+      const replayResponse = ctx.finalResponse;
       rec.record({
         stage: "check_idempotency",
         outcome: "short_circuit_replay",
         startedAt,
         completedAt: this.now(),
-        reason: "served_from_idempotency_cache",
+        reason: replay === undefined ? "served_from_idempotency_cache_body_not_retained" : "served_from_idempotency_cache",
         responseStatus: status,
       });
-      ctx.finalResponse = replayResponse;
       return { response: replayResponse, body: serviceUnavailable({ reason: "unused" }).body };
     }
     rec.record({
@@ -1179,6 +1394,58 @@ export class GatewayRuntime {
       reason: decision.outcome,
     });
     return null;
+  }
+
+  private reservationRecord(ctx: PipelineState, operationId: string): IdempotencyRecord {
+    const now = this.now();
+    return {
+      id: `idem_${sha256((ctx.idempotencyKey ?? "") + (ctx.tenantId ?? "")).slice(0, 32)}`,
+      tenantId: ctx.tenantId ?? "",
+      operationId,
+      method: ctx.request.method as IdempotencyRecord["method"],
+      idempotencyKey: ctx.idempotencyKey ?? "",
+      requestHashSha256: ctx.requestHash ?? "",
+      principalId: ctx.principal?.principalId ?? null,
+      receivedAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + this.idempotencyLeaseSeconds * 1000).toISOString(),
+      status: "in_progress",
+      responseStatus: null,
+      responseSha256: null,
+      responseStorageUri: null,
+      completedAt: null,
+      errorCode: null,
+      errorMessage: null,
+    };
+  }
+
+  /**
+   * Gives the key back after a request that changed nothing — a refusal, a handler that threw, a
+   * stage that did — so the retry executes instead of replaying an outcome that was never a result.
+   * A failure here is the store's to report; the reservation then lapses with its lease.
+   */
+  private async abandonReservation(ctx: PipelineState): Promise<void> {
+    if (!ctx.idempotencyReserved || ctx.tenantId === null || ctx.idempotencyKey === null || ctx.requestHash === null) {
+      return;
+    }
+    ctx.idempotencyReserved = false;
+    try {
+      await this.idempotencyStore.release({
+        tenantId: ctx.tenantId,
+        key: ctx.idempotencyKey,
+        requestHashSha256: ctx.requestHash,
+      });
+    } catch {
+      // The lease bounds a lost release; nothing else depends on it.
+    }
+  }
+
+  private reportInternalError(err: unknown, requestId: string, stage: PipelineStage): void {
+    if (this.onInternalError === null) return;
+    try {
+      this.onInternalError(err, { requestId, stage });
+    } catch {
+      // A reporter that throws must not turn a 500 into a lost response.
+    }
   }
 
   private async stageCheckRateLimit(ctx: PipelineState, rec: PipelineRecorder): Promise<ProblemEnvelope | null> {
@@ -1342,9 +1609,12 @@ export class GatewayRuntime {
       // classes: no error thrown through here declares a disposition, and recognising one by name
       // would mean the gateway importing the pg or crypto packages. Such a map can only be built
       // from the other end — by the throwers declaring what they are — so do not attempt it here.
+      await this.abandonReservation(ctx);
+      this.reportInternalError(err, ctx.request.id, "dispatch_handler");
       const env = internalServerError({
         reason: HANDLER_THREW_CLIENT_DETAIL,
         correlationId: ctx.request.correlationId ?? undefined,
+        requestId: ctx.request.id,
       });
       rec.record({
         stage: "dispatch_handler",
@@ -1361,8 +1631,11 @@ export class GatewayRuntime {
       return env;
     }
     ctx.finalResponse = handlerOutputToResponse(output);
-    if (ctx.idempotencyKey !== null && ctx.tenantId !== null) {
-      await this.persistIdempotency(ctx, output.status);
+    if (output.status >= 400) {
+      // Not cached, 4xx included. A refusal committed nothing, so re-executing the retry is safe and
+      // answers against the state at that moment; replaying a stored 409 or 503 for a day would
+      // pin a transient refusal to a key the client is obliged to keep sending.
+      await this.abandonReservation(ctx);
     }
     // A handler that returns a 4xx/5xx is a terminal outcome, not a "pass":
     // record it as deny (4xx) / error (5xx) and halt the pipeline so the
@@ -1370,12 +1643,20 @@ export class GatewayRuntime {
     // own response body is preserved (returned via the envelope's response).
     if (output.status >= 400) {
       const isServerError = output.status >= 500;
+      // This path leaves the loop before `transform_response`, so without redacting here a handler's
+      // own error body went out with the principal's classified fields in it — a 409 or 422 that
+      // carries the record is as much a response as the 200 that would have. The same redactor and
+      // the same spec, so the field set cannot differ between the two arms.
+      const redactedCount = this.applyResponseRedaction(ctx);
       rec.record({
         stage: "dispatch_handler",
         outcome: isServerError ? "error" : "deny",
         startedAt,
         completedAt: this.now(),
-        reason: `handler_returned_${output.status.toString()}`,
+        reason:
+          redactedCount > 0
+            ? `handler_returned_${output.status.toString()}_redacted_${redactedCount.toString()}_fields`
+            : `handler_returned_${output.status.toString()}`,
         ...(isServerError ? {} : { problemTypeUri: HANDLER_ERROR_PROBLEM_TYPE }),
         responseStatus: output.status,
       });
@@ -1390,6 +1671,10 @@ export class GatewayRuntime {
         },
       };
     }
+    // Redacted here rather than in `transform_response` so the body stored for a replay is the body
+    // this principal was shown — never one carrying fields their grants withhold.
+    ctx.redactionApplied = this.applyResponseRedaction(ctx);
+    await this.completeReservation(ctx, output.status);
     rec.record({
       stage: "dispatch_handler",
       outcome: "pass",
@@ -1400,43 +1685,50 @@ export class GatewayRuntime {
     return null;
   }
 
-  private async persistIdempotency(ctx: PipelineState, status: number): Promise<void> {
-    if (ctx.idempotencyKey === null || ctx.tenantId === null || ctx.requestHash === null) return;
-    const route = ctx.routeMatch?.route ?? null;
-    if (route === null) return;
-    const method = ctx.request.method;
-    if (method !== "POST" && method !== "PUT" && method !== "PATCH" && method !== "DELETE") {
+  /**
+   * Turns the reservation into the replayable result. A body larger than the cap is not stored: the
+   * key still completes, so a retry replays the status and says the body was not retained rather
+   * than executing twice. A store failure here is reported and swallowed — the handler has
+   * committed, and a 500 for a mutation that succeeded is what a client retries into a second one.
+   */
+  private async completeReservation(ctx: PipelineState, status: number): Promise<void> {
+    if (!ctx.idempotencyReserved || ctx.tenantId === null || ctx.idempotencyKey === null || ctx.requestHash === null) {
       return;
     }
-    const bodyBytes = ctx.finalResponse?.bodyBytes ?? null;
-    const responseSha256 = bodyBytes !== null && bodyBytes.byteLength > 0 ? sha256(bodyBytes) : null;
-    const succeeded = status >= 200 && status < 400;
-    const nowIso = this.now().toISOString();
-    const expiresAt = new Date(this.now().getTime() + this.idempotencyTtlSeconds * 1000).toISOString();
+    const route = ctx.routeMatch?.route ?? null;
+    if (route === null) return;
+    const response = ctx.finalResponse;
+    const bodyBytes = response?.bodyBytes ?? null;
+    const now = this.now();
     const record: IdempotencyRecord = {
-      id: `idem_${sha256(ctx.idempotencyKey + ctx.tenantId).slice(0, 32)}`,
-      tenantId: ctx.tenantId,
-      operationId: route.operationId,
-      method,
-      idempotencyKey: ctx.idempotencyKey,
-      requestHashSha256: ctx.requestHash,
-      principalId: ctx.principal?.principalId ?? null,
+      ...this.reservationRecord(ctx, route.operationId),
       receivedAt: ctx.request.receivedAt,
-      expiresAt,
-      status: succeeded ? "completed_success" : "completed_error",
+      expiresAt: new Date(now.getTime() + this.idempotencyTtlSeconds * 1000).toISOString(),
+      status: "completed_success",
       responseStatus: status,
-      responseSha256,
-      responseStorageUri: null,
-      completedAt: nowIso,
-      errorCode: succeeded ? null : `http_${status.toString()}`,
-      errorMessage: succeeded ? null : `dispatch returned status ${status.toString()}`,
+      responseSha256: bodyBytes !== null && bodyBytes.byteLength > 0 ? sha256(bodyBytes) : null,
+      completedAt: now.toISOString(),
     };
-    await this.idempotencyStore.put({ tenantId: ctx.tenantId, record });
+    const retained = bodyBytes === null || bodyBytes.byteLength <= this.idempotencyMaxStoredBodyBytes;
+    const responseHeaders: Record<string, string> = {};
+    for (const [name, value] of Object.entries(response?.headers ?? {})) {
+      if (!UNSTORED_RESPONSE_HEADERS.has(name.toLowerCase())) responseHeaders[name] = value;
+    }
+    try {
+      await this.idempotencyStore.complete({
+        tenantId: ctx.tenantId,
+        record,
+        replay: retained ? { responseHeaders, responseBody: bodyBytes } : null,
+      });
+      ctx.idempotencyReserved = false;
+    } catch (err) {
+      this.reportInternalError(err, ctx.request.id, "dispatch_handler");
+    }
   }
 
   private async stageTransformResponse(ctx: PipelineState, rec: PipelineRecorder): Promise<ProblemEnvelope | null> {
     const startedAt = this.now();
-    const redactedCount = this.applyResponseRedaction(ctx);
+    const redactedCount = ctx.redactionApplied ?? this.applyResponseRedaction(ctx);
     rec.record({
       stage: "transform_response",
       outcome: "pass",
@@ -1531,16 +1823,7 @@ export class GatewayRuntime {
 
   private async stageApplySecurityHeaders(ctx: PipelineState, rec: PipelineRecorder): Promise<ProblemEnvelope | null> {
     const startedAt = this.now();
-    if (ctx.finalResponse !== null) {
-      const merged = { ...ctx.finalResponse.headers };
-      merged["strict-transport-security"] = merged["strict-transport-security"] ?? DEFAULT_SECURITY_HEADERS.strict_transport_security;
-      merged["content-security-policy"] = merged["content-security-policy"] ?? DEFAULT_SECURITY_HEADERS.content_security_policy;
-      merged["x-content-type-options"] = merged["x-content-type-options"] ?? DEFAULT_SECURITY_HEADERS.x_content_type_options;
-      merged["x-frame-options"] = merged["x-frame-options"] ?? DEFAULT_SECURITY_HEADERS.x_frame_options;
-      merged["referrer-policy"] = merged["referrer-policy"] ?? DEFAULT_SECURITY_HEADERS.referrer_policy;
-      merged["permissions-policy"] = merged["permissions-policy"] ?? DEFAULT_SECURITY_HEADERS.permissions_policy;
-      ctx.finalResponse = { ...ctx.finalResponse, headers: merged };
-    }
+    if (ctx.finalResponse !== null) ctx.finalResponse = withDefaultSecurityHeaders(ctx.finalResponse);
     rec.record({
       stage: "apply_security_headers",
       outcome: "pass",
@@ -1572,11 +1855,16 @@ interface PipelineState {
   authScheme?: string;
   authPrincipalRef?: string;
   authScopes?: readonly string[];
+  authBearer?: VerifiedBearerToken;
   parsedAuth?: ReturnType<typeof parseAuthHeader>;
   routeMatchOutcome: RouteMatchOutcome | null;
   idempotencyOutcome: IdempotencyOutcome | null;
   idempotencyRecord: IdempotencyRecord | null;
   idempotencyKey: string | null;
+  /** True between a won reservation and its completion or release. */
+  idempotencyReserved: boolean;
+  /** The redaction count when dispatch already redacted the body, so a later stage does not twice. */
+  redactionApplied: number | null;
   requestHash: string | null;
   routeOperationId: string | null;
   resolvedApiVersion: string | null;

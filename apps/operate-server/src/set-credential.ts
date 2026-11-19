@@ -1,7 +1,8 @@
 import { hashPassword, parseCredentialPepper } from "@crossengin/crypto";
 import { createNodePgConnection, parsePgEnvConfig } from "@crossengin/kernel-pg";
 
-import { CREDENTIAL_PEPPER_VAR } from "./credential-auth-env.js";
+import { CREDENTIAL_PEPPER_VAR, resolvePepperRing } from "./credential-auth-env.js";
+import { DEFAULT_MIN_PASSWORD_LENGTH, passwordLength } from "./credential-routes.js";
 import { PostgresCredentialStore } from "./credential-store.js";
 
 /**
@@ -32,6 +33,8 @@ export interface SetCredentialOptions {
   readonly userId: string | null;
   readonly confirmUserId: string | null;
   readonly schema: string | null;
+  /** The floor the routes enforce, so the bootstrap path cannot set a password they would refuse. */
+  readonly minPasswordLength?: number;
   readonly format: "human" | "json";
   readonly help: boolean;
 }
@@ -40,6 +43,7 @@ export const SET_CREDENTIAL_OUTCOMES = [
   "set",
   "user_unknown",
   "password_absent",
+  "password_too_short",
   "pepper_absent",
   "pepper_refused",
 ] as const;
@@ -52,6 +56,7 @@ export const SET_CREDENTIAL_SUCCEEDED: Readonly<
   set: true,
   user_unknown: false,
   password_absent: false,
+  password_too_short: false,
   pepper_absent: false,
   pepper_refused: false,
 });
@@ -77,6 +82,10 @@ export async function runSetCredential(
   } catch (err) {
     return refused("pepper_refused", userId, (err as Error).message);
   }
+  // The ring and not the bare pepper, so a hash this command writes carries the version the
+  // serving process will look it up by.
+  const ring = resolvePepperRing(pepper, env);
+  if (!ring.ok) return refused("pepper_refused", userId, ring.detail);
   // Not trimmed. A trailing space is part of a password, and silently removing it would set a
   // credential the operator cannot type back.
   const password = env[NEW_PASSWORD_VAR] ?? "";
@@ -87,6 +96,14 @@ export async function runSetCredential(
       `${NEW_PASSWORD_VAR} is unset or empty (it is read from the environment, never argv)`,
     );
   }
+  const floor = options.minPasswordLength ?? DEFAULT_MIN_PASSWORD_LENGTH;
+  if (passwordLength(password) < floor) {
+    return refused(
+      "password_too_short",
+      userId,
+      `${NEW_PASSWORD_VAR} must be at least ${floor.toString()} characters`,
+    );
+  }
 
   const conn = createNodePgConnection(parsePgEnvConfig());
   try {
@@ -94,7 +111,7 @@ export async function runSetCredential(
     // Hashed under the deployment's current parameters, which is why there is no `--scrypt-n`:
     // a credential set under weaker parameters than the deployment serves would verify
     // (`verifyPassword` reads the hash's own) and quietly be the weakest thing in the system.
-    const encoded = await hashPassword(password, pepper);
+    const encoded = await hashPassword(password, ring.ring);
     const matched = await store.setCredential(userId, encoded);
     if (!matched) {
       return refused(

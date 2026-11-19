@@ -17,7 +17,13 @@ import {
   reapCancelledJobRuns,
   type ReapedJobRun,
 } from "./job-cancellation.js";
-import { claimDueJobs, releaseJobClaim, renewJobClaim, type JobClaimScope } from "./job-claim.js";
+import {
+  claimDueJobsPerTenant,
+  listJobClaimTenants,
+  releaseJobClaim,
+  renewJobClaim,
+  type JobClaimScope,
+} from "./job-claim.js";
 import type { PostgresJobRunEngine } from "./job-engine.js";
 
 /** The engine surface a job processor needs — the log-driven, targeted execute. */
@@ -42,22 +48,49 @@ export interface BuildJobClaimerOptions {
   readonly serves?: JobClaimScope;
 }
 
-/** Adapts the Postgres `claimDueJobs` / `releaseJobClaim` SQL to the worker's `JobClaimer`. */
+/**
+ * Adapts the Postgres claim / `releaseJobClaim` SQL to the worker's `JobClaimer`.
+ *
+ * The claim is **per tenant** (`claimDueJobsPerTenant`): the tenants are read from `meta.tenants`
+ * each poll and each one's queue is claimed under its own context. The cross-tenant single statement
+ * it replaced claimed nothing on the shipped serving role, which RLS confines (ADR-0424); per tenant
+ * works for that role and for an exempt one alike, so there is one path rather than a branch on a
+ * boot-time probe. The rotation index lives here, in the claimer, so successive polls start with
+ * successive tenants.
+ */
 export function buildJobClaimer(conn: PgConnection, opts: BuildJobClaimerOptions = {}): JobClaimer {
   const schemaOpt = opts.schema !== undefined ? { schema: opts.schema } : {};
   const servesOpt = opts.serves !== undefined ? { serves: opts.serves } : {};
   const reap = opts.reapCancellations === true;
+  let startIndex = 0;
   return {
     claim: async (o) => {
-      if (reap) {
-        const reaped = await reapCancelledJobRuns(conn, {
-          now: o.now,
-          ...(opts.reapLimit !== undefined ? { limit: opts.reapLimit } : {}),
-          ...schemaOpt,
-        });
-        if (reaped.length > 0) opts.onReaped?.(reaped);
-      }
-      return claimDueJobs(conn, { ...o, ...schemaOpt, ...servesOpt });
+      const tenantIds = await listJobClaimTenants(conn, schemaOpt);
+      const reaped: ReapedJobRun[] = [];
+      const result = await claimDueJobsPerTenant(conn, {
+        ...o,
+        ...schemaOpt,
+        ...servesOpt,
+        tenantIds,
+        startIndex,
+        ...(reap
+          ? {
+              beforeClaim: async (tx: PgConnection, tenantId: string) => {
+                reaped.push(
+                  ...(await reapCancelledJobRuns(tx, {
+                    now: o.now,
+                    tenantId,
+                    ...(opts.reapLimit !== undefined ? { limit: opts.reapLimit } : {}),
+                    ...schemaOpt,
+                  })),
+                );
+              },
+            }
+          : {}),
+      });
+      startIndex = result.nextStartIndex;
+      if (reaped.length > 0) opts.onReaped?.(reaped);
+      return result.claimed;
     },
     release: (o) => releaseJobClaim(conn, { ...o, ...schemaOpt }),
   };
@@ -88,8 +121,15 @@ export function buildJobClaimRenewer(
   const now = opts.now ?? (() => new Date());
   const schemaOpt = opts.schema !== undefined ? { schema: opts.schema } : {};
   return {
-    renew: ({ timerId, workerId }) =>
-      renewJobClaim(conn, { jobId: timerId, workerId, now: now().toISOString(), leaseMs: opts.leaseMs, ...schemaOpt }),
+    renew: ({ timerId, workerId, tenantId }) =>
+      renewJobClaim(conn, {
+        jobId: timerId,
+        workerId,
+        tenantId,
+        now: now().toISOString(),
+        leaseMs: opts.leaseMs,
+        ...schemaOpt,
+      }),
   };
 }
 
@@ -123,14 +163,22 @@ export interface JobCancellationPollConfig {
  */
 export function buildJobProcessor(
   engine: JobExecutingEngine,
-  opts: { readonly renewal?: JobRenewalConfig; readonly cancellation?: JobCancellationPollConfig } = {},
+  opts: {
+    /** The worker whose claim fences the run's read and finalize (`ExecuteJobRunOptions.claimedBy`). */
+    readonly workerId: string;
+    readonly renewal?: JobRenewalConfig;
+    readonly cancellation?: JobCancellationPollConfig;
+  },
 ): JobProcessor {
   const renewal = opts.renewal;
   const cancellation = opts.cancellation;
   return {
     process: async (job: ClaimedJob) => {
       const run = (signal?: AbortSignal): Promise<unknown> =>
-        engine.executeJobRun(job.jobId, job.tenantId, signal !== undefined ? { signal } : {});
+        engine.executeJobRun(job.jobId, job.tenantId, {
+          claimedBy: opts.workerId,
+          ...(signal !== undefined ? { signal } : {}),
+        });
 
       const execute =
         cancellation === undefined
@@ -154,6 +202,7 @@ export function buildJobProcessor(
         renewer: renewal.renewer,
         timerId: job.jobId,
         workerId: renewal.workerId,
+        tenantId: job.tenantId,
         intervalMs: renewal.intervalMs,
         sleep: renewal.sleep,
         ...(renewal.onLeaseLost !== undefined ? { onLeaseLost: renewal.onLeaseLost } : {}),
@@ -211,20 +260,24 @@ export function buildWorkflowJobWorker(input: BuildWorkflowJobWorkerInput): Work
   const watcher = cancelling
     ? buildJobCancellationWatcher(input.conn, input.schema !== undefined ? { schema: input.schema } : {})
     : undefined;
+  // Built whether or not the heartbeat is on: the batch reaffirms every claim before its item starts,
+  // which is what keeps an item queued behind a slow one from running on a lease it no longer holds.
+  const claimRenewer = buildJobClaimRenewer(input.conn, {
+    leaseMs: input.leaseMs ?? 30_000,
+    ...(input.now !== undefined ? { now: input.now } : {}),
+    ...(input.schema !== undefined ? { schema: input.schema } : {}),
+  });
   const renewal: JobRenewalConfig | undefined =
     input.renewIntervalMs !== undefined
       ? {
-          renewer: buildJobClaimRenewer(input.conn, {
-            leaseMs: input.leaseMs ?? 30_000,
-            ...(input.now !== undefined ? { now: input.now } : {}),
-            ...(input.schema !== undefined ? { schema: input.schema } : {}),
-          }),
+          renewer: claimRenewer,
           workerId: input.workerId,
           intervalMs: input.renewIntervalMs,
           sleep,
         }
       : undefined;
   const processor = buildJobProcessor(input.engine, {
+    workerId: input.workerId,
     ...(renewal !== undefined ? { renewal } : {}),
     ...(watcher !== undefined
       ? {
@@ -241,6 +294,7 @@ export function buildWorkflowJobWorker(input: BuildWorkflowJobWorkerInput): Work
     workerId: input.workerId,
     claimer,
     processor,
+    claimRenewer,
     ...(input.batchLimit !== undefined ? { batchLimit: input.batchLimit } : {}),
     ...(input.leaseMs !== undefined ? { leaseMs: input.leaseMs } : {}),
     ...(input.idlePollMs !== undefined ? { idlePollMs: input.idlePollMs } : {}),

@@ -41,7 +41,8 @@ function buildJwt(claims: Record<string, unknown>, opts: { kid?: string; private
 }
 
 function validClaims(overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  return { iss: ISS, aud: AUD, sub: "user-123", scope: "store_manager", exp: NOW_S + 3600, nbf: NOW_S - 60, ...overrides };
+  // `tenant_id` since H-03: a token naming no tenant had the caller's own `x-tenant-id` choose it.
+  return { iss: ISS, aud: AUD, sub: "user-123", tenant_id: TENANT, scope: "store_manager", exp: NOW_S + 3600, nbf: NOW_S - 60, ...overrides };
 }
 
 function makeServer(): OperateHttpServer {
@@ -171,6 +172,24 @@ describe("operate-server — Bearer JWT auth (EdDSA via JWKS)", () => {
   });
 });
 
+describe("operate-server — a token naming no tenant (H-03)", () => {
+  it("401s rather than letting the caller's x-tenant-id header choose the tenant", async () => {
+    const server = makeServer();
+    const claims = validClaims();
+    delete claims["tenant_id"];
+    const res = await server.dispatch(jwtReq("GET", "/v1/products", buildJwt(claims)), null);
+    expect(res.status).toBe(401);
+  });
+
+  it("401s a token naming no subject, which would share one principal id with every such token", async () => {
+    const server = makeServer();
+    const claims = validClaims();
+    delete claims["sub"];
+    const res = await server.dispatch(jwtReq("GET", "/v1/products", buildJwt(claims)), null);
+    expect(res.status).toBe(401);
+  });
+});
+
 describe("operate-server — JWT tenant_id ↔ x-tenant-id cross-check (P1.18)", () => {
   it("authenticates when the JWT tenant_id claim matches the x-tenant-id header", async () => {
     const server = makeServer();
@@ -200,5 +219,57 @@ describe("operate-server — JWT tenant_id ↔ x-tenant-id cross-check (P1.18)",
       null,
     );
     expect(res.status).toBe(200);
+  });
+});
+
+describe("operate-server — the two bearer decorations are wired by buildOperateHttpServer", () => {
+  // Each decoration has unit tests of its own; these pin that `buildOperateHttpServer` actually
+  // installs them, which nothing else did — removing either wrapper left every test green.
+  function decorated(extra: {
+    readonly foreignTokenScopes?: Parameters<typeof buildOperateHttpServer>[0]["foreignTokenScopes"];
+    readonly sessionStanding?: Parameters<typeof buildOperateHttpServer>[0]["sessionStanding"];
+  }): OperateHttpServer {
+    return buildOperateHttpServer({
+      edgeTrust: "untrusted",
+      manifest,
+      store: new InMemoryEntityStore(),
+      apiKeys: [],
+      jwt: {
+        jwksProvider: buildJwksProvider([{ kid: KID, publicKeyBase64: keypair.publicKeyBase64 }]),
+        issuer: ISS,
+        audience: AUD,
+        requiredClaims: new Set(REQUIRED_JWT_CLAIMS),
+      },
+      now: () => NOW,
+      ...extra,
+    }).httpServer;
+  }
+
+  it("drops a platform role a foreign key asserted, so the role grants nothing", async () => {
+    const dropped: string[] = [];
+    const server = decorated({
+      foreignTokenScopes: {
+        trustedKid: "login-v1",
+        platformRoles: new Set(["store_manager"]),
+        onDropped: (_kid, roles) => dropped.push(...roles),
+      },
+    });
+    const res = await server.dispatch(jwtReq("GET", "/v1/products", buildJwt(validClaims())), null);
+    expect(res.status).toBe(403);
+    expect(dropped).toEqual(["store_manager"]);
+  });
+
+  it("refuses a session whose person's meta.users.status is not active", async () => {
+    const refused: string[] = [];
+    const server = decorated({
+      sessionStanding: {
+        directory: { standingOf: async () => ({ status: "suspended", sessionEpoch: 0 }) },
+        loginKid: null,
+        onRefused: (_u, r) => refused.push(r),
+      },
+    });
+    const res = await server.dispatch(jwtReq("GET", "/v1/products", buildJwt(validClaims())), null);
+    expect(res.status).toBe(401);
+    expect(refused).toEqual(["user_not_active"]);
   });
 });

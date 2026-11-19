@@ -3,6 +3,7 @@ import {
   ed25519PublicKeyFromSeed,
   isEd25519PrivateSeedBase64,
   parseCredentialPepper,
+  type PepperRing,
 } from "@crossengin/crypto";
 
 /**
@@ -20,6 +21,22 @@ import {
 
 /** HMAC'd into a password before scrypt stretches it. */
 export const CREDENTIAL_PEPPER_VAR = "CREDENTIAL_PEPPER";
+
+/**
+ * The version `CREDENTIAL_PEPPER` is recorded under in every hash it keys (M-09). Absent is 1, which
+ * is the version every hash written before versioning existed is read as, so an unversioned
+ * deployment keeps verifying every stored password with no change.
+ *
+ * To rotate: move the current pepper to `CREDENTIAL_PEPPER_RETIRED_<its version>`, set a new
+ * `CREDENTIAL_PEPPER` and raise this. Every login under a retired pepper re-keys that user's hash
+ * to the current one (`passwordHashIsStale`), and a retired variable can be removed once nothing
+ * is keyed by it.
+ */
+export const CREDENTIAL_PEPPER_VERSION_VAR = "CREDENTIAL_PEPPER_VERSION";
+/** One variable per retired pepper, the version in the name, so no separator has to be chosen. */
+export const CREDENTIAL_PEPPER_RETIRED_PREFIX = "CREDENTIAL_PEPPER_RETIRED_";
+/** The hash encoding carries at most four digits (`k<1..9999>$`), so a wider version is refused. */
+export const MAX_CREDENTIAL_PEPPER_VERSION = 9999;
 
 /**
  * The raw base64 Ed25519 **seed** this deployment signs session tokens with.
@@ -45,6 +62,8 @@ export const TOKEN_SIGNING_KID = "login-v1";
 export const CREDENTIAL_AUTH_REFUSALS = [
   "pepper_absent",
   "pepper_refused",
+  "pepper_version_malformed",
+  "retired_pepper_refused",
   "signing_key_absent",
   "signing_key_malformed",
   "jwks_url_would_discard_it",
@@ -52,7 +71,8 @@ export const CREDENTIAL_AUTH_REFUSALS = [
 export type CredentialAuthRefusal = (typeof CREDENTIAL_AUTH_REFUSALS)[number];
 
 export interface CredentialAuthMaterial {
-  readonly pepper: string;
+  /** The current pepper with its version, and every retired one a stored hash may still name. */
+  readonly pepper: PepperRing;
   readonly signingSeedBase64: string;
   /** Derived from the seed, never configured. Registered in the JWKS under `TOKEN_SIGNING_KID`. */
   readonly publicKeyBase64: string;
@@ -105,6 +125,8 @@ export function resolveCredentialAuth(
       detail: (err as ColumnSecretRefused).message,
     };
   }
+  const ring = resolvePepperRing(pepper, input.env);
+  if (!ring.ok) return ring;
 
   const seed = (input.env[TOKEN_SIGNING_KEY_VAR] ?? "").trim();
   if (seed === "") {
@@ -138,7 +160,7 @@ export function resolveCredentialAuth(
   return {
     ok: true,
     material: {
-      pepper,
+      pepper: ring.ring,
       signingSeedBase64: seed,
       publicKeyBase64: ed25519PublicKeyFromSeed(seed),
       kid: TOKEN_SIGNING_KID,
@@ -153,8 +175,76 @@ export function formatCredentialAuth(resolution: CredentialAuthResolution): stri
   }
   // The public key, not the seed: it is public by construction and it is what an operator compares
   // against a `--jwks-key` line if they ever need to configure a second verifier.
+  const ring = resolution.material.pepper;
+  const retired = [...ring.retired.keys()].sort((a, b) => a - b);
   return (
     `credential login: enabled (kid ${resolution.material.kid}, ` +
-    `public key ${resolution.material.publicKeyBase64})`
+    `public key ${resolution.material.publicKeyBase64}; pepper version ${ring.version.toString()}` +
+    (retired.length === 0
+      ? ""
+      : `, still verifying hashes keyed by retired version(s) ${retired.join(", ")}`) +
+    ")"
   );
+}
+
+type PepperRingResolution =
+  | { readonly ok: true; readonly ring: PepperRing }
+  | { readonly ok: false; readonly refusal: CredentialAuthRefusal; readonly detail: string };
+
+function parseVersion(raw: string): number | null {
+  if (!/^[1-9][0-9]{0,3}$/.test(raw)) return null;
+  const n = Number(raw);
+  return n <= MAX_CREDENTIAL_PEPPER_VERSION ? n : null;
+}
+
+/**
+ * The current pepper, its version and the retired ones. A refusal names a variable and never a
+ * value. A retired pepper is held to the current one's strength, because a weak retired pepper is
+ * exactly as good to an attacker holding the table as a weak current one.
+ */
+export function resolvePepperRing(
+  pepper: string,
+  env: Readonly<Record<string, string | undefined>>,
+): PepperRingResolution {
+  const versionRaw = (env[CREDENTIAL_PEPPER_VERSION_VAR] ?? "").trim();
+  const version = versionRaw === "" ? 1 : parseVersion(versionRaw);
+  if (version === null) {
+    return {
+      ok: false,
+      refusal: "pepper_version_malformed",
+      detail: `${CREDENTIAL_PEPPER_VERSION_VAR} must be an integer 1..${MAX_CREDENTIAL_PEPPER_VERSION.toString()}`,
+    };
+  }
+  const retired = new Map<number, string>();
+  for (const [name, raw] of Object.entries(env)) {
+    if (!name.startsWith(CREDENTIAL_PEPPER_RETIRED_PREFIX)) continue;
+    const value = (raw ?? "").trim();
+    if (value === "") continue;
+    const retiredVersion = parseVersion(name.slice(CREDENTIAL_PEPPER_RETIRED_PREFIX.length));
+    if (retiredVersion === null) {
+      return {
+        ok: false,
+        refusal: "retired_pepper_refused",
+        detail: `${name} does not name a version 1..${MAX_CREDENTIAL_PEPPER_VERSION.toString()}`,
+      };
+    }
+    if (retiredVersion === version) {
+      return {
+        ok: false,
+        refusal: "retired_pepper_refused",
+        detail: `${name} names the current version; a version is keyed by exactly one pepper`,
+      };
+    }
+    try {
+      parseCredentialPepper(value);
+    } catch (err) {
+      return {
+        ok: false,
+        refusal: "retired_pepper_refused",
+        detail: `${name}: ${(err as ColumnSecretRefused).message}`,
+      };
+    }
+    retired.set(retiredVersion, value);
+  }
+  return { ok: true, ring: { version, pepper, retired } };
 }

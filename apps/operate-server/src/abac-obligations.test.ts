@@ -1232,7 +1232,7 @@ describe("the list_sort_addresses_withheld_field refusal", () => {
    * then finds is the one pair the rule would name the moment somebody declares such a policy for
    * real.
    */
-  it("names Patient.family_name across the seven resolved builtin packs, and nothing else", async () => {
+  it("names Patient.family_name and each pack's Employee.family_name, and nothing else", async () => {
     const found: string[] = [];
     for (const name of BUILTIN_PACK_NAMES) {
       const pack = await loadBuiltinPack(name);
@@ -1256,7 +1256,20 @@ describe("the list_sort_addresses_withheld_field refusal", () => {
         found.push(`${name} ${c.entity}.${c.field} (${c.classification})`);
       }
     }
-    expect(found).toEqual(["erp-healthcare Patient.family_name (pii)"]);
+    // Eight since ADR-0443 (M-26): `Patient.family_name` is `phi` now, and `Employee.family_name`
+    // became `pii` — and `Employee`'s default list sort names it, so every pack inheriting core's
+    // `Employee` carries one. Vacuous in shipped packs (no pack declares a row-filtering `list`
+    // grant); this sweep declares one on every entity to measure what would refuse.
+    expect(found).toEqual([
+      "erp-core Employee.family_name (pii)",
+      "erp-retail Employee.family_name (pii)",
+      "erp-healthcare Employee.family_name (pii)",
+      "erp-healthcare Patient.family_name (phi)",
+      "erp-grocery Employee.family_name (pii)",
+      "erp-government Employee.family_name (pii)",
+      "erp-education Employee.family_name (pii)",
+      "erp-construction Employee.family_name (pii)",
+    ]);
   });
 
   it("refuses that pack end to end once such a policy is declared on Patient", async () => {
@@ -1281,11 +1294,11 @@ describe("the list_sort_addresses_withheld_field refusal", () => {
       {
         entity: "Patient",
         field: "family_name",
-        classification: "pii",
+        classification: "phi",
         policyKey: "same_facility",
       },
     ]);
-    expect(formatAbacObligationCheck(result)).toContain("Patient.family_name (pii)");
+    expect(formatAbacObligationCheck(result)).toContain("Patient.family_name (phi)");
   });
 });
 

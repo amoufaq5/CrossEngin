@@ -1,4 +1,11 @@
-import { qualifyTable, quoteIdent, toTableName } from "@crossengin/kernel/ddl";
+import {
+  foreignKeyBaseName,
+  qualifyTable,
+  quoteIdent,
+  toTableName,
+  trigramIndexBaseName,
+  uniqueIndexBaseName,
+} from "@crossengin/kernel/ddl";
 import type { OnDelete } from "@crossengin/types/meta-schema";
 
 import {
@@ -23,6 +30,98 @@ const TENANT_ISOLATION =
   "tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID";
 
 const MAX_IDENTIFIER_LEN = 63;
+
+/** The isolation predicate's source text, for `renderTenantIsolationQual` to ask Postgres about. */
+export const TENANT_ISOLATION_PREDICATE = TENANT_ISOLATION;
+
+export interface SchemaDdlOptions {
+  /**
+   * How this server renders the isolation predicate — `pg_get_expr` of a policy carrying it, from
+   * `renderTenantIsolationQual`. Given, a table whose policy already says exactly that keeps it and
+   * takes no lock for it; absent, the policy is replaced on every application. Asked of Postgres
+   * rather than spelled here, because the stored form is Postgres's deparse and not this source text.
+   */
+  readonly isolationQualRendering?: string | null;
+  /**
+   * Given, each per-table statement that changes nothing on a table already holding its
+   * declaration — an `ADD COLUMN IF NOT EXISTS` for a column that exists, `ENABLE ROW LEVEL
+   * SECURITY` on a table that has it, a trigram `CREATE INDEX IF NOT EXISTS` for an index that
+   * exists, the millisecond `SET DEFAULT` where the stored default already deparses to this
+   * server's rendering — runs only when the catalog says it would change something.
+   *
+   * Not tidiness: `IF NOT EXISTS` and an `ENABLE` that is already on are decided **after** the
+   * table lock is taken, so each one takes `ACCESS EXCLUSIVE` (the index `SHARE`) on every boot,
+   * measured on PG 16 — and under a bounded `lock_timeout` a boot behind any long read or write on
+   * an entity table then fails where the schema needed nothing. `millisecondNowRendering` is
+   * `pg_get_expr` of that default, asked of Postgres (`renderMillisecondNowDefault`); `null`
+   * leaves the `SET DEFAULT` unguarded.
+   */
+  readonly catalogGuards?: { readonly millisecondNowRendering: string | null };
+}
+
+/**
+ * `DO … IF <condition> THEN <stmt> END IF`, under a dollar-quote tag the statement does not
+ * contain. The tag is chosen per statement because an `ADD COLUMN` carries a column default, and a
+ * default may be a manifest-authored string literal: a fixed tag inside it would end the block
+ * early and run the rest of the literal as SQL.
+ */
+function guardedStmt(condition: string, stmt: string): string {
+  let tag = "$ce_guard$";
+  for (let n = 1; stmt.includes(tag); n++) tag = `$ce_guard${String(n)}$`;
+  return `DO ${tag} BEGIN\n  IF ${condition} THEN\n    ${stmt}\n  END IF;\nEND ${tag};`;
+}
+
+function enableRlsStmt(qualified: string, guarded: boolean): string {
+  const stmt = `ALTER TABLE ${qualified} ENABLE ROW LEVEL SECURITY;`;
+  if (!guarded) return stmt;
+  return guardedStmt(
+    `NOT (SELECT c.relrowsecurity FROM pg_class c WHERE c.oid = ${sqlLiteral(qualified)}::regclass)`,
+    stmt,
+  );
+}
+
+function columnAbsent(qualified: string, column: string): string {
+  return (
+    `NOT EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = ${sqlLiteral(qualified)}::regclass ` +
+    `AND a.attname = ${sqlLiteral(column.slice(0, MAX_IDENTIFIER_LEN))} AND NOT a.attisdropped)`
+  );
+}
+
+/**
+ * The isolation policy as one statement. It was `DROP POLICY IF EXISTS` and then `CREATE POLICY`,
+ * two statements: run as two transactions, a table with RLS enabled sat with no policy between
+ * them, which for a non-owner reads as an empty table rather than an error. One `DO` block is one
+ * transaction. With a rendering, the replacement runs only when the catalog's policy differs from
+ * the declaration in name, command, permissiveness, roles, a `WITH CHECK`, or its predicate — so a
+ * policy edited by hand is still put back, which the unconditional form did.
+ */
+function isolationPolicyStmt(
+  qualified: string,
+  policyName: string,
+  rendering: string | null | undefined,
+): string {
+  const replace =
+    `DROP POLICY IF EXISTS ${quoteIdent(policyName)} ON ${qualified};\n` +
+    `CREATE POLICY ${quoteIdent(policyName)} ON ${qualified} USING (${TENANT_ISOLATION});`;
+  if (rendering === undefined || rendering === null)
+    return `DO $ce_policy$ BEGIN\n${replace}\nEND $ce_policy$;`;
+  const conditions = [
+    `p.polrelid = ${sqlLiteral(qualified)}::regclass`,
+    `p.polname = ${sqlLiteral(policyName.slice(0, MAX_IDENTIFIER_LEN))}`,
+    "p.polcmd = '*'",
+    "p.polpermissive",
+    "p.polroles = ARRAY[0]::oid[]",
+    "p.polwithcheck IS NULL",
+    `pg_get_expr(p.polqual, p.polrelid) = ${sqlLiteral(rendering)}`,
+  ];
+  return (
+    `DO $ce_policy$ BEGIN\n` +
+    `  IF NOT EXISTS (SELECT 1 FROM pg_policy p WHERE ${conditions.join("\n    AND ")}) THEN\n` +
+    `${replace}\n` +
+    `  END IF;\n` +
+    `END $ce_policy$;`
+  );
+}
 
 /**
  * A plaintext (non-encrypted) text or varchar column — the kind a `contains`
@@ -64,12 +163,12 @@ export const TRIGRAM_INDEX_SUFFIX = "_utrgm";
 
 /** Deterministic trigram index name, capped at Postgres's 63-char identifier limit. */
 function trigramIndexName(table: string, column: string): string {
-  const name = `${table}_${column}${TRIGRAM_INDEX_SUFFIX}`;
+  const name = trigramIndexBaseName(table, column);
   return name.length <= MAX_IDENTIFIER_LEN ? name : name.slice(0, MAX_IDENTIFIER_LEN);
 }
 
 export function uniqueIndexName(table: string, column: string): string {
-  const name = `${table}_${column}_uniq`;
+  const name = uniqueIndexBaseName(table, column);
   return name.length <= MAX_IDENTIFIER_LEN ? name : name.slice(0, MAX_IDENTIFIER_LEN);
 }
 
@@ -315,14 +414,14 @@ function columnType(c: ColumnMapping): string {
  * each typed domain column, an additive `ADD COLUMN IF NOT EXISTS` per planned
  * column so a table created by an earlier manifest gains what the current one
  * added, the `(tenant_id, id)` primary key, a tenant index, RLS enabled with the
- * standard tenant-isolation policy (`DROP POLICY IF EXISTS` → `CREATE POLICY`,
+ * standard tenant-isolation policy (one guarded statement, `isolationPolicyStmt`,
  * so re-runs are safe), and a
  * `crossengin.data_class=…[; crossengin.encrypt=at_rest]` comment per classified
  * column (the same convention the kernel-pg encryption applier reads). A column
  * flagged `encryptAtRest` is stored as `BYTEA` (pgcrypto ciphertext), not its
  * plaintext type.
  */
-export function emitEntityTableDdl(plan: EntityTablePlan): string[] {
+export function emitEntityTableDdl(plan: EntityTablePlan, opts: SchemaDdlOptions = {}): string[] {
   const qualified = qualifyTable(plan.schema, plan.table);
   const planned = new Set(plan.columns.map((c) => c.column));
   const columnLines: string[] = [
@@ -336,7 +435,26 @@ export function emitEntityTableDdl(plan: EntityTablePlan): string[] {
   ];
 
   const policyName = `${plan.table}_tenant_isolation`;
-  const indexNm = `idx_${plan.table}_tenant`;
+  const guards = opts.catalogGuards;
+  // `emitAddColumnDdl` maps `plan.columns` in order, so the zip names each statement's column.
+  const addColumns = emitAddColumnDdl(plan).map((stmt, i) =>
+    guards === undefined ? stmt : guardedStmt(columnAbsent(qualified, plan.columns[i]!.column), stmt),
+  );
+  // `emitTimestampPrecisionDdl` maps the unskipped system timestamps in order; the zip names each.
+  const skippedTimestamps = new Set(timestampPrecisionSkips(plan).map((s) => s.column));
+  const timestampNames = SYSTEM_TIMESTAMPS.filter((t) => !skippedTimestamps.has(t.name)).map((t) => t.name);
+  const rendering = guards?.millisecondNowRendering ?? null;
+  const timestampDefaults = emitTimestampPrecisionDdl(plan).map((stmt, i) =>
+    rendering === null
+      ? stmt
+      : guardedStmt(
+          `NOT EXISTS (SELECT 1 FROM pg_attrdef d JOIN pg_attribute a ON a.attrelid = d.adrelid ` +
+            `AND a.attnum = d.adnum WHERE d.adrelid = ${sqlLiteral(qualified)}::regclass ` +
+            `AND a.attname = ${sqlLiteral(timestampNames[i]!)} ` +
+            `AND pg_get_expr(d.adbin, d.adrelid) = ${sqlLiteral(rendering)})`,
+          stmt,
+        ),
+  );
 
   const stmts: string[] = [
     `CREATE TABLE IF NOT EXISTS ${qualified} (\n  ${columnLines.join(",\n  ")}\n);`,
@@ -344,14 +462,16 @@ export function emitEntityTableDdl(plan: EntityTablePlan): string[] {
     // CREATE is a no-op on a table that already exists, so without this a manifest that
     // gained a field would leave the column missing and the very next statement (its
     // trigram index) would fail.
-    ...emitAddColumnDdl(plan),
+    ...addColumns,
     // After the ADD COLUMNs, because on an `auditable` entity the timestamps are *planned* columns
-    // and a table created by an earlier manifest may not hold them yet.
-    ...emitTimestampPrecisionDdl(plan),
-    `CREATE INDEX IF NOT EXISTS ${quoteIdent(indexNm)} ON ${qualified} (${quoteIdent("tenant_id")});`,
-    `ALTER TABLE ${qualified} ENABLE ROW LEVEL SECURITY;`,
-    `DROP POLICY IF EXISTS ${quoteIdent(policyName)} ON ${qualified};`,
-    `CREATE POLICY ${quoteIdent(policyName)} ON ${qualified} USING (${TENANT_ISOLATION});`,
+    // and a table created by an earlier manifest may not hold them yet. The same statements
+    // `emitTimestampPrecisionDdl` returns, guarded when asked.
+    ...timestampDefaults,
+    // No `(tenant_id)` index: the primary key `(tenant_id, id)` leads with it and serves every
+    // `tenant_id = $1` scan, so a second index on the prefix only doubled each write's index work.
+    // A table an earlier binary created keeps its `idx_<table>_tenant`; dropping it is the operator's.
+    enableRlsStmt(qualified, guards !== undefined),
+    isolationPolicyStmt(qualified, policyName, opts.isolationQualRendering),
   ];
 
   for (const col of plan.columns) {
@@ -395,8 +515,14 @@ export function emitEntityTableDdl(plan: EntityTablePlan): string[] {
     if (!isTrigramIndexable(col)) continue;
     const idxName = trigramIndexName(plan.table, col.column);
     const indexed = searchFunctionCall(`${quoteIdent(col.column)}::text`);
+    const create = `CREATE INDEX IF NOT EXISTS ${quoteIdent(idxName)} ON ${qualified} USING gin (${indexed} gin_trgm_ops);`;
     stmts.push(
-      `CREATE INDEX IF NOT EXISTS ${quoteIdent(idxName)} ON ${qualified} USING gin (${indexed} gin_trgm_ops);`,
+      guards === undefined
+        ? create
+        : guardedStmt(
+            `to_regclass(${sqlLiteral(`${quoteIdent(plan.schema)}.${quoteIdent(idxName)}`)}) IS NULL`,
+            create,
+          ),
     );
   }
 
@@ -421,32 +547,90 @@ export function onDeleteClause(policy: OnDelete, refColumn: string): string {
   }
 }
 
+/** `confdeltype` as `pg_constraint` stores it, so the guard can compare what is there. */
+const ON_DELETE_ACTION_CODE: Readonly<Record<OnDelete, string>> = {
+  restrict: "r",
+  cascade: "c",
+  set_null: "n",
+};
+
+function sqlLiteral(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+/** The column names of a constraint's key, in key order, for the guard's comparison. */
+function keyColumnsSql(keyColumn: string, relationColumn: string): string {
+  return (
+    `ARRAY(SELECT a.attname::text FROM unnest(c.${keyColumn}) WITH ORDINALITY k(attnum, ord) ` +
+    `JOIN pg_attribute a ON a.attrelid = c.${relationColumn} AND a.attnum = k.attnum ORDER BY k.ord)`
+  );
+}
+
+/**
+ * One composite tenant-scoped FK, as a single guarded statement.
+ *
+ * It used to be `DROP CONSTRAINT IF EXISTS` then `ADD CONSTRAINT`, run on every boot for every
+ * reference, and the `ADD` re-validates the whole child table under a `SHARE ROW EXCLUSIVE` lock on
+ * both tables — so a boot's cost grew with the data, and a busy table queued every later query
+ * behind it. Now the pair runs only when the catalog does not already hold this constraint as
+ * declared: same name, same target, same key columns in order, same `ON DELETE` action (and for
+ * `SET NULL` the same column list), validated and not deferrable. A changed declaration still
+ * replaces it, and the drop and the add are one transaction, so no write runs between them with the
+ * reference unenforced. `pg_constraint` stores the name truncated as Postgres truncates an
+ * identifier, so the guard compares the truncated name.
+ *
+ * `confdelsetcols` is read only for a `set_null` reference, which already needs Postgres 15;
+ * naming it otherwise would make the guard itself fail to parse on 14.
+ */
+function compositeFkStmts(
+  qualified: string,
+  constraint: string,
+  refColumn: string,
+  targetTable: string,
+  policy: OnDelete,
+): string[] {
+  const stored = constraint.slice(0, MAX_IDENTIFIER_LEN);
+  const conditions = [
+    `c.conrelid = ${sqlLiteral(qualified)}::regclass`,
+    `c.conname = ${sqlLiteral(stored)}`,
+    "c.contype = 'f'",
+    `c.confrelid = ${sqlLiteral(targetTable)}::regclass`,
+    `c.confdeltype = '${ON_DELETE_ACTION_CODE[policy]}'`,
+    "c.confupdtype = 'a'",
+    "c.confmatchtype = 's'",
+    "c.convalidated",
+    "NOT c.condeferrable",
+    `${keyColumnsSql("conkey", "conrelid")} = ARRAY[${sqlLiteral("tenant_id")}, ${sqlLiteral(refColumn)}]`,
+    `${keyColumnsSql("confkey", "confrelid")} = ARRAY[${sqlLiteral("tenant_id")}, ${sqlLiteral("id")}]`,
+  ];
+  if (policy === "set_null") {
+    conditions.push(
+      `${keyColumnsSql("confdelsetcols", "conrelid")} = ARRAY[${sqlLiteral(refColumn)}]`,
+    );
+  }
+  return [
+    `DO $ce_fk$ BEGIN\n` +
+      `  IF NOT EXISTS (SELECT 1 FROM pg_constraint c WHERE ${conditions.join("\n    AND ")}) THEN\n` +
+      `    ALTER TABLE ${qualified} DROP CONSTRAINT IF EXISTS ${quoteIdent(constraint)};\n` +
+      `    ALTER TABLE ${qualified} ADD CONSTRAINT ${quoteIdent(constraint)} ` +
+      `FOREIGN KEY (${quoteIdent("tenant_id")}, ${quoteIdent(refColumn)}) ` +
+      `REFERENCES ${targetTable} (${quoteIdent("tenant_id")}, ${quoteIdent("id")}) ` +
+      `${onDeleteClause(policy, refColumn)};\n` +
+      `  END IF;\n` +
+      `END $ce_fk$;`,
+  ];
+}
+
 /**
  * Emits idempotent foreign-key DDL for a plan's reference columns. Each
  * reference is a **composite** FK `(tenant_id, <ref>_id) → target (tenant_id,
  * id)`, so a reference can only point to a row in the *same tenant* (the PK is
  * `(tenant_id, id)`). A target not in `knownEntities` is skipped (no table to
  * reference). The `ON DELETE` behavior is per-relation via `onDeleteFor(field)`
- * (defaulting to RESTRICT). `DROP CONSTRAINT IF EXISTS` → `ADD CONSTRAINT` keeps
- * it re-runnable; applied in a second pass after all tables exist (so reference
- * cycles are safe).
+ * (defaulting to RESTRICT). Each is one guarded statement (`compositeFkStmts`) that
+ * replaces the constraint only when it differs from the declaration; applied in a
+ * second pass after all tables exist (so reference cycles are safe).
  */
-/** Emits the idempotent DROP/ADD pair for one composite tenant-scoped FK. */
-function compositeFkStmts(
-  qualified: string,
-  constraint: string,
-  refColumn: string,
-  targetTable: string,
-  onDelete: string,
-): string[] {
-  return [
-    `ALTER TABLE ${qualified} DROP CONSTRAINT IF EXISTS ${quoteIdent(constraint)};`,
-    `ALTER TABLE ${qualified} ADD CONSTRAINT ${quoteIdent(constraint)} ` +
-      `FOREIGN KEY (${quoteIdent("tenant_id")}, ${quoteIdent(refColumn)}) ` +
-      `REFERENCES ${targetTable} (${quoteIdent("tenant_id")}, ${quoteIdent("id")}) ${onDelete};`,
-  ];
-}
-
 export function emitForeignKeyDdl(
   plan: EntityTablePlan,
   knownEntities: ReadonlySet<string>,
@@ -461,10 +645,10 @@ export function emitForeignKeyDdl(
     stmts.push(
       ...compositeFkStmts(
         qualified,
-        `fk_${plan.table}_${col.column}`,
+        foreignKeyBaseName(plan.table, col.column),
         col.column,
         targetTable,
-        onDeleteClause(policy, col.column),
+        policy,
       ),
     );
   }
@@ -482,6 +666,7 @@ export function emitForeignKeyDdl(
 export function emitJoinTableDdl(
   plan: JoinTablePlan,
   knownEntities: ReadonlySet<string>,
+  opts: SchemaDdlOptions = {},
 ): string[] {
   const qualified = qualifyTable(plan.schema, plan.table);
   const policyName = `${plan.table}_tenant_isolation`;
@@ -494,18 +679,17 @@ export function emitJoinTableDdl(
   ];
   const stmts: string[] = [
     `CREATE TABLE IF NOT EXISTS ${qualified} (\n  ${columnLines.join(",\n  ")}\n);`,
-    `ALTER TABLE ${qualified} ENABLE ROW LEVEL SECURITY;`,
-    `DROP POLICY IF EXISTS ${quoteIdent(policyName)} ON ${qualified};`,
-    `CREATE POLICY ${quoteIdent(policyName)} ON ${qualified} USING (${TENANT_ISOLATION});`,
+    enableRlsStmt(qualified, opts.catalogGuards !== undefined),
+    isolationPolicyStmt(qualified, policyName, opts.isolationQualRendering),
   ];
   if (knownEntities.has(plan.leftEntity)) {
     stmts.push(
       ...compositeFkStmts(
         qualified,
-        `fk_${plan.table}_${plan.leftColumn}`,
+        foreignKeyBaseName(plan.table, plan.leftColumn),
         plan.leftColumn,
         qualifyTable(plan.schema, toTableName(plan.leftEntity)),
-        "ON DELETE CASCADE",
+        "cascade",
       ),
     );
   }
@@ -513,10 +697,10 @@ export function emitJoinTableDdl(
     stmts.push(
       ...compositeFkStmts(
         qualified,
-        `fk_${plan.table}_${plan.rightColumn}`,
+        foreignKeyBaseName(plan.table, plan.rightColumn),
         plan.rightColumn,
         qualifyTable(plan.schema, toTableName(plan.rightEntity)),
-        "ON DELETE CASCADE",
+        "cascade",
       ),
     );
   }
@@ -552,12 +736,13 @@ export function emitManifestSchemaDdl(
   plans: ReadonlyMap<string, EntityTablePlan>,
   joinPlans: readonly JoinTablePlan[] = [],
   deletePolicies: ReadonlyMap<string, OnDelete> = new Map(),
+  opts: SchemaDdlOptions = {},
 ): readonly string[] {
   const stmts: string[] = [];
   const order = topologicalEntityOrder(plans);
   for (const name of order) {
     const plan = plans.get(name);
-    if (plan !== undefined) stmts.push(...emitEntityTableDdl(plan));
+    if (plan !== undefined) stmts.push(...emitEntityTableDdl(plan, opts));
   }
   const known = new Set(plans.keys());
   for (const name of order) {
@@ -567,6 +752,6 @@ export function emitManifestSchemaDdl(
       deletePolicies.get(`${plan.entity}.${field}`);
     stmts.push(...emitForeignKeyDdl(plan, known, onDeleteFor));
   }
-  for (const joinPlan of joinPlans) stmts.push(...emitJoinTableDdl(joinPlan, known));
+  for (const joinPlan of joinPlans) stmts.push(...emitJoinTableDdl(joinPlan, known, opts));
   return stmts;
 }

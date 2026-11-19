@@ -1,3 +1,4 @@
+import { reaffirmClaim, type ClaimRenewer } from "./renew.js";
 import type { ClaimOptions, ClaimedTimer, TimerClaimer, TimerProcessor } from "./types.js";
 
 export interface BatchFailure {
@@ -14,7 +15,7 @@ export interface BatchFailure {
  * reasons this path has no equivalent of — a timer carries no cancellation of its own, and an
  * instance-level one is the engine's fence (`isInstanceCancellationRequested`), not the worker's.
  */
-export const BATCH_SKIP_REASONS = ["worker_stopping"] as const;
+export const BATCH_SKIP_REASONS = ["worker_stopping", "lease_lost"] as const;
 export type BatchSkipReason = (typeof BATCH_SKIP_REASONS)[number];
 
 export interface BatchSkip {
@@ -37,6 +38,12 @@ export interface ProcessTimerBatchOptions {
   /** Checked before each item; `false` stops the batch and hands the rest back. */
   readonly shouldContinue?: () => boolean;
   readonly onSkipped?: (timer: ClaimedTimer, reason: BatchSkipReason) => void;
+  /**
+   * Renews each item's claim just before it starts and skips it as `lease_lost` when the renew
+   * finds the claim gone (see `reaffirmClaim`). Absent, a queued item runs on whatever is left of the
+   * batch's lease — which is the defect that let two workers fire one timer.
+   */
+  readonly claimRenewer?: ClaimRenewer | null;
 }
 
 /**
@@ -63,9 +70,9 @@ export async function processTimerBatch(
   const failed: BatchFailure[] = [];
   const skipped: BatchSkip[] = [];
 
-  const release = async (timerId: string): Promise<void> => {
+  const release = async (timer: ClaimedTimer): Promise<void> => {
     try {
-      await claimer.release({ timerId, workerId: opts.workerId });
+      await claimer.release({ timerId: timer.timerId, workerId: opts.workerId, tenantId: timer.tenantId });
     } catch {
       // The lease will lapse and recover the timer regardless.
     }
@@ -75,7 +82,21 @@ export async function processTimerBatch(
     if (options.shouldContinue !== undefined && !options.shouldContinue()) {
       skipped.push({ timerId: timer.timerId, reason: "worker_stopping" });
       options.onSkipped?.(timer, "worker_stopping");
-      await release(timer.timerId);
+      await release(timer);
+      continue;
+    }
+    if (
+      options.claimRenewer !== undefined &&
+      options.claimRenewer !== null &&
+      !(await reaffirmClaim(options.claimRenewer, {
+        id: timer.timerId,
+        workerId: opts.workerId,
+        tenantId: timer.tenantId,
+      }))
+    ) {
+      // Not released: the claim is no longer this worker's, so there is nothing of ours to hand back.
+      skipped.push({ timerId: timer.timerId, reason: "lease_lost" });
+      options.onSkipped?.(timer, "lease_lost");
       continue;
     }
     try {
@@ -83,7 +104,7 @@ export async function processTimerBatch(
       succeeded.push(timer.timerId);
     } catch (err) {
       failed.push({ timerId: timer.timerId, error: err instanceof Error ? err.message : String(err) });
-      await release(timer.timerId);
+      await release(timer);
     }
   }
   return { claimed: timers.length, succeeded, failed, skipped };

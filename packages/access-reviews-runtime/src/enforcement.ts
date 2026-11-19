@@ -1,5 +1,7 @@
 import {
   AccessReviewDecisionSchema,
+  AccessReviewItemSchema,
+  canTransitionItem,
   isItemOverdue,
   isPastGracePeriod,
   type AccessReviewCampaign,
@@ -92,4 +94,31 @@ export const planAutoRevocations = (
       isAutoRevocable(item, campaign, opts.now, requireGracePeriod),
     )
     .map((item) => buildRevokeDecision(item, campaign, opts));
+};
+
+/**
+ * The item an auto-revocation decision resolves (H-19). Recording the decision alone left the item
+ * in its unattested status, so the next tick planned and recorded another decision for the same
+ * grant, the campaign could never complete through auto-revocation, and a boot line counting
+ * decisions read as a count of revocations. Throws on an edge the transition map does not admit,
+ * because a decision whose item cannot move is the defect this exists to end.
+ */
+export const autoRevokedItem = (
+  item: AccessReviewItem,
+  decision: AccessReviewDecision,
+  now: Date,
+): AccessReviewItem => {
+  if (decision.itemId !== item.id) {
+    throw new Error(`auto-revocation decision ${decision.id} is for ${decision.itemId}, not ${item.id}`);
+  }
+  if (!canTransitionItem(item.status, "auto_revoked")) {
+    throw new Error(`access-review item ${item.id} cannot move from ${item.status} to auto_revoked`);
+  }
+  return AccessReviewItemSchema.parse({
+    ...item,
+    status: "auto_revoked",
+    decisionId: decision.id,
+    autoRevokedAt: now.toISOString(),
+    autoRevokeReason: decision.reason,
+  });
 };

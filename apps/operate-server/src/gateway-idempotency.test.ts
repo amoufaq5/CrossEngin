@@ -1,4 +1,5 @@
 import type { IdempotencyRecord } from "@crossengin/api-gateway";
+import type { IdempotencyReservation } from "@crossengin/api-gateway-runtime";
 import { describe, expect, it, vi } from "vitest";
 
 import type { IntervalHandle, IntervalScheduler } from "./jwks.js";
@@ -38,11 +39,17 @@ function innerStore(overrides: {
   get?: () => Promise<IdempotencyRecord | null>;
   put?: () => Promise<void>;
   update?: () => Promise<IdempotencyRecord>;
+  reserve?: () => Promise<IdempotencyReservation>;
+  complete?: () => Promise<void>;
+  release?: () => Promise<void>;
 } = {}) {
   return {
     get: vi.fn(overrides.get ?? (async () => null)),
     put: vi.fn(overrides.put ?? (async () => undefined)),
     update: vi.fn(overrides.update ?? (async () => record())),
+    reserve: vi.fn(overrides.reserve ?? (async (): Promise<IdempotencyReservation> => ({ reserved: true }))),
+    complete: vi.fn(overrides.complete ?? (async () => undefined)),
+    release: vi.fn(overrides.release ?? (async () => undefined)),
   };
 }
 
@@ -132,7 +139,7 @@ describe("ReportingIdempotencyStore.put — report, never throw", () => {
     const store = new ReportingIdempotencyStore(inner, { onPersistError });
     await store.put({ tenantId: TENANT, record: record() });
     expect(onPersistError).toHaveBeenCalledTimes(1);
-    expect(onPersistError.mock.calls[0]?.[1]).toEqual({ tenantId: TENANT, key: "key-delete-1" });
+    expect(onPersistError.mock.calls[0]?.[1]).toEqual({ tenantId: TENANT, key: "key-delete-1", operation: "put" });
   });
 
   it("mixes successes and failures in one report", async () => {
@@ -175,10 +182,97 @@ describe("ReportingIdempotencyStore.update", () => {
   });
 });
 
+describe("ReportingIdempotencyStore — reserve, complete and release", () => {
+  it("propagates a reservation failure, because a request with no reservation must not run", async () => {
+    const store = new ReportingIdempotencyStore(
+      innerStore({
+        reserve: async () => {
+          throw new Error("statement timeout");
+        },
+      }),
+    );
+    await expect(store.reserve({ tenantId: TENANT, record: record({ status: "in_progress" }) })).rejects.toThrow(
+      /statement timeout/,
+    );
+  });
+
+  it("lets a tenant with no meta.tenants row through unguarded and reported, rather than 500ing it", async () => {
+    // Measured live: the reservation's foreign key refused a keyed POST from an unprovisioned
+    // api-key tenant, and propagating that turned the tenant-status gate's named 403 into a 500.
+    const reported: string[] = [];
+    const store = new ReportingIdempotencyStore(
+      innerStore({
+        reserve: async () => {
+          throw Object.assign(new Error("violates foreign key constraint"), { code: "23503" });
+        },
+      }),
+      { onPersistError: (_err, where) => reported.push(where.key) },
+    );
+    const r = record({ status: "in_progress" });
+    await expect(store.reserve({ tenantId: TENANT, record: r })).resolves.toEqual({ reserved: true });
+    expect(reported).toEqual([r.idempotencyKey]);
+  });
+
+  it("still propagates any other reservation failure", async () => {
+    const store = new ReportingIdempotencyStore(
+      innerStore({
+        reserve: async () => {
+          throw Object.assign(new Error("connection reset"), { code: "08006" });
+        },
+      }),
+    );
+    await expect(store.reserve({ tenantId: TENANT, record: record({ status: "in_progress" }) })).rejects.toThrow(
+      /connection reset/,
+    );
+  });
+
+  it("swallows and reports a completion failure, since the handler has committed", async () => {
+    const seen: string[] = [];
+    const store = new ReportingIdempotencyStore(
+      innerStore({
+        complete: async () => {
+          throw new Error("disk full");
+        },
+      }),
+      { onPersistError: (_err, at) => seen.push(at.key) },
+    );
+    await store.complete({ tenantId: TENANT, record: record(), replay: null });
+    expect(store.report()).toMatchObject({ failed: 1, firstFailure: "disk full" });
+    expect(seen).toEqual(["key-delete-1"]);
+  });
+
+  it("swallows a release failure and counts it apart from records that were not stored", async () => {
+    // A lost release answers the next retry 409 until the lease lapses; it never makes a mutation
+    // re-execute, so counting it in `failed` made the shutdown line claim exactly that.
+    const seen: string[] = [];
+    const store = new ReportingIdempotencyStore(
+      innerStore({
+        release: async () => {
+          throw new Error("gone");
+        },
+      }),
+      { onPersistError: (_err, at) => seen.push(at.operation) },
+    );
+    await store.release({ tenantId: TENANT, key: "key-delete-1", requestHashSha256: "a".repeat(64) });
+    expect(store.report()).toMatchObject({ persisted: 0, failed: 0, releaseFailed: 1 });
+    expect(seen).toEqual(["release"]);
+  });
+
+  it("does not count a successful release as a stored record", async () => {
+    const store = new ReportingIdempotencyStore(innerStore({}));
+    await store.release({ tenantId: TENANT, key: "key-delete-1", requestHashSha256: "a".repeat(64) });
+    await store.complete({ tenantId: TENANT, record: record(), replay: null });
+    expect(store.report()).toMatchObject({ persisted: 1, failed: 0, releaseFailed: 0 });
+  });
+});
+
 describe("IDEMPOTENCY_GUARANTEE", () => {
-  it("states the sequential guarantee and the concurrent limitation", () => {
-    expect(IDEMPOTENCY_GUARANTEE).toContain("sequential");
-    expect(IDEMPOTENCY_GUARANTEE).toContain("concurrent");
+  // It used to say two concurrent retries could both execute, which was true before the gateway
+  // reserved the key. The sentence names what is now bounded and what is still not.
+  it("states the concurrent answer and the lease bound", () => {
+    expect(IDEMPOTENCY_GUARANTEE).toContain("409 in progress");
+    expect(IDEMPOTENCY_GUARANTEE).toContain("lease");
+    expect(IDEMPOTENCY_GUARANTEE).not.toContain("can still both execute");
   });
 });
 

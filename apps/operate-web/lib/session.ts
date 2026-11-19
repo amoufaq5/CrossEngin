@@ -63,20 +63,41 @@ export function sessionMaxAgeSeconds(expiresAt: string, now: Date = new Date()):
   return seconds > 0 ? seconds : null;
 }
 
+// A reserved name (RFC 2606) so no real origin can ever equal it: the parse only has to say
+// whether the input stayed relative to *some* origin, and which one does not matter.
+const NEXT_PATH_BASE = "https://next-path.invalid";
+const NEXT_PATH_BASE_ORIGIN = new URL(NEXT_PATH_BASE).origin;
+
 /**
  * The destination a `?next=` names, or `/`.
  *
  * A `?next=` is attacker-supplied input to a navigation this app performs, so only a path on
- * this origin is admitted. `//evil.test` and `/\evil.test` are both refused and neither is
- * theoretical: a browser reads a protocol-relative URL as absolute, and Chrome normalises the
- * backslash form into it. One definition because the middleware and the login form both
+ * this origin is admitted. One definition because the middleware and the login form both
  * decide where to send a browser, and a laxer copy in either is the whole hole.
+ *
+ * The decision is made on what a browser will do with the string, not on its first characters.
+ * The WHATWG URL parser deletes tab, CR and LF anywhere and reads `\` as `/`, so `/\t/evil.test`
+ * (which is what `?next=/%09/evil.test` decodes to) passed a check on `raw.charAt(1)` and
+ * navigated to `https://evil.test/` — and dot-segment removal turns `/.//evil.test` into the
+ * pathname `//evil.test`, which a check on the raw input cannot see at all. So the input is parsed
+ * with the same parser, the result must stay on the base origin, and what is returned is the
+ * parser's own serialization re-checked for a leading `//`: the caller hands a browser exactly the
+ * string that was judged. Any control character, space or backslash in the input is refused
+ * outright rather than normalised, because a legitimate `next` never carries one.
  */
 export function safeNextPath(raw: string | null | undefined): string {
   if (raw === undefined || raw === null) return "/";
   if (!raw.startsWith("/")) return "/";
-  const second = raw.charAt(1);
-  if (second === "/" || second === "\\") return "/";
-  if (raw.startsWith(LOGIN_PATH)) return "/";
-  return raw;
+  if (/[\u0000-\u0020\u007f\\]/.test(raw)) return "/";
+  let parsed: URL;
+  try {
+    parsed = new URL(raw, NEXT_PATH_BASE);
+  } catch {
+    return "/";
+  }
+  if (parsed.origin !== NEXT_PATH_BASE_ORIGIN) return "/";
+  const path = `${parsed.pathname}${parsed.search}${parsed.hash}`;
+  if (!path.startsWith("/") || path.startsWith("//")) return "/";
+  if (parsed.pathname.startsWith(LOGIN_PATH)) return "/";
+  return path;
 }

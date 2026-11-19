@@ -273,6 +273,7 @@ describe("formatListSurfaceReport", () => {
       surveyListSurfaces(manifest({ filterable: false, sortable: false, extraText: true }), "pg-columns"),
     );
     expect(line).toContain("?q is narrower than declared");
+    expect(line).toContain("page.searchNarrowedBy");
     expect(line).toContain("missed rather than refused");
     expect(line).not.toContain("refused 400");
   });

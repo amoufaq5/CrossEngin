@@ -11,6 +11,7 @@ import {
   type MembershipRoleWarning,
 } from "./membership-role-fence.js";
 import { roleNameHasNoWhitespace, roleNameIsScopeSafe } from "./token-mint.js";
+import { escalatingRoles } from "./platform-authority.js";
 
 /**
  * The writer `meta.users` and `meta.user_tenant_membership` never had.
@@ -858,7 +859,52 @@ export interface PlatformUserRoutesContext {
    * from a deployment whose roles all check out. The compiler asks instead.
    */
   readonly roleDirectory: MembershipRoleDirectory;
+  /**
+   * The roles this deployment's flags hand a platform authority (`platformAuthorityRoles`). A
+   * membership grant naming one is refused unless the granter holds it (H-04). Required for
+   * `roleDirectory`'s reason: an optional set defaulting to empty is the escalation kept as a
+   * default.
+   */
+  readonly platformAuthorityRoles: ReadonlySet<string>;
+  /**
+   * Called after a user's status has moved, so the per-request standing check (`session-standing.ts`)
+   * stops serving its cached answer on this replica at once rather than after its TTL: a suspension
+   * is the act an operator expects to bite immediately. Required for `onSessionsEnded`'s reason on
+   * the credential routes: a forgotten invalidation is the silent version of the defect.
+   */
+  readonly onUserStatusChanged: (userId: string) => void;
   readonly clock?: () => Date;
+}
+
+/**
+ * Refuses a grant naming a platform-authority role its granter does not hold, recording the
+ * attempt as a refusal row. Before the act's own record, because nothing is written: what the row
+ * says is that somebody tried.
+ */
+async function refuseEscalation(
+  ctx: PlatformUserRoutesContext,
+  principal: ResolvedPrincipal | null,
+  grantedRoles: readonly string[],
+  event: Omit<UserRegistryAuditEvent, "at">,
+): Promise<HandlerOutput | null> {
+  const escalating = escalatingRoles({
+    granterRoles: rolesOf(ctx, principal),
+    grantedRoles,
+    authorityRoles: ctx.platformAuthorityRoles,
+  });
+  if (escalating.length === 0) return null;
+  return recordRefusal(
+    ctx,
+    event,
+    "role_escalation",
+    json(403, {
+      error: "role_escalation",
+      detail:
+        `this grant names platform role(s) ${escalating.join(", ")} the caller does not hold;` +
+        " a platform authority can be granted only by a principal that already holds it",
+      roles: escalating,
+    }),
+  );
 }
 
 function json(status: number, body: unknown): HandlerOutput {
@@ -1202,6 +1248,15 @@ function buildProvisionHandler(ctx: PlatformUserRoutesContext): Handler {
         roleWarnings,
       },
     };
+    if (membership !== undefined) {
+      const escalation = await refuseEscalation(
+        ctx,
+        principal,
+        [membership.primaryRole, ...membership.secondaryRoles],
+        event,
+      );
+      if (escalation !== null) return escalation;
+    }
     const unrecordable = await record(ctx, event);
     if (unrecordable !== null) return unrecordable;
     try {
@@ -1272,6 +1327,7 @@ function buildUserTransitionHandler(
     // overwritten — and a no-match still leaves this response's claim true, because the only states
     // that could have replaced it are ones this transition is not legal from.
     const user = await ctx.store.transitionStatus(id, target, [current.status]);
+    if (user !== null) ctx.onUserStatusChanged(id);
     if (user === null) {
       return recordRefusal(
         ctx,
@@ -1348,6 +1404,13 @@ function buildGrantMembershipHandler(ctx: PlatformUserRoutesContext): Handler {
         roleWarnings,
       },
     };
+    const escalation = await refuseEscalation(
+      ctx,
+      principal,
+      [input.primaryRole, ...input.secondaryRoles],
+      event,
+    );
+    if (escalation !== null) return escalation;
     const unrecordable = await record(ctx, event);
     if (unrecordable !== null) return unrecordable;
     try {
@@ -1400,6 +1463,18 @@ function buildMembershipTransitionHandler(
       roles: rolesOf(ctx, principal),
       detail: { from: current.status, to: target },
     };
+    // Activating a membership confers its roles exactly as granting one does, so the no-escalation
+    // rule applies here too: otherwise a revoked or invited membership naming a platform role,
+    // written by a principal that held it, could be switched on by one that never did.
+    if (target === "active") {
+      const escalation = await refuseEscalation(
+        ctx,
+        principal,
+        [current.primaryRole, ...current.secondaryRoles],
+        event,
+      );
+      if (escalation !== null) return escalation;
+    }
     const unrecordable = await record(ctx, event);
     if (unrecordable !== null) return unrecordable;
     const membership = await ctx.store.transitionMembershipStatus(tenantId, userId, target, [

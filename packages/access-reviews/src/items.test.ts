@@ -62,6 +62,12 @@ describe("canTransitionItem", () => {
   it("decided is terminal", () => {
     expect(REVIEW_ITEM_TRANSITIONS.decided).toEqual([]);
   });
+  it("lets an unattested item past its deadline reach auto_revoked (H-19)", () => {
+    expect(canTransitionItem("pending", "auto_revoked")).toBe(true);
+    expect(canTransitionItem("in_review", "auto_revoked")).toBe(true);
+    expect(canTransitionItem("decided", "auto_revoked")).toBe(false);
+    expect(canTransitionItem("withdrawn", "auto_revoked")).toBe(false);
+  });
   it("auto_revoked is terminal", () => {
     expect(REVIEW_ITEM_TRANSITIONS.auto_revoked).toEqual([]);
   });

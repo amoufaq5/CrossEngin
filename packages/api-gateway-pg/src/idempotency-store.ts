@@ -1,5 +1,10 @@
 import type { IdempotencyRecord } from "@crossengin/api-gateway";
-import type { IdempotencyStore } from "@crossengin/api-gateway-runtime";
+import type {
+  IdempotencyLookup,
+  IdempotencyReservation,
+  IdempotencyStore,
+  StoredIdempotentResponse,
+} from "@crossengin/api-gateway-runtime";
 import { isoInstant, requireIsoInstant, type PgConnection } from "@crossengin/kernel-pg";
 
 import { scopedRead, scopedWrite } from "./pipeline-execution-store.js";
@@ -31,6 +36,43 @@ interface Row {
   readonly completed_at: unknown;
   readonly error_code: string | null;
   readonly error_message: string | null;
+  /** JSONB comes back parsed; NULL is a row that retained no body. */
+  readonly response_headers: unknown;
+  /** BYTEA comes back as a `Buffer`, which is a `Uint8Array`. */
+  readonly response_body: Uint8Array | null;
+}
+
+const SELECT_COLUMNS = `record_id, tenant_id, operation_id, method, idempotency_key,
+                request_hash_sha256, principal_id, received_at, expires_at,
+                status, response_status, response_sha256, response_storage_uri,
+                completed_at, error_code, error_message, response_headers, response_body`;
+
+const INSERT_COLUMNS = `record_id, tenant_id, operation_id, method, idempotency_key,
+         request_hash_sha256, principal_id, received_at, expires_at,
+         status, response_status, response_sha256, response_storage_uri,
+         completed_at, error_code, error_message, response_headers, response_body`;
+
+/**
+ * The stored headers, or `null` when the column holds nothing a replay could send. A value that is
+ * not an object of strings is treated as no retained body rather than thrown: the row's status and
+ * hash still decide the replay, and refusing it would turn a completed request into a re-execution.
+ */
+function storedHeaders(value: unknown): Readonly<Record<string, string>> | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  const out: Record<string, string> = {};
+  for (const [name, header] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof header !== "string") return null;
+    out[name] = header;
+  }
+  return out;
+}
+
+function rowToLookup(row: Row): IdempotencyLookup {
+  const record = rowToRecord(row);
+  const responseHeaders = storedHeaders(row.response_headers);
+  if (responseHeaders === null) return record;
+  const responseBody = row.response_body === null ? null : new Uint8Array(row.response_body);
+  return { ...record, replay: { responseHeaders, responseBody } };
 }
 
 function rowToRecord(row: Row): IdempotencyRecord {
@@ -90,13 +132,10 @@ export class PostgresIdempotencyStore implements IdempotencyStore {
     this.conn = conn;
   }
 
-  async get(input: { tenantId: string; key: string }): Promise<IdempotencyRecord | null> {
+  async get(input: { tenantId: string; key: string }): Promise<IdempotencyLookup | null> {
     const result = await scopedRead(this.conn, input.tenantId, (tx) =>
       tx.query<Row>(
-        `SELECT record_id, tenant_id, operation_id, method, idempotency_key,
-                request_hash_sha256, principal_id, received_at, expires_at,
-                status, response_status, response_sha256, response_storage_uri,
-                completed_at, error_code, error_message
+        `SELECT ${SELECT_COLUMNS}
            FROM ${SCHEMA}.${TABLE}
           WHERE tenant_id = $1 AND idempotency_key = $2
           LIMIT 1`,
@@ -104,7 +143,123 @@ export class PostgresIdempotencyStore implements IdempotencyStore {
       ),
     );
     const row = result.rows[0];
-    return row === undefined ? null : rowToRecord(row);
+    return row === undefined ? null : rowToLookup(row);
+  }
+
+  /**
+   * One statement decides who runs: the insert wins on an unseen key, and on a seen one the
+   * `DO UPDATE` takes the row over only when its lease or its retention has lapsed. `RETURNING`
+   * answers for the winner and nothing for the loser, who is then shown the row that beat it.
+   */
+  async reserve(input: { tenantId: string; record: IdempotencyRecord }): Promise<IdempotencyReservation> {
+    const r = input.record;
+    const won = await scopedWrite(this.conn, input.tenantId, (tx) =>
+      tx.query<{ readonly record_id: string }>(
+        `INSERT INTO ${SCHEMA}.${TABLE} (${INSERT_COLUMNS})
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'in_progress', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
+       ON CONFLICT (record_id) DO UPDATE
+         SET operation_id = EXCLUDED.operation_id,
+             method = EXCLUDED.method,
+             request_hash_sha256 = EXCLUDED.request_hash_sha256,
+             principal_id = EXCLUDED.principal_id,
+             received_at = EXCLUDED.received_at,
+             expires_at = EXCLUDED.expires_at,
+             status = 'in_progress',
+             response_status = NULL,
+             response_sha256 = NULL,
+             response_storage_uri = NULL,
+             completed_at = NULL,
+             error_code = NULL,
+             error_message = NULL,
+             response_headers = NULL,
+             response_body = NULL
+         WHERE ${TABLE}.tenant_id = $2 AND ${TABLE}.expires_at <= EXCLUDED.received_at
+       RETURNING record_id`,
+        [
+          r.id,
+          r.tenantId,
+          r.operationId,
+          r.method,
+          r.idempotencyKey,
+          r.requestHashSha256,
+          r.principalId,
+          r.receivedAt,
+          r.expiresAt,
+        ],
+      ),
+    );
+    if (won.rows.length > 0) return { reserved: true };
+    const existing = await this.get({ tenantId: input.tenantId, key: r.idempotencyKey });
+    if (existing === null) {
+      // The holder was released or reaped between the two statements. Not a reservation for this
+      // request — the caller answers in progress and the client's next retry reserves cleanly.
+      return { reserved: false, existing: { ...r } };
+    }
+    return { reserved: false, existing };
+  }
+
+  /**
+   * Upserts the completed row. Conditional on the request hash, so a completion arriving after its
+   * lease lapsed and another request took the key over writes nothing over that request's row.
+   */
+  async complete(input: {
+    tenantId: string;
+    record: IdempotencyRecord;
+    replay: StoredIdempotentResponse | null;
+  }): Promise<void> {
+    const r = input.record;
+    const responseHeaders = input.replay === null ? null : JSON.stringify(input.replay.responseHeaders);
+    const responseBody = input.replay?.responseBody ?? null;
+    await scopedWrite(this.conn, input.tenantId, (tx) =>
+      tx.query(
+        `INSERT INTO ${SCHEMA}.${TABLE} (${INSERT_COLUMNS})
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17::jsonb, $18)
+       ON CONFLICT (record_id) DO UPDATE
+         SET status = EXCLUDED.status,
+             response_status = EXCLUDED.response_status,
+             response_sha256 = EXCLUDED.response_sha256,
+             response_storage_uri = EXCLUDED.response_storage_uri,
+             completed_at = EXCLUDED.completed_at,
+             error_code = EXCLUDED.error_code,
+             error_message = EXCLUDED.error_message,
+             expires_at = EXCLUDED.expires_at,
+             response_headers = EXCLUDED.response_headers,
+             response_body = EXCLUDED.response_body
+         WHERE ${TABLE}.tenant_id = $2 AND ${TABLE}.request_hash_sha256 = EXCLUDED.request_hash_sha256`,
+        [
+          r.id,
+          r.tenantId,
+          r.operationId,
+          r.method,
+          r.idempotencyKey,
+          r.requestHashSha256,
+          r.principalId,
+          r.receivedAt,
+          r.expiresAt,
+          r.status,
+          r.responseStatus,
+          r.responseSha256,
+          r.responseStorageUri,
+          r.completedAt,
+          r.errorCode,
+          r.errorMessage,
+          responseHeaders,
+          responseBody,
+        ],
+      ),
+    );
+  }
+
+  /** Deletes this request's own in-progress reservation, and nothing it does not hold. */
+  async release(input: { tenantId: string; key: string; requestHashSha256: string }): Promise<void> {
+    await scopedWrite(this.conn, input.tenantId, (tx) =>
+      tx.query(
+        `DELETE FROM ${SCHEMA}.${TABLE}
+          WHERE tenant_id = $1 AND idempotency_key = $2
+            AND status = 'in_progress' AND request_hash_sha256 = $3`,
+        [input.tenantId, input.key, input.requestHashSha256],
+      ),
+    );
   }
 
   async put(input: { tenantId: string; record: IdempotencyRecord }): Promise<void> {

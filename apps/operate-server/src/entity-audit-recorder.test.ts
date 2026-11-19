@@ -56,18 +56,37 @@ function pool(): { conn: PgConnection; txs: PgConnection[] } {
 function sink(over: Partial<EntityAuditSink> = {}): EntityAuditSink & {
   within: { tx: PgConnection; entry: AuditLogEntry }[];
   own: AuditLogEntry[];
+  removalReads: { tx: PgConnection | null }[];
 } {
   const within: { tx: PgConnection; entry: AuditLogEntry }[] = [];
   const own: AuditLogEntry[] = [];
+  const removalReads: { tx: PgConnection | null }[] = [];
   return {
     within,
     own,
+    removalReads,
     emitWithin: async (tx, entry) => void within.push({ tx, entry }),
     emit: async (entry) => void own.push(entry),
     anchors: () => true,
+    childDetachments: async () => {
+      removalReads.push({ tx: null });
+      return { removers: [USER], withheld: false };
+    },
+    childDetachmentsWithin: async (tx) => {
+      removalReads.push({ tx });
+      return { removers: [USER], withheld: false };
+    },
     ...over,
   };
 }
+
+const REMOVAL_QUERY = {
+  tenantId: TENANT,
+  childEntity: "BillLine",
+  parentField: "bill_id",
+  parentId: "bill_1",
+  parentCreatedAt: null,
+};
 
 function exec(requestId: string, status: number | null): PipelineExecution {
   return { requestId, finalResponseStatus: status } as PipelineExecution;
@@ -209,6 +228,44 @@ describe("EntityAuditRecorder", () => {
     expect(rec.pendingSupersedes()).toBe(2);
     expect(rec.supersedes(exec("a", 200))).toBe(false);
     expect(rec.supersedes(exec("c", 200))).toBe(true);
+  });
+});
+
+describe("EntityAuditRecorder.childRemovers", () => {
+  it("reads inside the caller's transaction, so an approval holding the parent lock takes no second connection", async () => {
+    const ambient = new AmbientTransactions();
+    const s = sink();
+    const rec = new EntityAuditRecorder({ sink: s, currentTransaction: () => ambient.current(), onRefused: vi.fn() });
+    const out = await ambient.wrap(pool().conn).transaction(() => rec.childRemovers(REMOVAL_QUERY));
+    expect(out).toEqual({ kind: "read", removers: [USER] });
+    expect(s.removalReads).toHaveLength(1);
+    expect(s.removalReads[0]!.tx).not.toBeNull();
+  });
+
+  it("opens its own scoped read outside a transaction", async () => {
+    const s = sink();
+    const rec = new EntityAuditRecorder({ sink: s, currentTransaction: () => undefined, onRefused: vi.fn() });
+    expect(await rec.childRemovers(REMOVAL_QUERY)).toEqual({ kind: "read", removers: [USER] });
+    expect(s.removalReads).toEqual([{ tx: null }]);
+  });
+
+  it("answers unreadable, never an empty list, when the read fails or a parent reference is withheld", async () => {
+    const leaky = Object.assign(new Error("relation detail MRN-SECRET"), { code: "42501" });
+    const failing = new EntityAuditRecorder({
+      sink: sink({ childDetachments: async () => Promise.reject(leaky) }),
+      currentTransaction: () => undefined,
+      onRefused: vi.fn(),
+    });
+    const a = await failing.childRemovers(REMOVAL_QUERY);
+    expect(a).toEqual({ kind: "unreadable", reason: "Error 42501" });
+    const withheld = new EntityAuditRecorder({
+      sink: sink({ childDetachments: async () => ({ removers: [], withheld: true }) }),
+      currentTransaction: () => undefined,
+      onRefused: vi.fn(),
+    });
+    const b = await withheld.childRemovers(REMOVAL_QUERY);
+    expect(b.kind).toBe("unreadable");
+    expect(b.kind === "unreadable" ? b.reason : "").toContain("withheld");
   });
 });
 

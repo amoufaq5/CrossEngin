@@ -1,4 +1,4 @@
-import { getActiveFormatting, type UiFormatting } from "@/lib/schema";
+import { getActiveFormatting, type UiFieldSchema, type UiFormatting } from "@/lib/schema";
 
 export function titleCase(value: string): string {
   return value
@@ -12,10 +12,76 @@ const NUMBER_LOCALE: Record<string, string> = {
   "1 234,56": "fr-FR",
 };
 
-function groupNumber(n: number, fmt: UiFormatting): string {
-  if (fmt.numberFormat === "1234.56") return n.toFixed(2);
+/** The fraction digits every ledger amount column declares — what a number with no text of its own is shown at. */
+const LEDGER_MONEY_SCALE = 2;
+
+function separators(fmt: UiFormatting): { group: string; decimal: string } {
+  if (fmt.numberFormat === "1234.56") return { group: "", decimal: "." };
   const locale = (fmt.numberFormat ? NUMBER_LOCALE[fmt.numberFormat] : undefined) ?? fmt.locale;
-  return n.toLocaleString(locale, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  let parts: Intl.NumberFormatPart[];
+  try {
+    parts = new Intl.NumberFormat(locale).formatToParts(12345.6);
+  } catch {
+    parts = new Intl.NumberFormat("en-US").formatToParts(12345.6);
+  }
+  return {
+    group: parts.find((p) => p.type === "group")?.value ?? ",",
+    decimal: parts.find((p) => p.type === "decimal")?.value ?? ".",
+  };
+}
+
+/**
+ * A money value as exact decimal text, or null when it is not one.
+ *
+ * A decimal arrives as a canonical string at its own declared scale, so it is used as it is: no
+ * double touches it, and it is shown at the scale it carries rather than at a fixed two places — a
+ * zero-decimal currency's `1500` is not `1,500.00`. A JS number (a report total) has no scale of its
+ * own, so it is spelled exactly by `String()` and padded to the ledger's scale.
+ */
+function moneyText(value: unknown): string | null {
+  if (typeof value === "string") return /^-?\d+(?:\.\d+)?$/.test(value) ? value : null;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const text = String(value);
+    if (!/^-?\d+(?:\.\d+)?$/.test(text)) return value.toFixed(LEDGER_MONEY_SCALE);
+    const point = text.indexOf(".");
+    const frac = point < 0 ? "" : text.slice(point + 1);
+    if (frac.length >= LEDGER_MONEY_SCALE) return text;
+    return `${point < 0 ? text : text.slice(0, point)}.${frac.padEnd(LEDGER_MONEY_SCALE, "0")}`;
+  }
+  return null;
+}
+
+/** Groups exact decimal text with the tenant's separators, digit for digit. */
+function groupDecimalText(text: string, fmt: UiFormatting): string {
+  const { group, decimal } = separators(fmt);
+  const negative = text.startsWith("-");
+  const body = negative ? text.slice(1) : text;
+  const point = body.indexOf(".");
+  const whole = point < 0 ? body : body.slice(0, point);
+  const frac = point < 0 ? "" : body.slice(point + 1);
+  const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, group);
+  return `${negative ? "-" : ""}${grouped}${frac === "" ? "" : decimal + frac}`;
+}
+
+/**
+ * The tenant's functional currency — the right label for a figure the ledger states in it (a
+ * functional debit or credit, a revaluation), and the wrong one for a document amount, which is in
+ * the document's own currency.
+ */
+export function functionalCurrency(): string | null {
+  return getActiveFormatting().currency ?? null;
+}
+
+/**
+ * The currency a money field of a record is stated in. A record's own `currency` is its transaction
+ * currency, which is right for its amounts and wrong for the two kinds of field that carry the base
+ * currency beside them: a journal line's `functional_debit`/`functional_credit`, and a payment's
+ * `cash_amount` (the base-currency cash the settlement posts as such). Labelling those with the
+ * record's currency put `EUR` beside a USD figure.
+ */
+export function moneyFieldCurrency(fieldName: string, recordCurrency: unknown): string | null {
+  if (fieldName.startsWith("functional_") || fieldName === "cash_amount") return functionalCurrency();
+  return typeof recordCurrency === "string" && recordCurrency !== "" ? recordCurrency : null;
 }
 
 function formatDate(iso: string, fmt: UiFormatting): string {
@@ -34,35 +100,36 @@ function formatDate(iso: string, fmt: UiFormatting): string {
   }
 }
 
+const MONEY_NAME = /(total|amount|price|cost|tax|budget|salary|debit|credit|payable|receivable|value|balance|fee)/;
+const NOT_MONEY_NAME = /(_pct|percent|hours|days|quantity|qty|rate|weight|probability)/;
+
 /**
- * Whether `n` still names the decimal `text` exactly. `String(n)` alone is too strict — a
- * canonical wire decimal is padded to its declared scale, so `"10.00"` renders as `"10"` while
- * being the same number — so the comparison is made at the text's own scale.
+ * Whether a field holds money. The schema carries no money marker — a manifest has no money field
+ * kind, so a `decimal` is a price, a percentage or a quantity alike — and this is a name guess,
+ * narrowed by the one fact the schema does carry: money is a `decimal`. Measured over `erp-core`'s
+ * fields, the earlier guess (any number named like a total) missed seven money fields, among them
+ * `JournalLine.debit`/`credit` and both functional amounts, and matched none it should not; this one
+ * matches the 48 `decimal` money fields and nothing else. A manifest-declared marker is the real
+ * fix, and it is a schema decision.
  */
-function roundTripsExactly(text: string, n: number): boolean {
-  const point = text.indexOf(".");
-  const scale = point < 0 ? 0 : text.length - point - 1;
-  // `toFixed` only accepts 0-100; past that, treat the value as one a double cannot name.
-  if (scale > 100) return false;
-  return n.toFixed(scale) === text;
+export function isMoneyField(field: UiFieldSchema): boolean {
+  return field.decimal !== undefined && MONEY_NAME.test(field.name) && !NOT_MONEY_NAME.test(field.name);
 }
 
-export function formatCell(value: unknown, kind?: string): string {
+/**
+ * Renders a cell. A `money` value is labelled with `currency` when the caller states it — the
+ * record's own `currency`, or {@link functionalCurrency} for a figure the ledger states in it — and
+ * with nothing when it does not. It used to be labelled with the tenant's currency unconditionally,
+ * which put `USD` beside every EUR invoice's total.
+ */
+export function formatCell(value: unknown, kind?: string, currency?: string | null): string {
   if (value === null || value === undefined) return "—";
   const fmt = getActiveFormatting();
   if (kind === "money") {
-    const n = typeof value === "number" ? value : Number(value);
-    if (!Number.isFinite(n)) return String(value);
-    // A decimal arrives as a canonical string and may carry more digits than a double holds, so
-    // grouping it would print a figure that is not the stored one — `99999999999999.99` groups as
-    // `99,999,999,999,999.98`, a cent out. When the round trip is not exact the raw value is shown
-    // instead: harder to read, but a money column that quietly displays the wrong figure is the
-    // thing the wire type exists to prevent.
-    if (typeof value === "string" && !roundTripsExactly(value, n)) {
-      return fmt.currency ? `${value} ${fmt.currency}` : value;
-    }
-    const grouped = groupNumber(n, fmt);
-    return fmt.currency ? `${grouped} ${fmt.currency}` : grouped;
+    const text = moneyText(value);
+    if (text === null) return String(value);
+    const grouped = groupDecimalText(text, fmt);
+    return typeof currency === "string" && currency !== "" ? `${grouped} ${currency}` : grouped;
   }
   if (kind === "date") {
     return formatDate(String(value), fmt);

@@ -10,6 +10,7 @@ import {
   MAX_SESSION_TOKEN_SECONDS,
   MIN_SESSION_TOKEN_SECONDS,
   SCOPE_DELIMITER,
+  SESSION_EPOCH_CLAIM,
   TOKEN_NOT_BEFORE_SKEW_SECONDS,
   dedupedSessionRoles,
   mintSessionToken,
@@ -30,6 +31,7 @@ function mint(over: Partial<Parameters<typeof mintSessionToken>[0]> = {}) {
     userId: USER,
     tenantId: TENANT,
     roles: { primaryRole: "erp_admin", secondaryRoles: [] },
+    sessionEpoch: 0,
     now: NOW,
     lifetimeSeconds: DEFAULT_SESSION_TOKEN_SECONDS,
     kid: "login-v1",
@@ -99,6 +101,18 @@ describe("mintSessionToken", () => {
     // the system -- the RLS context, the status gate, row filtering -- reads that value.
     const claims = decodeSegment(mint().token.split(".")[1]!);
     expect(claims["tenant_id"]).toBe(TENANT);
+  });
+
+  it("carries the session generation it was minted under, as a number", () => {
+    const claims = decodeSegment(mint({ sessionEpoch: 7 }).token.split(".")[1]!);
+    expect(claims[SESSION_EPOCH_CLAIM]).toBe(7);
+    expect(decodeSegment(mint().token.split(".")[1]!)[SESSION_EPOCH_CLAIM]).toBe(0);
+  });
+
+  it("refuses a generation that is not a non-negative integer", () => {
+    for (const bad of [-1, 1.5, Number.NaN]) {
+      expect(() => mint({ sessionEpoch: bad })).toThrow(/session epoch/);
+    }
   });
 
   it("puts the user's row id in sub, unhashed", () => {

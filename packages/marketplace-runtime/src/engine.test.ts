@@ -1,6 +1,8 @@
 import { generateEd25519Keypair } from "@crossengin/crypto";
 import {
   PackManifestSchema,
+  PackPublisherRegistry,
+  parsePackPublisherSpec,
   signPackManifest,
   type PackCompatibility,
   type PackManifest,
@@ -58,7 +60,9 @@ function buildRequest(overrides: Partial<PackManifest> = {}): InstallRequest {
     version: "1.0.0",
     compatibility,
     signature,
-    publisherPublicKeyBase64: kp.publicKeyBase64,
+    publishers: new PackPublisherRegistry([
+      parsePackPublisherSpec(`com.crossengin:crossengin_official:${kp.publicKeyBase64}`),
+    ]),
     securityReviewStatus: "passed",
     tenantContext,
     existing: [],

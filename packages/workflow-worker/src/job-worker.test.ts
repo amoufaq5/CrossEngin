@@ -36,6 +36,7 @@ describe("WorkflowJobWorker.runOnce", () => {
     };
     const processed: string[] = [];
     const worker = new WorkflowJobWorker({
+      claimRenewer: null,
       workerId: "worker-A",
       claimer,
       processor: { process: async (j) => void processed.push(j.jobId) },
@@ -65,6 +66,7 @@ describe("WorkflowJobWorker loop", () => {
     const done = new Promise<void>((r) => (resolveDone = r));
 
     const worker = new WorkflowJobWorker({
+      claimRenewer: null,
       workerId: "w",
       claimer,
       processor: { process: async (j) => void processed.push(j.jobId) },
@@ -88,6 +90,54 @@ describe("WorkflowJobWorker loop", () => {
     expect(sleeps).toContain(1_000);
   });
 
+  it("backs off to the idle delay after a batch that claimed work and finished none of it", async () => {
+    // A run whose processing throws is released and re-claimed; with the active delay (0 by default)
+    // that was a claim/throw/release loop at round-trip speed. Only a batch that made progress drains.
+    const claimer: JobClaimer = { claim: async () => [job("poison")], release: async () => undefined };
+    const sleeps: number[] = [];
+    let resolveDone!: () => void;
+    const done = new Promise<void>((r) => (resolveDone = r));
+    const worker = new WorkflowJobWorker({
+      claimRenewer: null,
+      workerId: "w",
+      claimer,
+      processor: {
+        process: async () => {
+          throw new Error("deterministic bug");
+        },
+      },
+      idlePollMs: 1_000,
+      activePollMs: 0,
+      now: () => new Date("2026-01-01T00:00:00.000Z"),
+      sleep: async (ms) => {
+        sleeps.push(ms);
+        if (sleeps.length === 2) resolveDone();
+      },
+    });
+    worker.start();
+    await done;
+    await worker.stop();
+    expect(sleeps).toEqual([1_000, 1_000]);
+  });
+
+  it("passes its claim renewer to the batch, so a queued run is reaffirmed before it starts", async () => {
+    const asked: string[] = [];
+    const worker = new WorkflowJobWorker({
+      claimRenewer: {
+        renew: async (o) => {
+          asked.push(o.timerId);
+          return false;
+        },
+      },
+      workerId: "w",
+      claimer: { claim: async () => [job("a")], release: async () => undefined },
+      processor: { process: async () => undefined },
+    });
+    const result = await worker.runOnce();
+    expect(asked).toEqual(["a"]);
+    expect(result.skipped).toEqual([{ jobId: "a", reason: "lease_lost" }]);
+  });
+
   it("reports a claim error via onError and keeps polling", async () => {
     let call = 0;
     const errors: unknown[] = [];
@@ -102,6 +152,7 @@ describe("WorkflowJobWorker loop", () => {
       release: async () => undefined,
     };
     const worker = new WorkflowJobWorker({
+      claimRenewer: null,
       workerId: "w",
       claimer,
       processor: noopProcessor,
@@ -122,6 +173,7 @@ describe("WorkflowJobWorker loop", () => {
 
   it("start() is idempotent and stop() is safe when never started", async () => {
     const worker = new WorkflowJobWorker({
+      claimRenewer: null,
       workerId: "w",
       claimer: { claim: async () => [], release: async () => undefined },
       processor: noopProcessor,
@@ -137,6 +189,7 @@ describe("WorkflowJobWorker and cancellation", () => {
     const processed: string[] = [];
     const released: string[] = [];
     const worker = new WorkflowJobWorker({
+      claimRenewer: null,
       workerId: "worker-A",
       claimer: {
         claim: async () => [job("a"), job("b")],
@@ -154,6 +207,7 @@ describe("WorkflowJobWorker and cancellation", () => {
   it("does not report a direct runOnce as a shutdown — `stopping` gates the batch, not `running`", async () => {
     const processed: string[] = [];
     const worker = new WorkflowJobWorker({
+      claimRenewer: null,
       workerId: "worker-A",
       claimer: { claim: async () => [job("a")], release: async () => undefined },
       processor: { process: async (j) => void processed.push(j.jobId) },
@@ -171,6 +225,7 @@ describe("WorkflowJobWorker and cancellation", () => {
     const aMayFinish = deferred();
     let claims = 0;
     const worker = new WorkflowJobWorker({
+      claimRenewer: null,
       workerId: "worker-A",
       claimer: {
         claim: async () => {
@@ -207,6 +262,7 @@ describe("WorkflowJobWorker and cancellation", () => {
   it("reports each skip through onSkipped", async () => {
     const seen: Array<[string, string]> = [];
     const worker = new WorkflowJobWorker({
+      claimRenewer: null,
       workerId: "worker-A",
       claimer: { claim: async () => [job("a")], release: async () => undefined },
       processor: noopProcessor,

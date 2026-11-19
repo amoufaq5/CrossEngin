@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { resolve } from "node:path";
@@ -7,7 +8,7 @@ import { InMemoryEntityStore } from "@crossengin/operate-runtime";
 // `}` inside a doc comment unbalances the brace matcher below, and `stripComments` is the one
 // implementation whose regex-literal hazard has already been found and fixed (ADR-0356).
 import { stripComments } from "@crossengin/testing/strategy";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { parseServeArgs } from "./cli.js";
 import { loadBuiltinPack } from "./manifest-source.js";
@@ -15,6 +16,8 @@ import { parseApiKeySpec } from "./principals.js";
 import { buildOperateHttpServer } from "./server.js";
 import { auditEmitterAvailable, createNodeRequestListener, serve, type NodeReqLike, type NodeResLike } from "./node.js";
 
+// Random per run, so no fixed secret-shaped literal sits in the tree (ADR-0420).
+const STRONG_KEY = randomBytes(32).toString("hex");
 const TENANT = "00000000-0000-4000-8000-000000000001";
 const manifest = await loadBuiltinPack("erp-retail");
 
@@ -169,16 +172,91 @@ describe("createNodeRequestListener", () => {
     );
     expect(res.status).toBe(201);
   });
+
+  // The listener's 500 carried `err.message` as its `detail`, and the dispatch target is reached
+  // before any authentication, so whatever a fault said — a host, a table, a tenant id — went to
+  // an anonymous caller. The cause is logged under an id; the caller gets the id and nothing else.
+  it("answers a thrown dispatch with a fixed 500 naming a request id, never the exception", async () => {
+    const secret = `connect ECONNREFUSED 10.0.0.7:5432 for tenant ${TENANT}`;
+    const listener = createNodeRequestListener({
+      dispatch: async () => {
+        throw new Error(secret);
+      },
+    });
+    const res = mockRes();
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    let logged = "";
+    try {
+      await listener(mockReq({ method: "GET", url: "/v1/products?api_key=nope" }), res);
+      logged = spy.mock.calls.map((c) => String(c[0])).join("\n");
+    } finally {
+      spy.mockRestore();
+    }
+    expect(res.status).toBe(500);
+    const text = new TextDecoder().decode(res.body ?? new Uint8Array());
+    expect(text).not.toContain("ECONNREFUSED");
+    expect(text).not.toContain(TENANT);
+    const id = res.headers["x-request-id"];
+    expect(id).toMatch(/^req_[A-Za-z0-9_-]{8,64}$/);
+    expect(JSON.parse(text)).toMatchObject({ status: 500, extensions: { requestId: id } });
+    expect(logged).toContain(id!);
+    expect(logged).toContain("ECONNREFUSED");
+    expect(logged).not.toContain("api_key=nope");
+  });
+
+  it("does not reject when the fallback response itself cannot be written", async () => {
+    const listener = createNodeRequestListener({
+      dispatch: async () => {
+        throw new Error("boom");
+      },
+    });
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      await expect(
+        listener(mockReq({ method: "GET", url: "/" }), {
+          writeHead: () => {
+            throw new Error("ERR_HTTP_HEADERS_SENT");
+          },
+          end: () => undefined,
+        }),
+      ).resolves.toBeUndefined();
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });
 
 describe("serve — real loopback boot", () => {
   it("boots a listening server and answers a request", async () => {
     const running = await serve(
-      parseServeArgs(["--pack", "erp-retail", "--port", "0", "--api-key", `key-manager:store_manager:${TENANT}`]),
+      // A token the M-28 entropy floor admits: the boot now refuses a guessable api-key token.
+      parseServeArgs(["--pack", "erp-retail", "--port", "0", "--api-key", `${STRONG_KEY}:store_manager:${TENANT}`]),
     );
     try {
-      const status = await get(running.port, "/v1/products", "key-manager");
+      const status = await get(running.port, "/v1/products", STRONG_KEY);
       expect(status).toBe(200);
+    } finally {
+      await running.close();
+    }
+  });
+
+  it("refuses to boot on a guessable api-key token unless --allow-weak-api-keys says so (M-28)", async () => {
+    await expect(
+      serve(parseServeArgs(["--pack", "erp-retail", "--port", "0", "--api-key", `key-manager:store_manager:${TENANT}`])),
+    ).rejects.toThrow(/--allow-weak-api-keys/);
+    const running = await serve(
+      parseServeArgs([
+        "--pack",
+        "erp-retail",
+        "--port",
+        "0",
+        "--api-key",
+        `key-manager:store_manager:${TENANT}`,
+        "--allow-weak-api-keys",
+      ]),
+    );
+    try {
+      expect(await get(running.port, "/v1/products", "key-manager")).toBe(200);
     } finally {
       await running.close();
     }
@@ -309,6 +387,25 @@ describe("the two durable job producers report their failures", () => {
       expect(at, prefix).toBeGreaterThan(-1);
       expect(src.slice(at, at + 400), prefix).toContain("42501");
     }
+  });
+});
+
+describe("serve() — the pre-auth bound reaches the login route", () => {
+  /**
+   * The login is an interceptor in front of `OperateHttpServer.dispatch`, which is where the
+   * pre-auth bound was first applied — so the one route that verifies a password, the work the
+   * bound exists to cap, was outside it. Read as text for the fence above's reason: the wrapper is
+   * built inside `serve()`.
+   */
+  const src = readFileSync(resolve(import.meta.dirname, "./node.ts"), "utf8");
+
+  it("checks the bound before the login interceptor runs, for the login path only", () => {
+    const at = src.indexOf('mountedOutOfRegistry.add("credential_login");');
+    expect(at).toBeGreaterThan(-1);
+    const wrapper = src.slice(at, src.indexOf("(await login(raw, body))", at));
+    expect(wrapper).toContain("isAuthTokenPath(raw.url)");
+    expect(wrapper).toContain("preAuthLimiter.check(raw)");
+    expect(wrapper).toContain("preAuthLimitedResponse(");
   });
 });
 
@@ -998,4 +1095,60 @@ describe("the serving pool is bounded and the operator subcommands are not", () 
     expect(others.length).toBeGreaterThanOrEqual(4);
     expect(new Set(others)).toEqual(new Set(["parsePgEnvConfig()"]));
   });
+});
+
+describe("node — usage metered in memory reaches the store on shutdown (H-30)", () => {
+  const src = stripComments(readFileSync(resolve(import.meta.dirname, "./node.ts"), "utf8"));
+
+  it("flushes the metering scheduler after the listener closes and before the pool does", () => {
+    const flush = src.indexOf("listenerClosed.then(() => metering?.flushScheduler.flushOnce())");
+    const close = src.indexOf(".then(() => conn?.close())");
+    expect(flush).toBeGreaterThan(0);
+    expect(close).toBeGreaterThan(flush);
+    expect(src.indexOf("const listenerClosed = closeListener(")).toBeLessThan(flush);
+  });
+});
+
+/**
+ * The marketplace's tenant facts were a literal in this file — `planTier: "professional"`,
+ * `region: "us-east"`, `compliancePacks: []`, `isDedicatedTenant: false`, `platformVersion: "1.0.0"` —
+ * the same for every tenant, so three of the five admitted a pack the tenant's real fact refuses. The
+ * facts are resolved per tenant now and the install grant is a flag; this fences both from returning.
+ */
+describe("serve()'s marketplace tenant facts", () => {
+  const src = stripComments(readFileSync(resolve(import.meta.dirname, "./node.ts"), "utf8"));
+  const start = src.indexOf("buildMarketplaceAdminRoutes({");
+  const block = src.slice(start, src.indexOf("}),", start));
+
+  it("builds the tenant context per tenant rather than as one literal", () => {
+    expect(start).toBeGreaterThan(-1);
+    expect(block).toMatch(/tenantContext:\s*buildMarketplaceTenantContext\(/);
+    for (const fabricated of [/planTier:\s*"/, /isDedicatedTenant:\s*(true|false)/, /compliancePacks:\s*\[/, /platformVersion:\s*"/]) {
+      expect(block).not.toMatch(fabricated);
+    }
+  });
+
+  it("takes the install grant from --pack-admin-role rather than a fixed role name", () => {
+    expect(block).toMatch(/adminRoles:\s*new Set\(options\.packAdminRoles\)/);
+    expect(block).not.toMatch(/adminRoles:\s*new Set\(\[/);
+  });
+});
+
+/**
+ * H-05 made both destructive routes act only under a verified deletion request, so mounting either
+ * without the routes that verify one is a surface that refuses every call. Fenced as text, per
+ * route block, because the warning is the only thing that says so at boot.
+ */
+describe("serve()'s destructive routes without the request routes", () => {
+  const src = stripComments(readFileSync(resolve(import.meta.dirname, "./node.ts"), "utf8"));
+  for (const flag of ["--tenant-deletion-routes", "--tenant-erasure-routes"] as const) {
+    it(`warns that ${flag} has no request it can act under`, () => {
+      const field = flag === "--tenant-deletion-routes" ? "tenantDeletionRoutes" : "tenantErasureRoutes";
+      const start = src.indexOf(`if (options.${field}) {`);
+      expect(start).toBeGreaterThan(-1);
+      const block = src.slice(start, src.indexOf("extraRouteList.push(", start));
+      expect(block).toMatch(/if \(!options\.deletionRequestRoutes\)/);
+      expect(block).toContain(`${flag} acts only under a verified deletion request`);
+    });
+  }
 });

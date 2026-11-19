@@ -36,8 +36,15 @@ export function buildActivityClaimRenewer(
   const now = opts.now ?? (() => new Date());
   const schemaOpt = opts.schema !== undefined ? { schema: opts.schema } : {};
   return {
-    renew: ({ timerId, workerId }) =>
-      renewActivityClaim(conn, { activityId: timerId, workerId, now: now().toISOString(), leaseMs: opts.leaseMs, ...schemaOpt }),
+    renew: ({ timerId, workerId, tenantId }) =>
+      renewActivityClaim(conn, {
+        activityId: timerId,
+        workerId,
+        tenantId,
+        now: now().toISOString(),
+        leaseMs: opts.leaseMs,
+        ...schemaOpt,
+      }),
   };
 }
 
@@ -74,6 +81,7 @@ export function buildActivityProcessor(
         renewer: renewal.renewer,
         timerId: activity.activityId,
         workerId: renewal.workerId,
+        tenantId: activity.tenantId,
         intervalMs: renewal.intervalMs,
         sleep: renewal.sleep,
         ...(renewal.onLeaseLost !== undefined ? { onLeaseLost: renewal.onLeaseLost } : {}),
@@ -108,14 +116,17 @@ export interface BuildWorkflowActivityWorkerInput {
 export function buildWorkflowActivityWorker(input: BuildWorkflowActivityWorkerInput): WorkflowActivityWorker {
   const claimer = buildActivityClaimer(input.conn, input.schema !== undefined ? { schema: input.schema } : {});
   // Optional lease renewal: heartbeat the claim while an execute runs so a slow handler isn't stolen.
+  // Built whether or not the heartbeat is on: the batch reaffirms every claim before its item starts,
+  // which is what keeps an item queued behind a slow one from running on a lease it no longer holds.
+  const claimRenewer = buildActivityClaimRenewer(input.conn, {
+    leaseMs: input.leaseMs ?? 30_000,
+    ...(input.now !== undefined ? { now: input.now } : {}),
+    ...(input.schema !== undefined ? { schema: input.schema } : {}),
+  });
   const renewal: ActivityRenewalConfig | undefined =
     input.renewIntervalMs !== undefined
       ? {
-          renewer: buildActivityClaimRenewer(input.conn, {
-            leaseMs: input.leaseMs ?? 30_000,
-            ...(input.now !== undefined ? { now: input.now } : {}),
-            ...(input.schema !== undefined ? { schema: input.schema } : {}),
-          }),
+          renewer: claimRenewer,
           workerId: input.workerId,
           intervalMs: input.renewIntervalMs,
           sleep: input.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))),
@@ -128,6 +139,7 @@ export function buildWorkflowActivityWorker(input: BuildWorkflowActivityWorkerIn
     workerId: input.workerId,
     claimer,
     processor,
+    claimRenewer,
     ...(input.batchLimit !== undefined ? { batchLimit: input.batchLimit } : {}),
     ...(input.leaseMs !== undefined ? { leaseMs: input.leaseMs } : {}),
     ...(input.idlePollMs !== undefined ? { idlePollMs: input.idlePollMs } : {}),

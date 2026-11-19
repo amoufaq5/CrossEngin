@@ -317,6 +317,12 @@ export interface ListSqlParts {
    * beside are **not** safe to run: they are the query minus whatever could not be expressed.
    */
   readonly unserveable: readonly UnserveableListSurface[];
+  /**
+   * The searchable fields a `?q=` that **ran** left out because this store cannot express them, in
+   * the order the query named them. Empty unless the search was partially narrowed: a search left
+   * with nothing to match against is in `unserveable` instead, because that one widens.
+   */
+  readonly searchNarrowedBy: readonly string[];
 }
 
 /** Builds a `$n` placeholder for a value, appending it to `params`. */
@@ -544,6 +550,7 @@ export function buildListSql(
 ): ListSqlParts {
   const where = [...baseWhere];
   const unserveable: UnserveableListSurface[] = [];
+  const searchNarrowedBy: string[] = [];
   for (const filter of query.filters) {
     const pred = filterPredicate(filter, adapter, params);
     if ("sql" in pred) {
@@ -574,6 +581,7 @@ export function buildListSql(
       const needle = fold(p);
       const ors = exprs.map((expr) => `${fold(`${expr}::text`)} ILIKE ('%' || ${needle} || '%')`);
       where.push(`(${ors.join(" OR ")})`);
+      for (const r of resolved) if (r.expr.kind === "unavailable") searchNarrowedBy.push(r.field);
     } else {
       for (const r of resolved) {
         if (r.expr.kind === "unavailable") {
@@ -616,5 +624,5 @@ export function buildListSql(
     orderParts.push(`${expr} ${s.direction === "desc" ? "DESC" : "ASC"} NULLS LAST`);
   }
   orderParts.push(`${adapter.idExpr} ASC`);
-  return { where: where.join(" AND "), orderBy: orderParts.join(", "), params, unserveable };
+  return { where: where.join(" AND "), orderBy: orderParts.join(", "), params, unserveable, searchNarrowedBy };
 }

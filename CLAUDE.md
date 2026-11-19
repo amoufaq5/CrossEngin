@@ -15790,11 +15790,78 @@ their ADR's open questions; the live findings that cut across slices are listed 
   healthcheck on a failed run, and a compose smoke job. Open: zod 4 / vitest 4 migration, no off-host
   backup copy, no metrics or tracing.
 
-**Live findings across the slices, still open**: the job worker claims nothing as `crossengin_app`
-(above); **`--store pg-columns` cannot boot as `crossengin_app`** (`CREATE SCHEMA IF NOT EXISTS public`
-needs a database privilege the role does not hold, and the fatal names neither cause nor remedy), so
-every pg-columns live arm ran as the owner; and `--file-root /` is accepted silently with no file tool
-enabled (harmless).
+**Live findings across the slices, as the high batch left them**: the job worker claimed nothing as
+`crossengin_app`, and **`--store pg-columns` could not boot as `crossengin_app`** (`CREATE SCHEMA IF NOT
+EXISTS public` needs a database privilege the role does not hold, and the fatal named neither cause nor
+remedy). **Both are closed by ADR-0440** below; `--file-root /` is still accepted silently with no
+file tool enabled (harmless).
+
+**The medium and low tiers, plus the high batch's live residuals: thirteen slices
+(ADR-0440 – ADR-0452).** Each was implemented, adversarially reviewed and then verified live on PG 16
+in compose order with the API as `crossengin_app` on both `--store pg` and `--store pg-columns`. The
+work survived three container restarts mid-run, so several slices were resumed from their
+predecessors' transcripts rather than restarted. The live arms are in each ADR, and what the live
+runs found that no review had is the useful part:
+
+- **ADR-0440, high residuals**: the job worker claims **per tenant** under that tenant's context, so
+  a confined role runs jobs (live: overdue and reorder runs completed); `column-schema` is a one-shot
+  owner step and a `pg-columns` boot as the app verifies rather than applies, naming the role, the
+  owner and the remedy; deleting or moving another author's line then approving is
+  `maker_cannot_approve`.
+- **ADR-0441, money**: a currency with `decimal_places` other than 2 is refused, a foreign-currency
+  document with no rate is **409 `exchange_rate_unresolved`** rather than posted at 1, an API-created
+  credit note posts, payments clear AR to the cent (100.01 at 1.0731 in three instalments: 107.32,
+  realized 0.01), and voiding a partly paid bill is `document_partly_settled`.
+- **ADR-0442, workflow engine**: compensation undoes only completed steps, a stale worker cannot
+  finalize another's claim, a thrown handler retries then dead-letters, the concurrent-replay false
+  drift is gone (245 → 0), and a New York cron no longer loses a week across DST.
+- **ADR-0443, manifest limits and value types**: size caps, physical-name and trait collisions are
+  validation errors; a string-published field refuses a number; a null field is absent on all three
+  stores; geo kinds are refused at plan time; encrypted JSON round-trips its type; `Patient`'s six
+  demographics are `phi`. **Upgrade hazard**: an existing `erp-healthcare` deployment on
+  `pg-columns` holds those six as TEXT/DATE, which the additive migrator cannot convert — the boot
+  now refuses naming the column, and the remedy is `crossengin-pg encrypt --plan` then `--apply`.
+- **ADR-0444, database operations**: `PGSSLMODE` is negotiated as libpq does, with
+  `PGSSLROOTCERT`, so `verify-full` against a private CA and `verify-ca` both work; boot DDL changes
+  only what differs (it no longer takes table locks on an unchanged schema); declared indexes are
+  built; a job-run retention sweep exists.
+- **ADR-0445, keys**: the column secret rotates through a `PREVIOUS` generation, a write waits on an
+  in-flight rekey, and a fenced table refuses a tenant `DELETE` by name rather than as a silent zero.
+- **ADR-0446, privacy**: the submitter is the credential, the verifier is the approver, execution
+  waits a grace period, and a late breach notice is stored with its reason. **Found live and only
+  half closed**: on the shipped `crossengin_app` role every delete is refused
+  `rls_would_confine_this_session`, so the Article 17 deletion surfaces cannot complete on the
+  default role, and each refusal consumed the verified request. Fixed after the workflow: the refusal
+  now restores the tenant from `pending_deletion` (`tenantRestored` on the 409); the request is still
+  consumed, because the contract has no `in_progress → verified` edge.
+- **ADR-0447, web**: open redirects closed (nine variants), the proxy refuses foreign origins, bodies
+  are capped, CSP and five more headers are on every response, CSV cells are formula-escaped.
+- **ADR-0448, sessions**: a foreign JWT must carry `sub` and `tenant_id`, a grant cannot exceed its
+  granter (`role_escalation`), a suspended user's session ends immediately, password changes revoke
+  sessions, and passwords have a 12-character floor.
+- **ADR-0449, gateway and process**: a 500 is logged under the request id the caller holds, a keyed
+  replay returns the original body, concurrent same-key requests execute once, the listener is
+  bounded and drains on SIGTERM. **`--http-headers-timeout-ms` did not bound what it named** (2 s
+  answered a slowloris after 26.2 s, because Node sweeps every 30 s) — fixed after the workflow by
+  deriving the sweep interval from the timeouts.
+- **ADR-0450, AI**: a model with no declared price refuses boot, a request over the per-request
+  ceiling is 422 before the provider is called, the monthly budget is reserved atomically
+  (5 parallel designs against room for 2: 2 calls, 3 × 402), residency is checked on the provider.
+  **Found live**: the post-call settle failed on every design, because Postgres checks the proposed
+  `INSERT` row against `dollars_used >= 0` before conflict resolution — fixed after the workflow with
+  an `UPDATE … GREATEST(0, …)`, and the test fake now models that CHECK, which is why it had passed.
+- **ADR-0451, operations**: usage windows are billed once and flushed on shutdown, Stripe sync is
+  idempotent, the notification survey no longer calls an unproduced channel working, and residency
+  is checked on the authenticated tenant rather than the unverified hint header.
+- **ADR-0452, marketplace**: a pack is trusted by a registered publisher's key and admitted against
+  the tenant's own region and plan. **Found live**: a publisher's signature replayed onto any version
+  and bundle. Half fixed after the workflow — `manifestSha256` must be the digest of the signed
+  manifest (`manifest_digest_mismatch`) — and the version/bundle half needs a signed release envelope.
+
+Still open from this batch, each recorded in its ADR: the Article 17 request consumption above; the
+release envelope; a key-generation mismatch after a rekey boots clean and 500s every PHI read (it
+could be a boot refusal); the provider wire carries no tenant id; two residency-421 shapes on one
+route; and the `[search]` and `[jobs]` boot lines each carry one inaccurate clause.
 
 ### Demoted, with the measurement that demoted them
 
@@ -15819,7 +15886,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 433 records; 354 Accepted, 79 Proposed (the
+title or status change cannot drift. 446 records; 367 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

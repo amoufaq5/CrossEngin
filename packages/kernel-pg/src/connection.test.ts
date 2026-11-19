@@ -1,6 +1,3 @@
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-
 import { describe, expect, it } from "vitest";
 import { META_TABLES } from "@crossengin/kernel/bootstrap";
 
@@ -30,10 +27,14 @@ import {
   scopeFilter,
   scopeFilterWithPlatform,
   setPlatformWriteSql,
+  describePgChannel,
+  sslModeChecksHostname,
   sslModeRequiresTls,
   sslModeValidatesCertificate,
   type PlatformWriteGrant,
 } from "./connection.js";
+
+const PEM = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n";
 
 describe("parsePgEnvConfig", () => {
   const baseEnv: NodeJS.ProcessEnv = {
@@ -101,38 +102,68 @@ describe("parsePgEnvConfig", () => {
     expect(() => parsePgEnvConfig({ ...baseEnv, PGSSLMODE: "bogus" })).toThrow(/PGSSLMODE/);
   });
 
-  it("threads every mode but verify-ca through unchanged", () => {
+  it("threads every mode through unchanged when the root certificate it needs is present", () => {
     for (const mode of PG_SSL_MODES) {
-      if (mode === "verify-ca") continue;
-      expect(parsePgEnvConfig({ ...baseEnv, PGSSLMODE: mode }).ssl).toBe(mode);
+      const env = mode === "verify-ca" ? { ...baseEnv, PGSSLROOTCERT: "/ca.pem" } : baseEnv;
+      expect(parsePgEnvConfig({ ...env, PGSSLMODE: mode }, () => PEM).ssl).toBe(mode);
     }
   });
 
-  it("refuses PGSSLMODE=verify-ca by name", () => {
-    expect(() => parsePgEnvConfig({ ...baseEnv, PGSSLMODE: "verify-ca" })).toThrow(
-      /PGSSLMODE=verify-ca is refused/,
-    );
+  // libpq refuses verify-ca with no root file: it checks the chain and not the name, so node's
+  // bundled store would accept a certificate any public CA issued to anybody.
+  it("refuses verify-ca with no PGSSLROOTCERT, naming the variable and verify-full", () => {
+    const run = (): unknown => parsePgEnvConfig({ ...baseEnv, PGSSLMODE: "verify-ca" });
+    expect(run).toThrow(/PGSSLMODE=verify-ca needs PGSSLROOTCERT/);
+    expect(run).toThrow(/verify-full/);
+    expect(run).not.toThrow(/not recognized/);
   });
 
-  it("says verification is not implemented and that no CA material is read", () => {
-    expect(() => parsePgEnvConfig({ ...baseEnv, PGSSLMODE: "verify-ca" })).toThrow(
-      /verification is not implemented/,
+  it("reads PGSSLROOTCERT's file once, carrying its path and PEM", () => {
+    const reads: string[] = [];
+    const cfg = parsePgEnvConfig(
+      { ...baseEnv, PGSSLMODE: "verify-ca", PGSSLROOTCERT: "/etc/ca.pem" },
+      (path) => {
+        reads.push(path);
+        return PEM;
+      },
     );
-    expect(() => parsePgEnvConfig({ ...baseEnv, PGSSLMODE: "verify-ca" })).toThrow(/PGSSLROOTCERT/);
+    expect(reads).toEqual(["/etc/ca.pem"]);
+    expect(cfg.sslRootCert).toEqual({ kind: "file", path: "/etc/ca.pem", pem: PEM });
   });
 
-  it("names verify-full as the mode that does validate", () => {
-    expect(() => parsePgEnvConfig({ ...baseEnv, PGSSLMODE: "verify-ca" })).toThrow(
-      /PGSSLMODE=verify-full/,
-    );
+  it("leaves sslRootCert null, and reads nothing, when PGSSLROOTCERT is unset", () => {
+    const cfg = parsePgEnvConfig({ ...baseEnv, PGSSLMODE: "verify-full" }, () => {
+      throw new Error("must not read");
+    });
+    expect(cfg.sslRootCert).toBeNull();
   });
 
-  // The two refusals must stay distinguishable: a typo and a mode this binding declines to serve
-  // send an operator to different places, so the verify-ca message must not read as "not recognized".
-  it("does not report verify-ca as unrecognized", () => {
-    expect(() => parsePgEnvConfig({ ...baseEnv, PGSSLMODE: "verify-ca" })).not.toThrow(
-      /not recognized/,
-    );
+  it("refuses an unreadable PGSSLROOTCERT by path rather than failing the first TLS handshake", () => {
+    expect(() =>
+      parsePgEnvConfig({ ...baseEnv, PGSSLMODE: "verify-full", PGSSLROOTCERT: "/nope.pem" }, () => {
+        throw new Error("ENOENT");
+      }),
+    ).toThrow(/PGSSLROOTCERT \/nope\.pem cannot be read: ENOENT/);
+  });
+
+  it("refuses a PGSSLROOTCERT holding no PEM certificate", () => {
+    expect(() =>
+      parsePgEnvConfig(
+        { ...baseEnv, PGSSLMODE: "verify-full", PGSSLROOTCERT: "/empty.pem" },
+        () => "",
+      ),
+    ).toThrow(/holds no PEM certificate/);
+  });
+
+  it("accepts PGSSLROOTCERT=system with verify-full and refuses it with every weaker mode", () => {
+    expect(
+      parsePgEnvConfig({ ...baseEnv, PGSSLMODE: "verify-full", PGSSLROOTCERT: "system" }).sslRootCert,
+    ).toEqual({ kind: "system" });
+    for (const mode of PG_SSL_MODES.filter((m) => m !== "verify-full")) {
+      expect(() =>
+        parsePgEnvConfig({ ...baseEnv, PGSSLMODE: mode, PGSSLROOTCERT: "system" }),
+      ).toThrow(/PGSSLROOTCERT=system is refused/);
+    }
   });
 
   it("defaults to a plaintext-capable mode, and says so", () => {
@@ -152,9 +183,8 @@ describe("PG_SSL_MODES", () => {
     ]);
   });
 
-  it("keeps verify-ca, which the parse refuses, so the maps can answer for it", () => {
-    expect(PG_SSL_MODES).toContain("verify-ca");
-    expect(pgChannelAssurance("verify-ca")).toBe("encrypted_unauthenticated");
+  it("calls verify-ca chain_validated: the chain is checked and the hostname is not", () => {
+    expect(pgChannelAssurance("verify-ca")).toBe("chain_validated");
   });
 });
 
@@ -199,7 +229,7 @@ describe("pgChannelAssurance", () => {
 });
 
 describe("PG_CHANNEL_ASSURANCE_DESCRIPTIONS", () => {
-  it("carries exactly the three assurances", () => {
+  it("carries exactly the four assurances", () => {
     expect(Object.keys(PG_CHANNEL_ASSURANCE_DESCRIPTIONS).sort()).toEqual(
       [...PG_CHANNEL_ASSURANCES].sort(),
     );
@@ -216,87 +246,72 @@ describe("PG_CHANNEL_ASSURANCE_DESCRIPTIONS", () => {
   });
 });
 
-describe("sslModeValidatesCertificate", () => {
-  it("is true for verify-full alone", () => {
-    expect(sslModeValidatesCertificate("verify-full")).toBe(true);
+describe("sslModeValidatesCertificate and sslModeChecksHostname", () => {
+  it("validates the chain under verify-ca and verify-full and nothing else", () => {
     expect(PG_SSL_MODES.filter((mode) => sslModeValidatesCertificate(mode))).toEqual([
-      "verify-full",
-    ]);
-  });
-
-  // The defect this refusal exists for: the mode whose purpose is to validate the CA validates
-  // nothing, so the predicate must not flatter it.
-  it("is false for verify-ca", () => {
-    expect(sslModeValidatesCertificate("verify-ca")).toBe(false);
-  });
-
-  it("is false for the plaintext-capable modes", () => {
-    expect(sslModeValidatesCertificate("disable")).toBe(false);
-    expect(sslModeValidatesCertificate("allow")).toBe(false);
-    expect(sslModeValidatesCertificate("prefer")).toBe(false);
-    expect(sslModeValidatesCertificate("require")).toBe(false);
-  });
-
-  it("agrees with the assurance it is derived from, for every mode", () => {
-    for (const mode of PG_SSL_MODES) {
-      expect(sslModeValidatesCertificate(mode)).toBe(pgChannelAssurance(mode) === "authenticated");
-    }
-  });
-
-  // This is the fence on the measurement the map rests on. `createNodePgConnection` is what decides
-  // whether a mode validates anything, and the refusal above exists *because* of what it asks of
-  // node's TLS stack — so it must ask it through the predicate rather than restating the judgement.
-  //
-  // Asserted as a **call plus the absence of the literal**, which is stronger than pinning the
-  // literal was: an inline `config.ssl === "verify-full"` beside this map is a second spelling of
-  // one judgement, and two spellings can disagree about one mode invisibly, because the predicate
-  // gates a refusal while the assurance gates what an operator is told. Read as text rather than by
-  // behaviour because `createNodePgConnection` constructs a real `Pool` on the first line, so there
-  // is nothing to inspect without a server to connect to.
-  it("reads both judgements from this module rather than restating them", () => {
-    const source = readFileSync(fileURLToPath(new URL("./node-pg.ts", import.meta.url)), "utf8");
-    expect(source).toContain("rejectUnauthorized: sslModeValidatesCertificate(config.ssl)");
-    expect(source).toContain("sslModeRequiresTls(config.ssl)");
-    // Strip comments before looking for a restatement, so the prose explaining why these
-    // comparisons are gone cannot itself fail the assertion. Both are checked: `verify-full` was
-    // the validation judgement, and the three-name list was the *must there be TLS* one — which
-    // this test found still present after the first was converged, which is why it is here.
-    const code = source.replace(/\/\/[^\n]*|\/\*[\s\S]*?\*\//g, "");
-    expect(code).not.toContain('config.ssl === "verify-full"');
-    expect(code).not.toContain('config.ssl === "verify-ca"');
-    expect(code).not.toContain('config.ssl === "require"');
-  });
-
-  it("is the complement of plaintext_possible, which is what lets node-pg stop listing names", () => {
-    for (const mode of PG_SSL_MODES) {
-      expect(sslModeRequiresTls(mode)).toBe(pgChannelAssurance(mode) !== "plaintext_possible");
-    }
-    expect(PG_SSL_MODES.filter(sslModeRequiresTls)).toEqual([
-      "require",
       "verify-ca",
       "verify-full",
     ]);
   });
 
+  it("checks the hostname under verify-full alone", () => {
+    expect(PG_SSL_MODES.filter((mode) => sslModeChecksHostname(mode))).toEqual(["verify-full"]);
+  });
+
+  it("agrees with the assurance it is derived from, for every mode", () => {
+    for (const mode of PG_SSL_MODES) {
+      const a = pgChannelAssurance(mode);
+      expect(sslModeValidatesCertificate(mode)).toBe(a === "chain_validated" || a === "authenticated");
+      expect(sslModeChecksHostname(mode)).toBe(a === "authenticated");
+    }
+  });
+
+  it("makes TLS mandatory exactly where it is not plaintext_possible", () => {
+    for (const mode of PG_SSL_MODES) {
+      expect(sslModeRequiresTls(mode)).toBe(pgChannelAssurance(mode) !== "plaintext_possible");
+    }
+    expect(PG_SSL_MODES.filter(sslModeRequiresTls)).toEqual(["require", "verify-ca", "verify-full"]);
+  });
+
   it("answers the question sslModeValidatesCertificate does not, and require is why", () => {
-    // `require` is the member that makes the two predicates distinct: TLS is mandatory and the
-    // peer is unchecked. If they ever agreed on every mode, one of them would be redundant.
     expect(sslModeRequiresTls("require")).toBe(true);
     expect(sslModeValidatesCertificate("require")).toBe(false);
-    expect(PG_SSL_MODES.some((m) => sslModeRequiresTls(m) !== sslModeValidatesCertificate(m))).toBe(
-      true,
+  });
+});
+
+describe("describePgChannel", () => {
+  const file = { kind: "file" as const, path: "/ca.pem", pem: PEM };
+
+  it("is info only when the hostname is checked", () => {
+    for (const mode of PG_SSL_MODES) {
+      const d = describePgChannel({ ssl: mode, sslRootCert: mode === "verify-ca" ? file : null });
+      expect(d.level).toBe(mode === "verify-full" ? "info" : "warn");
+      expect(d.line).toContain(`PGSSLMODE=${mode}`);
+    }
+  });
+
+  it("names the trust anchors a validating mode uses", () => {
+    expect(describePgChannel({ ssl: "verify-full", sslRootCert: file }).line).toContain(
+      "trust anchors: PGSSLROOTCERT /ca.pem only",
+    );
+    expect(describePgChannel({ ssl: "verify-full", sslRootCert: null }).line).toContain(
+      "node's bundled CA store (PGSSLROOTCERT unset)",
+    );
+    expect(describePgChannel({ ssl: "verify-full", sslRootCert: { kind: "system" } }).line).toContain(
+      "(PGSSLROOTCERT system)",
     );
   });
 
-  // The one mode comparison that stays, and why. `disable`, `allow` and `prefer` share one
-  // assurance — the channel may be plaintext — and differ only in *who declines*, which is the
-  // distinction the assurance deliberately does not carry: `disable` passes `ssl: false` and the
-  // other two pass nothing and let the server decide. So that comparison is not a duplicated
-  // judgement, and a future edit that tried to derive it from the assurance would be wrong.
-  it("still decides disable by name, which the assurance cannot answer", () => {
-    const source = readFileSync(fileURLToPath(new URL("./node-pg.ts", import.meta.url)), "utf8");
-    expect(source).toContain('config.ssl === "disable"');
-    expect(pgChannelAssurance("disable")).toBe(pgChannelAssurance("prefer"));
+  it("says a root certificate set under a non-validating mode is unused", () => {
+    const line = describePgChannel({ ssl: "require", sslRootCert: file }).line;
+    expect(line).toContain("PGSSLROOTCERT /ca.pem is set and unused under require");
+    expect(describePgChannel({ ssl: "require", sslRootCert: null }).line).not.toContain("unused");
+  });
+
+  it("tells a verify-ca operator what verify-full adds", () => {
+    expect(describePgChannel({ ssl: "verify-ca", sslRootCert: file }).line).toContain(
+      "verify-full also checks the hostname",
+    );
   });
 });
 

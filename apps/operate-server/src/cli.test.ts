@@ -1,4 +1,5 @@
 import { generateEd25519Keypair } from "@crossengin/crypto";
+import { DEFAULT_DELETION_GRACE_DAYS } from "@crossengin/tenant-lifecycle";
 import { describe, expect, it } from "vitest";
 
 import { COLUMN_KEY_TTL_BOUNDS, DEFAULT_COLUMN_KEY_TTL_MS } from "./data-key-envelope.js";
@@ -6,6 +7,7 @@ import { ALLOW_UNCOVERED_SETTLEMENT_FLAG } from "./settlement-coverage-survey.js
 import {
   CliUsageError,
   helpText,
+  parseColumnSchemaArgs,
   parseDocumentIndexesArgs,
   parsePruneArgs,
   parseRekeyArgs,
@@ -372,11 +374,71 @@ describe("parseServeArgs", () => {
     ).toThrow(/requires --notification-drain-ms/);
   });
 
-  it("parses --pack-catalog with a pg store and defaults it to null", () => {
-    expect(parseServeArgs(["--pack", "erp-core", "--store", "pg", "--pack-catalog", "./catalog.json"]).packCatalogFile).toBe(
-      "./catalog.json",
-    );
+  it("parses --pack-catalog with a pg store and a registered publisher, and defaults it to null", () => {
+    const key = `com.acme:community:${generateEd25519Keypair().publicKeyBase64}`;
+    const opts = parseServeArgs([
+      "--pack", "erp-core", "--store", "pg", "--pack-catalog", "./catalog.json", "--pack-publisher-key", key,
+    ]);
+    expect(opts.packCatalogFile).toBe("./catalog.json");
+    expect(opts.packPublisherKeys).toEqual([key]);
+    expect(opts.packAdminRoles).toEqual(["erp_admin"]);
+    expect(opts.marketplacePlatformVersion).toBeNull();
     expect(parseServeArgs(["--pack", "erp-core"]).packCatalogFile).toBeNull();
+  });
+
+  it("refuses a marketplace surface with no registered publisher key, naming the flag", () => {
+    expect(() => parseServeArgs(["--pack", "erp-core", "--store", "pg", "--pack-catalog", "./catalog.json"])).toThrow(
+      /--pack-catalog requires at least one --pack-publisher-key/,
+    );
+    expect(() => parseServeArgs(["--pack", "erp-core", "--store", "pg", "--marketplace-authoring"])).toThrow(
+      /--marketplace-authoring requires at least one --pack-publisher-key/,
+    );
+  });
+
+  it("refuses a malformed publisher key, and two keys whose namespaces overlap", () => {
+    expect(() =>
+      parseServeArgs(["--pack", "erp-core", "--store", "pg", "--marketplace-authoring", "--pack-publisher-key", "com.acme:community"]),
+    ).toThrow(/invalid --pack-publisher-key/);
+    const a = `com.acme:community:${generateEd25519Keypair().publicKeyBase64}`;
+    const b = `com.acme.labs:community:${generateEd25519Keypair().publicKeyBase64}`;
+    expect(() =>
+      parseServeArgs([
+        "--pack", "erp-core", "--store", "pg", "--marketplace-authoring", "--pack-publisher-key", a, "--pack-publisher-key", b,
+      ]),
+    ).toThrow(/invalid --pack-publisher-key set: .*overlap/);
+  });
+
+  it("parses --marketplace-platform-version and --pack-admin-role, refusing a non-semver version", () => {
+    const key = `com.acme:community:${generateEd25519Keypair().publicKeyBase64}`;
+    const catalog = ["--store", "pg", "--pack-catalog", "./c.json", "--pack-publisher-key", key];
+    const opts = parseServeArgs([
+      "--pack", "erp-core", ...catalog, "--marketplace-platform-version", "1.4.0", "--pack-admin-role", "pack_admin",
+    ]);
+    expect(opts.marketplacePlatformVersion).toBe("1.4.0");
+    expect(opts.packAdminRoles).toEqual(["pack_admin"]);
+    expect(() => parseServeArgs(["--pack", "erp-core", ...catalog, "--marketplace-platform-version", "latest"])).toThrow(
+      /invalid --marketplace-platform-version/,
+    );
+  });
+
+  it("refuses the marketplace's configuration flags when no surface reads them", () => {
+    const key = `com.acme:community:${generateEd25519Keypair().publicKeyBase64}`;
+    expect(() => parseServeArgs(["--pack", "erp-core", "--pack-admin-role", "pack_admin"])).toThrow(
+      /--pack-admin-role configures a marketplace surface and none is mounted/,
+    );
+    expect(() => parseServeArgs(["--pack", "erp-core", "--marketplace-platform-version", "1.4.0"])).toThrow(
+      /none is mounted/,
+    );
+    expect(() => parseServeArgs(["--pack", "erp-core", "--pack-publisher-key", key])).toThrow(
+      /--pack-publisher-key configures .* pass --pack-catalog or --marketplace-authoring/,
+    );
+    // Authoring reads the keys and nothing else: the platform version and the install role stay inert.
+    expect(() =>
+      parseServeArgs([
+        "--pack", "erp-core", "--store", "pg", "--marketplace-authoring", "--pack-publisher-key", key,
+        "--pack-admin-role", "pack_admin",
+      ]),
+    ).toThrow(/--pack-admin-role configures/);
   });
 
   it("rejects --pack-catalog with the memory store", () => {
@@ -608,10 +670,12 @@ describe("parseServeArgs", () => {
     expect(opts.planCatalogFile).toBe("./plans.json");
   });
 
-  it("rejects --plan-catalog without --stripe-webhook-secret", () => {
-    expect(() =>
-      parseServeArgs(["--pack", "erp-core", "--store", "pg", "--plan-catalog", "./plans.json"]),
-    ).toThrow(/--plan-catalog requires --stripe-webhook-secret/);
+  it("admits --plan-catalog without --stripe-webhook-secret: the secret may come from STRIPE_WEBHOOK_SECRET, so boot decides", () => {
+    // The parser reads no environment, so this check moved to boot over the resolved secrets
+    // (stripeRequirementRefusal); refusing here refused every environment-only deployment.
+    expect(
+      parseServeArgs(["--pack", "erp-core", "--store", "pg", "--plan-catalog", "./plans.json"]).planCatalogFile,
+    ).toBe("./plans.json");
   });
 
   it("parses --stripe-webhook-secret with a pg store", () => {
@@ -682,7 +746,11 @@ describe("parseServeArgs", () => {
   });
 
   it("parses --marketplace-authoring (needs pg) and defaults it to false", () => {
-    expect(parseServeArgs(["--pack", "erp-core", "--store", "pg", "--marketplace-authoring"]).marketplaceAuthoring).toBe(true);
+    const key = `com.acme:community:${generateEd25519Keypair().publicKeyBase64}`;
+    expect(
+      parseServeArgs(["--pack", "erp-core", "--store", "pg", "--marketplace-authoring", "--pack-publisher-key", key])
+        .marketplaceAuthoring,
+    ).toBe(true);
     expect(parseServeArgs(["--pack", "erp-core"]).marketplaceAuthoring).toBe(false);
   });
 
@@ -704,10 +772,11 @@ describe("parseServeArgs", () => {
     expect(parseServeArgs(["--pack", "erp-core"]).stripeUsageSyncConfig).toBeNull();
   });
 
-  it("rejects --stripe-usage-sync-config without --stripe-api-key", () => {
-    expect(() =>
-      parseServeArgs(["--pack", "erp-core", "--store", "pg", "--stripe-usage-sync-config", "./s.json"]),
-    ).toThrow(/requires --stripe-api-key/);
+  it("admits --stripe-usage-sync-config without --stripe-api-key: STRIPE_API_KEY may supply it, so boot decides", () => {
+    expect(
+      parseServeArgs(["--pack", "erp-core", "--store", "pg", "--stripe-usage-sync-config", "./s.json"])
+        .stripeUsageSyncConfig,
+    ).toBe("./s.json");
   });
 
   it("allows --stripe-api-key with --stripe-usage-sync-config (no billing-portal url needed)", () => {
@@ -872,10 +941,54 @@ describe("parseDocumentIndexesArgs", () => {
   });
 });
 
+describe("parseColumnSchemaArgs", () => {
+  it("takes the pack, the schema and every role to grant, de-duplicated", () => {
+    expect(
+      parseColumnSchemaArgs(["--pack", "erp-core", "--grant-to", "crossengin_app", "--grant-to=crossengin_app"]),
+    ).toEqual({ pack: "erp-core", manifestPath: null, schema: null, grantTo: ["crossengin_app"], help: false });
+    expect(parseColumnSchemaArgs(["--manifest=m.json", "--schema", "tenant_app"]).schema).toBe("tenant_app");
+  });
+
+  it("grants nothing when no role is named", () => {
+    expect(parseColumnSchemaArgs(["--pack", "erp-core"]).grantTo).toEqual([]);
+  });
+
+  it("refuses a role name that is not one, because it becomes a quoted identifier in a GRANT", () => {
+    expect(() => parseColumnSchemaArgs(["--pack", "erp-core", "--grant-to", "app; DROP"])).toThrow(
+      /not a role name/,
+    );
+  });
+
+  it("requires exactly one manifest source, and refuses an unknown argument", () => {
+    expect(() => parseColumnSchemaArgs([])).toThrow(/one of --pack or --manifest is required/);
+    expect(() => parseColumnSchemaArgs(["--pack", "a", "--manifest", "b"])).toThrow(/mutually exclusive/);
+    expect(() => parseColumnSchemaArgs(["--pack", "a", "--store", "pg"])).toThrow(/unknown argument: --store/);
+  });
+
+  it("answers --help without a source", () => {
+    expect(parseColumnSchemaArgs(["-h"]).help).toBe(true);
+  });
+});
+
 describe("parseRekeyArgs", () => {
   const TENANT = "00000000-0000-4000-8000-000000000001";
   const OTHER = "00000000-0000-4000-8000-000000000002";
   const REQUIRED = ["--tenant", TENANT, "--confirm-tenant", TENANT];
+
+  it("parses --rewrap-kek, off by default", () => {
+    expect(parseRekeyArgs(REQUIRED).rewrapKek).toBe(false);
+    expect(parseRekeyArgs([...REQUIRED, "--rewrap-kek"]).rewrapKek).toBe(true);
+  });
+
+  it("refuses --rewrap-kek with --allow-live-rekey, which has nothing to allow there", () => {
+    expect(() => parseRekeyArgs([...REQUIRED, "--rewrap-kek", "--allow-live-rekey"])).toThrow(
+      /nothing to allow/,
+    );
+  });
+
+  it("still requires the confirmation under --rewrap-kek", () => {
+    expect(() => parseRekeyArgs(["--tenant", TENANT, "--rewrap-kek"])).toThrow(/--confirm-tenant/);
+  });
 
   it("parses the required pair, the two schemas and the flags", () => {
     const opts = parseRekeyArgs([
@@ -1070,22 +1183,28 @@ describe("parseServeArgs — the GDPR deletion handle", () => {
     expect(() => parseServeArgs(["--pack", "erp-core", "--deletion-runner-ms", "2000"])).toThrow(/Postgres/);
   });
 
-  it("checks four-eyes against the RESOLVED actor pair, not just the flags", () => {
-    // Passing only one of them, set to the other's default, would otherwise pass here and throw at
-    // the runner's construction — which is at boot.
-    expect(() =>
-      parseServeArgs([...PG, "--deletion-runner-executed-by", "system:retention-policy"]),
-    ).toThrow(/four-eyes/);
-    expect(() =>
-      parseServeArgs([...PG, "--deletion-runner-approved-by", "system:deletion-runner"]),
-    ).toThrow(/four-eyes/);
-    expect(() =>
-      parseServeArgs([...PG, "--deletion-runner-executed-by", "a", "--deletion-runner-approved-by", "a"]),
-    ).toThrow(/four-eyes/);
+  it("refuses --deletion-runner-approved-by by name: the approver is the request's verifier (H-05)", () => {
+    // It used to be a configured string standing in for an approval nobody gave; every value,
+    // including the former default, is refused rather than silently ignored.
+    for (const value of ["system:retention-policy", "b", "a"]) {
+      expect(() => parseServeArgs([...PG, "--deletion-runner-approved-by", value])).toThrow(
+        /principal who verified/,
+      );
+    }
     expect(
-      parseServeArgs([...PG, "--deletion-runner-executed-by", "a", "--deletion-runner-approved-by", "b"])
-        .deletionRunnerExecutedBy,
+      parseServeArgs([...PG, "--deletion-runner-executed-by", "a"]).deletionRunnerExecutedBy,
     ).toBe("a");
+  });
+
+  it("defaults the grace period and accepts 0..90 whole days, refusing the rest", () => {
+    expect(parseServeArgs([...PG]).deletionGraceDays).toBe(DEFAULT_DELETION_GRACE_DAYS);
+    expect(parseServeArgs([...PG, "--deletion-grace-days", "0"]).deletionGraceDays).toBe(0);
+    expect(parseServeArgs([...PG, "--deletion-grace-days=90"]).deletionGraceDays).toBe(90);
+    for (const bad of ["-1", "91", "1.5", "x"]) {
+      expect(() => parseServeArgs([...PG, "--deletion-grace-days", bad])).toThrow(
+        /--deletion-grace-days/,
+      );
+    }
   });
 });
 
@@ -1701,15 +1820,40 @@ describe("--workflow-workers", () => {
 describe("--tenant-status-gate", () => {
   const PG = ["--pack", "erp-core", "--store", "pg"];
 
-  it("is off by default, which is what every deployment has had", () => {
-    const o = parseServeArgs([...PG]);
-    expect(o.tenantStatusGate).toBe(false);
-    expect(o.tenantStatusTtlMs).toBeNull();
+  it("is on by default on a Postgres store, and says it was a default", () => {
+    // It was opt-in until the default moved; this test pinned that and is rewritten rather than
+    // deleted, because the opt-in was the defect: a suspended or pending_deletion tenant kept writing
+    // on every deployment that did not know to pass the flag.
+    for (const store of ["pg", "pg-columns"]) {
+      const o = parseServeArgs(["--pack", "erp-core", "--store", store]);
+      expect(o.tenantStatusGate).toBe(true);
+      expect(o.tenantStatusGateSource).toBe("default");
+    }
+    expect(parseServeArgs([...PG]).tenantStatusTtlMs).toBeNull();
   });
 
-  it("mounts the gate", () => {
+  it("does not reach the memory store by default, which has no registry to gate on", () => {
+    const o = parseServeArgs(["--pack", "erp-core", "--store", "memory"]);
+    expect(o.tenantStatusGate).toBe(false);
+    expect(o.tenantStatusGateSource).toBe("not_applicable");
+  });
+
+  it("mounts the gate when asked explicitly", () => {
     const o = parseServeArgs([...PG, "--tenant-status-gate"]);
     expect(o.tenantStatusGate).toBe(true);
+    expect(o.tenantStatusGateSource).toBe("flag");
+  });
+
+  it("turns it off with the hatch, and records that it was turned off", () => {
+    const o = parseServeArgs([...PG, "--no-tenant-status-gate"]);
+    expect(o.tenantStatusGate).toBe(false);
+    expect(o.tenantStatusGateSource).toBe("disabled_by_flag");
+  });
+
+  it("refuses the two contradicting flags", () => {
+    expect(() =>
+      parseServeArgs([...PG, "--tenant-status-gate", "--no-tenant-status-gate"]),
+    ).toThrow(/contradict/);
   });
 
   it("takes a TTL in both spellings", () => {
@@ -1731,14 +1875,19 @@ describe("--tenant-status-gate", () => {
     ).toThrow(/requires a Postgres store/);
   });
 
-  it("refuses a TTL with no gate mounted", () => {
-    expect(() => parseServeArgs([...PG, "--tenant-status-ttl-ms", "5000"])).toThrow(
-      /no effect without --tenant-status-gate/,
-    );
+  it("takes a TTL for the default gate, and refuses one with no gate mounted", () => {
+    expect(parseServeArgs([...PG, "--tenant-status-ttl-ms", "5000"]).tenantStatusTtlMs).toBe(5000);
+    expect(() =>
+      parseServeArgs([...PG, "--no-tenant-status-gate", "--tenant-status-ttl-ms", "5000"]),
+    ).toThrow(/no effect without --tenant-status-gate/);
+    expect(() =>
+      parseServeArgs(["--pack", "erp-core", "--store", "memory", "--tenant-status-ttl-ms", "5000"]),
+    ).toThrow(/no effect without --tenant-status-gate/);
   });
 
   it("documents the gate and its exemption in the help text", () => {
     expect(helpText).toContain("--tenant-status-gate");
+    expect(helpText).toContain("--no-tenant-status-gate");
     expect(helpText).toContain("--tenant-status-ttl-ms");
     expect(helpText).toContain("/v1/platform routes are exempt");
   });
@@ -2017,6 +2166,62 @@ describe("--idempotency-store", () => {
     expect(
       parseServeArgs(["--pack", "erp-core", "--idempotency-store", "memory"]).pgIdempotencyStore,
     ).toBe(false);
+  });
+});
+
+describe("--retention-sweep / --retention", () => {
+  const PG = ["--pack", "erp-core", "--store", "pg"];
+
+  it("prunes nothing by default, because the sweep deletes rows a deployment keeps today", () => {
+    expect(parseServeArgs([...PG]).retention).toBeNull();
+  });
+
+  it("mounts the declared defaults under the sweep flag", () => {
+    expect(parseServeArgs([...PG, "--retention-sweep"]).retention).toEqual({
+      job_runs: 90,
+      gateway_pipeline_executions: 30,
+      rate_limit_decisions: 30,
+      notification_dispatches: 365,
+    });
+  });
+
+  it("takes an override in both spellings, and off", () => {
+    const retention = parseServeArgs([
+      ...PG,
+      "--retention-sweep",
+      "--retention",
+      "job_runs=14",
+      "--retention=notification_dispatches=off",
+    ]).retention;
+    expect(retention?.job_runs).toBe(14);
+    expect(retention?.notification_dispatches).toBeNull();
+    expect(retention?.gateway_pipeline_executions).toBe(30);
+  });
+
+  it("refuses an override with no sweep, which would be a policy nothing reads", () => {
+    expect(() => parseServeArgs([...PG, "--retention", "job_runs=14"])).toThrow(
+      /--retention requires --retention-sweep/,
+    );
+  });
+
+  it("refuses the memory store, which has no operational tables", () => {
+    expect(() => parseServeArgs(["--pack", "erp-core", "--retention-sweep"])).toThrow(
+      /--retention-sweep requires a Postgres store/,
+    );
+  });
+
+  it("surfaces the policy's own refusals as usage errors", () => {
+    expect(() =>
+      parseServeArgs([...PG, "--retention-sweep", "--retention", "audit_log=30"]),
+    ).toThrow(/the table must be one of/);
+    expect(() =>
+      parseServeArgs([
+        ...PG,
+        "--retention-sweep",
+        "--retention",
+        "rate_limit_decisions=7",
+      ]),
+    ).toThrow(/rate_limit_decisions/);
   });
 });
 
@@ -2473,6 +2678,66 @@ describe("parseSetCredentialArgs", () => {
   });
 });
 
+describe("--min-password-length", () => {
+  const login = [
+    "--pack", "erp-core", "--store", "pg", "--jwt-issuer", "https://i.test", "--jwt-audience", "a",
+    "--credential-login",
+  ];
+
+  it("defaults to null (the route applies 12) and parses a declared floor at both bounds", () => {
+    expect(parseServeArgs(login).minPasswordLength).toBeNull();
+    expect(parseServeArgs([...login, "--min-password-length", "8"]).minPasswordLength).toBe(8);
+    expect(parseServeArgs([...login, "--min-password-length=1024"]).minPasswordLength).toBe(1024);
+  });
+
+  it("refuses a floor below 8, above the maximum length, or not an integer", () => {
+    for (const bad of ["7", "1025", "12.5", "twelve", "0"]) {
+      expect(() => parseServeArgs([...login, "--min-password-length", bad])).toThrow(
+        /invalid --min-password-length/,
+      );
+    }
+  });
+
+  it("is refused without --credential-login, where nothing sets a password", () => {
+    expect(() =>
+      parseServeArgs(["--pack", "erp-core", "--store", "pg", "--min-password-length", "16"]),
+    ).toThrow(/--min-password-length requires --credential-login/);
+  });
+
+  it("reaches set-credential too, and is absent from its result when not passed", () => {
+    const USER = "22222222-2222-4222-8222-222222222222";
+    expect(
+      parseSetCredentialArgs(["--user", USER, "--confirm-user", USER, "--min-password-length", "20"])
+        .minPasswordLength,
+    ).toBe(20);
+    expect("minPasswordLength" in parseSetCredentialArgs(["--user", USER, "--confirm-user", USER])).toBe(
+      false,
+    );
+  });
+});
+
+describe("--allow-weak-api-keys and --idp-platform-roles", () => {
+  const base = ["--pack", "erp-core", "--store", "pg"];
+
+  it("default off, so a weak key and a foreign platform role are refused unless asked", () => {
+    const opts = parseServeArgs(base);
+    expect(opts.allowWeakApiKeys).toBe(false);
+    expect(opts.idpPlatformRoles).toBe(false);
+  });
+
+  it("are booleans that take no value", () => {
+    const opts = parseServeArgs([...base, "--allow-weak-api-keys", "--idp-platform-roles"]);
+    expect(opts.allowWeakApiKeys).toBe(true);
+    expect(opts.idpPlatformRoles).toBe(true);
+  });
+
+  it("are documented in --help", () => {
+    expect(helpText).toContain("--allow-weak-api-keys");
+    expect(helpText).toContain("--idp-platform-roles");
+    expect(helpText).toContain("--min-password-length");
+  });
+});
+
 describe("--jwks-key validation", () => {
   it("refuses a value that is not a 32-byte Ed25519 public key, as a USAGE error", () => {
     // Exit 2 with the help text, rather than a boot stack trace. Until this increment nothing
@@ -2744,5 +3009,48 @@ describe("--integrity-proof-full-every (H-18)", () => {
     expect(() =>
       parseServeArgs([...base, "--integrity-proof-config", "p.json", "--integrity-proof-full-every", "6"]),
     ).toThrow(/set fullFoldEveryPasses in the file/);
+  });
+});
+
+describe("parseServeArgs — AI provider timeout, price and residency (M-16, M-17)", () => {
+  const base = ["--pack", "erp-core", "--store", "pg", "--ai-design"];
+
+  it("defaults to the provider timeout, no declared price, no hatch and no provider ref", () => {
+    const o = parseServeArgs(base);
+    expect(o.aiProviderTimeoutMs).toBeNull();
+    expect(o.aiModelPrice).toBeNull();
+    expect(o.allowUnpricedModel).toBe(false);
+    expect(o.aiProviderRef).toBeNull();
+  });
+
+  it("reads all four", () => {
+    const o = parseServeArgs([
+      ...base,
+      "--ai-provider-timeout-ms",
+      "30000",
+      "--ai-model-price=2:8:0.5",
+      "--ai-allow-unpriced-model",
+      "--ai-provider-ref",
+      "anthropic:us",
+    ]);
+    expect(o.aiProviderTimeoutMs).toBe(30_000);
+    expect(o.aiModelPrice).toEqual({ inputUsdPerMillion: 2, outputUsdPerMillion: 8, cachedInputUsdPerMillion: 0.5 });
+    expect(o.allowUnpricedModel).toBe(true);
+    expect(o.aiProviderRef).toBe("anthropic:us");
+  });
+
+  it("refuses a malformed value of each", () => {
+    expect(() => parseServeArgs([...base, "--ai-provider-timeout-ms", "10"])).toThrow(CliUsageError);
+    expect(() => parseServeArgs([...base, "--ai-provider-timeout-ms", "1.5e9"])).toThrow(CliUsageError);
+    expect(() => parseServeArgs([...base, "--ai-model-price", "3"])).toThrow(/--ai-model-price/);
+    expect(() => parseServeArgs([...base, "--ai-model-price", "-1:2"])).toThrow(CliUsageError);
+    expect(() => parseServeArgs([...base, "--ai-provider-ref", "anthropic"])).toThrow(/--ai-provider-ref/);
+  });
+
+  it("documents each flag in --help", () => {
+    const help = helpText;
+    for (const flag of ["--ai-provider-timeout-ms", "--ai-model-price", "--ai-allow-unpriced-model", "--ai-provider-ref"]) {
+      expect(help).toContain(flag);
+    }
   });
 });

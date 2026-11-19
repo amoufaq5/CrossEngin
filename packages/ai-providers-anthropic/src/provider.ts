@@ -1,3 +1,8 @@
+import {
+  ProviderInactivityTimeout,
+  resolveInactivityTimeoutMs,
+  startInactivityWatchdog,
+} from "@crossengin/ai-providers";
 import type {
   CompletionChunk,
   CompletionRequest,
@@ -17,7 +22,12 @@ import {
   extractToolCalls,
   normalizeUsage,
 } from "./messages-api.js";
-import { ANTHROPIC_PRICING, isAnthropicModel, type AnthropicModel } from "./pricing.js";
+import {
+  ANTHROPIC_PRICING,
+  isAnthropicModel,
+  type AnthropicModel,
+  type AnthropicModelPricing,
+} from "./pricing.js";
 import { chunksFromSse, readSseStream } from "./streaming.js";
 
 export const ANTHROPIC_API_VERSION = "2023-06-01";
@@ -37,6 +47,17 @@ export interface AnthropicProviderOptions {
   readonly residency?: readonly Region[];
   readonly fetch?: FetchLike;
   readonly anthropicBeta?: readonly string[];
+  /**
+   * Abort the call when the provider sends nothing for this long — before the response headers or
+   * between body chunks (`startInactivityWatchdog`). Default `DEFAULT_PROVIDER_INACTIVITY_TIMEOUT_MS`.
+   */
+  readonly inactivityTimeoutMs?: number;
+  /**
+   * The price to charge for the default model, in place of the catalogue's. For a deployment whose
+   * contract price differs from the list price; the catalogue's figure is a list price as of
+   * `ANTHROPIC_PRICING_AS_OF`.
+   */
+  readonly pricingOverride?: AnthropicModelPricing;
 }
 
 const PROVIDER_ID = "anthropic";
@@ -63,6 +84,8 @@ export class AnthropicProvider implements LlmProvider {
   private readonly apiVersion: string;
   private readonly fetchImpl: FetchLike;
   private readonly anthropicBeta: readonly string[];
+  private readonly inactivityTimeoutMs: number;
+  private readonly pricingOverride: AnthropicModelPricing | undefined;
 
   constructor(opts: AnthropicProviderOptions) {
     if (opts.apiKey.length === 0) {
@@ -78,9 +101,11 @@ export class AnthropicProvider implements LlmProvider {
     this.apiVersion = opts.apiVersion ?? ANTHROPIC_API_VERSION;
     this.fetchImpl = opts.fetch ?? (globalThis.fetch as FetchLike);
     this.anthropicBeta = opts.anthropicBeta ?? [];
+    this.inactivityTimeoutMs = resolveInactivityTimeoutMs(opts.inactivityTimeoutMs);
+    this.pricingOverride = opts.pricingOverride;
     this.models = Object.keys(ANTHROPIC_PRICING);
     this.residency = opts.residency ?? ["us", "eu"];
-    const defaultPricing = ANTHROPIC_PRICING[this.defaultModel];
+    const defaultPricing = opts.pricingOverride ?? ANTHROPIC_PRICING[this.defaultModel];
     this.pricing = {
       inputPerMillionTokens: defaultPricing.inputUsdPerMillion,
       outputPerMillionTokens: defaultPricing.outputUsdPerMillion,
@@ -95,27 +120,41 @@ export class AnthropicProvider implements LlmProvider {
       defaultMaxTokens: this.defaultMaxTokens,
       stream: true,
     });
-    let response;
+    const watchdog = startInactivityWatchdog(this.inactivityTimeoutMs);
     try {
-      response = await this.fetchImpl(this.url("/v1/messages"), {
-        method: "POST",
-        headers: this.headers({ stream: true }),
-        body: JSON.stringify(built),
-      });
+      let response;
+      try {
+        response = await watchdog.guard(
+          this.fetchImpl(this.url("/v1/messages"), {
+            method: "POST",
+            headers: this.headers({ stream: true }),
+            body: JSON.stringify(built),
+            signal: watchdog.signal,
+          }),
+        );
+      } catch (err) {
+        if (err instanceof ProviderInactivityTimeout) throw err;
+        throw fromNetworkError(err);
+      }
+      if (!response.ok) {
+        throw fromHttpResponse({ status: response.status, body: await watchdog.guard(response.text()) });
+      }
+      if (response.body === null) {
+        throw new AnthropicError({
+          kind: "api_error",
+          message: "Anthropic streaming response had no body",
+          status: response.status,
+        });
+      }
+      yield* readSseStream(watchdog.watch(response.body), model, this.pricingFor(model));
     } catch (err) {
-      throw fromNetworkError(err);
+      if (err instanceof ProviderInactivityTimeout) {
+        throw new AnthropicError({ kind: "timeout_error", message: err.message });
+      }
+      throw err;
+    } finally {
+      watchdog.dispose();
     }
-    if (!response.ok) {
-      throw fromHttpResponse({ status: response.status, body: await response.text() });
-    }
-    if (response.body === null) {
-      throw new AnthropicError({
-        kind: "api_error",
-        message: "Anthropic streaming response had no body",
-        status: response.status,
-      });
-    }
-    yield* readSseStream(response.body, model);
   }
 
   async embed(_req: EmbeddingRequest): Promise<EmbeddingResponse> {
@@ -131,20 +170,35 @@ export class AnthropicProvider implements LlmProvider {
       defaultMaxTokens: this.defaultMaxTokens,
       stream: false,
     });
+    const watchdog = startInactivityWatchdog(this.inactivityTimeoutMs);
     let response;
+    let text: string;
     try {
-      response = await this.fetchImpl(this.url("/v1/messages"), {
-        method: "POST",
-        headers: this.headers({ stream: false }),
-        body: JSON.stringify(built),
-      });
+      try {
+        response = await watchdog.guard(
+          this.fetchImpl(this.url("/v1/messages"), {
+            method: "POST",
+            headers: this.headers({ stream: false }),
+            body: JSON.stringify(built),
+            signal: watchdog.signal,
+          }),
+        );
+      } catch (err) {
+        if (err instanceof ProviderInactivityTimeout) throw err;
+        throw fromNetworkError(err);
+      }
+      if (!response.ok) {
+        throw fromHttpResponse({ status: response.status, body: await watchdog.guard(response.text()) });
+      }
+      text = await watchdog.guard(response.text());
     } catch (err) {
-      throw fromNetworkError(err);
+      if (err instanceof ProviderInactivityTimeout) {
+        throw new AnthropicError({ kind: "timeout_error", message: err.message });
+      }
+      throw err;
+    } finally {
+      watchdog.dispose();
     }
-    if (!response.ok) {
-      throw fromHttpResponse({ status: response.status, body: await response.text() });
-    }
-    const text = await response.text();
     try {
       return JSON.parse(text) as AnthropicResponse;
     } catch (err) {
@@ -158,6 +212,11 @@ export class AnthropicProvider implements LlmProvider {
 
   async chunksFromTextStream(sse: string, model?: AnthropicModel): Promise<readonly CompletionChunk[]> {
     return [...chunksFromSse(sse, model ?? this.defaultModel)];
+  }
+
+  /** The declared price applies to the model it was declared for — the default — and no other. */
+  private pricingFor(model: AnthropicModel): AnthropicModelPricing | undefined {
+    return model === this.defaultModel ? this.pricingOverride : undefined;
   }
 
   private resolveModel(requested: string | undefined): AnthropicModel {

@@ -1,6 +1,8 @@
 import { generateEd25519Keypair } from "@crossengin/crypto";
 import {
   PackManifestSchema,
+  PackPublisherRegistry,
+  parsePackPublisherSpec,
   signPackManifest,
   type PackCompatibility,
   type PackManifest,
@@ -61,7 +63,9 @@ function persistentRequest(overrides: Partial<PackManifest> = {}): PersistentIns
     version: "1.0.0",
     compatibility,
     signature,
-    publisherPublicKeyBase64: kp.publicKeyBase64,
+    publishers: new PackPublisherRegistry([
+      parsePackPublisherSpec(`com.crossengin:crossengin_official:${kp.publicKeyBase64}`),
+    ]),
     securityReviewStatus: "passed",
     tenantContext,
   };
@@ -150,8 +154,48 @@ describe("PersistentMarketplaceInstallEngine", () => {
   it("writes nothing when admission is rejected", async () => {
     const { engine, store } = makeEngine();
     const other = generateEd25519Keypair();
-    const decision = await engine.install({ ...persistentRequest(), publisherPublicKeyBase64: other.publicKeyBase64 });
+    const decision = await engine.install({
+      ...persistentRequest(),
+      publishers: new PackPublisherRegistry([
+        parsePackPublisherSpec(`com.crossengin:crossengin_official:${other.publicKeyBase64}`),
+      ]),
+    });
     expect(decision.outcome).toBe("rejected");
     expect((await store.listForTenant(TENANT)).records).toEqual([]);
+  });
+
+  it.each<[string, Partial<PackManifest>]>([
+    ["installing", {}],
+    ["permission_pending", { requiredScopes: ["records:read"] }],
+  ])(
+    "uninstalls a recorded %s install, which no route could do before",
+    async (status, overrides) => {
+      const { engine, store } = makeEngine();
+      const decision = await engine.install(persistentRequest(overrides));
+      if (decision.outcome === "rejected") throw new Error("expected an admission");
+      expect(decision.installation.status).toBe(status);
+      const gone = await engine.uninstall(decision.installation, USER);
+      expect(gone.status).toBe("uninstalled");
+      expect((await store.get(TENANT, gone.id))?.status).toBe("uninstalled");
+      // A reinstall is admitted once the first is gone, where before it was `already_installed` for ever.
+      expect((await engine.install(persistentRequest(overrides))).outcome).not.toBe("rejected");
+    },
+  );
+
+  it("records a withdrawn install as failed with its reason rather than as ever installed", async () => {
+    const { engine } = makeEngine();
+    const decision = await engine.install(persistentRequest());
+    if (decision.outcome !== "admitted") throw new Error("expected admitted");
+    const gone = await engine.uninstall(decision.installation, USER);
+    expect(gone.installedAt).toBeNull();
+    expect(gone.failureReason).toBe("uninstalled before any installer completed it");
+  });
+
+  it("refuses to uninstall what is already uninstalled", async () => {
+    const { engine } = makeEngine();
+    const decision = await engine.install(persistentRequest());
+    if (decision.outcome !== "admitted") throw new Error("expected admitted");
+    const gone = await engine.uninstall(decision.installation, USER);
+    await expect(engine.uninstall(gone, USER)).rejects.toThrow(/illegal installation transition uninstalled/);
   });
 });

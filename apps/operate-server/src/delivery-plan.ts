@@ -258,7 +258,9 @@ export function advanceDispatch(input: {
   const retryPending = input.attempts.some((a) => a.nextRetryAt !== null);
   const status: DispatchStatus = retryPending
     ? "sending"
-    : input.plan.deliverable.length === 0 || deliveredCount > 0
+    : // A recipient the drain could not address is a recorded failure the plan never saw, so an
+      // empty deliverable list completes only when nothing failed.
+      (input.plan.deliverable.length === 0 && failedCount === 0) || deliveredCount > 0
       ? "completed"
       : "failed";
 

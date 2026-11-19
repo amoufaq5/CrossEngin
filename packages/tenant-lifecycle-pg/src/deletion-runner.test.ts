@@ -99,6 +99,7 @@ interface Harness {
   readonly runs: Array<Record<string, unknown>>;
   readonly reported: DeletionRunResult[];
   readonly unreadable: UnreadableRequestRow[];
+  readonly dueCalls: Array<{ readonly now: string; readonly graceMs: number } | undefined>;
 }
 
 function harness(
@@ -125,6 +126,7 @@ function harness(
   const runs: Array<Record<string, unknown>> = [];
   const reported: DeletionRunResult[] = [];
   const unreadable: UnreadableRequestRow[] = [];
+  const dueCalls: Array<{ readonly now: string; readonly graceMs: number } | undefined> = [];
   const store = {
     transition: async (
       id: string,
@@ -151,7 +153,10 @@ function harness(
     },
     dueForExecution: async (
       onUnreadable: (row: UnreadableRequestRow) => void,
+      _limit?: number,
+      grace?: { readonly now: string; readonly graceMs: number },
     ): Promise<readonly GdprDeletionRequest[]> => {
+      dueCalls.push(grace);
       for (const row of behaviour.dueUnreadable ?? []) onUnreadable(row);
       return behaviour.due ?? [requestOf()];
     },
@@ -166,7 +171,7 @@ function harness(
       return behaviour.outcome ?? OK;
     },
     executedBy: "system:deletion-runner",
-    approvedBy: "system:retention-policy",
+    graceMs: 7 * 86_400_000,
     // Required since ADR-0328, where it replaced a `requiredSubsystems ?? []` that made every
     // scheduled deletion silent about five of the six subsystems.
     capabilities: CONSERVATIVE_DELETION_CAPABILITIES,
@@ -175,25 +180,57 @@ function harness(
     onRun: (r) => reported.push(r),
     ...over,
   });
-  return { runner, transitions, runs, reported, unreadable };
+  return { runner, transitions, runs, reported, unreadable, dueCalls };
 }
 
 describe("construction", () => {
-  it("refuses an executor who is also the approver, at wiring time", () => {
-    // A scheduler configured to approve its own work would fail every run identically; failing here
-    // says so once.
-    expect(
-      () =>
-        new DeletionRunner({
-          store: {} as PostgresDeletionRequestStore,
-          run: async () => OK,
-          capabilities: CONSERVATIVE_DELETION_CAPABILITIES,
-          executedBy: "same",
-          approvedBy: "same",
-          newTombstoneId: () => TOMB,
-          onUnreadableRequest: () => undefined,
-        }),
-    ).toThrow(/four-eyes/);
+  it("refuses a negative or non-finite grace at wiring time", () => {
+    for (const graceMs of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(
+        () =>
+          new DeletionRunner({
+            store: {} as PostgresDeletionRequestStore,
+            run: async () => OK,
+            capabilities: CONSERVATIVE_DELETION_CAPABILITIES,
+            executedBy: "system:deletion-runner",
+            graceMs,
+            newTombstoneId: () => TOMB,
+            onUnreadableRequest: () => undefined,
+          }),
+      ).toThrow(/graceMs/);
+    }
+  });
+});
+
+describe("four-eyes against the request's verifier (H-05)", () => {
+  it("records the verifier as the approver, never a configured name", async () => {
+    const h = harness();
+    await h.runner.runOne(requestOf({ verifiedBy: "0193a0f1-aaaa-7bbb-8ccc-ddddeeeeffff" }));
+    expect(h.runs[0]?.["approvedBy"]).toBe("0193a0f1-aaaa-7bbb-8ccc-ddddeeeeffff");
+  });
+
+  it("refuses, without claiming, a request its own executor verified", async () => {
+    const h = harness();
+    const result = await h.runner.runOne(requestOf({ verifiedBy: "system:deletion-runner" }));
+    expect(result.outcome).toBe("refused_four_eyes");
+    expect(h.transitions).toEqual([]);
+    expect(h.runs).toEqual([]);
+    expect(needsReconciliation(result.outcome)).toBe(true);
+  });
+
+  it("refuses a request that names no verifier", async () => {
+    const h = harness();
+    const result = await h.runner.runOne(requestOf({ verifiedBy: null }));
+    expect(result.outcome).toBe("refused_four_eyes");
+    expect(h.runs).toEqual([]);
+  });
+});
+
+describe("grace (C-04)", () => {
+  it("asks the store only for requests whose grace has elapsed, on the runner's clock", async () => {
+    const h = harness();
+    await h.runner.runDue();
+    expect(h.dueCalls).toEqual([{ now: AT, graceMs: 7 * 86_400_000 }]);
   });
 });
 
@@ -204,6 +241,7 @@ describe("runOne", () => {
     expect(result).toEqual({
       requestId: REQ,
       tenantId: TENANT,
+      approvedBy: "support-1",
       outcome: "completed",
       tombstoneId: TOMB,
       detail: null,
@@ -233,7 +271,7 @@ describe("runOne", () => {
       },
       capabilities: CONSERVATIVE_DELETION_CAPABILITIES,
       executedBy: "a",
-      approvedBy: "b",
+      graceMs: 0,
       newTombstoneId: () => TOMB,
       onUnreadableRequest: () => undefined,
     });
@@ -263,7 +301,7 @@ describe("runOne", () => {
     // A data subject asking for erasure is not the party executing it, and four-eyes is between the
     // executor and the approver.
     expect(h.runs[0]?.["executedBy"]).toBe("system:deletion-runner");
-    expect(h.runs[0]?.["approvedBy"]).toBe("system:retention-policy");
+    expect(h.runs[0]?.["approvedBy"]).toBe("support-1");
   });
 
   it("rejects the request when the pipeline refuses, recording the reason", async () => {
@@ -505,8 +543,9 @@ describe("runDue", () => {
 });
 
 describe("needsReconciliation", () => {
-  it("flags only the two outcomes a human must look at", () => {
+  it("flags only the three outcomes a human must look at", () => {
     expect(RUN_OUTCOMES.filter((o) => needsReconciliation(o))).toEqual([
+      "refused_four_eyes",
       "completed_unrecorded",
       "aborted",
     ]);

@@ -159,35 +159,21 @@ interface Harness {
   readonly jobs: FakeJobStore;
   readonly manifests: FakeManifestStore;
   readonly errors: unknown[];
-  readonly recorded: Array<{ tenantId: string; costUsd: number }>;
   readonly opts: DesignRunnerOptions;
 }
 
-function harness(designer: ProgressingDesignerLike, opts: { budget?: boolean; budgetError?: Error } = {}): Harness {
+function harness(designer: ProgressingDesignerLike): Harness {
   const jobs = new FakeJobStore();
   const manifests = new FakeManifestStore();
   const errors: unknown[] = [];
-  const recorded: Array<{ tenantId: string; costUsd: number }> = [];
-  const budget =
-    opts.budget === true
-      ? {
-          record: async (tenantId: string, costUsd: number): Promise<number> => {
-            recorded.push({ tenantId, costUsd });
-            if (opts.budgetError !== undefined) throw opts.budgetError;
-            return costUsd;
-          },
-        }
-      : undefined;
   return {
     jobs,
     manifests,
     errors,
-    recorded,
     opts: {
       jobs,
       manifests,
       designer,
-      budget,
       onError: (err: unknown) => errors.push(err),
     },
   };
@@ -362,13 +348,28 @@ describe("design-runner — progress write ordering", () => {
 });
 
 describe("design-runner — budget accounting", () => {
-  it("charges the usage cost of a successful design", async () => {
-    const h = harness(designerEmitting([]), { budget: true });
+  it("hands the designer the job's tenant, which is the tenant it charges", async () => {
+    const seen: string[] = [];
+    const h = harness(async ({ tenantId }) => {
+      seen.push(tenantId);
+      return okResult();
+    });
     await runDesignJob(h.opts, TENANT, JOB_ID, INPUT);
-    expect(h.recorded).toEqual([{ tenantId: TENANT, costUsd: 0.0123 }]);
+    expect(seen).toEqual([TENANT]);
   });
 
-  it("charges a failed design too — the tokens were still spent", async () => {
+  it("records no spend itself: the designer charged it, and a second record would double it", async () => {
+    const base = harness(designerEmitting([])).opts;
+    // The runner takes no budget any more, so a caller still passing one is a compile error.
+    // @ts-expect-error -- `budget` is not a runner option.
+    const refused: DesignRunnerOptions = { jobs: base.jobs, manifests: base.manifests, designer: base.designer, budget: {} };
+    void refused;
+    const h = harness(designerEmitting([]));
+    await runDesignJob(h.opts, TENANT, JOB_ID, INPUT);
+    expect(h.jobs.succeedCalls).toHaveLength(1);
+  });
+
+  it("fails a job the month could not absorb with the budget's own sentence", async () => {
     const h = harness(
       designerEmitting(
         [],
@@ -376,35 +377,15 @@ describe("design-runner — budget accounting", () => {
           ok: false,
           manifest: null,
           manifestHash: null,
-          issues: ["nope"],
-          attempts: 3,
-          usage: { inputTokens: 5, outputTokens: 5, cost: 0.02 },
+          issues: ["the monthly AI design budget cannot absorb this request's estimated $0.1230"],
+          attempts: 1,
+          usage: null,
+          failure: "monthly_budget_exhausted",
         }),
       ),
-      { budget: true },
     );
     await runDesignJob(h.opts, TENANT, JOB_ID, INPUT);
-    expect(h.recorded).toEqual([{ tenantId: TENANT, costUsd: 0.02 }]);
-    expect(h.jobs.failCalls).toHaveLength(1);
-  });
-
-  it("does not charge when usage is absent or zero", async () => {
-    const none = harness(designerEmitting([], okResult({ usage: null })), { budget: true });
-    await runDesignJob(none.opts, TENANT, JOB_ID, INPUT);
-    const zero = harness(
-      designerEmitting([], okResult({ usage: { inputTokens: 0, outputTokens: 0, cost: 0 } })),
-      { budget: true },
-    );
-    await runDesignJob(zero.opts, TENANT, JOB_ID, INPUT);
-    expect(none.recorded).toEqual([]);
-    expect(zero.recorded).toEqual([]);
-  });
-
-  it("still succeeds when the ledger write throws", async () => {
-    const h = harness(designerEmitting([]), { budget: true, budgetError: new Error("ledger down") });
-    await runDesignJob(h.opts, TENANT, JOB_ID, INPUT);
-    expect(h.jobs.succeedCalls).toHaveLength(1);
-    expect(h.errors).toHaveLength(1);
+    expect(h.jobs.failCalls[0]?.error).toMatch(/monthly AI design budget cannot absorb/);
   });
 });
 

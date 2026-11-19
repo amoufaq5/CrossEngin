@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import { generateEd25519Keypair } from "@crossengin/crypto";
 import { FixedClock } from "@crossengin/marketplace-runtime";
 import {
+  packManifestDigest,
   PackManifestSchema,
+  PackPublisherRegistry,
+  parsePackPublisherSpec,
   signPackManifest,
   type PackManifest,
 } from "@crossengin/marketplace";
@@ -33,22 +36,28 @@ function submitInput(m: PackManifest) {
     channel: "stable" as const,
     bundleSha256: SHA,
     bundleSizeBytes: 4096,
-    manifestSha256: SHA,
+    manifestSha256: packManifestDigest(m),
     signature: signPackManifest({
       manifest: m,
       privateKeyBase64: keypair.privateKeyBase64,
       publicKeyBase64: keypair.publicKeyBase64,
       signedAt: "2026-06-01T00:00:00.000Z",
     }),
-    publicKeyBase64: keypair.publicKeyBase64,
     changelog: "Initial release",
   };
 }
 
+const publishers = new PackPublisherRegistry([
+  parsePackPublisherSpec(`com.crossengin:crossengin_official:${keypair.publicKeyBase64}`),
+]);
+
 describe("PersistentPackSubmissionEngine", () => {
   it("persists each submission step into pack_versions", async () => {
     const { conn, calls } = fakeVersionPg();
-    const engine = buildPersistentPackSubmissionEngine(conn, { clock: new FixedClock("2026-06-15T00:00:00.000Z") });
+    const engine = buildPersistentPackSubmissionEngine(conn, {
+      clock: new FixedClock("2026-06-15T00:00:00.000Z"),
+      publishers,
+    });
 
     const draft = await engine.submit(submitInput(officialManifest()));
     expect(draft.status).toBe("draft");
@@ -58,19 +67,27 @@ describe("PersistentPackSubmissionEngine", () => {
     const published = await engine.publish(inReview, { publishedBy: "00000000-0000-4000-8000-0000000000cc" });
     expect(published.status).toBe("published");
 
-    // Each step issued an UPSERT; the stored row reflects the latest state.
-    const inserts = calls.filter((c) => c.sql.includes("INSERT INTO"));
-    expect(inserts.length).toBe(3);
+    // The submission inserted the version once; each later step advanced it in place.
+    expect(calls.filter((c) => c.sql.includes("INSERT INTO"))).toHaveLength(1);
+    expect(calls.filter((c) => c.sql.startsWith("UPDATE"))).toHaveLength(2);
     const stored = await engine.store.getByPackVersion("com.crossengin.loyalty", "1.0.0");
     expect(stored?.status).toBe("published");
   });
 
-  it("does not persist when the pure engine rejects (bad signature)", async () => {
+  it("does not persist when the signer is not a registered publisher", async () => {
     const { conn, calls } = fakeVersionPg();
-    const engine = buildPersistentPackSubmissionEngine(conn);
-    const wrongKey = generateEd25519Keypair();
-    const bad = { ...submitInput(officialManifest()), publicKeyBase64: wrongKey.publicKeyBase64 };
-    await expect(engine.submit(bad)).rejects.toThrow();
+    const other = new PackPublisherRegistry([
+      parsePackPublisherSpec(`com.crossengin:crossengin_official:${generateEd25519Keypair().publicKeyBase64}`),
+    ]);
+    const engine = buildPersistentPackSubmissionEngine(conn, { publishers: other });
+    await expect(engine.submit(submitInput(officialManifest()))).rejects.toThrow(/not a registered publisher key/);
     expect(calls.some((c) => c.sql.includes("INSERT INTO"))).toBe(false);
+  });
+
+  it("refuses to submit a version number that already exists", async () => {
+    const { conn } = fakeVersionPg();
+    const engine = buildPersistentPackSubmissionEngine(conn, { publishers });
+    await engine.submit(submitInput(officialManifest()));
+    await expect(engine.submit(submitInput(officialManifest()))).rejects.toThrow(/already exists/);
   });
 });

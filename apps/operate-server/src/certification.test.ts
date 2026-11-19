@@ -4,6 +4,12 @@ import { join } from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
 import { buildChainEntry, GENESIS_HASH, verifyChainIntegrity } from "@crossengin/forensics";
+import {
+  ed25519PublicKeyFingerprint,
+  generateEd25519Keypair,
+  signEd25519,
+} from "@crossengin/crypto";
+import { pinnedKeyResolver } from "@crossengin/forensics-pg";
 import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 import {
   FixedClock,
@@ -24,6 +30,8 @@ import {
   drReadinessSource,
   encryptionCoverageSource,
   forensicChainSource,
+  CHAIN_SIGNATURES_UNVERIFIED_REASON,
+  defaultLiveSources,
   loadCertificationConfig,
   parseCertificationConfig,
   type EvidenceSource,
@@ -46,21 +54,28 @@ function chainEntry(seq: number, prior: string, hash: string) {
 }
 
 /** A chain whose hashes are the ones its content commits to, as the real writer builds it. */
-async function realChain(count: number) {
+async function realChain(count: number, key = generateEd25519Keypair()) {
   const entries = [];
   let prior = GENESIS_HASH;
+  const fingerprint = ed25519PublicKeyFingerprint(key.publicKeyBase64);
   for (let seq = 0; seq < count; seq += 1) {
     const sealed = await buildChainEntry({
       sequenceNumber: seq,
       priorEntryHash: prior,
       entry: { kind: "audit_event", recordedAt: AT, actorReference: "svc", payloadBytes: `p${seq.toString()}` },
-      signingKeyFingerprint: "e".repeat(64),
-      sign: async () => "sig",
+      signingKeyFingerprint: fingerprint,
+      sign: async (bytes) => signEd25519(key.privateKeyBase64, key.publicKeyBase64, bytes),
     });
     entries.push(sealed.entry);
     prior = sealed.entry.entryHash;
   }
   return entries;
+}
+
+function pinned(key: { readonly publicKeyBase64: string }) {
+  return pinnedKeyResolver(
+    new Map([[ed25519PublicKeyFingerprint(key.publicKeyBase64), key.publicKeyBase64]]),
+  );
 }
 
 const AT = "2026-06-01T00:00:00.000Z";
@@ -102,6 +117,7 @@ describe("parseCertificationConfig", () => {
     expect(c.tenantId).toBeNull();
     expect(c.intervalMs).toBe(86_400_000);
     expect(c.schema).toBe("meta");
+    expect(c.encryptionSchema).toBe("public");
     expect(c.frameworks).toEqual(["soc2_type2", "hipaa_security_rule"]);
     expect(c.drReadiness).toBe(true);
     expect(c.accessReviews).toBe(true);
@@ -126,6 +142,22 @@ describe("parseCertificationConfig", () => {
     expect(() => parseCertificationConfig({ frameworks: ["nope"] })).toThrow();
     expect(() => parseCertificationConfig({ bogus: 1 })).toThrow();
     expect(() => parseCertificationConfig({ schema: "Bad-Schema" })).toThrow();
+    expect(() => parseCertificationConfig({ encryptionSchema: "Bad-Schema" })).toThrow();
+  });
+
+  it("asks the encryption control about the entity schema and never the meta catalog (H-19)", async () => {
+    const captured: { sql: string; params: readonly unknown[] | undefined }[] = [];
+    const config = parseCertificationConfig({
+      drReadiness: false,
+      accessReviews: false,
+      forensicChain: false,
+    });
+    const [encryption] = defaultLiveSources(fakeConn(captured), config);
+    const [ev] = (await encryption?.collect("soc2_type2", AT)) ?? [];
+    expect(ev?.sourceKind).toBe("encryption_coverage");
+    const asked = captured.flatMap((c) => c.params ?? []);
+    expect(asked).toContain("public");
+    expect(asked).not.toContain("meta");
   });
 });
 
@@ -200,12 +232,39 @@ describe("evidence sources", () => {
     expect(await empty.collect("soc2_type2", AT)).toEqual([]);
   });
 
-  it("forensicChainSource verifies an intact chain from genesis", async () => {
-    const entries = await realChain(2);
-    const src = forensicChainSource({ loadChain: async () => ({ entries, unreadable: [] }) });
+  it("forensicChainSource satisfies the control only when the chain folds and its signatures verify under a pinned key", async () => {
+    const key = generateEd25519Keypair();
+    const entries = await realChain(2, key);
+    const src = forensicChainSource(
+      { loadChain: async () => ({ entries, unreadable: [] }) },
+      "audit.tamper_evident_log",
+      pinned(key),
+    );
     const [ev] = await src.collect("soc2_type2", AT);
     expect(ev?.sourceKind).toBe("forensic_chain");
     expect(ev?.satisfied).toBe(true);
+  });
+
+  it("forensicChainSource does not satisfy the control over an intact fold whose signatures nobody checked (H-19)", async () => {
+    // This was the "intact chain" fixture's verdict: satisfied over links and content alone, which
+    // a database writer who re-hashes a chain end to end reproduces exactly.
+    const entries = await realChain(2);
+    const src = forensicChainSource({ loadChain: async () => ({ entries, unreadable: [] }) });
+    const [ev] = await src.collect("soc2_type2", AT);
+    expect(ev?.satisfied).toBe(false);
+    expect(ev?.findings[0]).toContain(CHAIN_SIGNATURES_UNVERIFIED_REASON);
+  });
+
+  it("forensicChainSource refuses a chain signed under a key this deployment does not pin", async () => {
+    const entries = await realChain(2, generateEd25519Keypair());
+    const src = forensicChainSource(
+      { loadChain: async () => ({ entries, unreadable: [] }) },
+      "audit.tamper_evident_log",
+      pinned(generateEd25519Keypair()),
+    );
+    const [ev] = await src.collect("soc2_type2", AT);
+    expect(ev?.satisfied).toBe(false);
+    expect(ev?.findings[0]).toBe("chain broken at sequence 0: signature untrusted_key (2 checked)");
   });
 
   it("forensicChainSource flags a broken chain", async () => {

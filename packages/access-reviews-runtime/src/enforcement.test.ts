@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   AccessReviewDecisionSchema,
+  canTransitionItem,
   type AccessReviewItem,
 } from "@crossengin/access-reviews";
 import { CountingIdGenerator } from "./clock.js";
@@ -8,6 +9,7 @@ import { generateItems } from "./item-generation.js";
 import {
   REVOKING_AUTO_POLICIES,
   UNATTESTED_ITEM_STATUSES,
+  autoRevokedItem,
   isAutoRevocable,
   planAutoRevocations,
 } from "./enforcement.js";
@@ -136,5 +138,39 @@ describe("planAutoRevocations", () => {
     const decisions = planAutoRevocations(items, campaign, revokeOpts(AFTER_DEADLINE));
     expect(decisions).toHaveLength(1);
     expect(decisions[0]?.itemId).toBe(items[1]?.id);
+  });
+});
+
+describe("autoRevokedItem (H-19)", () => {
+  it("lets every status the planner revokes from reach auto_revoked, so a decision always moves its item", () => {
+    for (const status of UNATTESTED_ITEM_STATUSES) {
+      expect(canTransitionItem(status, "auto_revoked")).toBe(true);
+    }
+  });
+
+  it("resolves the item the decision names, so the next tick plans nothing for it", () => {
+    const campaign = makeCampaign({ autoRevokePolicy: "auto_revoke_on_deadline" });
+    const items = pendingItems();
+    const decisions = planAutoRevocations(items, campaign, revokeOpts(AFTER_DEADLINE));
+    const resolved = items.map((item) => {
+      const decision = decisions.find((d) => d.itemId === item.id);
+      return decision === undefined ? item : autoRevokedItem(item, decision, AFTER_DEADLINE);
+    });
+    for (const item of resolved) {
+      expect(item.status).toBe("auto_revoked");
+      expect(item.autoRevokedAt).toBe(AFTER_DEADLINE.toISOString());
+      expect(item.autoRevokeReason).toBe("no_response_auto_default");
+      expect(item.decisionId).toBe(decisions.find((d) => d.itemId === item.id)?.id);
+    }
+    expect(planAutoRevocations(resolved, campaign, revokeOpts(AFTER_DEADLINE))).toEqual([]);
+  });
+
+  it("refuses a decision for another item and an item already resolved", () => {
+    const campaign = makeCampaign({ autoRevokePolicy: "auto_revoke_on_deadline" });
+    const [a, b] = pendingItems();
+    const [decisionA] = planAutoRevocations([a!], campaign, revokeOpts(AFTER_DEADLINE));
+    expect(() => autoRevokedItem(b!, decisionA!, AFTER_DEADLINE)).toThrow(/is for/);
+    const resolved = autoRevokedItem(a!, decisionA!, AFTER_DEADLINE);
+    expect(() => autoRevokedItem(resolved, decisionA!, AFTER_DEADLINE)).toThrow(/cannot move/);
   });
 });

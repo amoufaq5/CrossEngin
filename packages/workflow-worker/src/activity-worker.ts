@@ -1,4 +1,5 @@
 import { processActivityBatch, type ActivityBatchResult } from "./activity-batch.js";
+import type { ClaimRenewer } from "./renew.js";
 import type { ActivityClaimer, ActivityProcessor, ClaimedActivity } from "./activity-types.js";
 import type { BatchSkipReason } from "./batch.js";
 
@@ -7,6 +8,12 @@ export interface WorkflowActivityWorkerOptions {
   readonly workerId: string;
   readonly claimer: ActivityClaimer;
   readonly processor: ActivityProcessor;
+  /**
+   * Renews each claimed item just before it starts, so an item queued behind a slow one is not run
+   * on a lease another worker has since taken. **Required**, and `null` is the explicit claim that
+   * this worker runs without it — optional-and-absent would be the defect kept as a default.
+   */
+  readonly claimRenewer: ClaimRenewer | null;
   /** Max activities claimed per poll (default 20). */
   readonly batchLimit?: number;
   /** Lease each claim holds before another worker may steal it (default 30_000 ms). */
@@ -44,6 +51,7 @@ export class WorkflowActivityWorker {
   private readonly workerId: string;
   private readonly claimer: ActivityClaimer;
   private readonly processor: ActivityProcessor;
+  private readonly claimRenewer: ClaimRenewer | null;
   private readonly batchLimit: number;
   private readonly leaseMs: number;
   private readonly idlePollMs: number;
@@ -68,6 +76,7 @@ export class WorkflowActivityWorker {
     this.workerId = opts.workerId;
     this.claimer = opts.claimer;
     this.processor = opts.processor;
+    this.claimRenewer = opts.claimRenewer;
     this.batchLimit = opts.batchLimit ?? 20;
     this.leaseMs = opts.leaseMs ?? 30_000;
     this.idlePollMs = opts.idlePollMs ?? 1_000;
@@ -93,6 +102,7 @@ export class WorkflowActivityWorker {
       {
         ...(this.onSkipped !== undefined ? { onSkipped: this.onSkipped } : {}),
         shouldContinue: () => !this.stopping,
+        claimRenewer: this.claimRenewer,
       },
     );
   }
@@ -116,7 +126,12 @@ export class WorkflowActivityWorker {
           this.onError?.(err);
         }
         if (!this.running) break;
-        await this.sleep(result !== null && result.claimed > 0 ? this.activePollMs : this.idlePollMs);
+        // The short sleep is for draining a backlog, so it needs a batch that made progress. A batch
+        // that claimed and finished nothing — every item threw, or was skipped — used to re-poll at
+        // `activePollMs` (0 by default) and re-claim the same failing items at round-trip speed.
+        await this.sleep(
+          result !== null && result.succeeded.length > 0 ? this.activePollMs : this.idlePollMs,
+        );
       }
     })();
   }

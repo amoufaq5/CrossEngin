@@ -72,7 +72,7 @@ export interface IntegrityProofWiring {
 
 export interface IncidentLifecycleSurveyInput {
   /** The built SLO enforcement, from `--slo-config` or `--slo-defaults`, or null. */
-  readonly slo: Pick<SloEnforcement, "engines" | "persisted"> | null;
+  readonly slo: Pick<SloEnforcement, "engines" | "persisted" | "escalationGrades"> | null;
   /** The built integrity proof, or null when it was not built. */
   readonly integrity: IntegrityProofWiring | null;
   readonly deletion: DeletionEscalationWiring | null;
@@ -136,14 +136,20 @@ function surveyEscalators(input: IncidentLifecycleSurveyInput): readonly Surveye
   if (input.slo !== null && input.slo.engines.availability !== null) {
     out.push({
       name: "slo-availability",
-      grades: sortedGrades(DEFAULT_BURN_RATE_THRESHOLDS.map((t) => t.severity)),
+      grades: sortedGrades([
+        ...DEFAULT_BURN_RATE_THRESHOLDS.map((t) => t.severity),
+        ...input.slo.escalationGrades.availability,
+      ]),
       stored: input.slo.persisted,
     });
   }
   if (input.slo !== null && input.slo.engines.latency !== null) {
     out.push({
       name: "slo-latency",
-      grades: sortedGrades(DEFAULT_LATENCY_THRESHOLDS.map((t) => t.severity)),
+      grades: sortedGrades([
+        ...DEFAULT_LATENCY_THRESHOLDS.map((t) => t.severity),
+        ...input.slo.escalationGrades.latency,
+      ]),
       stored: input.slo.persisted,
     });
   }
@@ -172,7 +178,7 @@ const PROBE_AT = "2026-01-01T00:00:00.000Z";
 const PROBE_ACTOR = "incident-lifecycle-survey";
 
 /** The automated writers of `meta.incidents` this binary can construct. */
-export const AUTOMATED_INCIDENT_WRITERS = ["declarer", "paged_note", "stall_note"] as const;
+export const AUTOMATED_INCIDENT_WRITERS = ["declarer", "paged_note", "stall_note", "regrader"] as const;
 export type AutomatedIncidentWriter = (typeof AUTOMATED_INCIDENT_WRITERS)[number];
 
 interface WriterSpec {
@@ -187,7 +193,8 @@ interface WriterSpec {
  * Each writer's effect, by calling the same function the live writer does:
  * `PostgresIncidentDeclarer.closeOut` is `cancelIfUntriaged` (its `declare` only ever creates a
  * `declared` row), `appendPagedNote` is `IncidentExecutor.notePage`, and `appendIncidentNote` — the
- * deletion escalator's stall-kind note — is `IncidentExecutor.note`. A total map, so a fourth writer
+ * deletion escalator's stall-kind note — is `IncidentExecutor.note`, and the SLO engines' escalation
+ * regrade (`incidentRegrader`) is `IncidentExecutor.changeSeverity`. A total map, so a fifth writer
  * is a compile error until it says what it does to a status.
  */
 const WRITERS: Readonly<Record<AutomatedIncidentWriter, WriterSpec>> = Object.freeze({
@@ -211,6 +218,12 @@ const WRITERS: Readonly<Record<AutomatedIncidentWriter, WriterSpec>> = Object.fr
     short: "the stall-kind note",
     step: (r, ex) =>
       ex.note(r, { kind: "observation", message: "probe", actorUserId: PROBE_ACTOR, at: PROBE_AT }),
+  },
+  regrader: {
+    label: "the SLO escalation regrade (changeSeverity)",
+    short: "the escalation regrade",
+    step: (r, ex) =>
+      ex.changeSeverity(r, { severity: "sev1", reason: "probe", actorUserId: PROBE_ACTOR, at: PROBE_AT }),
   },
 });
 
@@ -272,6 +285,16 @@ export function surveyIncidentLifecycle(input: IncidentLifecycleSurveyInput): In
   if (stored.length > 0) writers.push("declarer", "paged_note");
   if (input.deletion !== null && input.deletion.declarer instanceof PostgresIncidentDeclarer) {
     writers.push("stall_note");
+  }
+  // The persisting SLO engines build their regrader whenever they persist; it writes only for a
+  // registration that declares an `escalation`, which is what puts a grade in `escalationGrades`.
+  const slo = input.slo;
+  if (
+    slo !== null &&
+    slo.persisted &&
+    slo.escalationGrades.availability.length + slo.escalationGrades.latency.length > 0
+  ) {
+    writers.push("regrader");
   }
   const integrity = input.integrity;
   return {

@@ -38,4 +38,36 @@ describe("UsageMeter", () => {
     // A previously-seen key stays de-duplicated even after clearing buckets.
     expect(meter.record(aiCall({ idempotencyKey: "a", quantity: 2 })).duplicate).toBe(true);
   });
+
+  it("forgets a key once it falls outside the retention window — the set no longer grows for ever", () => {
+    const meter = new UsageMeter({ dedupRetentionMs: 60_000 });
+    meter.record(aiCall({ idempotencyKey: "old", occurredAt: "2026-06-15T12:00:00.000Z" }));
+    meter.record(aiCall({ idempotencyKey: "new", occurredAt: "2026-06-15T12:05:00.000Z" }));
+    expect(meter.dedupStats()).toEqual({ remembered: 1, evictedWithinRetention: 0 });
+    // Inside the window a retry is still refused.
+    expect(meter.record(aiCall({ idempotencyKey: "new", occurredAt: "2026-06-15T12:05:00.000Z" })).duplicate).toBe(true);
+  });
+
+  it("caps the remembered keys and counts an eviction that was still inside the window", () => {
+    const meter = new UsageMeter({ maxDedupKeys: 2 });
+    for (const k of ["a", "b", "c"]) meter.record(aiCall({ idempotencyKey: k }));
+    expect(meter.dedupStats()).toEqual({ remembered: 2, evictedWithinRetention: 1 });
+    expect(meter.record(aiCall({ idempotencyKey: "c" })).duplicate).toBe(true);
+    expect(meter.record(aiCall({ idempotencyKey: "a" })).duplicate).toBe(false);
+  });
+
+  it("refuses a non-positive retention or cap", () => {
+    expect(() => new UsageMeter({ dedupRetentionMs: 0 })).toThrow(/dedupRetentionMs/);
+    expect(() => new UsageMeter({ maxDedupKeys: 0 })).toThrow(/maxDedupKeys/);
+  });
+
+  it("takes a subscription's buckets in one step and keeps later events apart", () => {
+    const meter = new UsageMeter();
+    meter.record(aiCall({ idempotencyKey: "a", quantity: 2 }));
+    const taken = meter.takeSubscription(SUBSCRIPTION);
+    expect(taken.map((b) => b.quantity)).toEqual([2]);
+    meter.record(aiCall({ idempotencyKey: "b", quantity: 5 }));
+    expect(meter.quantityFor(SUBSCRIPTION, "ai_call")).toBe(5);
+    expect(meter.record(aiCall({ idempotencyKey: "a", quantity: 2 })).duplicate).toBe(true);
+  });
 });

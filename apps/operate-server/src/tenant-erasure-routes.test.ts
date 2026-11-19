@@ -81,11 +81,22 @@ function harness(
     readonly survey?: SchemaSurveyLike | (() => never);
     readonly erasure?: SchemaErasureLike | (() => never);
     readonly recordThrows?: boolean;
+    readonly verifiedBy?: string | null;
   } = {},
 ): Harness {
   const events: TenantErasureEvent[] = [];
   const eraseCalls: Array<{ tenantId: string; executedBy: string; approvedBy: string }> = [];
   const ctx: TenantErasureRoutesContext = {
+    requests: {
+      read: async (id) => ({
+        id,
+        tenantId: TENANT,
+        status: behaviour.verifiedBy === null ? "submitted" : "verified",
+        verifiedBy: behaviour.verifiedBy === undefined ? APPROVER : behaviour.verifiedBy,
+        verifiedAt: "2026-09-01T00:00:00.000Z",
+        deadlineAt: "2026-10-31T00:00:00.000Z",
+      }),
+    },
     eraser: {
       survey: async (tenantId): Promise<SchemaSurveyLike> => {
         const s = behaviour.survey ?? surveyOf();
@@ -143,7 +154,8 @@ async function call(
 
 const SURVEY = "platform.tenants.schema";
 const ERASE = "platform.tenants.eraseSchema";
-const BODY = { approvedBy: APPROVER, confirmTenantId: TENANT };
+const REQ = "dreq_abcdefgh1234";
+const BODY = { relatedDeletionRequestId: REQ, confirmTenantId: TENANT };
 
 describe("the route declarations", () => {
   it("are a read-only survey and a POST erase under /v1/platform/tenants/{id}", () => {
@@ -171,7 +183,8 @@ describe("the route declarations", () => {
 describe("EraseSchemaInputSchema", () => {
   it("requires both an approver and a confirmed tenant id", () => {
     expect(EraseSchemaInputSchema.safeParse(BODY).success).toBe(true);
-    expect(EraseSchemaInputSchema.safeParse({ approvedBy: APPROVER }).success).toBe(false);
+    expect(EraseSchemaInputSchema.safeParse({ relatedDeletionRequestId: REQ }).success).toBe(false);
+    expect(EraseSchemaInputSchema.safeParse({ ...BODY, relatedDeletionRequestId: "x" }).success).toBe(false);
     expect(EraseSchemaInputSchema.safeParse({ confirmTenantId: TENANT }).success).toBe(false);
     expect(EraseSchemaInputSchema.safeParse({ ...BODY, extra: 1 }).success).toBe(false);
     expect(EraseSchemaInputSchema.safeParse({ ...BODY, confirmTenantId: "nope" }).success).toBe(false);
@@ -272,19 +285,30 @@ describe("the erase route", () => {
     expect(ok.eraseCalls[0]?.executedBy).toBe(CALLER);
   });
 
-  it("refuses when the caller is also the approver", async () => {
-    const { ctx, eraseCalls } = harness();
-    const res = await call(ctx, ERASE, { parsedBody: { ...BODY, approvedBy: CALLER } });
+  it("refuses when the caller verified the request it names", async () => {
+    const { ctx, eraseCalls } = harness({}, { verifiedBy: CALLER });
+    const res = await call(ctx, ERASE, { parsedBody: BODY });
     expect(res.status).toBe(403);
     expect(res.body["error"]).toBe("four_eyes_required");
     // Refused before the eraser is reached, so no survey runs for a request that cannot proceed.
     expect(eraseCalls).toEqual([]);
   });
 
+  it("refuses an approver named in the body, and a request nobody verified (H-05)", async () => {
+    const named = harness();
+    const res = await call(named.ctx, ERASE, { parsedBody: { ...BODY, approvedBy: APPROVER } });
+    expect(res.status).toBe(400);
+    expect(res.body["error"]).toBe("approver_is_the_verifier");
+    const unverified = harness({}, { verifiedBy: null });
+    const res2 = await call(unverified.ctx, ERASE, { parsedBody: BODY });
+    expect([res2.status, res2.body["error"]]).toEqual([409, "deletion_request_not_verified"]);
+    expect([...named.eraseCalls, ...unverified.eraseCalls]).toEqual([]);
+  });
+
   it("requires the body to confirm the tenant in the path", async () => {
     const { ctx, eraseCalls } = harness();
     const res = await call(ctx, ERASE, {
-      parsedBody: { approvedBy: APPROVER, confirmTenantId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" },
+      parsedBody: { ...BODY, confirmTenantId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" },
     });
     expect(res.status).toBe(400);
     expect(String(res.body["detail"])).toContain("confirmTenantId");
@@ -294,7 +318,7 @@ describe("the erase route", () => {
   it("accepts a confirmation differing only in case", async () => {
     const { ctx } = harness();
     const res = await call(ctx, ERASE, {
-      parsedBody: { approvedBy: APPROVER, confirmTenantId: TENANT.toUpperCase() },
+      parsedBody: { ...BODY, confirmTenantId: TENANT.toUpperCase() },
     });
     expect(res.status).toBe(200);
   });
@@ -302,7 +326,7 @@ describe("the erase route", () => {
   it("400s a missing or malformed body before touching the eraser", async () => {
     const { ctx, eraseCalls } = harness();
     expect((await call(ctx, ERASE, { parsedBody: null })).status).toBe(400);
-    expect((await call(ctx, ERASE, { parsedBody: { approvedBy: "" } })).status).toBe(400);
+    expect((await call(ctx, ERASE, { parsedBody: { relatedDeletionRequestId: "" } })).status).toBe(400);
     expect(eraseCalls).toEqual([]);
   });
 

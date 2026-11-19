@@ -5,6 +5,7 @@ import type {
   ClaimedActivity,
 } from "./activity-types.js";
 import type { BatchSkipReason } from "./batch.js";
+import { reaffirmClaim, type ClaimRenewer } from "./renew.js";
 
 export interface ActivityBatchFailure {
   readonly activityId: string;
@@ -31,6 +32,8 @@ export interface ProcessActivityBatchOptions {
   /** Checked before each item; `false` stops the batch and hands the rest back. */
   readonly shouldContinue?: () => boolean;
   readonly onSkipped?: (activity: ClaimedActivity, reason: BatchSkipReason) => void;
+  /** Renews each activity's claim just before it starts; see `ProcessTimerBatchOptions.claimRenewer`. */
+  readonly claimRenewer?: ClaimRenewer | null;
 }
 
 /**
@@ -59,9 +62,13 @@ export async function processActivityBatch(
   const failed: ActivityBatchFailure[] = [];
   const skipped: ActivityBatchSkip[] = [];
 
-  const release = async (activityId: string): Promise<void> => {
+  const release = async (activity: ClaimedActivity): Promise<void> => {
     try {
-      await claimer.release({ activityId, workerId: opts.workerId });
+      await claimer.release({
+        activityId: activity.activityId,
+        workerId: opts.workerId,
+        tenantId: activity.tenantId,
+      });
     } catch {
       // The lease will lapse and recover the activity regardless.
     }
@@ -71,7 +78,20 @@ export async function processActivityBatch(
     if (options.shouldContinue !== undefined && !options.shouldContinue()) {
       skipped.push({ activityId: activity.activityId, reason: "worker_stopping" });
       options.onSkipped?.(activity, "worker_stopping");
-      await release(activity.activityId);
+      await release(activity);
+      continue;
+    }
+    if (
+      options.claimRenewer !== undefined &&
+      options.claimRenewer !== null &&
+      !(await reaffirmClaim(options.claimRenewer, {
+        id: activity.activityId,
+        workerId: opts.workerId,
+        tenantId: activity.tenantId,
+      }))
+    ) {
+      skipped.push({ activityId: activity.activityId, reason: "lease_lost" });
+      options.onSkipped?.(activity, "lease_lost");
       continue;
     }
     try {
@@ -82,7 +102,7 @@ export async function processActivityBatch(
         activityId: activity.activityId,
         error: err instanceof Error ? err.message : String(err),
       });
-      await release(activity.activityId);
+      await release(activity);
     }
   }
   return { claimed: activities.length, succeeded, failed, skipped };

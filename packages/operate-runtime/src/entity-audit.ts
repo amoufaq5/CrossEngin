@@ -43,10 +43,11 @@ export function auditUnavailable(rolledBack: boolean): HandlerOutput {
  * sensitive field. The value itself is in the entity table, under the protections that table has.
  *
  * **The withholding is only as wide as the classification, and that leaves the erasure argument
- * half-made.** An *unclassified* value is copied into the payloads in the clear, and in the shipped
- * `erp-core` nearly every own field carries no classification — among them every field of `Contact`
- * (`given_name`, `family_name`, `email`, `phone`), `Employee.given_name`/`family_name`,
- * `Account.billing_email` and the free-text `notes`/`memo` fields. Since the trail is retained by the
+ * half-made.** An *unclassified* value is copied into the payloads in the clear. `Contact`'s
+ * `given_name`/`family_name`/`email`/`phone`, `Employee.given_name`/`family_name` and
+ * `Account.billing_email` are classified `pii` now, so their values are withheld; what remains in the
+ * clear is every other unclassified field, the free-text `notes`/`memo` fields among them, which name
+ * people as often as they name anything. Since the trail is retained by the
  * Article 17 erasure, those copies outlive a tenant deletion whose proof says nothing about them, and
  * `PLATFORM_RECORD_TABLES`' premise — that those tables hold the platform's record and not the
  * tenant's data — stops being true of `meta.audit_log` for entity rows. Scrubbing the payloads at
@@ -95,7 +96,34 @@ export type EntityAuditAction = (typeof ENTITY_AUDIT_ACTIONS)[number];
 /** Where a deployment puts an entity write's record. One method; the handler owns the shape. */
 export interface EntityWriteAuditor {
   record(event: EntityWriteAuditEvent): Promise<void>;
+  /**
+   * Who took a child record away from its parent — deleted it, or moved it to another parent — read
+   * back from the trail this auditor writes. Optional, because a deployment with no audit table has
+   * no trail to read; the segregation-of-duties check says at boot that it cannot see removals then.
+   */
+  childRemovers?(query: ChildRemovalQuery): Promise<ChildRemovers>;
 }
+
+/** A child entity's records that named `parentId` through `parentField` and no longer do. */
+export interface ChildRemovalQuery {
+  readonly tenantId: string;
+  readonly childEntity: string;
+  readonly parentField: string;
+  readonly parentId: string;
+  /**
+   * The parent's `created_at`, which bounds the read to the parent's lifetime: a child cannot have
+   * been taken from a parent that did not exist yet. Null when the parent carries none.
+   */
+  readonly parentCreatedAt: string | null;
+}
+
+/**
+ * Each removal's actor, `null` where the write named no person; or the trail could not be read,
+ * which a caller treats as unverifiable rather than as "nobody removed anything".
+ */
+export type ChildRemovers =
+  | { readonly kind: "read"; readonly removers: readonly (string | null)[] }
+  | { readonly kind: "unreadable"; readonly reason: string };
 
 /**
  * The write's record could not be made. A recorder throws this, and only this, to refuse.

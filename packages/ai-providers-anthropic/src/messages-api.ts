@@ -1,6 +1,6 @@
 import type { CompletionRequest, LlmMessage, LlmTool, Usage } from "@crossengin/ai-providers";
 
-import { computeUsageCost, type AnthropicModel } from "./pricing.js";
+import { computeUsageCost, type AnthropicModel, type AnthropicModelPricing } from "./pricing.js";
 
 export interface AnthropicMessagesRequest {
   readonly model: string;
@@ -150,6 +150,7 @@ function buildTool(tool: LlmTool): AnthropicTool {
 
 export interface NormalizeOptions {
   readonly cacheWriteAsInput?: boolean;
+  readonly pricing?: AnthropicModelPricing;
 }
 
 export function normalizeUsage(
@@ -166,7 +167,7 @@ export function normalizeUsage(
     cachedInputTokens: cachedInput,
     cacheWriteTokens: cacheWrite,
     outputTokens: usage.output_tokens,
-  });
+  }, opts.pricing);
   return {
     inputTokens,
     outputTokens: usage.output_tokens,

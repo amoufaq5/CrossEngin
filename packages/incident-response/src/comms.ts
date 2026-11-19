@@ -63,6 +63,16 @@ export const IncidentCommunicationSchema = z
     retractedAt: Iso8601.nullable().default(null),
     retractedReason: z.string().min(1).optional(),
     breachNotificationDeadlineAt: Iso8601.optional(),
+    /**
+     * Why a breach notification went out after its deadline — GDPR Article 33(1): a notification
+     * not made within 72 hours "shall be accompanied by reasons for the delay".
+     *
+     * Required exactly when the notification is late and refused otherwise. The contract used to
+     * refuse a late notification outright, which made the first fact a regulator asks for — *was
+     * it late?* — unstorable, and left `isBreachNotificationTimely` constant `true` for any record
+     * that parsed. A late notification is a fact to record with its reasons, not a row to refuse.
+     */
+    breachNotificationDelayReason: z.string().trim().min(1).max(2000).optional(),
   })
   .superRefine((v, ctx) => {
     if (v.audience === "status_page_public" && v.statusPageLevel === undefined) {
@@ -103,17 +113,32 @@ export const IncidentCommunicationSchema = z
             "breach_notification requires breachNotificationDeadlineAt (GDPR 72h)",
         });
       } else {
-        const deadlineMs = new Date(v.breachNotificationDeadlineAt).getTime();
-        const publishedMs = new Date(v.publishedAt).getTime();
-        if (deadlineMs < publishedMs) {
+        const late =
+          new Date(v.publishedAt).getTime() > new Date(v.breachNotificationDeadlineAt).getTime();
+        if (late && v.breachNotificationDelayReason === undefined) {
           ctx.addIssue({
             code: z.ZodIssueCode.custom,
-            path: ["publishedAt"],
+            path: ["breachNotificationDelayReason"],
             message:
-              "publishedAt cannot be after breachNotificationDeadlineAt (notification was late)",
+              "a breach_notification published after breachNotificationDeadlineAt must state breachNotificationDelayReason (GDPR Article 33(1))",
+          });
+        }
+        if (!late && v.breachNotificationDelayReason !== undefined) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["breachNotificationDelayReason"],
+            message:
+              "breachNotificationDelayReason is only valid on a breach_notification published after its deadline",
           });
         }
       }
+    }
+    if (v.kind !== "breach_notification" && v.breachNotificationDelayReason !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["breachNotificationDelayReason"],
+        message: "breachNotificationDelayReason is only valid on a breach_notification",
+      });
     }
     if (v.requiresLegalReview) {
       if (v.legalReviewedBy === null) {

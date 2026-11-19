@@ -866,7 +866,8 @@ function DigestRow({ notification }: { notification: TenantNotification }) {
         <span className="ml-auto text-xs tabular-nums text-ink-faint">{label}</span>
       </div>
       {/* The body is rendered server-side from the digest's own pool, with every substituted
-          value HTML-escaped by the template renderer before it reaches this component. */}
+          value HTML-escaped by the template renderer, and a tenant's override re-checked against
+          the authoring allowlist at render time (the platform default renders if it fails). */}
       <div
         className="prose-digest mt-2 text-sm text-ink-muted"
         dangerouslySetInnerHTML={{ __html: digest.body }}

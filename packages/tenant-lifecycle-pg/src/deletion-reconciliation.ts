@@ -1191,3 +1191,44 @@ export interface TombstoneVerification {
 
 /** Re-exported so a caller need not reach into the tombstone module for the one type it reads. */
 export type { StoredTombstone };
+
+/** One request the data subject is still waiting on, with its Article 12(3) standing. */
+export interface PendingDeletionRequest {
+  readonly request: GdprDeletionRequest;
+  readonly assessment: DeadlineAssessment;
+}
+
+/**
+ * The operator's pending list (H-20): every unanswered request, nearest deadline first, each with
+ * its standing — so `breached` and `approaching` are rows on a page rather than log lines only.
+ *
+ * Distinct from `auditDeadlines` on purpose. That is a **sweep**, which reports findings to the
+ * deployment's reporter; this is a **read**, which reports nothing, because a human loading a list
+ * must not re-emit every finding the scheduler already reported. It reads one store query, so it
+ * needs neither the tombstone table nor the forensic chain the reconciler does.
+ */
+export interface PendingDeletionPage {
+  readonly requests: readonly PendingDeletionRequest[];
+  readonly unreadable: readonly { readonly requestId: string | null; readonly detail: string }[];
+  /** `false` when the read filled its limit — a prefix, nearest deadlines first (ADR-0367). */
+  readonly complete: boolean;
+  readonly warningDays: number;
+}
+
+export async function pendingDeletionRequests(
+  store: Pick<PostgresDeletionRequestStore, "unanswered">,
+  opts: { readonly now: Date; readonly warningDays?: number; readonly limit?: number },
+): Promise<PendingDeletionPage> {
+  const bounded = Math.max(1, Math.min(500, Math.trunc(opts.limit ?? DEFAULT_DEADLINE_AUDIT_LIMIT)));
+  const warningDays = opts.warningDays ?? DEFAULT_DEADLINE_WARNING_DAYS;
+  const page = await store.unanswered(bounded);
+  return {
+    requests: page.records.map((request) => ({
+      request,
+      assessment: assessDeadline(request, { now: opts.now, warningDays }),
+    })),
+    unreadable: page.unreadable,
+    complete: page.rowsRead < bounded,
+    warningDays,
+  };
+}

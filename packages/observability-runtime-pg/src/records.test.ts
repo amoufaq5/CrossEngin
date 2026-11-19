@@ -133,6 +133,7 @@ function recovered(
     incidentId: "INC-2026-0001",
     killSwitchId: "fks_auto00000001",
     closeOut: overrides.closeOut ?? "cancelled",
+    killSwitchRelease: "released",
   };
 }
 
@@ -204,6 +205,7 @@ describe("enforcementActionFromDecision — an unrecorded rollback", () => {
       },
       tenantId: TENANT,
       occurredAt: NOW,
+      pageDelivery: null,
     });
     expect(action.killSwitchId).toBeNull();
     expect(action.flagId).toBe("ff_checkout01");
@@ -216,6 +218,7 @@ describe("enforcementActionFromDecision — an unrecorded rollback", () => {
       decision: { ...opened, plan: { ...opened.plan, killSwitch: null } },
       tenantId: TENANT,
       occurredAt: NOW,
+      pageDelivery: null,
     });
     expect(action.killSwitchId).toBeNull();
     expect(action.flagId).toBeNull();
@@ -228,6 +231,7 @@ describe("enforcementActionFromDecision signal", () => {
       decision: breachOpened(),
       tenantId: null,
       occurredAt: NOW,
+      pageDelivery: null,
     });
     expect(action.signal).toBe("availability");
   });
@@ -237,6 +241,7 @@ describe("enforcementActionFromDecision signal", () => {
       decision: latencyBreachOpened(),
       tenantId: null,
       occurredAt: NOW,
+      pageDelivery: null,
       signal: "latency",
     });
     expect(action.signal).toBe("latency");
@@ -275,11 +280,14 @@ describe("evaluationRecordFromVerdict", () => {
 });
 
 describe("enforcementActionFromDecision", () => {
-  it("maps a breach_opened decision with incident + kill switch + paging", () => {
+  // Rewritten (ADR-0415): this test fed a decision with a planned page and expected `paged: true`,
+  // which pinned the defect — the row claimed a page from the plan before anything had delivered it.
+  it("maps a breach_opened decision with incident + kill switch + the delivered page", () => {
     const action = enforcementActionFromDecision({
       decision: breachOpened(),
       tenantId: TENANT,
       occurredAt: NOW,
+      pageDelivery: { deliveredChannels: 1 },
     });
     expect(SloEnforcementActionRecordSchema.safeParse(action).success).toBe(true);
     expect(action.decision).toBe("breach_opened");
@@ -302,6 +310,7 @@ describe("enforcementActionFromDecision", () => {
       },
       tenantId: null,
       occurredAt: NOW,
+      pageDelivery: null,
     });
     expect(action.decision).toBe("breach_ongoing");
     expect(action.severity).toBeNull();
@@ -315,6 +324,7 @@ describe("enforcementActionFromDecision", () => {
       decision: recovered(),
       tenantId: null,
       occurredAt: NOW,
+      pageDelivery: null,
     });
     expect(action.decision).toBe("recovered");
     expect(action.killSwitchId).toBe("fks_auto00000001");
@@ -326,6 +336,7 @@ describe("enforcementActionFromDecision", () => {
       decision: breachOpened(),
       tenantId: null,
       occurredAt: NOW,
+      pageDelivery: null,
     });
     expect(action.closeOut).toBeNull();
   });
@@ -340,6 +351,7 @@ describe("enforcementActionFromDecision", () => {
       },
       tenantId: null,
       occurredAt: NOW,
+      pageDelivery: null,
     });
     expect(action.closeOut).toBeNull();
   });
@@ -351,6 +363,7 @@ describe("enforcementActionFromDecision close-out", () => {
       decision: recovered({ closeOut: "cancelled" }),
       tenantId: TENANT,
       occurredAt: NOW,
+      pageDelivery: null,
     });
     expect(action.closeOut).toBe("cancelled");
     expect(SloEnforcementActionRecordSchema.safeParse(action).success).toBe(true);
@@ -362,6 +375,7 @@ describe("enforcementActionFromDecision close-out", () => {
         decision: recovered({ closeOut }),
         tenantId: null,
         occurredAt: NOW,
+        pageDelivery: null,
       });
       expect(action.closeOut).toBe(closeOut);
     }
@@ -373,6 +387,7 @@ describe("enforcementActionFromDecision close-out", () => {
       decision: recovered({ closeOut: "failed" }),
       tenantId: null,
       occurredAt: NOW,
+      pageDelivery: null,
     });
     expect(action.closeOut).toBe("failed");
   });
@@ -382,6 +397,7 @@ describe("enforcementActionFromDecision close-out", () => {
       decision: recovered({ closeOut: "human_owned" }),
       tenantId: null,
       occurredAt: NOW,
+      pageDelivery: null,
       signal: "latency",
     });
     expect(action.signal).toBe("latency");
@@ -487,5 +503,76 @@ describe("SloEnforcementActionRecordSchema close-out invariant", () => {
     expect(parsed.success).toBe(false);
     if (parsed.success) return;
     expect(parsed.error.issues[0]?.path).toEqual(["closeOut"]);
+  });
+});
+
+describe("enforcementActionFromDecision — paged is the delivery outcome, not the plan (ADR-0415)", () => {
+  it("writes paged false for a planned page nothing delivered", () => {
+    const opened = breachOpened();
+    if (opened.kind !== "breach_opened") throw new Error("unreachable");
+    expect(opened.plan.pages.length).toBeGreaterThan(0);
+    const action = enforcementActionFromDecision({
+      decision: opened,
+      tenantId: null,
+      occurredAt: NOW,
+      pageDelivery: null,
+    });
+    expect([action.paged, action.pageChannelCount]).toEqual([false, 0]);
+  });
+
+  it("writes paged false when the delivery reached no channel", () => {
+    const action = enforcementActionFromDecision({
+      decision: breachOpened(),
+      tenantId: null,
+      occurredAt: NOW,
+      pageDelivery: { deliveredChannels: 0 },
+    });
+    expect([action.paged, action.pageChannelCount]).toEqual([false, 0]);
+  });
+
+  it("counts the channels that accepted the page, not the ones planned", () => {
+    const action = enforcementActionFromDecision({
+      decision: breachOpened(),
+      tenantId: null,
+      occurredAt: NOW,
+      pageDelivery: { deliveredChannels: 3 },
+    });
+    expect([action.paged, action.pageChannelCount]).toEqual([true, 3]);
+  });
+
+  it("refuses a tally that is not a non-negative integer", () => {
+    for (const deliveredChannels of [-1, 1.5, Number.NaN]) {
+      expect(() =>
+        enforcementActionFromDecision({
+          decision: breachOpened(),
+          tenantId: null,
+          occurredAt: NOW,
+          pageDelivery: { deliveredChannels },
+        }),
+      ).toThrow(/non-negative integer/);
+    }
+  });
+
+  it("stores an escalation as an ongoing action carrying its grade and its re-page", () => {
+    const action = enforcementActionFromDecision({
+      decision: {
+        kind: "breach_escalated",
+        surface: "POST /v1/orders",
+        sloId: "orders-availability",
+        incidentId: "INC-2026-0001",
+        fromSeverity: "sev2",
+        severity: "sev1",
+        pages: [],
+        regraded: true,
+      },
+      tenantId: null,
+      occurredAt: NOW,
+      pageDelivery: { deliveredChannels: 1 },
+    });
+    expect(SloEnforcementActionRecordSchema.safeParse(action).success).toBe(true);
+    expect(action.decision).toBe("breach_ongoing");
+    expect(action.severity).toBe("sev1");
+    expect([action.paged, action.pageChannelCount]).toEqual([true, 1]);
+    expect(action.closeOut).toBeNull();
   });
 });

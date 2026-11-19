@@ -1,7 +1,7 @@
 import type { CompletionChunk } from "@crossengin/ai-providers";
 
 import { normalizeUsage, type OpenAiUsage } from "./chat-api.js";
-import type { OpenAiModel } from "./pricing.js";
+import type { OpenAiModel, OpenAiModelPricing } from "./pricing.js";
 
 export function parseSseDataPayloads(raw: string): readonly string[] {
   const payloads: string[] = [];
@@ -20,6 +20,7 @@ export function parseSseDataPayloads(raw: string): readonly string[] {
 
 interface StreamState {
   readonly model: OpenAiModel;
+  readonly pricing: OpenAiModelPricing | undefined;
   promptTokens: number;
   completionTokens: number;
   cachedTokens: number;
@@ -27,9 +28,10 @@ interface StreamState {
   openToolIds: Set<string>;
 }
 
-function newState(model: OpenAiModel): StreamState {
+function newState(model: OpenAiModel, pricing?: OpenAiModelPricing): StreamState {
   return {
     model,
+    pricing,
     promptTokens: 0,
     completionTokens: 0,
     cachedTokens: 0,
@@ -49,7 +51,7 @@ function* finalize(state: StreamState): Generator<CompletionChunk, void, void> {
       prompt_tokens: state.promptTokens,
       completion_tokens: state.completionTokens,
       prompt_tokens_details: { cached_tokens: state.cachedTokens },
-    }),
+    }, state.pricing),
   };
 }
 
@@ -156,23 +158,31 @@ function applyUsage(delta: Partial<OpenAiUsage>, state: StreamState): void {
 export async function* readSseStream(
   body: ReadableStream<Uint8Array>,
   model: OpenAiModel,
+  pricing?: OpenAiModelPricing,
 ): AsyncGenerator<CompletionChunk, void, void> {
   const decoder = new TextDecoder();
   const reader = body.getReader();
-  const state = newState(model);
+  const state = newState(model, pricing);
   let buffer = "";
-  while (true) {
-    const { value, done } = await reader.read();
-    if (value !== undefined) {
-      buffer += decoder.decode(value, { stream: true });
-      const splitIdx = buffer.lastIndexOf("\n\n");
-      if (splitIdx >= 0) {
-        const complete = buffer.slice(0, splitIdx + 2);
-        buffer = buffer.slice(splitIdx + 2);
-        for (const chunk of processSsePayloads(complete, state)) yield chunk;
+  let finished = false;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (value !== undefined) {
+        buffer += decoder.decode(value, { stream: true });
+        const splitIdx = buffer.lastIndexOf("\n\n");
+        if (splitIdx >= 0) {
+          const complete = buffer.slice(0, splitIdx + 2);
+          buffer = buffer.slice(splitIdx + 2);
+          for (const chunk of processSsePayloads(complete, state)) yield chunk;
+        }
       }
+      if (done) break;
     }
-    if (done) break;
+    finished = true;
+  } finally {
+    // A consumer that stops iterating early leaves the body unread; release the connection.
+    if (!finished) await reader.cancel().catch(() => undefined);
   }
   if (buffer.trim().length > 0) {
     for (const chunk of processSsePayloads(buffer, state)) yield chunk;

@@ -17,7 +17,7 @@ const flush = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 
 describe("renewWhile", () => {
   it("renews on each heartbeat while the task runs, then stops cleanly", async () => {
-    const renews: Array<{ timerId: string; workerId: string }> = [];
+    const renews: Array<{ timerId: string; workerId: string; tenantId: string }> = [];
     const renewer: ClaimRenewer = {
       renew: async (o) => {
         renews.push(o);
@@ -28,15 +28,22 @@ describe("renewWhile", () => {
 
     let finishTask!: () => void;
     const task = new Promise<string>((r) => (finishTask = () => r("done")));
-    const wrapped = renewWhile(task, { renewer, timerId: "wft_1", workerId: "w", intervalMs: 100, sleep });
+    const wrapped = renewWhile(task, {
+      renewer,
+      timerId: "wft_1",
+      workerId: "w",
+      tenantId: "t-1",
+      intervalMs: 100,
+      sleep,
+    });
 
     releaseNext(); // heartbeat 1 → renew #1, re-parks
     await flush();
     releaseNext(); // heartbeat 2 → renew #2, re-parks
     await flush();
     expect(renews).toEqual([
-      { timerId: "wft_1", workerId: "w" },
-      { timerId: "wft_1", workerId: "w" },
+      { timerId: "wft_1", workerId: "w", tenantId: "t-1" },
+      { timerId: "wft_1", workerId: "w", tenantId: "t-1" },
     ]);
 
     finishTask(); // task done → done=true
@@ -55,6 +62,7 @@ describe("renewWhile", () => {
       renewer,
       timerId: "wft_1",
       workerId: "w",
+      tenantId: "t-1",
       intervalMs: 100,
       sleep,
       onLeaseLost: () => {
@@ -77,7 +85,14 @@ describe("renewWhile", () => {
       },
     };
     const { sleep, releaseNext } = controllableSleep();
-    const wrapped = renewWhile(Promise.resolve("fast"), { renewer, timerId: "wft_1", workerId: "w", intervalMs: 100, sleep });
+    const wrapped = renewWhile(Promise.resolve("fast"), {
+      renewer,
+      timerId: "wft_1",
+      workerId: "w",
+      tenantId: "t-1",
+      intervalMs: 100,
+      sleep,
+    });
     await flush(); // task already resolved → done=true; heartbeat parked on its first sleep
     releaseNext(); // unpark → heartbeat sees done → breaks WITHOUT renewing
     await expect(wrapped).resolves.toBe("fast");

@@ -116,3 +116,46 @@ describe("computeAging — withholding and credit notes", () => {
     expect(computeAging({ documents: [doc], appliedByDocument: new Map(), asOf }).totalOpen).toBe(30);
   });
 });
+
+describe("computeAging — money", () => {
+  const asOf = "2026-06-15";
+
+  it("totals each currency apart, because a sum of euros and dollars is not a quantity", () => {
+    const r = computeAging({
+      documents: [
+        { id: "a", total: "100.00", currency: "EUR", due_date: asOf },
+        { id: "b", total: "40.00", currency: "USD", due_date: asOf },
+        { id: "c", total: "10.50", currency: "EUR", due_date: asOf },
+      ],
+      appliedByDocument: new Map(),
+      asOf,
+    });
+    expect(r.currency).toBeNull();
+    expect(r.totalsByCurrency).toEqual({
+      EUR: { totalOpen: 110.5, totalsByBucket: { current: 110.5, "1-30": 0, "31-60": 0, "61-90": 0, "90+": 0 } },
+      USD: { totalOpen: 40, totalsByBucket: { current: 40, "1-30": 0, "31-60": 0, "61-90": 0, "90+": 0 } },
+    });
+  });
+
+  it("sums exactly where a double running total drifts", () => {
+    // 0.1 + 0.2 is 0.30000000000000004 in a double; ten thousand of them is not 3000.
+    const documents = Array.from({ length: 10_000 }, (_, i) => ({
+      id: `d${String(i)}`,
+      total: i % 2 === 0 ? "0.10" : "0.20",
+      currency: "USD",
+      due_date: asOf,
+    }));
+    const r = computeAging({ documents, appliedByDocument: new Map(), asOf });
+    expect(r.totalOpen).toBe(1500);
+    expect(r.totalsByCurrency["USD"]!.totalOpen).toBe(1500);
+  });
+
+  it("reads a near-limit amount without losing its last cent", () => {
+    const r = computeAging({
+      documents: [{ id: "x", total: "99999999999999.99", currency: "USD", due_date: asOf }],
+      appliedByDocument: new Map([["x", 0.01]]),
+      asOf,
+    });
+    expect(r.documents[0]!.open).toBe(99999999999999.98);
+  });
+});

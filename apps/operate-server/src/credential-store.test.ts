@@ -119,6 +119,7 @@ describe("PostgresCredentialStore", () => {
             credential_hash: HASH,
             credential_failed_attempts: 2,
             credential_locked_until: null,
+            session_epoch: 3,
           },
         ],
       ]);
@@ -129,6 +130,7 @@ describe("PostgresCredentialStore", () => {
         credentialHash: HASH,
         failedAttempts: 2,
         lockedUntil: null,
+        sessionEpoch: 3,
       });
       const sql = captured[0]!.sql;
       expect(sql).toContain("credential_hash");
@@ -211,6 +213,7 @@ describe("PostgresCredentialStore", () => {
         credentialHash: HASH,
         failedAttempts: 4,
         lockedUntil: null,
+        sessionEpoch: 0,
       });
       const sql = captured[0]!.sql;
       expect(sql).toContain("credential_hash");
@@ -412,11 +415,75 @@ describe("PostgresCredentialStore", () => {
       expect(captured[0]!.params).toEqual([USER, HASH]);
     });
 
+    it("ends every session in the same statement", async () => {
+      // A password set is the moment sessions minted under the previous one must stop working; a
+      // second statement could land between two requests that would then disagree.
+      const { conn, captured } = fakeDb([[{}]]);
+      await new PostgresCredentialStore(conn).setCredential(USER, HASH);
+      expect(captured).toHaveLength(1);
+      expect(captured[0]!.sql).toContain("session_epoch = session_epoch + 1");
+    });
+
     it("reports false for a user that does not exist", async () => {
       // Rather than reporting a success it did not have: `set-credential` exits 1 on this, so an
       // operator who mistyped a uuid is told instead of believing a password was set.
       const { conn } = fakeDb([[]]);
       expect(await new PostgresCredentialStore(conn).setCredential(USER, HASH)).toBe(false);
+    });
+  });
+
+  describe("rehashCredential", () => {
+    it("ends no session and is conditional on the hash it replaces", async () => {
+      const { conn, captured } = fakeDb([[{}]]);
+      const next = HASH.replace("$1$", "$3$");
+      expect(await new PostgresCredentialStore(conn).rehashCredential(USER, HASH, next)).toBe(true);
+      const sql = captured[0]!.sql;
+      // A re-hash is the same password under new parameters, not a password change.
+      expect(sql).not.toContain("session_epoch");
+      expect(sql).toContain("credential_hash = $3");
+      expect(sql).toContain("AND credential_hash = $2");
+      expect(captured[0]!.params).toEqual([USER, HASH, next]);
+    });
+
+    it("reports false when the hash moved underneath it", async () => {
+      // A password change that landed between the login's verification and this write: the
+      // re-hash of the old password must not overwrite the new one.
+      const { conn } = fakeDb([[]]);
+      expect(await new PostgresCredentialStore(conn).rehashCredential(USER, HASH, HASH)).toBe(false);
+    });
+  });
+
+  describe("endSessions", () => {
+    it("advances the generation and answers the new one", async () => {
+      const { conn, captured } = fakeDb([[{ session_epoch: 4 }]]);
+      expect(await new PostgresCredentialStore(conn).endSessions(USER)).toBe(4);
+      expect(captured[0]!.sql).toContain("session_epoch = session_epoch + 1");
+      expect(captured[0]!.sql).toContain("RETURNING session_epoch");
+      expect(captured[0]!.params).toEqual([USER]);
+    });
+
+    it("answers null for a user that does not exist", async () => {
+      const { conn } = fakeDb([[]]);
+      expect(await new PostgresCredentialStore(conn).endSessions(USER)).toBeNull();
+    });
+  });
+
+  describe("sessionStanding", () => {
+    it("reads status and generation and never the hash", async () => {
+      const { conn, captured } = fakeDb([[{ status: "suspended", session_epoch: 2 }]]);
+      expect(await new PostgresCredentialStore(conn).sessionStanding(USER)).toEqual({
+        status: "suspended",
+        sessionEpoch: 2,
+      });
+      expect(captured[0]!.sql).toBe("SELECT status, session_epoch FROM meta.users WHERE id = $1::uuid");
+    });
+
+    it("answers null for a non-uuid without a statement, and for no row", async () => {
+      const a = fakeDb([]);
+      expect(await new PostgresCredentialStore(a.conn).sessionStanding("nope")).toBeNull();
+      expect(a.captured).toHaveLength(0);
+      const b = fakeDb([[]]);
+      expect(await new PostgresCredentialStore(b.conn).sessionStanding(USER)).toBeNull();
     });
   });
 

@@ -358,6 +358,8 @@ describe("defaultRecoverPages", () => {
       killSwitchId: null,
       closeOut: "cancelled",
       pages: [],
+      pagesDelivered: false,
+      killSwitchRelease: null,
       ...over,
     } as ObservedEnforcementDecision;
   }
@@ -551,5 +553,92 @@ describe("buildSloEnforcement — recoverPages", () => {
       { kind: "pagerduty_phone", serviceKey: "svc-oncall" },
     ]);
     expect(resolved[0]?.[0]?.incidentId).toBe(incidentId);
+  });
+});
+
+describe("buildSloEnforcement — escalation and delivered pages (M-23, ADR-0415)", () => {
+  function burst(enforcement: ReturnType<typeof buildSloEnforcement>, atMs: number): void {
+    const sink = enforcement.observer.asExecutionSink();
+    for (let i = 0; i < 25; i += 1) {
+      sink(makeExecution(503, "error", new Date(atMs - i * 1_000).toISOString()));
+    }
+  }
+
+  it("parses an escalation and refuses one sooner than a minute", () => {
+    const reg = { slo: availabilitySlo(SURFACE), escalation: { afterMs: 1_800_000, severity: "sev1" } };
+    expect(parseSloConfig(validConfig({ availability: [reg] } as Partial<SloConfig>)).availability?.[0]?.escalation).toEqual({
+      afterMs: 1_800_000,
+      severity: "sev1",
+    });
+    expect(() =>
+      parseSloConfig(
+        validConfig({
+          availability: [{ ...reg, escalation: { afterMs: 1_000, severity: "sev1" } }],
+        } as Partial<SloConfig>),
+      ),
+    ).toThrow();
+  });
+
+  it("escalates a configured breach once its duration has passed", async () => {
+    const clock = new FixedClock(new Date(END));
+    const enforcement = buildSloEnforcement(
+      parseSloConfig(
+        validConfig({
+          availability: [
+            { slo: availabilitySlo(SURFACE), escalation: { afterMs: 1_800_000, severity: "sev1" } },
+          ],
+        } as Partial<SloConfig>),
+      ),
+      { clock },
+    );
+    expect(enforcement.escalationGrades).toEqual({ availability: ["sev1"], latency: [] });
+    burst(enforcement, clock.nowMs());
+    expect((await enforcement.scheduler.evaluateOnce())[0]?.kind).toBe("breach_opened");
+    clock.advance(1_860_000);
+    burst(enforcement, clock.nowMs());
+    const escalated = (await enforcement.scheduler.evaluateOnce())[0];
+    expect(escalated).toMatchObject({ kind: "breach_escalated", severity: "sev1" });
+  });
+
+  it("over a connection, delivers through deliverPages and skips onPage", async () => {
+    const capture: { sql: string }[] = [];
+    const clock = new FixedClock(new Date(END));
+    const delivered: number[] = [];
+    let onPage = 0;
+    const enforcement = buildSloEnforcement(parseSloConfig(validConfig()), {
+      clock,
+      conn: allocatingConnection(capture, 91),
+      onPage: async () => {
+        onPage += 1;
+      },
+      deliverPages: async (_d, pages) => {
+        delivered.push(pages.length);
+        return { deliveredChannels: 1 };
+      },
+    });
+    burst(enforcement, clock.nowMs());
+    const decisions = await enforcement.scheduler.evaluateOnce();
+    expect(decisions[0]).toMatchObject({ kind: "breach_opened", pagesDelivered: true });
+    expect(delivered).toEqual([1]);
+    expect(onPage).toBe(0);
+  });
+
+  it("without a connection, ignores deliverPages and pages through onPage", async () => {
+    const clock = new FixedClock(new Date(END));
+    let delivered = 0;
+    let onPage = 0;
+    const enforcement = buildSloEnforcement(parseSloConfig(validConfig()), {
+      clock,
+      onPage: async () => {
+        onPage += 1;
+      },
+      deliverPages: async () => {
+        delivered += 1;
+        return { deliveredChannels: 1 };
+      },
+    });
+    burst(enforcement, clock.nowMs());
+    await enforcement.scheduler.evaluateOnce();
+    expect([delivered, onPage]).toEqual([0, 1]);
   });
 });

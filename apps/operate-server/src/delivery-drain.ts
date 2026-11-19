@@ -1,3 +1,4 @@
+import { sha256 } from "@crossengin/crypto";
 import type { UnreadableRow, UnreadableRowReporter } from "@crossengin/kernel-pg";
 import {
   RETRYABLE_DELIVERY_OUTCOMES,
@@ -23,7 +24,9 @@ import {
   type SendResult,
   type SenderRegistry,
   type SendTimer,
+  type DispatchContent,
 } from "./delivery-senders.js";
+import type { DispatchContentSource } from "./delivery-content.js";
 import type { ClaimedDispatch, DispatchAdvanceUpdate, DueRetry } from "./delivery-store.js";
 import {
   DEFAULT_NOTIFICATION_POLICY,
@@ -53,6 +56,9 @@ export interface DeliveryStoreLike {
     onUnreadable: UnreadableRowReporter,
     limit?: number,
   ): Promise<readonly DueRetry[]>;
+  reconcile(tenantId: string, rowId: string, at: Date): Promise<unknown>;
+  attemptedRecipients(tenantId: string, rowId: string): Promise<ReadonlySet<string>>;
+  unsettledSending(tenantId: string, limit?: number): Promise<readonly string[]>;
 }
 
 export interface RecipientResolverLike {
@@ -92,6 +98,11 @@ export interface DeliveryDrainOptions {
   readonly maxAttempts?: number;
   readonly timer?: SendTimer;
   readonly onError?: (err: unknown, tenantId: string) => void;
+  /**
+   * Renders a dispatch's approved template for the providers. Absent, every provider sends its own
+   * identifier-only notice, which is what every deployment did before this option existed.
+   */
+  readonly content?: DispatchContentSource;
   /**
    * Where a dispatch row the contract refuses is reported.
    *
@@ -141,14 +152,56 @@ export interface MultiTenantDrainReport {
 
 export const DEFAULT_DRAIN_BATCH_SIZE = 25;
 
-/** The channel decides what an "address" is; suppressions and preferences are keyed by it. */
+/**
+ * The channel decides what an "address" is; suppressions and preferences are keyed by it, and
+ * `null` means this recipient cannot be reached on this channel at all.
+ *
+ * It answered the e-mail address for every channel but `in_app` and `push_mobile`, so an SMS or a
+ * voice call was handed an e-mail address as its destination, and push was handed a user id —
+ * which FCM refuses, and which ADR-0310's sender refuses before FCM sees it. A phone channel now
+ * reads `meta.users.phone_e164`; push answers `null` because **no table in this platform holds a
+ * device registration token**, so there is nothing a push could be addressed to until one exists;
+ * a webhook is addressed to an endpoint and not to a person, so a person-audience has none.
+ */
 export function addressFor(
   channel: NotificationChannel,
   recipient: ResolvedRecipient,
-): string {
-  return channel === "in_app" || channel === "push_mobile"
-    ? recipient.userId
-    : recipient.email;
+): string | null {
+  switch (channel) {
+    case "in_app":
+      return recipient.userId;
+    case "email":
+      return recipient.email;
+    case "sms":
+    case "voice_call":
+      return recipient.phoneE164;
+    case "push_mobile":
+    case "webhook":
+      return null;
+  }
+}
+
+/** Recorded on the attempt for a recipient `addressFor` has no address for on the channel. */
+export const RECIPIENT_UNADDRESSABLE_ERROR_CODE = "recipient_unaddressable";
+
+/** Recorded on a retry's closing attempt when its recipient can no longer be sent to at all. */
+export const RECIPIENT_NO_LONGER_SENDABLE_ERROR_CODE = "recipient_no_longer_sendable";
+
+/**
+ * What one due retry came to: `attempted` reached a send (or a throttle) and `settled` closed a
+ * retry whose recipient can no longer be sent to, without calling a provider.
+ */
+type RetryOutcome =
+  | { readonly kind: "attempted"; readonly attempt: DeliveryAttempt }
+  | { readonly kind: "settled"; readonly attempt: DeliveryAttempt };
+
+/**
+ * The hash an unaddressable recipient's attempt is recorded under. Not a hash of an address,
+ * because there is none: namespaced so it can never equal one, and stable per (channel, user) so a
+ * re-drain of the same dispatch finds the attempt already on record.
+ */
+export function unaddressableRecipientHash(channel: NotificationChannel, userId: string): string {
+  return sha256(`unaddressable:${channel}:${userId}`);
 }
 
 export function emptyPreferenceMatrix(
@@ -177,11 +230,26 @@ function providerFor(senders: SenderRegistry, channel: NotificationChannel): Pro
   return senders.for(channel)?.provider ?? unroutedResult(channel).provider;
 }
 
+async function contentFor(
+  opts: DeliveryDrainOptions,
+  dispatch: NotificationDispatch,
+): Promise<DispatchContent | null> {
+  if (opts.content === undefined) return null;
+  try {
+    const resolution = await opts.content(dispatch);
+    return resolution.kind === "rendered" ? resolution.content : null;
+  } catch {
+    // A rendering failure costs the template, never the notice: the provider's default is sent.
+    return null;
+  }
+}
+
 async function sendOnce(
   opts: DeliveryDrainOptions,
   dispatch: NotificationDispatch,
   recipientAddress: string,
   attemptNumber: number,
+  content: DispatchContent | null,
 ): Promise<SendResult> {
   const sender = opts.senders.for(dispatch.channel);
   if (sender === null) return unroutedResult(dispatch.channel);
@@ -195,6 +263,7 @@ async function sendOnce(
       locale: dispatch.locale,
       recipientAddress,
       attemptNumber,
+      content,
     },
     opts.sendTimeoutMs,
     opts.timer,
@@ -356,20 +425,61 @@ async function drainDispatch(
     now(),
   );
 
-  const recipients: DrainRecipient[] = resolved.map((r) => ({
-    userId: r.userId,
-    address: addressFor(dispatch.channel, r),
-    preferences:
-      preferences.get(r.userId) ?? emptyPreferenceMatrix(tenantId, r.userId, now()),
-  }));
+  // A dispatch still `rendering` was taken again after its claim lapsed: the drain that held it
+  // may have sent to some recipients before it died, and their attempts are on record.
+  const reclaimed = dispatch.status === "rendering";
+  const alreadyAttempted = reclaimed
+    ? await opts.store.attemptedRecipients(tenantId, claimed.rowId)
+    : new Set<string>();
+
+  const recipients: DrainRecipient[] = [];
+  const unaddressable: string[] = [];
+  for (const r of resolved) {
+    const address = addressFor(dispatch.channel, r);
+    if (address === null) {
+      unaddressable.push(r.userId);
+      continue;
+    }
+    recipients.push({
+      userId: r.userId,
+      address,
+      preferences: preferences.get(r.userId) ?? emptyPreferenceMatrix(tenantId, r.userId, now()),
+    });
+  }
 
   const plan = planDelivery({ dispatch, recipients, suppressions, now: now() });
   const provider = providerFor(opts.senders, dispatch.channel);
   const attempts: DeliveryAttempt[] = [];
+  // Each attempt is written as soon as it exists rather than after the whole fan-out, so a process
+  // that dies part-way leaves a record of exactly who was already sent to.
+  const record = async (attempt: DeliveryAttempt): Promise<void> => {
+    attempts.push(attempt);
+    await opts.store.recordAttempt(tenantId, claimed.rowId, attempt);
+  };
+
+  for (const userId of [...new Set(unaddressable)]) {
+    const hash = unaddressableRecipientHash(dispatch.channel, userId);
+    if (alreadyAttempted.has(hash)) continue;
+    const at = now().toISOString();
+    await record(
+      buildDeliveryAttempt({
+        dispatch,
+        recipientAddressSha256: hash,
+        attemptNumber: 1,
+        outcome: "dropped",
+        provider,
+        sentAt: null,
+        finalizedAt: at,
+        errorCode: RECIPIENT_UNADDRESSABLE_ERROR_CODE,
+        errorMessage: `recipient has no ${dispatch.channel} address`,
+      }),
+    );
+  }
 
   for (const ineligible of plan.ineligible) {
+    if (alreadyAttempted.has(ineligible.recipientAddressSha256)) continue;
     const at = now().toISOString();
-    attempts.push(
+    await record(
       buildDeliveryAttempt({
         dispatch,
         recipientAddressSha256: ineligible.recipientAddressSha256,
@@ -398,8 +508,11 @@ async function drainDispatch(
   let deferred = 0;
   let batched = 0;
   let dropped = 0;
+  // Resolved at the first send, once per dispatch: every recipient gets the same template.
+  let content: { readonly value: DispatchContent | null } | undefined;
 
   for (const target of plan.deliverable) {
+    if (alreadyAttempted.has(target.recipientAddressSha256)) continue;
     if (decision.action !== "send_now") {
       const releaseAt =
         decision.action === "batch"
@@ -417,7 +530,7 @@ async function drainDispatch(
               },
             )
           : decision.releaseAt;
-      attempts.push(
+      await record(
         throttledAttempt(
           dispatch,
           target.recipientAddressSha256,
@@ -434,8 +547,9 @@ async function drainDispatch(
       continue;
     }
     const sentAt = now().toISOString();
-    const result = await sendOnce(opts, dispatch, target.recipient.address, 1);
-    attempts.push(
+    content ??= { value: await contentFor(opts, dispatch) };
+    const result = await sendOnce(opts, dispatch, target.recipient.address, 1, content.value);
+    await record(
       attemptFromResult(
         opts,
         dispatch,
@@ -449,8 +563,18 @@ async function drainDispatch(
     );
   }
 
-  for (const attempt of attempts) {
-    await opts.store.recordAttempt(tenantId, claimed.rowId, attempt);
+  if (reclaimed) {
+    // The attempts in hand are not all of this dispatch's attempts, so the counters are recomputed
+    // from what is on record rather than from this pass.
+    await opts.store.reconcile(tenantId, claimed.rowId, now());
+    return {
+      attempts,
+      suppressed: attempts.filter((a) => a.outcome === "suppressed").length,
+      retryScheduled: attempts.filter((a) => a.nextRetryAt !== null).length,
+      deferred,
+      batched,
+      dropped,
+    };
   }
 
   const advance = advanceDispatch({ dispatch, plan, attempts, startedAt, now: now() });
@@ -483,23 +607,50 @@ async function drainRetry(
   opts: DeliveryDrainOptions,
   tenantId: string,
   due: DueRetry,
-): Promise<DeliveryAttempt | null> {
+): Promise<RetryOutcome> {
   const now = opts.clock ?? ((): Date => new Date());
   const dispatch = due.dispatch;
   const resolved = await opts.resolver.resolveAudience(tenantId, dispatch.audienceJson);
-  const recipients: DrainRecipient[] = resolved.map((r) => ({
-    userId: r.userId,
-    address: addressFor(dispatch.channel, r),
-    preferences: emptyPreferenceMatrix(tenantId, r.userId, now()),
-  }));
+  const recipients: DrainRecipient[] = [];
+  for (const r of resolved) {
+    const address = addressFor(dispatch.channel, r);
+    if (address === null) continue;
+    recipients.push({ userId: r.userId, address, preferences: emptyPreferenceMatrix(tenantId, r.userId, now()) });
+  }
   const suppressions = await opts.resolver.activeSuppressions(tenantId, dispatch.channel, now());
   const plan = planDelivery({ dispatch, recipients, suppressions, now: now() });
   const target = plan.deliverable.find(
     (p) => p.recipientAddressSha256 === due.recipientAddressSha256,
   );
-  if (target === undefined) return null;
-
   const attemptNumber = due.attemptNumber + 1;
+  if (target === undefined) {
+    // The recipient is no longer sendable to: suppressed since the first attempt, gone from the
+    // audience, or without an address on this channel. Skipping it recorded nothing, so its attempt
+    // stayed the latest and stayed retryable — the parent never settled, and with `dueRetries`
+    // leasing the row it came back once a lease for ever. A terminal attempt settles it.
+    const ineligible = plan.ineligible.find(
+      (p) => p.recipientAddressSha256 === due.recipientAddressSha256,
+    );
+    const at = now().toISOString();
+    const settled = buildDeliveryAttempt({
+      dispatch,
+      recipientAddressSha256: due.recipientAddressSha256,
+      attemptNumber,
+      outcome: ineligible !== undefined ? "suppressed" : "dropped",
+      provider: providerFor(opts.senders, dispatch.channel),
+      sentAt: null,
+      finalizedAt: at,
+      ...(ineligible !== undefined
+        ? { errorMessage: ineligible.eligibility.reason }
+        : {
+            errorCode: RECIPIENT_NO_LONGER_SENDABLE_ERROR_CODE,
+            errorMessage: `recipient is no longer in the audience or has no ${dispatch.channel} address`,
+          }),
+    });
+    await opts.store.recordAttempt(tenantId, due.rowId, settled);
+    return { kind: "settled", attempt: settled };
+  }
+
   // A retry landing back inside quiet hours must defer again, not slip through the window the
   // first pass respected.
   const policy = await policyFor(opts, tenantId);
@@ -529,11 +680,17 @@ async function drainRetry(
       now().toISOString(),
     );
     await opts.store.recordAttempt(tenantId, due.rowId, throttled);
-    return throttled;
+    return { kind: "attempted", attempt: throttled };
   }
 
   const sentAt = now().toISOString();
-  const result = await sendOnce(opts, dispatch, target.recipient.address, attemptNumber);
+  const result = await sendOnce(
+    opts,
+    dispatch,
+    target.recipient.address,
+    attemptNumber,
+    await contentFor(opts, dispatch),
+  );
   const attempt = attemptFromResult(
     opts,
     dispatch,
@@ -545,7 +702,7 @@ async function drainRetry(
     now(),
   );
   await opts.store.recordAttempt(tenantId, due.rowId, attempt);
-  return attempt;
+  return { kind: "attempted", attempt };
 }
 
 export async function drainTenant(
@@ -588,12 +745,26 @@ export async function drainTenant(
     batch,
   );
   for (const one of due) {
-    const attempt = await drainRetry(opts, tenantId, one);
-    if (attempt === null) continue;
-    retriesAttempted += 1;
-    if (attempt.outcome === "delivered") delivered += 1;
-    else if (attempt.nextRetryAt !== null) retryScheduled += 1;
-    else failed += 1;
+    const outcome = await drainRetry(opts, tenantId, one);
+    const attempt = outcome.attempt;
+    if (outcome.kind === "settled") {
+      if (attempt.outcome === "suppressed") suppressed += 1;
+      else dropped += 1;
+    } else {
+      retriesAttempted += 1;
+      if (attempt.outcome === "delivered") delivered += 1;
+      else if (attempt.nextRetryAt !== null) retryScheduled += 1;
+      else failed += 1;
+    }
+    // Nothing settled the parent before, so a dispatch whose retry delivered stayed `sending` and
+    // its retries stayed selectable.
+    await opts.store.reconcile(tenantId, one.rowId, now());
+  }
+
+  // A `sending` dispatch with nothing left pending — a process that died between a retry's attempt
+  // and its reconcile leaves one — is settled here, so no dispatch can be stranded mid-send.
+  for (const rowId of await opts.store.unsettledSending(tenantId, batch)) {
+    await opts.store.reconcile(tenantId, rowId, now());
   }
 
   return {

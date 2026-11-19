@@ -141,6 +141,7 @@ const DISPATCH = {
   templateId: "ntpl_1",
   locale: "en-US",
   attemptNumber: 1,
+  content: null,
 } as const;
 
 describe("buildSenderRegistryFromEnv", () => {
@@ -292,6 +293,7 @@ describe("buildSenderRegistryFromEnv", () => {
         templateId: "ntpl_1",
         locale: "en-US",
         attemptNumber: 1,
+        content: null,
       };
       await registry
         .for("email")
@@ -637,6 +639,7 @@ describe("mobile push from the environment (ADR-0327)", () => {
         // address here would never reach the network and the assertion below would be vacuous.
         recipientAddress: `cE1:APA91b${"x".repeat(48)}`,
         attemptNumber: 1,
+        content: null,
       });
     } finally {
       globalThis.fetch = original;

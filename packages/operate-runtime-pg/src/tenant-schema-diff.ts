@@ -105,8 +105,9 @@ const DECLARED_TYPE_BASES: ReadonlyMap<string, string> = new Map([
  * fragile, and `tenant-schema-diff.test.ts` enumerates it against the kernel's
  * own mapping to keep it that way.
  *
- * Anything outside it (today: PostGIS `geography(POINT)`, whose `format_type`
- * spelling carries an SRID this function has no way to predict) returns **null**
+ * Anything outside it (PostGIS `geography(POINT)`, whose `format_type` spelling
+ * carries an SRID this function has no way to predict — no longer plannable since
+ * ADR-0414 Q2, but a plan built elsewhere could still hold one) returns **null**
  * — undetermined. A caller must read that as "not compared", never as drift,
  * the same rule ADR-0292 applies to an index predicate it cannot render.
  */

@@ -643,7 +643,7 @@ anchored until you say so.
 
 | Flag | What it turns on | Needs |
 |---|---|---|
-| `--rate-limit-policy …` | durable, cross-replica rate limiting | a `command:` line |
+| `--rate-limit-policy …` | your own post-authentication limit, every decision written to `meta.rate_limit_decisions` — counted per process, so not cross-replica | a `command:` line |
 | `--workflow-workers` | the timer, activity and job workers — without this a due timer never fires | a `command:` line, **and a job handler** (see below) |
 | `--schedule-ms 60000` | the manifest's scheduled jobs | `--workflow-workers`, **and a job handler** |
 | `--checkpoints` | the periodic chain checkpoints the truncation check needs | **passed already** — ADR-0406 |

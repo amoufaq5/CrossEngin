@@ -1,5 +1,7 @@
 import type { ArchitectMessageRecord } from "@crossengin/ai-architect";
-import type { PgConnection } from "@crossengin/kernel-pg";
+import { requireIsoInstant, type PgConnection } from "@crossengin/kernel-pg";
+
+import { withTenantContext } from "./tenant-context.js";
 
 const SCHEMA = "meta";
 const TABLE = "architect_messages";
@@ -35,7 +37,7 @@ interface Row {
   readonly output_tokens: number | null;
   readonly cached_input_tokens: number | null;
   readonly cost_usd: string | null;
-  readonly created_at: string;
+  readonly created_at: unknown;
 }
 
 function parseToolUses(
@@ -86,7 +88,7 @@ function rowToRecord(row: Row): ArchitectMessageRecord {
     outputTokens: row.output_tokens,
     cachedInputTokens: row.cached_input_tokens,
     costUsd: row.cost_usd === null ? null : Number(row.cost_usd),
-    createdAt: row.created_at,
+    createdAt: requireIsoInstant(row.created_at, "created_at"),
   };
 }
 
@@ -100,31 +102,35 @@ export class PostgresArchitectMessageStore {
        cached_input_tokens, cost_usd)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12)
       RETURNING *`;
-    const result = await this.conn.query<Row>(sql, [
-      input.tenantId,
-      input.sessionId,
-      input.turnIndex,
-      input.messageIndex,
-      input.role,
-      input.content,
-      input.toolCallId,
-      input.toolUses === null ? null : JSON.stringify(input.toolUses),
-      input.inputTokens,
-      input.outputTokens,
-      input.cachedInputTokens,
-      input.costUsd,
-    ]);
+    const result = await withTenantContext(this.conn, input.tenantId, (tx) =>
+      tx.query<Row>(sql, [
+        input.tenantId,
+        input.sessionId,
+        input.turnIndex,
+        input.messageIndex,
+        input.role,
+        input.content,
+        input.toolCallId,
+        input.toolUses === null ? null : JSON.stringify(input.toolUses),
+        input.inputTokens,
+        input.outputTokens,
+        input.cachedInputTokens,
+        input.costUsd,
+      ]),
+    );
     const row = result.rows[0];
     if (row === undefined) throw new Error("append message: insert returned no row");
     return rowToRecord(row);
   }
 
-  async listForSession(sessionId: string): Promise<readonly ArchitectMessageRecord[]> {
-    const result = await this.conn.query<Row>(
-      `SELECT * FROM ${SCHEMA}.${TABLE}
-       WHERE session_id = $1
-       ORDER BY turn_index ASC, message_index ASC`,
-      [sessionId],
+  async listForSession(tenantId: string, sessionId: string): Promise<readonly ArchitectMessageRecord[]> {
+    const result = await withTenantContext(this.conn, tenantId, (tx) =>
+      tx.query<Row>(
+        `SELECT * FROM ${SCHEMA}.${TABLE}
+         WHERE session_id = $1 AND tenant_id = $2
+         ORDER BY turn_index ASC, message_index ASC`,
+        [sessionId, tenantId],
+      ),
     );
     return result.rows.map(rowToRecord);
   }

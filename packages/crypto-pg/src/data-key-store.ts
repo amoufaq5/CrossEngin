@@ -44,6 +44,29 @@ const READ_COLUMNS = "tenant_id, generation, wrapped_key, kek_generation, proven
 export const DATA_KEY_LOCK_SQL =
   "SELECT pg_advisory_xact_lock(hashtext('crypto_tenant_data_key'), hashtext($1))";
 
+/**
+ * The **shared** form of `DATA_KEY_LOCK_SQL`, on the same key: held by every transaction that
+ * writes or reads a tenant's encrypted columns under a cached key, so a rekey's exclusive lock
+ * waits for every such transaction in flight and every such transaction started later waits for the
+ * rekey. Shared holders do not block one another, so ordinary traffic pays no serialisation.
+ *
+ * Taken as its **own statement**, never inside the statement that then reads the generation. Under
+ * READ COMMITTED a statement's snapshot is taken before it runs, so a lock waited for *inside* a
+ * statement leaves that statement reading the world as it was before the rekey committed — the
+ * stale generation the lock exists to catch. Taken first, the next statement's snapshot is taken
+ * after the grant and sees whatever the rekey committed.
+ */
+export const DATA_KEY_SHARED_LOCK_SQL =
+  "SELECT pg_advisory_xact_lock_shared(hashtext('crypto_tenant_data_key'), hashtext($1))";
+
+/**
+ * `DATA_KEY_LOCK_SQL` without the wait, for the one caller that must never block on it: the
+ * serving path's opportunistic re-wrap, which runs while a request may already hold the shared form
+ * on another connection of the same pool — waiting there would be a deadlock Postgres cannot see.
+ */
+export const DATA_KEY_TRY_LOCK_SQL =
+  "SELECT pg_try_advisory_xact_lock(hashtext('crypto_tenant_data_key'), hashtext($1)) AS locked";
+
 export const DATA_KEY_PROVENANCES = ["random", "seeded_from_derived"] as const;
 export type DataKeyProvenance = (typeof DATA_KEY_PROVENANCES)[number];
 
@@ -82,12 +105,58 @@ export interface DataKeySeed {
 export interface PostgresDataKeyStoreOptions {
   readonly schema?: string;
   /**
-   * Which KEK generation `kekFor` returns. Recorded on every row this store writes, and defaulted to
+   * The KEK generation this store **writes** under. Recorded on every row it writes, and defaulted to
    * `DEFAULT_KEY_GENERATION` because that is `deriveTenantKek`'s own default — a store defaulting to
    * anything else would record a KEK generation that did not wrap the row, which is the one fact a
    * mid-flight KEK rotation reads to decide what still needs re-wrapping.
+   *
+   * A row is always **opened** under the generation it records, which may be older: that is what
+   * lets a rotated deployment go on reading rows wrapped before the rotation while it re-wraps them.
    */
   readonly kekGeneration?: number;
+}
+
+/**
+ * Resolves the key-encryption key for one tenant at one KEK generation, or throws.
+ *
+ * Two arguments since KEK rotation: a row is opened under the generation it was wrapped at, and a
+ * deployment that rotated its secret holds two. A one-argument resolver is still assignable and
+ * still correct for a deployment that never rotated, since every row it has written records the one
+ * generation it serves.
+ */
+export type KekResolver = (tenantId: string, kekGeneration: number) => Uint8Array;
+
+/** What a re-wrap did, or why it did nothing. Never carries a key. */
+export interface DataKeyRewrap {
+  readonly tenantId: string;
+  /** `null` when the tenant has no data key row at all. */
+  readonly generation: number | null;
+  readonly fromKekGeneration: number | null;
+  readonly toKekGeneration: number;
+  readonly outcome: "rewrapped" | "already_current" | "no_data_key_row" | "lock_busy";
+}
+
+/**
+ * The stored row names a KEK generation this deployment holds no secret for.
+ *
+ * Distinct from `DataKeyUnwrapFailed`, whose cause is a wrong key or a corrupt row: here nothing was
+ * tried, because the generation the row records is not one the resolver can derive — the usual
+ * cause is a deployment that retired its previous secret before every row was re-wrapped.
+ */
+export class DataKeyKekUnavailable extends Error {
+  constructor(
+    readonly tenantId: string,
+    readonly generation: number,
+    readonly kekGeneration: number,
+    cause: unknown,
+  ) {
+    super(
+      `the stored data key for tenant ${tenantId} generation ${generation.toString()} is wrapped ` +
+        `under key-encryption-key generation ${kekGeneration.toString()}, which this deployment ` +
+        `holds no secret for: ${cause instanceof Error ? cause.message : String(cause)}`,
+    );
+    this.name = "DataKeyKekUnavailable";
+  }
 }
 
 /**
@@ -139,7 +208,7 @@ export class PostgresDataKeyStore {
 
   constructor(
     private readonly conn: PgConnection,
-    private readonly kekFor: (tenantId: string) => Uint8Array,
+    private readonly kekFor: KekResolver,
     options: PostgresDataKeyStoreOptions = {},
   ) {
     this.schema = options.schema ?? "meta";
@@ -196,12 +265,12 @@ export class PostgresDataKeyStore {
     // releases an xact lock — and that a malformed seed handed to a tenant who already has a row is
     // not reported at all, because that seed is ignored either way.
     const seeded = seed?.seed;
-    const kek = this.kekFor(tenantId);
+    const kek = this.kekFor(tenantId, this.kekGeneration);
     return this.scoped(tenantId, async (tx) => {
       await tx.query(DATA_KEY_LOCK_SQL, [tenantId]);
 
       const existing = await this.selectLatest(tx, tenantId);
-      if (existing !== null) return this.open(kek, existing);
+      if (existing !== null) return this.open(existing);
 
       const dek = seeded ?? generateDataKey();
       // Recorded, never inferred from the bytes: the shreddability claim is read off this column,
@@ -229,8 +298,130 @@ export class PostgresDataKeyStore {
    */
   async load(tenantId: string, generation?: number): Promise<StoredDataKey | null> {
     assertScopeTenantId(tenantId);
-    const kek = this.kekFor(tenantId);
-    return this.scoped(tenantId, (tx) => this.readKey(tx, kek, tenantId, generation));
+    return this.scoped(tenantId, (tx) => this.readKey(tx, tenantId, generation));
+  }
+
+  /** The KEK generation this store writes under; a row recording any other is due a re-wrap. */
+  get currentKekGeneration(): number {
+    return this.kekGeneration;
+  }
+
+  /**
+   * The highest data-key generation this tenant holds, without unwrapping anything, inside a
+   * caller's transaction that has set the tenant context. `null` when the tenant has no row.
+   *
+   * It is the question the serving path asks after taking `DATA_KEY_SHARED_LOCK_SQL`: does the key
+   * this process cached still name the tenant's current generation, or has a rekey replaced it.
+   */
+  async currentGenerationWithin(tx: PgConnection, tenantId: string): Promise<number | null> {
+    assertScopeTenantId(tenantId);
+    const scope = scopeFilter(tenantId, 1);
+    const result = await tx.query<{ generation: unknown }>(
+      `SELECT generation FROM ${this.schema}.${TABLE}
+       WHERE ${scope.sql}
+       ORDER BY generation DESC
+       LIMIT 1`,
+      [...scope.params],
+    );
+    const row = result.rows[0];
+    return row === undefined ? null : asInt(row.generation);
+  }
+
+  /**
+   * Re-wraps this tenant's current data key under the KEK generation this store writes, leaving the
+   * data key itself — and therefore every ciphertext column — untouched.
+   *
+   * This is what a **secret rotation** costs per tenant in envelope mode: one row rewritten, no
+   * column re-encrypted, no stale-key window, because the column key a serving process caches is the
+   * data key and the data key does not change. A KEK generation is retired only once no row records
+   * it, which this method is how a deployment gets to.
+   *
+   * Held under `DATA_KEY_LOCK_SQL` across the read and the write, `ensure`'s reason: the row being
+   * re-wrapped must be the row read. With `opportunistic` the lock is only *tried*, and a held lock
+   * answers `lock_busy` rather than waiting — the serving path calls it that way, where waiting on a
+   * lock another connection of the same pool may hold is a deadlock Postgres cannot detect.
+   *
+   * The `UPDATE` re-asserts the generation and the KEK generation it read, so a concurrent writer
+   * that defeated the lock would make it match no row rather than overwrite a newer one, and a
+   * zero-row match is then a throw: a re-wrap that wrote nothing must not report that it did.
+   */
+  async rewrap(
+    tenantId: string,
+    options: { readonly opportunistic?: boolean } = {},
+  ): Promise<DataKeyRewrap> {
+    assertScopeTenantId(tenantId);
+    const kekGeneration = this.kekGeneration;
+    return this.scoped(tenantId, async (tx) => {
+      if (options.opportunistic === true) {
+        const tried = await tx.query<{ locked: unknown }>(DATA_KEY_TRY_LOCK_SQL, [tenantId]);
+        if (tried.rows[0]?.locked !== true) {
+          return {
+            tenantId,
+            generation: null,
+            fromKekGeneration: null,
+            toKekGeneration: kekGeneration,
+            outcome: "lock_busy",
+          };
+        }
+      } else {
+        await tx.query(DATA_KEY_LOCK_SQL, [tenantId]);
+      }
+      const row = await this.selectLatest(tx, tenantId);
+      if (row === null) {
+        return {
+          tenantId,
+          generation: null,
+          fromKekGeneration: null,
+          toKekGeneration: kekGeneration,
+          outcome: "no_data_key_row",
+        };
+      }
+      const opened = this.open(row);
+      if (opened.kekGeneration === kekGeneration) {
+        return {
+          tenantId,
+          generation: opened.generation,
+          fromKekGeneration: kekGeneration,
+          toKekGeneration: kekGeneration,
+          outcome: "already_current",
+        };
+      }
+      const wrapped = wrapDataKey(
+        this.kekFor(tenantId, kekGeneration),
+        opened.dek,
+        dataKeyWrapAad(tenantId, opened.generation),
+      );
+      // Literal placeholders and the scope at $3, so the workspace column rules can read the
+      // statement: `tenantId` is a string here, so `scopeFilter` always binds exactly one parameter.
+      const scope = scopeFilter(tenantId, 3);
+      const updated = await tx.query(
+        `UPDATE ${this.schema}.${TABLE}
+            SET wrapped_key = $1, kek_generation = $2
+          WHERE ${scope.sql} AND generation = $4
+            AND kek_generation = $5`,
+        [
+          Buffer.from(wrapped),
+          kekGeneration,
+          ...scope.params,
+          opened.generation,
+          opened.kekGeneration,
+        ],
+      );
+      if (updated.rowCount !== 1) {
+        throw new Error(
+          `data key re-wrap for tenant ${tenantId} generation ${opened.generation.toString()} ` +
+            `matched ${updated.rowCount.toString()} row(s) where it read one under this ` +
+            "transaction's lock, so it must not report a re-wrap",
+        );
+      }
+      return {
+        tenantId,
+        generation: opened.generation,
+        fromKekGeneration: opened.kekGeneration,
+        toKekGeneration: kekGeneration,
+        outcome: "rewrapped",
+      };
+    });
   }
 
   /**
@@ -261,7 +452,7 @@ export class PostgresDataKeyStore {
     generation?: number,
   ): Promise<StoredDataKey | null> {
     assertScopeTenantId(tenantId);
-    return this.readKey(tx, this.kekFor(tenantId), tenantId, generation);
+    return this.readKey(tx, tenantId, generation);
   }
 
   /**
@@ -311,19 +502,12 @@ export class PostgresDataKeyStore {
       );
     }
     const newGeneration = fromGeneration + 1;
-    const kek = this.kekFor(tenantId);
+    const kek = this.kekFor(tenantId, this.kekGeneration);
     // The INSERT first, though the `DELETE`'s predicate cannot reach the row it writes
     // (`generation <= fromGeneration` excludes `fromGeneration + 1`), so the two commute. What the
     // order buys is legibility on the one failure path that exists: a defeated lock surfaces as a
     // unique violation on this statement, before anything has been destroyed, rather than after.
-    const written = await this.insertGeneration(
-      tx,
-      kek,
-      tenantId,
-      newGeneration,
-      dek,
-      "random",
-    );
+    const written = await this.insertGeneration(tx, kek, tenantId, newGeneration, dek, "random");
     const scope = scopeFilter(tenantId, 1);
     const deleted = await tx.query(
       `DELETE FROM ${this.schema}.${TABLE}
@@ -405,12 +589,11 @@ export class PostgresDataKeyStore {
   /** The read `load` and `loadWithin` share, so the two cannot differ about what a row means. */
   private async readKey(
     tx: PgConnection,
-    kek: Uint8Array,
     tenantId: string,
     generation?: number,
   ): Promise<StoredDataKey | null> {
     const row = await this.selectLatest(tx, tenantId, generation);
-    return row === null ? null : this.open(kek, row);
+    return row === null ? null : this.open(row);
   }
 
   private async selectLatest(
@@ -445,9 +628,19 @@ export class PostgresDataKeyStore {
    * cannot be read beside, and answering "no key yet" invites the caller to do the same thing one
    * level up. A wrong answer is worse than a refusal, and here the wrong answer cannot be undone.
    */
-  private open(kek: Uint8Array, row: Record<string, unknown>): StoredDataKey {
+  private open(row: Record<string, unknown>): StoredDataKey {
     const tenantId = String(row["tenant_id"]);
     const generation = asInt(row["generation"]);
+    const kekGeneration = asInt(row["kek_generation"]);
+    // Opened under the generation the row records, never the one this store writes: after a secret
+    // rotation the two differ until the row is re-wrapped, and unwrapping under the new KEK would
+    // read every not-yet-re-wrapped tenant as corrupt.
+    let kek: Uint8Array;
+    try {
+      kek = this.kekFor(tenantId, kekGeneration);
+    } catch (cause) {
+      throw new DataKeyKekUnavailable(tenantId, generation, kekGeneration, cause);
+    }
     const dek = unwrapDataKey(
       kek,
       asBytes(row["wrapped_key"]),
@@ -457,7 +650,7 @@ export class PostgresDataKeyStore {
     return {
       tenantId,
       generation,
-      kekGeneration: asInt(row["kek_generation"]),
+      kekGeneration,
       provenance: asProvenance(row["provenance"]),
       dek,
     };

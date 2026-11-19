@@ -46,6 +46,7 @@ const CANCELLED: InstanceCancelResultLike = {
   signalDeliveredActivityIds: ["act_flight"],
   compensationOutcome: "executed",
   compensatedActivityIds: ["act_posted"],
+  failedCompensationActivityIds: [],
   unreversedActivityIds: [],
 };
 
@@ -59,6 +60,7 @@ function refusal(outcome: InstanceCancelResultLike["outcome"]): InstanceCancelRe
     signalDeliveredActivityIds: [],
     compensationOutcome: "skipped_by_request",
     compensatedActivityIds: [],
+    failedCompensationActivityIds: [],
     unreversedActivityIds: [],
   };
 }
@@ -273,6 +275,7 @@ describe("effectsFor", () => {
     expect(effectsFor(CANCELLED)).toEqual({
       compensationOutcome: "executed",
       compensatedActivityIds: ["act_posted"],
+      failedCompensationActivityIds: [],
       unreversedActivityIds: [],
       cancelledTimerIds: ["tmr_1"],
       beforeHandlerActivityIds: ["act_sched"],
@@ -286,9 +289,17 @@ describe("effectsFor", () => {
       ...CANCELLED,
       compensationOutcome: "skipped_by_request" as const,
       compensatedActivityIds: [],
+      failedCompensationActivityIds: [],
       unreversedActivityIds: ["act_posted"],
     };
     expect(effectsFor(abandoned).unreversedActivityIds).toEqual(["act_posted"]);
+  });
+
+  it("reports a compensation that ran and failed rather than folding it into the compensated list", () => {
+    const partial = { ...CANCELLED, compensatedActivityIds: [], failedCompensationActivityIds: ["act_posted"] };
+    const effects = effectsFor(partial);
+    expect(effects.failedCompensationActivityIds).toEqual(["act_posted"]);
+    expect(effects.compensatedActivityIds).toEqual([]);
   });
 
   it("nulls every field for a non-cancelling outcome instead of passing EMPTY_PLAN's filler", () => {
@@ -299,6 +310,7 @@ describe("effectsFor", () => {
       expect(effects.compensationOutcome).toBeNull();
       expect(effects.unreversedActivityIds).toBeNull();
       expect(effects.compensatedActivityIds).toBeNull();
+      expect(effects.failedCompensationActivityIds).toBeNull();
     }
   });
 });
@@ -329,6 +341,7 @@ describe("the cancel handler", () => {
         ...CANCELLED,
         compensationOutcome: "deferred_to_human",
         compensatedActivityIds: [],
+        failedCompensationActivityIds: [],
         unreversedActivityIds: ["act_posted"],
       },
     });

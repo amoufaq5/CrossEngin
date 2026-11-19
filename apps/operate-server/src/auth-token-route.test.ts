@@ -1,4 +1,4 @@
-import { hashPassword } from "@crossengin/crypto";
+import { hashPassword, type PepperSource } from "@crossengin/crypto";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -96,15 +96,20 @@ async function activeRecord(over: Partial<CredentialRecord> = {}): Promise<Crede
     credentialHash: await hashPassword(PASSWORD, PEPPER, { params: CHEAP }),
     failedAttempts: 0,
     lockedUntil: null,
+    sessionEpoch: 0,
     ...over,
   };
 }
 
-function run(state: StubState, password = PASSWORD): Promise<LoginOutcome> {
+function run(
+  state: StubState,
+  password = PASSWORD,
+  pepper: PepperSource = PEPPER,
+): Promise<LoginOutcome> {
   return verifyLogin({
     request: { tenant: "acme", email: "a@example.test", password },
     store: stubStore(state),
-    pepper: PEPPER,
+    pepper,
     roleFor: async () =>
       state.roles === undefined ? { primaryRole: "erp_admin", secondaryRoles: [] } : state.roles,
     lockout: DEFAULT_LOGIN_LOCKOUT,
@@ -500,17 +505,39 @@ describe("verifyLogin", () => {
     const outcome = await run({ record: await activeRecord({ credentialHash: stale }) });
     expect(outcome.ok).toBe(true);
     if (outcome.ok) {
-      expect(outcome.rehashTo).not.toBeNull();
+      expect(outcome.rehash).not.toBeNull();
       // Upgraded to the parameters the equaliser derives under, which is what keeps
       // `spendPasswordWork`'s assumption true as a deployment raises its cost.
-      expect(outcome.rehashTo).toMatch(/^scrypt\$1024\$/);
+      expect(outcome.rehash?.to).toMatch(/^scrypt\$1024\$/);
+      // Conditional on the hash it replaces, so a password changed in between is not overwritten.
+      expect(outcome.rehash?.from).toBe(stale);
     }
   });
 
   it("does not re-hash a hash already at the current parameters", async () => {
     const outcome = await run({ record: await activeRecord() });
     expect(outcome.ok).toBe(true);
-    if (outcome.ok) expect(outcome.rehashTo).toBeNull();
+    if (outcome.ok) expect(outcome.rehash).toBeNull();
+  });
+
+  it("re-keys a hash written under a retired pepper, and verifies it first", async () => {
+    // A rotation: the deployment now keys with version 2 and still holds version 1 to verify.
+    const NEXT = PEPPER.split("").reverse().join("");
+    const ring = { version: 2, pepper: NEXT, retired: new Map([[1, PEPPER]]) };
+    const outcome = await run({ record: await activeRecord() }, PASSWORD, ring);
+    expect(outcome.ok).toBe(true);
+    if (outcome.ok) expect(outcome.rehash?.to).toMatch(/\$k2\$/);
+    // A ring that no longer holds version 1 cannot verify the row at all, which is a refusal and
+    // not a wrong password.
+    const dropped = { version: 2, pepper: NEXT, retired: new Map<number, string>() };
+    const refused = await run({ record: await activeRecord() }, PASSWORD, dropped);
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.refusal).not.toBe("password_mismatch");
+  });
+
+  it("carries the row's session generation into the outcome the token is minted from", async () => {
+    const outcome = await run({ record: await activeRecord({ sessionEpoch: 5 }) });
+    expect(outcome.ok && outcome.sessionEpoch).toBe(5);
   });
 });
 
@@ -524,7 +551,8 @@ describe("buildAuthTokenInterceptor", () => {
         userId: USER,
         tenantId: TENANT,
         roles: { primaryRole: "erp_admin", secondaryRoles: [] },
-        rehashTo: null,
+        rehash: null,
+        sessionEpoch: 0,
       }),
       mint: () => minted,
       onSuccess: async () => undefined,
@@ -576,7 +604,8 @@ describe("buildAuthTokenInterceptor", () => {
         userId: USER,
         tenantId: TENANT,
         roles: { primaryRole: "ap_clerk", secondaryRoles: ["hr_manager"] },
-        rehashTo: null,
+        rehash: null,
+        sessionEpoch: 0,
       }),
     })(req, body({ tenant: "acme", email: "a@b.test", password: "x" }));
     expect(parse(res!)).toMatchObject({ role: "ap_clerk", secondaryRoles: ["hr_manager"] });
@@ -592,7 +621,8 @@ describe("buildAuthTokenInterceptor", () => {
         userId: USER,
         tenantId: TENANT,
         roles: { primaryRole: "erp_admin", secondaryRoles: ["erp_admin", "hr_manager"] },
-        rehashTo: null,
+        rehash: null,
+        sessionEpoch: 0,
       }),
     })(req, body({ tenant: "acme", email: "a@b.test", password: "x" }));
     expect(parse(res!)).toMatchObject({ role: "erp_admin", secondaryRoles: ["hr_manager"] });

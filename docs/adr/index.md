@@ -1,10 +1,10 @@
 # ADR index
 
-433 records. Generated from the ADR files themselves — regenerate rather than
+446 records. Generated from the ADR files themselves — regenerate rather than
 hand-edit, so a title or status change in an ADR cannot silently drift from this table:
 `python3 docs/adr/generate-index.py`.
 
-- **Accepted:** 354  **Proposed:** 79
+- **Accepted:** 367  **Proposed:** 79
 - ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never written;
   those milestones landed under other numbers. The gap is permanent and intentional.
 - ADR-0046 is the Phase 2 plan; **ADR-0077 is the Phase 3 plan (P1–P8)**. Phase 4 has no
@@ -445,3 +445,16 @@ hand-edit, so a title or status change in an ADR cannot silently drift from this
 | [0437](0437-a-chain-is-checked-against-its-content-and-a-key-it-pins.md) | A chain is checked against its content, its signer is pinned, and its anchors are signed | — | Accepted | 2026-11-17 |
 | [0438](0438-a-migration-waits-a-bounded-time-and-a-plan-takes-no-lock.md) | A migration waits a bounded time for a lock, a plan takes none, and a flag it does not know is refused | — | Accepted | 2026-11-17 |
 | [0439](0439-the-web-is-patched-the-image-is-unprivileged-and-every-backup-is-test-restored.md) | The web is patched, the image is unprivileged, and every backup is test-restored | — | Accepted | 2026-11-17 |
+| [0440](0440-a-confined-role-claims-each-tenants-jobs-and-verifies-a-schema-the-owner-applied.md) | A confined role claims each tenant's jobs and verifies a schema the owner applied | — | Accepted | 2026-11-19 |
+| [0441](0441-money-is-converted-at-a-resolved-rate-in-exact-cents-and-a-reversal-reverses-only-what-stands.md) | Money is converted at a resolved rate in exact cents, and a reversal reverses only what still stands | — | Accepted | 2026-11-19 |
+| [0442](0442-a-workflow-undoes-only-what-completed-and-a-claim-is-reaffirmed-before-its-item-runs.md) | A workflow undoes only what completed, and a claim is reaffirmed before its item runs | — | Accepted | 2026-11-19 |
+| [0443](0443-a-manifest-is-bounded-and-collision-free-and-a-field-holds-only-its-declared-type.md) | A manifest is bounded and collision-free, and a field holds only its declared type | — | Accepted | 2026-11-19 |
+| [0444](0444-the-channel-is-negotiated-as-libpq-does-boot-ddl-changes-only-what-differs-and-declared-indexes-are-built.md) | The channel is negotiated as libpq does, boot DDL changes only what differs, and declared indexes are built | — | Accepted | 2026-11-19 |
+| [0445](0445-a-column-secret-rotates-a-write-waits-on-the-rekey-and-a-fenced-table-refuses-a-tenant-delete-by-name.md) | A column secret rotates, a write waits on the rekey, and a fenced table refuses a tenant delete by name | — | Accepted | 2026-11-19 |
+| [0446](0446-a-deletion-is-approved-by-its-verifier-after-a-grace-period-and-a-late-breach-notice-is-stored-with-its-reason.md) | A deletion is approved by its verifier after a grace period, and a late breach notice is stored with its reason | — | Accepted | 2026-11-19 |
+| [0447](0447-the-console-accepts-writes-and-redirects-only-from-its-own-origin-and-every-response-carries-its-headers.md) | The console accepts writes and redirects only from its own origin, and every response carries its headers | — | Accepted | 2026-11-19 |
+| [0448](0448-a-token-names-its-subject-and-tenant-a-grant-cannot-exceed-its-granter-and-a-session-ends-with-its-standing.md) | A token names its subject and tenant, a grant cannot exceed its granter, and a session ends with its standing | — | Accepted | 2026-11-19 |
+| [0449](0449-a-failure-is-logged-under-the-id-the-caller-holds-a-replay-returns-what-was-sent-and-the-listener-is-bounded.md) | A failure is logged under the id the caller holds, a replay returns what was sent, and the listener is bounded | — | Accepted | 2026-11-19 |
+| [0450](0450-an-ai-design-is-priced-reserved-and-bounded-before-it-is-sent-and-its-transcript-is-written-in-its-tenants-scope.md) | An AI design is priced, reserved and bounded before it is sent, and its transcript is written in its tenant's scope | — | Accepted | 2026-11-19 |
+| [0451](0451-a-usage-window-is-billed-once-a-notice-goes-only-where-it-can-arrive-and-residency-is-checked-on-the-proven-tenant.md) | A usage window is billed once, a notice goes only where it can arrive, and residency is checked on the proven tenant | — | Accepted | 2026-11-19 |
+| [0452](0452-a-pack-is-trusted-by-a-registered-publisher-and-admitted-against-its-tenants-own-facts.md) | A pack is trusted by a registered publisher and admitted against its tenant's own facts | — | Accepted | 2026-11-19 |

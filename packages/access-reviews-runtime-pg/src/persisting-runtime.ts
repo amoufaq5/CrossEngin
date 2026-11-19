@@ -7,6 +7,7 @@ import type {
 } from "@crossengin/access-reviews";
 import {
   AccessReviewRuntime,
+  autoRevokedItem,
   compileCampaignEvidence,
   evidenceIdFor,
   sealCompiledEvidence,
@@ -302,13 +303,20 @@ export class PersistentAccessReviewRuntime {
     campaign: AccessReviewCampaign,
     now?: Date,
   ): Promise<readonly AccessReviewDecision[]> {
-    const decisions = this.runtime.planAutoRevocations(
-      items,
-      campaign,
-      now ?? this.runtime.clock.now(),
-    );
+    const at = now ?? this.runtime.clock.now();
+    const decisions = this.runtime.planAutoRevocations(items, campaign, at);
+    const byId = new Map(items.map((item) => [item.id, item]));
     for (const decision of decisions) {
+      const item = byId.get(decision.itemId);
+      if (item === undefined) {
+        throw new Error(`auto-revocation decision ${decision.id} names an item outside the planned set`);
+      }
+      const resolved = autoRevokedItem(item, decision, at);
+      // Decision first: an item resolved with no decision behind it is an unattested revocation,
+      // while a decision whose item write failed is re-planned next tick — recoverable, and visible
+      // as two decisions for one item rather than as a silent hole.
       await this.decisionStore.record(decision);
+      await this.itemStore.upsert(resolved);
     }
     return decisions;
   }

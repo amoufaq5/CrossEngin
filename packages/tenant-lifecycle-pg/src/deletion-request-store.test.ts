@@ -399,6 +399,30 @@ describe("read and dueForExecution", () => {
     expect(select?.sql).toContain("ORDER BY deadline_at, request_id");
   });
 
+  it("with a grace gate, holds a verified request until its grace ends or its deadline nears", async () => {
+    const { conn, calls } = fakePg();
+    await new PostgresDeletionRequestStore(conn).dueForExecution(collector().report, 5, {
+      now: "2026-10-03T13:00:00.000Z",
+      graceMs: 7 * 86_400_000,
+    });
+    const select = calls.find((c) => c.sql.includes("ORDER BY deadline_at"));
+    expect(select?.sql).toContain("verified_at + $2 * interval '1 millisecond'");
+    expect(select?.sql).toContain("deadline_at - $3 * interval '1 millisecond'");
+    expect(select?.sql).toContain("<= $4::timestamptz");
+    expect(select?.params).toEqual([5, 7 * 86_400_000, 86_400_000, "2026-10-03T13:00:00.000Z"]);
+  });
+
+  it("refuses a negative grace before any SQL", async () => {
+    const { conn, calls } = fakePg();
+    await expect(
+      new PostgresDeletionRequestStore(conn).dueForExecution(collector().report, 5, {
+        now: "2026-10-03T13:00:00.000Z",
+        graceMs: -1,
+      }),
+    ).rejects.toThrow(/non-negative/);
+    expect(calls.some((c) => c.sql.includes("ORDER BY deadline_at"))).toBe(false);
+  });
+
   it("finds the requests a run stranded, oldest first", async () => {
     const { conn, calls } = fakePg([rowOf({ status: "in_progress", in_progress_at: "2026-10-03T12:00:00.000Z" })]);
     await new PostgresDeletionRequestStore(conn).stranded(

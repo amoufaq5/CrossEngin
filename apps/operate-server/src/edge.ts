@@ -11,7 +11,12 @@ import {
   RequestBodyTooLargeError,
 } from "./request-body-limit.js";
 import type { ApiKeySpec, JwtVerifyConfig } from "./principals.js";
-import { OperateHttpServer, buildOperateHttpServer } from "./server.js";
+import {
+  OperateHttpServer,
+  buildOperateHttpServer,
+  internalErrorResponse,
+  logServerError,
+} from "./server.js";
 
 /**
  * Maps a Fetch API `Request` (Cloudflare Workers / edge runtimes / `undici`)
@@ -112,7 +117,21 @@ export function createFetchHandler(
       ({ raw, body } = await fetchToRaw(request, limit, overrides));
     } catch (err) {
       if (err instanceof RequestBodyTooLargeError) return payloadTooLarge(err);
-      throw err;
+      // Rethrown before, so a body that failed mid-read reached the runtime as an uncaught error —
+      // whatever page the host renders for that. The same answer the Node listener gives: a fixed
+      // 500 and an id, with the cause in the log under that id. `dispatch` itself never throws.
+      const requestId = `req_${Date.now().toString(36)}${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
+      logServerError({
+        requestId,
+        status: 500,
+        method: request.method,
+        path: new URL(request.url).pathname.slice(0, 512),
+        operationId: null,
+        stage: "read_body",
+        reason: err instanceof Error ? err.message.slice(0, 480) : "non_error_thrown",
+        cause: err,
+      });
+      return rawToFetchResponse(internalErrorResponse(requestId));
     }
     const response = await server.dispatch(raw, body);
     return rawToFetchResponse(response);

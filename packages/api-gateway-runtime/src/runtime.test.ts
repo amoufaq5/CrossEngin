@@ -263,6 +263,12 @@ describe("GatewayRuntime — idempotency-key replay returns cached response", ()
     );
     expect(second.response.status).toBe(201);
     expect(second.response.headers["x-idempotent-replay"]).toBe("true");
+    // The replay carries the first response's body. It used to answer 201 with an empty
+    // body and `content-length: 0`, so a client retrying a create learned it had succeeded and not
+    // what it had created.
+    expect(new TextDecoder().decode(second.response.bodyBytes!)).toBe(
+      new TextDecoder().decode(first.response.bodyBytes!),
+    );
     expect(second.execution.idempotencyOutcome).toBe("replay_hit_match");
     expect(second.execution.finalStage).toBe("check_idempotency");
     expect(second.execution.finalOutcome).toBe("short_circuit_replay");
@@ -585,5 +591,66 @@ describe("GatewayRuntime — idempotency_required without key denies", () => {
     );
     expect(response.status).toBe(400);
     expect(execution.finalStage).toBe("check_idempotency");
+  });
+});
+
+describe("GatewayRuntime — security headers on every response, denials included", () => {
+  const expectSecurityHeaders = (headers: Readonly<Record<string, string>>): void => {
+    expect(headers["strict-transport-security"]).toContain("max-age");
+    expect(headers["content-security-policy"]).toContain("frame-ancestors 'none'");
+    expect(headers["x-content-type-options"]).toBe("nosniff");
+    expect(headers["x-frame-options"]).toBe("DENY");
+    expect(headers["referrer-policy"]).toBe("strict-origin-when-cross-origin");
+    expect(headers["permissions-policy"]).toBeDefined();
+  };
+
+  it("on an authentication denial (401)", async () => {
+    const { response } = await buildRuntime().runtime.handleRequest(fixtureRequest());
+    expect(response.status).toBe(401);
+    expectSecurityHeaders(response.headers);
+  });
+
+  it("on a route that does not exist (404)", async () => {
+    const { response } = await buildRuntime().runtime.handleRequest(fixtureRequest({ path: "/v1/nothing-here" }));
+    expect(response.status).toBe(404);
+    expectSecurityHeaders(response.headers);
+  });
+
+  // `match_route` runs before `negotiate_content`'s preflight arm and no route is registered for
+  // OPTIONS, so a preflight is answered by the matcher's 404 — and carries no CORS grant either way.
+  it("on a preflight, which the matcher answers", async () => {
+    const { response } = await buildRuntime().runtime.handleRequest(fixtureRequest({ method: "OPTIONS" }));
+    expect(response.status).toBe(404);
+    expectSecurityHeaders(response.headers);
+    expect(response.headers["access-control-allow-origin"]).toBeUndefined();
+  });
+
+  it("on a handler's own 4xx, without overriding a header the handler set", async () => {
+    const kp = generateEd25519Keypair();
+    const kid = ed25519PublicKeyFingerprint(kp.publicKeyBase64).slice(0, 16);
+    const jwks = new InMemoryJwksProvider({ keys: [{ kid, publicKeyBase64: kp.publicKeyBase64 }] });
+    const handlers = new HandlerRegistry().register("tenants.create", () => ({
+      kind: "json",
+      status: 422,
+      body: { error: "invalid" },
+      headers: { "referrer-policy": "no-referrer" },
+    }));
+    const { runtime } = buildRuntime({ jwks, handlers });
+    const token = buildJwt({
+      privateKeyBase64: kp.privateKeyBase64,
+      publicKeyBase64: kp.publicKeyBase64,
+      kid,
+      sub: USER,
+      exp: Math.floor(Date.parse("2026-05-16T12:00:00.000Z") / 1000) + 3_600,
+      tenantId: TENANT,
+      scope: "tenants:write",
+    });
+    const { response } = await runtime.handleRequest(
+      fixtureRequest({ headers: { authorization: `Bearer ${token}` } }),
+    );
+    expect(response.status).toBe(422);
+    expect(response.headers["referrer-policy"]).toBe("no-referrer");
+    expect(response.headers["x-content-type-options"]).toBe("nosniff");
+    expect(response.headers["content-security-policy"]).toContain("default-src");
   });
 });

@@ -32,10 +32,18 @@
  */
 
 import { dataKeyToColumnKey, deriveTenantColumnKey } from "@crossengin/crypto";
-import type { DataKeyProvenance, PostgresDataKeyStore } from "@crossengin/crypto-pg";
+import type {
+  DataKeyProvenance,
+  DataKeyRewrap,
+  PostgresDataKeyStore,
+} from "@crossengin/crypto-pg";
 import type { ColumnEncryptionKeySource } from "@crossengin/operate-runtime-pg";
 
 import { COLUMN_ENCRYPTION_SECRET_VAR } from "./column-encryption.js";
+import {
+  COLUMN_ENCRYPTION_SECRET_GENERATION_VAR,
+  COLUMN_ENCRYPTION_SECRET_PREVIOUS_VAR,
+} from "./column-secret-ring.js";
 
 /**
  * The flag naming the mode, kept in the module that owns the feature so a refusal cannot name
@@ -223,14 +231,101 @@ function derivedSeed(secret: Uint8Array, tenantId: string): Uint8Array {
 interface ResolvedColumnKey {
   readonly key: string;
   readonly provenance: DataKeyProvenance;
+  /** The data-key generation the key came from, which the write-time fence compares against. */
+  readonly generation: number;
+}
+
+/**
+ * Which tenant and data-key generation each column key this process handed out came from.
+ *
+ * The write-time generation fence needs it: a column key arrives at the database as the value of
+ * `set_config('app.column_encryption_key', …)`, which says nothing about where it came from, and the
+ * fence has to know which generation to compare the tenant's current row against.
+ *
+ * A superseded key keeps its entry. Requests in flight may still hold it — they read it from the
+ * cache before the newer key was recorded — and the fence can only send such a request to the
+ * current generation if it still knows which tenant and generation the stale key came from; an
+ * evicted entry would read as a key this ledger never handed out and pass through unfenced, which is
+ * exactly the split write the fence exists to stop. The map therefore grows by one entry per data key
+ * a tenant is served under in this process's lifetime, i.e. per rekey, which is an operator act.
+ *
+ * `supersede` is how the fence tells the key source a cached entry is stale: it has just read a
+ * newer generation inside a write transaction, so the cache must not hand the old key to the next
+ * request either.
+ */
+export class ColumnKeyLedger {
+  private readonly byKey = new Map<string, { tenantId: string; generation: number }>();
+  private readonly listeners: ((tenantId: string) => void)[] = [];
+
+  record(tenantId: string, key: string, generation: number): void {
+    this.byKey.set(key, { tenantId, generation });
+  }
+
+  originOf(key: string): { readonly tenantId: string; readonly generation: number } | undefined {
+    return this.byKey.get(key);
+  }
+
+  supersede(tenantId: string): void {
+    for (const listener of this.listeners) listener(tenantId);
+  }
+
+  onSupersede(listener: (tenantId: string) => void): void {
+    this.listeners.push(listener);
+  }
+}
+
+/**
+ * A tenant may hold ciphertext written in derived mode and has no data key row, and this deployment
+ * no longer holds the secret that ciphertext is under (`seedSecretOf` answered `null`: a secret
+ * rotation completed and its previous secret was unset). Seeding from any other secret would make
+ * every read of that ciphertext fail and put new writes under a second key, so nothing is provisioned.
+ */
+export class ColumnKeySeedUnavailable extends Error {
+  constructor(readonly tenantId: string) {
+    super(
+      `tenant ${tenantId} has no data key row and may hold ciphertext written in derived mode, ` +
+        "which is under the generation-1 column secret; this deployment no longer holds it, so no " +
+        `key is provisioned. Set ${COLUMN_ENCRYPTION_SECRET_PREVIOUS_VAR} back to the generation-1 ` +
+        `secret (at ${COLUMN_ENCRYPTION_SECRET_GENERATION_VAR}=2) and serve the tenant once.`,
+    );
+    this.name = "ColumnKeySeedUnavailable";
+  }
 }
 
 async function resolveColumnKey(
   store: PostgresDataKeyStore,
-  secret: Uint8Array,
+  secret: Uint8Array | null,
   mayHoldCiphertext: TenantCiphertextProbe,
   tenantId: string,
+  onRewrap: ((outcome: DataKeyRewrap) => void) | undefined,
 ): Promise<ResolvedColumnKey> {
+  // Read first, and provision only when there is no row. `ensure` takes the exclusive per-tenant
+  // lock, and the write-time generation fence holds the **shared** form of that lock for the life
+  // of a write transaction — so a request whose cache entry lapses mid-transaction, re-resolving
+  // on a second pooled connection while its own transaction holds the shared lock, would wait on
+  // itself. Postgres cannot see that deadlock: the two connections are one request only to this
+  // process. A plain read takes no lock, and a tenant that already holds a row is the steady state.
+  const existing = await store.load(tenantId);
+  if (existing !== null) {
+    if (existing.kekGeneration !== store.currentKekGeneration) {
+      // Wrapped under a retired key-encryption key: re-wrap it now so the previous secret can be
+      // dropped, but only **opportunistically** — the lock is tried, never waited for, for the
+      // deadlock reason above — and never at the cost of the request. The data key opened, so the
+      // request is served whatever the re-wrap does.
+      try {
+        const outcome = await store.rewrap(tenantId, { opportunistic: true });
+        onRewrap?.(outcome);
+      } catch {
+        // A re-wrap that could not run leaves the row readable under the previous secret, which is
+        // exactly the state it was in; `rekey --rewrap-kek` is the deliberate path and reports.
+      }
+    }
+    return {
+      key: dataKeyToColumnKey(existing.dek),
+      provenance: existing.provenance,
+      generation: existing.generation,
+    };
+  }
   // The seed decision, and the only irreversible one here. Seeding a tenant that holds no
   // ciphertext costs **shreddability** — the row records `seeded_from_derived` and destroying it
   // bounds nothing until a rekey. Randomising a tenant that *does* hold ciphertext makes that
@@ -239,13 +334,22 @@ async function resolveColumnKey(
   // `true`; the caller's probe is conservative in exactly that direction, answering `true` both
   // for a tenant whose schema merely exists and when the probe itself fails.
   if (await mayHoldCiphertext(tenantId)) {
+    if (secret === null) throw new ColumnKeySeedUnavailable(tenantId);
     const seeded = await store.ensure(tenantId, { seed: derivedSeed(secret, tenantId) });
-    return { key: dataKeyToColumnKey(seeded.dek), provenance: seeded.provenance };
+    return {
+      key: dataKeyToColumnKey(seeded.dek),
+      provenance: seeded.provenance,
+      generation: seeded.generation,
+    };
   }
   // No seed, so the store generates a random data key and the row records `random` — the only
   // provenance for which destroying the row is worth anything.
   const fresh = await store.ensure(tenantId);
-  return { key: dataKeyToColumnKey(fresh.dek), provenance: fresh.provenance };
+  return {
+    key: dataKeyToColumnKey(fresh.dek),
+    provenance: fresh.provenance,
+    generation: fresh.generation,
+  };
 }
 
 /**
@@ -345,7 +449,11 @@ interface ColumnKeyCacheEntry {
  */
 export function buildEnvelopeKeySource(input: {
   readonly store: PostgresDataKeyStore;
-  readonly secret: Uint8Array;
+  /**
+   * The secret derived-mode ciphertext is under, which seeds a tenant's first data key; `null` once
+   * this deployment no longer holds it (`seedSecretOf`), when such a tenant is refused instead.
+   */
+  readonly secret: Uint8Array | null;
   readonly mayHoldCiphertext: TenantCiphertextProbe;
   /** Defaults to `DEFAULT_COLUMN_KEY_TTL_MS`. The CLI bounds it; this function does not. */
   readonly ttlMs?: number;
@@ -353,11 +461,19 @@ export function buildEnvelopeKeySource(input: {
   readonly now?: () => number;
   /** Called once per **cold** resolution with the row's own provenance. May throw; see below. */
   readonly onResolved?: (tenantId: string, provenance: DataKeyProvenance) => void;
+  /**
+   * Records each resolved key's origin for the write-time generation fence, and lets that fence
+   * evict an entry it has proved stale. Absent, nothing is recorded and nothing can evict.
+   */
+  readonly ledger?: ColumnKeyLedger;
+  /** Reports an opportunistic re-wrap under the current key-encryption key. */
+  readonly onRewrap?: (outcome: DataKeyRewrap) => void;
 }): ColumnEncryptionKeySource {
-  const { store, secret, mayHoldCiphertext, onResolved } = input;
+  const { store, secret, mayHoldCiphertext, onResolved, ledger, onRewrap } = input;
   const ttlMs = input.ttlMs ?? DEFAULT_COLUMN_KEY_TTL_MS;
   const now = input.now ?? Date.now;
   const cache = new Map<string, ColumnKeyCacheEntry>();
+  ledger?.onSupersede((tenantId) => cache.delete(tenantId));
   return (tenantId: string): Promise<string> => {
     const startedAt = now();
     const hit = cache.get(tenantId);
@@ -373,8 +489,10 @@ export function buildEnvelopeKeySource(input: {
       secret,
       mayHoldCiphertext,
       tenantId,
+      onRewrap,
     )
       .then((resolved) => {
+        ledger?.record(tenantId, resolved.key, resolved.generation);
         reportResolution(onResolved, tenantId, resolved.provenance);
         return resolved.key;
       })

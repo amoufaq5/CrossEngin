@@ -10,8 +10,12 @@ import {
   CREDENTIAL_REFUSAL_STATUS,
   CREDENTIAL_REFUSED_OPERATION,
   CREDENTIAL_SET_OPERATION,
+  DEFAULT_MIN_PASSWORD_LENGTH,
   MAX_PASSWORD_LENGTH,
+  MIN_MIN_PASSWORD_LENGTH,
+  SESSIONS_ENDED_OPERATION,
   buildCredentialRoutes,
+  passwordLength,
   type CredentialAuditEvent,
   type CredentialAuditor,
   type CredentialRoutesContext,
@@ -77,6 +81,8 @@ interface FakeOptions {
    * like a lost race.
    */
   readonly writes?: readonly number[];
+  /** One answer per `endSessions`, in order: the new generation, or `null` for no such row. */
+  readonly ends?: readonly (number | null)[];
 }
 
 /**
@@ -106,6 +112,7 @@ function fakeDb(opts: FakeOptions = {}): {
   const captured: Captured[] = [];
   let readIndex = 0;
   let writeIndex = 0;
+  let endIndex = 0;
 
   const run = async (
     sql: string,
@@ -136,6 +143,20 @@ function fakeDb(opts: FakeOptions = {}): {
       const row = declared[readIndex] ?? null;
       readIndex += 1;
       return row === null ? { rows: [], rowCount: 0 } : { rows: [row], rowCount: 1 };
+    }
+
+    if (/^\s*UPDATE meta\.users SET session_epoch = session_epoch \+ 1/.test(sql)) {
+      const declared = opts.ends;
+      if (declared === undefined || endIndex >= declared.length) {
+        throw new Error(
+          `this fake has no epoch declared for session end #${(endIndex + 1).toString()}`,
+        );
+      }
+      const epoch = declared[endIndex] ?? null;
+      endIndex += 1;
+      return epoch === null
+        ? { rows: [], rowCount: 0 }
+        : { rows: [{ session_epoch: epoch }], rowCount: 1 };
     }
 
     if (/^\s*UPDATE meta\.users SET credential_hash/.test(sql)) {
@@ -201,6 +222,8 @@ interface Recorded {
   readonly failures: string[];
   /** Every reserve and release, in order. */
   readonly calls: string[];
+  /** Every user whose sessions the route reported ended, in order. */
+  readonly ended: string[];
 }
 
 function ctxFor(
@@ -215,15 +238,20 @@ function ctxFor(
     readonly reserve?: boolean;
     readonly admission?: LoginAdmission;
     readonly pepper?: string;
+    readonly minPasswordLength?: number;
   } = {},
 ): { ctx: CredentialRoutesContext; recorded: Recorded } {
-  const recorded: Recorded = { events: [], failures: [], calls: [] };
+  const recorded: Recorded = { events: [], failures: [], calls: [], ended: [] };
   const roles = opts.roles ?? ["platform_admin"];
   return {
     recorded,
     ctx: {
       store,
       pepper: opts.pepper ?? PEPPER,
+      minPasswordLength: opts.minPasswordLength ?? DEFAULT_MIN_PASSWORD_LENGTH,
+      onSessionsEnded: (userId) => {
+        recorded.ended.push(userId);
+      },
       principalRoles: () => ({
         primaryRole: roles[0] ?? "anonymous",
         secondaryRoles: roles.slice(1),
@@ -285,6 +313,7 @@ function body(out: HandlerOutput): Record<string, unknown> {
 
 const SET = "platform.users.credential.set";
 const CHANGE = "account.credential.change";
+const LOGOUT = "account.logout";
 
 function setBody(over: Record<string, unknown> = {}): Record<string, unknown> {
   return { password: NEW_PASSWORD, confirmUserId: TARGET, ...over };
@@ -383,24 +412,24 @@ describe("buildCredentialRoutes", () => {
     );
   });
 
-  it("mounts only the self route when no role is granted", () => {
+  it("mounts only the self routes when no role is granted", () => {
     const { conn } = fakeDb();
     const { ctx } = ctxFor(new PostgresCredentialStore(conn), { adminRoles: [] });
     const routes = buildCredentialRoutes(ctx);
     // Fail-closed by omission: a surface that answers 403 for everyone reads as broken rather than
     // as ungranted. The self route is unconditional, because a deployment that mounted a login must
     // be able to change the password it logs in with.
-    expect(routes).toHaveLength(1);
-    expect(routes[0]?.route.operationId).toBe(CHANGE);
+    expect(new Set(routes.map((r) => r.route.operationId))).toEqual(new Set([CHANGE, LOGOUT]));
     expect(routes.some((r) => r.route.operationId === SET)).toBe(false);
   });
 
-  it("mounts both routes with a role, at the two declared paths", () => {
+  it("mounts all three routes with a role, at the declared paths", () => {
     const { conn } = fakeDb();
     const { ctx } = ctxFor(new PostgresCredentialStore(conn));
     const routes = buildCredentialRoutes(ctx);
-    expect(routes).toHaveLength(2);
-    expect(new Set(routes.map((r) => r.route.operationId))).toEqual(new Set([CHANGE, SET]));
+    expect(new Set(routes.map((r) => r.route.operationId))).toEqual(
+      new Set([CHANGE, SET, LOGOUT]),
+    );
     const path = (operationId: string): string => {
       const found = routes.find((r) => r.route.operationId === operationId);
       return (found?.route.pathSegments ?? [])
@@ -414,6 +443,7 @@ describe("buildCredentialRoutes", () => {
         .join("/");
     };
     expect(path(CHANGE)).toBe("v1/account/password");
+    expect(path(LOGOUT)).toBe("v1/account/logout");
     expect(path(SET)).toBe("v1/platform/users/{id}/credential");
     for (const r of routes) {
       expect(r.route.method).toBe("POST");
@@ -638,6 +668,73 @@ describe("the operator route", () => {
     expect(update?.params[0]).toBe(TARGET);
 
     expect(await verifyPassword(NEW_PASSWORD, String(update?.params[1]), PEPPER)).toBe("matched");
+  });
+
+  it("ends the user's sessions with the reset, in the same statement, and says so", async () => {
+    const db = fakeDb({ reads: [credentialRow()], writes: [1] });
+    const { ctx, recorded } = ctxFor(new PostgresCredentialStore(db.conn));
+    const out = await invoke(handlerFor(ctx, SET), {
+      principal: principal(),
+      params: { id: TARGET },
+      parsedBody: setBody(),
+    });
+    expect(out.status).toBe(200);
+    expect(body(out)["sessionsEnded"]).toBe(true);
+    expect(db.updates()[0]?.sql).toMatch(/session_epoch = session_epoch \+ 1/);
+    expect(recorded.ended).toEqual([TARGET]);
+  });
+
+  it("does not report sessions ended when the write lost its row", async () => {
+    const db = fakeDb({ reads: [credentialRow()], writes: [0] });
+    const { ctx, recorded } = ctxFor(new PostgresCredentialStore(db.conn));
+    await invoke(handlerFor(ctx, SET), {
+      principal: principal(),
+      params: { id: TARGET },
+      parsedBody: setBody(),
+    });
+    expect(recorded.ended).toEqual([]);
+  });
+
+  it("refuses a password under the declared floor before any store call, and admits one at it", async () => {
+    const short = "x".repeat(DEFAULT_MIN_PASSWORD_LENGTH - 1);
+    const refusedDb = fakeDb();
+    const refused = ctxFor(new PostgresCredentialStore(refusedDb.conn));
+    const out = await invoke(handlerFor(refused.ctx, SET), {
+      principal: principal(),
+      params: { id: TARGET },
+      parsedBody: setBody({ password: short }),
+    });
+    expect(out.status).toBe(400);
+    expect(body(out)["error"]).toBe("password_too_short");
+    expect(String(body(out)["detail"])).toContain(DEFAULT_MIN_PASSWORD_LENGTH.toString());
+    expect(refusedDb.captured).toHaveLength(0);
+
+    const atDb = fakeDb({ reads: [credentialRow()], writes: [1] });
+    const at = ctxFor(new PostgresCredentialStore(atDb.conn));
+    const ok = await invoke(handlerFor(at.ctx, SET), {
+      principal: principal(),
+      params: { id: TARGET },
+      parsedBody: setBody({ password: "y".repeat(DEFAULT_MIN_PASSWORD_LENGTH) }),
+    });
+    expect(ok.status).toBe(200);
+  });
+
+  it("reads the floor the deployment declared, not the default", async () => {
+    const db = fakeDb();
+    const { ctx } = ctxFor(new PostgresCredentialStore(db.conn), { minPasswordLength: 40 });
+    const out = await invoke(handlerFor(ctx, SET), {
+      principal: principal(),
+      params: { id: TARGET },
+      parsedBody: setBody({ password: "z".repeat(39) }),
+    });
+    expect(body(out)["error"]).toBe("password_too_short");
+    expect(String(body(out)["detail"])).toContain("40");
+  });
+
+  it("counts characters, not UTF-16 units, so an astral password is not padded by its encoding", () => {
+    // Six emoji are twelve UTF-16 code units; a floor of 12 must not admit them.
+    expect(passwordLength("\u{1F600}".repeat(6))).toBe(6);
+    expect(DEFAULT_MIN_PASSWORD_LENGTH).toBeGreaterThanOrEqual(MIN_MIN_PASSWORD_LENGTH);
   });
 
   it("503s and writes nothing when the act cannot be recorded", async () => {
@@ -949,12 +1046,12 @@ describe("the self-service route", () => {
     expect(corruptRec.failures).toEqual([]);
   });
 
-  it("changes the password and says the existing sessions are not revoked", async () => {
+  it("changes the password and ends every session the person held", async () => {
     const db = fakeDb({
       reads: [credentialRow({ id: OPERATOR, credential_hash: await storedHash() })],
       writes: [1],
     });
-    const { ctx } = ctxFor(new PostgresCredentialStore(db.conn));
+    const { ctx, recorded } = ctxFor(new PostgresCredentialStore(db.conn));
     const out = await invoke(handlerFor(ctx, CHANGE), {
       principal: principal(),
       params: {},
@@ -962,10 +1059,12 @@ describe("the self-service route", () => {
     });
     expect(out.status).toBe(200);
     expect(body(out)["credentialChanged"]).toBe(true);
-    // Present and false, which is the point: a session token is verified by signature against the
-    // JWKS and carries its own expiry, so changing this row cannot revoke one. Saying so is the
-    // alternative to a reader assuming a password change logs everyone out.
-    expect(body(out)["sessionsRevoked"]).toBe(false);
+    // This was pinned `false` while a token was verified by signature alone and nothing on the
+    // request path read the row. The write now advances `session_epoch` in the same statement and
+    // the per-request standing check refuses a token minted under an older one, so the earlier
+    // sessions are revoked -- and the route reports it to the standing cache in this process.
+    expect(body(out)["sessionsRevoked"]).toBe(true);
+    expect(recorded.ended).toEqual([OPERATOR]);
 
     const update = db.updates()[0];
     expect(update?.params[0]).toBe(OPERATOR);
@@ -1271,5 +1370,109 @@ describe("the self-service route", () => {
     expect(written).not.toContain(NEW_PASSWORD);
     expect(written).not.toContain(PEPPER);
     expect(written).not.toContain("scrypt$");
+  });
+});
+
+describe("the self-service route's floor", () => {
+  it("refuses a new password under the floor before verifying the current one", async () => {
+    const db = fakeDb();
+    const { ctx, recorded } = ctxFor(new PostgresCredentialStore(db.conn));
+    const out = await invoke(handlerFor(ctx, CHANGE), {
+      principal: principal(),
+      params: {},
+      parsedBody: {
+        currentPassword: CURRENT_PASSWORD,
+        newPassword: "a".repeat(DEFAULT_MIN_PASSWORD_LENGTH - 1),
+      },
+    });
+    expect(out.status).toBe(400);
+    expect(body(out)["error"]).toBe("password_too_short");
+    // Before any read, so a short new password cannot be used to probe the current one, and no
+    // attempt is reserved against the lockout for a request that proved nothing.
+    expect(db.captured).toHaveLength(0);
+    expect(recorded.calls).toEqual([]);
+  });
+
+  it("does not apply the floor to the current password, which an existing hash may be shorter than", async () => {
+    const shortCurrent = "short-pw";
+    const hash = await hashPassword(shortCurrent, PEPPER, { params: FAST_SCRYPT });
+    const db = fakeDb({
+      reads: [credentialRow({ id: OPERATOR, credential_hash: hash })],
+      writes: [1],
+    });
+    const { ctx } = ctxFor(new PostgresCredentialStore(db.conn));
+    const out = await invoke(handlerFor(ctx, CHANGE), {
+      principal: principal(),
+      params: {},
+      parsedBody: { currentPassword: shortCurrent, newPassword: NEW_PASSWORD },
+    });
+    expect(out.status).toBe(200);
+  });
+});
+
+describe("the sign-out route", () => {
+  it("ends every session the person holds and says it ended them on every device", async () => {
+    const db = fakeDb({ ends: [3] });
+    const { ctx, recorded } = ctxFor(new PostgresCredentialStore(db.conn));
+    const out = await invoke(handlerFor(ctx, LOGOUT), {
+      principal: principal(),
+      params: {},
+      parsedBody: null,
+    });
+    expect(out.status).toBe(200);
+    expect(body(out)["sessionsEnded"]).toBe(true);
+    expect(String(body(out)["detail"])).toMatch(/every device/);
+    expect(db.captured[0]?.params).toEqual([OPERATOR]);
+    expect(recorded.ended).toEqual([OPERATOR]);
+    expect(recorded.events.map((e) => e.operation)).toEqual([SESSIONS_ENDED_OPERATION]);
+    expect(recorded.events[0]?.tenantId).toBe(TENANT);
+  });
+
+  it("still signs out when the record cannot be written", async () => {
+    const db = fakeDb({ ends: [1] });
+    const { ctx, recorded } = ctxFor(new PostgresCredentialStore(db.conn), { auditThrows: true });
+    const out = await invoke(handlerFor(ctx, LOGOUT), {
+      principal: principal(),
+      params: {},
+      parsedBody: null,
+    });
+    expect(out.status).toBe(200);
+    expect(recorded.ended).toEqual([OPERATOR]);
+  });
+
+  it("404s a token whose user row is gone, and reports nothing ended", async () => {
+    const db = fakeDb({ ends: [null] });
+    const { ctx, recorded } = ctxFor(new PostgresCredentialStore(db.conn));
+    const out = await invoke(handlerFor(ctx, LOGOUT), {
+      principal: principal(),
+      params: {},
+      parsedBody: null,
+    });
+    expect(out.status).toBe(CREDENTIAL_REFUSAL_STATUS.user_unknown);
+    expect(body(out)["error"]).toBe("user_unknown");
+    expect(recorded.ended).toEqual([]);
+  });
+
+  it("refuses a credential that names no person, before any store call", async () => {
+    const db = fakeDb();
+    const { ctx } = ctxFor(new PostgresCredentialStore(db.conn));
+    const out = await invoke(handlerFor(ctx, LOGOUT), {
+      principal: principal({ principalKind: "service_account", authScheme: "api_key_header" }),
+      params: {},
+      parsedBody: null,
+    });
+    expect(body(out)["error"]).toBe("not_a_person");
+    expect(db.captured).toHaveLength(0);
+  });
+
+  it("401s with no principal", async () => {
+    const db = fakeDb();
+    const { ctx } = ctxFor(new PostgresCredentialStore(db.conn));
+    const out = await invoke(handlerFor(ctx, LOGOUT), {
+      principal: null,
+      params: {},
+      parsedBody: null,
+    });
+    expect(out.status).toBe(401);
   });
 });

@@ -13,6 +13,7 @@ import {
   buildPlatformAdminRoutes,
   consoleActionsNeedNoApprover,
   type PlatformAdminContext,
+  type TenantCreationEvent,
 } from "./platform-admin.js";
 import { TENANT_STATUSES, TENANT_STATUS_TRANSITIONS } from "./platform-tenants.js";
 
@@ -109,20 +110,43 @@ function fakePg(): PgConnection & { readonly stored: Map<string, Record<string, 
   };
   const conn: PgConnection = {
     query: run as PgConnection["query"],
-    transaction: (async <T>(fn: (tx: PgConnection) => Promise<T>) => fn(conn)) as PgConnection["transaction"],
+    // Runs the body, and undoes what it wrote if the body throws: the creation record is written in
+    // the INSERT's transaction precisely so that a refused record takes the tenant with it, and a
+    // fake that kept the row would make "rolled back" and "left behind" indistinguishable.
+    transaction: (async <T>(fn: (tx: PgConnection) => Promise<T>) => {
+      const snapshot = new Map([...rows].map(([k, v]) => [k, { ...v }]));
+      try {
+        return await fn(conn);
+      } catch (err) {
+        rows.clear();
+        for (const [k, v] of snapshot) rows.set(k, v);
+        throw err;
+      }
+    }) as PgConnection["transaction"],
     withAdvisoryLock: (async <T>(_k: bigint, fn: () => Promise<T>) => fn()) as PgConnection["withAdvisoryLock"],
     close: (async () => undefined) as PgConnection["close"],
   };
   return { ...conn, stored: rows };
 }
 
-function makeCtx(): PlatformAdminContext & { readonly stored: Map<string, Record<string, unknown>> } {
+function makeCtx(
+  opts: { readonly recordThrows?: boolean } = {},
+): PlatformAdminContext & {
+  readonly stored: Map<string, Record<string, unknown>>;
+  readonly creations: TenantCreationEvent[];
+} {
   const conn = fakePg();
+  const creations: TenantCreationEvent[] = [];
   return {
     stored: conn.stored,
+    creations,
     store: new PostgresTenantStore(conn),
     principalRoles: (p: ResolvedPrincipal | null) => ({ primaryRole: p?.grantedScopes[0] ?? "anon" }),
     adminRoles: new Set(["platform_admin"]),
+    recordCreation: async (_tx, event): Promise<void> => {
+      if (opts.recordThrows === true) throw new Error("audit table unreachable");
+      creations.push(event);
+    },
   };
 }
 
@@ -189,6 +213,52 @@ describe("platform-admin — create", () => {
     const ctx = makeCtx();
     await create(ctx, { slug: "acme", name: "Acme", schemaName: "t_shared" });
     expect((await create(ctx, { slug: "acme-two", name: "Two", schemaName: "t_shared" })).status).toBe(409);
+  });
+});
+
+describe("platform-admin — creation is recorded", () => {
+  it("records the created row and who created it, in the INSERT's transaction", async () => {
+    const ctx = makeCtx();
+    const out = await create(ctx, { slug: "acme", name: "Acme Inc" });
+    expect(out.status).toBe(201);
+    const tenant = out.body["tenant"] as { id: string };
+    expect(ctx.creations).toHaveLength(1);
+    expect(ctx.creations[0]?.tenant.id).toBe(tenant.id);
+    expect(ctx.creations[0]?.tenant.slug).toBe("acme");
+    expect(ctx.creations[0]?.principalId).toBe(USER);
+  });
+
+  it("503s and creates nothing when the creation cannot be recorded", async () => {
+    const ctx = makeCtx({ recordThrows: true });
+    const out = await create(ctx, { slug: "acme", name: "Acme Inc" });
+    expect(out.status).toBe(503);
+    expect(out.body["error"]).toBe("audit_unavailable");
+    // Rolled back with the record: a tenant that exists with no record of its creation is the
+    // state this closes, so the refusal must leave no row behind.
+    expect(ctx.stored.size).toBe(0);
+  });
+
+  it("records nothing for a refused duplicate", async () => {
+    const ctx = makeCtx();
+    await createdId(ctx, "acme");
+    const out = await create(ctx, { slug: "acme", name: "Again" });
+    expect(out.status).toBe(409);
+    expect(ctx.creations).toHaveLength(1);
+  });
+
+  it("does not read a unique violation inside the record as a duplicate tenant", async () => {
+    const base = makeCtx();
+    const ctx: PlatformAdminContext = {
+      ...base,
+      recordCreation: async (): Promise<void> => {
+        const err = new Error("duplicate key value violates unique constraint") as Error & { code?: string };
+        err.code = "23505";
+        throw err;
+      },
+    };
+    const out = await create(ctx, { slug: "acme", name: "Acme Inc" });
+    expect(out.status).toBe(503);
+    expect(base.stored.size).toBe(0);
   });
 });
 
@@ -285,6 +355,30 @@ describe("platform-admin — transitions", () => {
     const id = await createdId(ctx, "acme");
     await findHandler(ctx, "platform.tenants.archive")(input("platform_admin", { params: { id }, body: { reason: "operator request" } }));
     expect((await findHandler(ctx, "platform.tenants.suspend")(input("platform_admin", { params: { id }, body: { reason: "operator request" } })) as JsonOut).status).toBe(409);
+  });
+
+  it("409s rather than overwriting a status that changed after it was read", async () => {
+    const ctx = makeCtx();
+    const id = await createdId(ctx, "acme");
+    await findHandler(ctx, "platform.tenants.suspend")(input("platform_admin", { params: { id }, body: { reason: "first" } }));
+    // A second console archives the tenant between this request's read (which saw `suspended`, from
+    // which reactivation is legal) and its write.
+    const store = ctx.store;
+    const raced: PlatformAdminContext = {
+      ...ctx,
+      store: Object.assign(Object.create(Object.getPrototypeOf(store) as object) as PostgresTenantStore, store, {
+        getById: async (tid: string) => {
+          const seen = await store.getById(tid);
+          const row = ctx.stored.get(tid);
+          if (row !== undefined) row["status"] = "archived";
+          return seen;
+        },
+      }),
+    };
+    const out = (await findHandler(raced, "platform.tenants.reactivate")(input("platform_admin", { params: { id }, body: { reason: "second" } }))) as JsonOut;
+    expect(out.status).toBe(409);
+    expect(out.body["error"]).toBe("concurrent_transition");
+    expect(ctx.stored.get(id)?.["status"]).toBe("archived");
   });
 
   it("404s a transition on a missing tenant", async () => {

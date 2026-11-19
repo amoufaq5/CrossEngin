@@ -49,6 +49,7 @@ function buildJwt(opts: {
   iss?: string;
   aud?: string | readonly string[];
   sub?: string;
+  tenant_id?: string;
   /**
    * `string` as well as `number`, because a wire JWT is JSON and a minter can put a string here —
    * which is the case the usability check exists for. Typing it `number` would make the one token
@@ -67,6 +68,7 @@ function buildJwt(opts: {
         iss: opts.iss,
         aud: opts.aud,
         sub: opts.sub,
+        tenant_id: opts.tenant_id,
         exp: opts.exp,
         nbf: opts.nbf,
       }),
@@ -130,6 +132,7 @@ describe("parseJwt", () => {
 describe("verifyBearerJwt", () => {
   const issuer = "https://issuer.example";
   const audience = "https://api.crossengin.io";
+  const TOKEN_TENANT = "00000000-0000-4000-8000-0000000000c1";
   /** Derived, not listed: a fourth required claim is covered by every test below without an edit. */
   const ALL_CLAIMS: ReadonlySet<RequiredJwtClaim> = new Set(REQUIRED_JWT_CLAIMS);
   /** The pre-ADR-0386 behaviour, kept nameable so the new tests can assert against it. */
@@ -147,6 +150,7 @@ describe("verifyBearerJwt", () => {
       nbf?: number;
       aud?: string | readonly string[];
       iss?: string;
+      sub?: string;
       omit?: readonly RequiredJwtClaim[];
     } = {},
   ) {
@@ -160,7 +164,8 @@ describe("verifyBearerJwt", () => {
       kid,
       iss: omitted("iss") ? undefined : (opts.iss ?? issuer),
       aud: omitted("aud") ? undefined : (opts.aud ?? audience),
-      sub: USER,
+      sub: omitted("sub") ? undefined : (opts.sub ?? USER),
+      tenant_id: omitted("tenant_id") ? undefined : TOKEN_TENANT,
       exp: omitted("exp") ? undefined : (opts.exp ?? NOW_SECONDS + 3_600),
       nbf: opts.nbf,
     });
@@ -285,7 +290,7 @@ describe("verifyBearerJwt", () => {
       });
     }
 
-    it("refuses a token carrying none of the three, naming the first in a fixed order", async () => {
+    it("refuses a token carrying none of them, naming the first in a fixed order", async () => {
       const { jwks, token } = await makeJwksAndToken({ omit: REQUIRED_JWT_CLAIMS });
       const result = await verifyBearerJwt({
         token,
@@ -327,6 +332,14 @@ describe("verifyBearerJwt", () => {
       // never compared.
       expect((await verifyBearerJwt({ token, jwks, opts: { ...base, requiredClaims: NO_CLAIMS } })).outcome)
         .toBe("authenticated");
+    });
+
+    it("refuses an empty sub, which every such token would share as one principal id", async () => {
+      const { jwks, token } = await makeJwksAndToken({ sub: "" });
+      const base = { expectedIssuer: issuer, expectedAudience: audience, clockSkewSeconds: 30, nowSeconds: NOW_SECONDS };
+      const strict = await verifyBearerJwt({ token, jwks, opts: { ...base, requiredClaims: ALL_CLAIMS } });
+      expect(strict.outcome).toBe("required_claim_absent");
+      expect(strict.reason).toBe("sub is absent or not usable");
     });
 
     it("never puts the claim's own value in the reason", async () => {

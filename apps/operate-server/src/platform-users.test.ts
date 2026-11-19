@@ -555,6 +555,8 @@ function ctxFor(
     /** What the role directory answers; `null` is "this process cannot say which roles exist". */
     readonly declaredRoles?: readonly string[] | null;
     readonly directoryThrows?: boolean;
+    readonly adminRoles?: readonly string[];
+    readonly authorityRoles?: readonly string[];
   } = {},
 ): {
   ctx: Parameters<typeof buildPlatformUserRoutes>[0];
@@ -570,18 +572,29 @@ function ctxFor(
    * of the tenant passed every test in this file.
    */
   directoryAsked: () => readonly string[];
+  /** The users whose status a transition moved, in order (the standing cache's invalidation). */
+  statusChanged: readonly string[];
 } {
   const recorded: Recorded = { events: [] };
+  const statusChanged: string[] = [];
   let directoryCalls = 0;
   const asked: string[] = [];
   return {
     recorded,
     directoryCalls: () => directoryCalls,
     directoryAsked: () => asked,
+    statusChanged,
     ctx: {
       store,
-      principalRoles: () => ({ primaryRole: (opts.roles ?? ["platform_admin"])[0] ?? "anonymous" }),
-      adminRoles: new Set(["platform_admin"]),
+      principalRoles: () => ({
+        primaryRole: (opts.roles ?? ["platform_admin"])[0] ?? "anonymous",
+        secondaryRoles: (opts.roles ?? []).slice(1),
+      }),
+      adminRoles: new Set(opts.adminRoles ?? ["platform_admin"]),
+      platformAuthorityRoles: new Set(opts.authorityRoles ?? ["platform_admin", "deletion_verifier"]),
+      onUserStatusChanged: (userId) => {
+        statusChanged.push(userId);
+      },
       roleDirectory: async (tenantId) => {
         directoryCalls += 1;
         asked.push(tenantId);
@@ -670,6 +683,8 @@ describe("buildPlatformUserRoutes", () => {
         store,
         principalRoles: () => ({ primaryRole: "platform_admin" }),
         adminRoles: new Set(["platform_admin"]),
+        platformAuthorityRoles: new Set(["platform_admin"]),
+        onUserStatusChanged: () => undefined,
         roleDirectory: async () => null,
         audit: undefined as unknown as (e: UserRegistryAuditEvent) => Promise<void>,
       }),
@@ -822,6 +837,140 @@ describe("buildPlatformUserRoutes", () => {
     expect(db.captured.find((c) => c.sql.includes("INSERT"))?.params[1]).toBe(TENANT);
   });
 
+  it("refuses a grant naming a platform role the granter does not hold (H-04), writing nothing", async () => {
+    for (const body of [
+      { userId: USER, primaryRole: "platform_admin", status: "active" },
+      { userId: USER, primaryRole: "erp_admin", secondaryRoles: ["deletion_verifier"], status: "active" },
+    ]) {
+      const db = fakeDb([]);
+      const { ctx, recorded } = ctxFor(new PostgresUserStore(db.conn), {
+        roles: ["user_admin"],
+        adminRoles: ["user_admin"],
+      });
+      const grant = handlerFor(buildPlatformUserRoutes(ctx), "platform.tenants.members.grant");
+      const out = await grant({ principal: principal(), params: { tenantId: TENANT }, request: {}, parsedBody: body });
+      expect(out.status).toBe(403);
+      expect((out.body as Record<string, unknown>)["error"]).toBe("role_escalation");
+      expect(db.captured.some((c) => c.sql.includes("INSERT"))).toBe(false);
+      // The attempt is on the trail as a refusal and not as a grant.
+      expect(recorded.events.map((e) => e.operation)).toEqual([REGISTRY_REFUSED_OPERATION]);
+      expect(recorded.events[0]?.detail["refusal"]).toBe("role_escalation");
+    }
+  });
+
+  it("admits a platform-role grant from a principal that holds the role, and a tenant role from anyone", async () => {
+    const holder = fakeDb([[membershipRow()]]);
+    const holderCtx = ctxFor(new PostgresUserStore(holder.conn), {
+      roles: ["user_admin", "platform_admin"],
+      adminRoles: ["user_admin"],
+    });
+    const byHolder = await handlerFor(buildPlatformUserRoutes(holderCtx.ctx), "platform.tenants.members.grant")({
+      principal: principal(),
+      params: { tenantId: TENANT },
+      request: {},
+      parsedBody: { userId: USER, primaryRole: "platform_admin", status: "active" },
+    });
+    expect(byHolder.status).toBe(201);
+
+    const tenantDb = fakeDb([[membershipRow()]]);
+    const tenantCtx = ctxFor(new PostgresUserStore(tenantDb.conn), { roles: ["user_admin"], adminRoles: ["user_admin"] });
+    const tenantRole = await handlerFor(buildPlatformUserRoutes(tenantCtx.ctx), "platform.tenants.members.grant")({
+      principal: principal(),
+      params: { tenantId: TENANT },
+      request: {},
+      parsedBody: { userId: USER, primaryRole: "erp_admin", status: "active" },
+    });
+    expect(tenantRole.status).toBe(201);
+  });
+
+  it("refuses to ACTIVATE a membership naming a platform role the caller does not hold", async () => {
+    // A grant written by a holder and later revoked would otherwise be switched back on by anyone
+    // with the user-administration grant: activating confers the roles exactly as granting does.
+    const revoked = membershipRow({ status: "revoked", primary_role: "platform_admin", secondary_roles: [] });
+    const db = fakeDb([[revoked]]);
+    const { ctx, recorded } = ctxFor(new PostgresUserStore(db.conn), {
+      roles: ["user_admin"],
+      adminRoles: ["user_admin"],
+    });
+    const out = await handlerFor(buildPlatformUserRoutes(ctx), "platform.tenants.members.activate")({
+      principal: principal(),
+      params: { tenantId: TENANT, userId: USER },
+      request: {},
+    });
+    expect(out.status).toBe(403);
+    expect((out.body as Record<string, unknown>)["error"]).toBe("role_escalation");
+    expect(db.captured.some((c) => c.sql.includes("UPDATE"))).toBe(false);
+    expect(recorded.events.map((e) => e.operation)).toEqual([REGISTRY_REFUSED_OPERATION]);
+  });
+
+  it("activates such a membership for a holder, and revokes one for anybody", async () => {
+    const holder = fakeDb([
+      [membershipRow({ status: "revoked", primary_role: "platform_admin", secondary_roles: [] })],
+      [membershipRow({ status: "active", primary_role: "platform_admin", secondary_roles: [] })],
+    ]);
+    const holderCtx = ctxFor(new PostgresUserStore(holder.conn), {
+      roles: ["user_admin", "platform_admin"],
+      adminRoles: ["user_admin"],
+    });
+    const activated = await handlerFor(buildPlatformUserRoutes(holderCtx.ctx), "platform.tenants.members.activate")({
+      principal: principal(),
+      params: { tenantId: TENANT, userId: USER },
+      request: {},
+    });
+    expect(activated.status).toBe(200);
+
+    // Revoking takes authority away, so it is not an escalation whoever performs it.
+    const other = fakeDb([
+      [membershipRow({ status: "active", primary_role: "platform_admin", secondary_roles: [] })],
+      [membershipRow({ status: "revoked", primary_role: "platform_admin", secondary_roles: [] })],
+    ]);
+    const otherCtx = ctxFor(new PostgresUserStore(other.conn), { roles: ["user_admin"], adminRoles: ["user_admin"] });
+    const revoked = await handlerFor(buildPlatformUserRoutes(otherCtx.ctx), "platform.tenants.members.revoke")({
+      principal: principal(),
+      params: { tenantId: TENANT, userId: USER },
+      request: {},
+    });
+    expect(revoked.status).toBe(200);
+  });
+
+  it("tells the standing cache when a user's status moved, and only when it did", async () => {
+    const moved = fakeDb([[userRow({ status: "active" })], [userRow({ status: "suspended" })]]);
+    const ok = ctxFor(new PostgresUserStore(moved.conn));
+    const out = await handlerFor(buildPlatformUserRoutes(ok.ctx), "platform.users.suspend")({
+      principal: principal(),
+      params: { id: USER },
+      request: {},
+    });
+    expect(out.status).toBe(200);
+    expect(ok.statusChanged).toEqual([USER]);
+
+    const lost = fakeDb([[userRow({ status: "active" })], []]);
+    const raced = ctxFor(new PostgresUserStore(lost.conn));
+    const refused = await handlerFor(buildPlatformUserRoutes(raced.ctx), "platform.users.suspend")({
+      principal: principal(),
+      params: { id: USER },
+      request: {},
+    });
+    expect(refused.status).toBe(409);
+    expect(raced.statusChanged).toEqual([]);
+  });
+
+  it("refuses a provision whose membership names a platform role the caller does not hold", async () => {
+    const db = fakeDb([]);
+    const { ctx } = ctxFor(new PostgresUserStore(db.conn), { roles: ["user_admin"], adminRoles: ["user_admin"] });
+    const out = await handlerFor(buildPlatformUserRoutes(ctx), "platform.users.provision")({
+      principal: principal(),
+      params: {},
+      request: {},
+      parsedBody: {
+        user: { email: "esc@example.test" },
+        membership: { tenantId: TENANT, primaryRole: "platform_admin", status: "active" },
+      },
+    });
+    expect(out.status).toBe(403);
+    expect(db.captured.some((c) => c.sql.includes("INSERT"))).toBe(false);
+  });
+
   it("refuses a grant body that tries to name its own tenant", async () => {
     const db = fakeDb([]);
     const { ctx } = ctxFor(new PostgresUserStore(db.conn));
@@ -935,6 +1084,8 @@ describe("buildPlatformUserRoutes", () => {
         store: new PostgresUserStore(conn as unknown as PgConnection),
         principalRoles: () => ({ primaryRole: "platform_admin" }),
         adminRoles: new Set(["platform_admin"]),
+        platformAuthorityRoles: new Set(["platform_admin"]),
+        onUserStatusChanged: () => undefined,
         roleDirectory: async () => new Set(DECLARED_ROLES),
         audit: async () => {
           calls += 1;

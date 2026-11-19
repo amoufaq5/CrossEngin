@@ -20,6 +20,8 @@ import { addressFor } from "./delivery-drain.js";
 export interface ResolvedRecipient {
   readonly userId: string;
   readonly email: string;
+  /** `meta.users.phone_e164`; `null` is a user with no phone on record, who no SMS or call can reach. */
+  readonly phoneE164: string | null;
   readonly displayName: string | null;
   readonly primaryRole: string;
   readonly secondaryRoles: readonly string[];
@@ -51,9 +53,9 @@ const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0
 const EPOCH_ISO = "1970-01-01T00:00:00.000Z";
 
 const RECIPIENT_COLUMNS =
-  "m.user_id, u.email, u.display_name, m.primary_role, m.secondary_roles";
+  "m.user_id, u.email, u.phone_e164, u.display_name, m.primary_role, m.secondary_roles";
 
-const IDENTITY_COLUMNS = "m.user_id, u.email, u.display_name";
+const IDENTITY_COLUMNS = "m.user_id, u.email, u.phone_e164, u.display_name";
 
 const PREFERENCE_COLUMNS = "user_id, category, channel, opted_in, source, updated_at";
 
@@ -107,6 +109,10 @@ function uniqueUuids(values: readonly string[]): readonly string[] {
   return out;
 }
 
+function phoneOf(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
 function rowToRecipient(row: Record<string, unknown>): ResolvedRecipient | null {
   const userId = row["user_id"];
   const email = row["email"];
@@ -117,6 +123,7 @@ function rowToRecipient(row: Record<string, unknown>): ResolvedRecipient | null 
   return {
     userId,
     email,
+    phoneE164: phoneOf(row["phone_e164"]),
     displayName: typeof displayName === "string" ? displayName : null,
     primaryRole: typeof primaryRole === "string" ? primaryRole : "",
     secondaryRoles: toStringArray(row["secondary_roles"]),
@@ -132,10 +139,12 @@ function rowToRecipient(row: Record<string, unknown>): ResolvedRecipient | null 
 export function addressHashesFor(input: {
   readonly userId: string;
   readonly email: string;
+  readonly phoneE164: string | null;
 }): readonly string[] {
   const recipient: ResolvedRecipient = {
     userId: input.userId,
     email: input.email,
+    phoneE164: input.phoneE164,
     displayName: null,
     primaryRole: "",
     secondaryRoles: [],
@@ -143,7 +152,7 @@ export function addressHashesFor(input: {
   const hashes = new Set<string>();
   for (const channel of NOTIFICATION_CHANNELS) {
     const address = addressFor(channel, recipient);
-    if (typeof address !== "string" || address.length === 0) continue;
+    if (address === null || address.length === 0) continue;
     hashes.add(sha256(address));
   }
   return [...hashes].sort();
@@ -155,11 +164,12 @@ function rowToIdentity(row: Record<string, unknown>): RecipientIdentity | null {
   if (typeof userId !== "string" || !UUID_RE.test(userId)) return null;
   if (typeof email !== "string" || email.length === 0) return null;
   const displayName = row["display_name"];
+  const phoneE164 = phoneOf(row["phone_e164"]);
   return {
     userId,
     email,
     displayName: typeof displayName === "string" ? displayName : null,
-    addressHashes: addressHashesFor({ userId, email }),
+    addressHashes: addressHashesFor({ userId, email, phoneE164 }),
   };
 }
 

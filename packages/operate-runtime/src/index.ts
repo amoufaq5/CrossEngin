@@ -4,6 +4,7 @@ export * from "./datetime.js";
 export * from "./datetime-store.js";
 export * from "./decimal.js";
 export * from "./decimal-store.js";
+export * from "./money.js";
 export * from "./list-value-types.js";
 export * from "./list-query.js";
 export * from "./openapi-schema.js";

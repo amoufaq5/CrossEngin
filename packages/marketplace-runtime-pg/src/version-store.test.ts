@@ -2,31 +2,66 @@ import type { PackVersionRecord } from "@crossengin/marketplace";
 import type { PgConnection, UnreadableRow } from "@crossengin/kernel-pg";
 import { describe, expect, it } from "vitest";
 
+import { PackSubmissionError } from "@crossengin/marketplace-runtime";
+
 import { PostgresPackVersionStore } from "./version-store.js";
 import { fakePackVersion, fakeVersionPg } from "./test-fakes.js";
 
-describe("PostgresPackVersionStore.upsert", () => {
-  it("INSERTs with an (pack_id, version) UPSERT + a bound JSONB signature", async () => {
+describe("PostgresPackVersionStore.insertDraft", () => {
+  it("INSERTs with a bound JSONB signature and refuses rather than updates on conflict", async () => {
     const { conn, calls } = fakeVersionPg();
-    await new PostgresPackVersionStore(conn).upsert(fakePackVersion());
+    await new PostgresPackVersionStore(conn).insertDraft(fakePackVersion());
     const insert = calls.find((c) => c.sql.includes("INSERT INTO"))!;
     expect(insert.sql).toContain("meta.pack_versions");
-    expect(insert.sql).toContain("ON CONFLICT (pack_id, version) DO UPDATE");
+    expect(insert.sql).toContain("ON CONFLICT (pack_id, version) DO NOTHING");
+    expect(insert.sql).not.toContain("DO UPDATE");
     expect(insert.sql).toContain("$8::jsonb");
     expect(insert.params[0]).toBe("com.acme.loyalty");
     expect(insert.params[1]).toBe("1.0.0");
     expect(insert.params[2]).toBe("draft");
-    expect(typeof insert.params[7]).toBe("string"); // signature serialized
+    expect(typeof insert.params[7]).toBe("string");
   });
 
-  it("re-upserting the same (pack_id, version) advances the row (one row, new status)", async () => {
+  it("refuses to re-submit an existing version, so a published version's bytes cannot be replaced", async () => {
     const { conn } = fakeVersionPg();
     const store = new PostgresPackVersionStore(conn);
-    await store.upsert(fakePackVersion({ status: "draft" }));
-    await store.upsert(fakePackVersion({ status: "in_review", securityReviewStatus: "in_progress" }));
+    await store.insertDraft(fakePackVersion({ bundleSha256: "a".repeat(64) }));
+    const err = await store.insertDraft(fakePackVersion({ bundleSha256: "b".repeat(64) })).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PackSubmissionError);
+    expect((err as PackSubmissionError).reason).toBe("version_exists");
+    const got = await store.getByPackVersion("com.acme.loyalty", "1.0.0");
+    expect(got?.bundleSha256).toBe("a".repeat(64));
+  });
+});
+
+describe("PostgresPackVersionStore.advance", () => {
+  it("moves the lifecycle and names no content column", async () => {
+    const { conn, calls } = fakeVersionPg();
+    const store = new PostgresPackVersionStore(conn);
+    const draft = fakePackVersion({ status: "draft" });
+    await store.insertDraft(draft);
+    await store.advance(draft, fakePackVersion({ status: "in_review", securityReviewStatus: "in_progress" }));
+    const update = calls.find((c) => c.sql.startsWith("UPDATE"))!;
+    for (const column of ["channel", "bundle_sha256", "bundle_size_bytes", "manifest_sha256", "signature", "changelog"]) {
+      expect(update.sql).not.toMatch(new RegExp(`\\b${column}\\s*=`));
+    }
+    expect(update.sql).toContain("status = $14 AND security_review_status = $15");
     const got = await store.getByPackVersion("com.acme.loyalty", "1.0.0");
     expect(got?.status).toBe("in_review");
     expect(got?.securityReviewStatus).toBe("in_progress");
+  });
+
+  it("refuses when the row has moved since it was read, so a stale read cannot overwrite a newer state", async () => {
+    const { conn } = fakeVersionPg();
+    const store = new PostgresPackVersionStore(conn);
+    const draft = fakePackVersion({ status: "draft" });
+    await store.insertDraft(draft);
+    await store.advance(draft, fakePackVersion({ status: "in_review", securityReviewStatus: "in_progress" }));
+    const err = await store
+      .advance(draft, fakePackVersion({ status: "withdrawn", withdrawnAt: "2026-06-12T00:00:00.000Z", withdrawnReason: "x" }))
+      .catch((e: unknown) => e);
+    expect((err as PackSubmissionError).reason).toBe("version_changed");
+    expect((await store.getByPackVersion("com.acme.loyalty", "1.0.0"))?.status).toBe("in_review");
   });
 });
 
@@ -43,7 +78,7 @@ describe("PostgresPackVersionStore reads", () => {
       publishedAt: "2026-06-11T00:00:00.000Z",
       publishedBy: "00000000-0000-4000-8000-0000000000cc",
     });
-    await store.upsert(published);
+    await store.insertDraft(published);
     const got = await store.getByPackVersion("com.acme.loyalty", "1.0.0");
     expect(got?.status).toBe("published");
     expect(got?.securityReviewStatus).toBe("passed");
@@ -54,8 +89,8 @@ describe("PostgresPackVersionStore reads", () => {
     const { conn } = fakeVersionPg();
     const store = new PostgresPackVersionStore(conn);
     expect(await store.getByPackVersion("com.acme.loyalty", "9.9.9")).toBeNull();
-    await store.upsert(fakePackVersion({ version: "1.0.0", status: "draft" }));
-    await store.upsert(fakePackVersion({ version: "1.1.0", status: "published", channel: "beta", publishedAt: "2026-06-11T00:00:00.000Z", publishedBy: "00000000-0000-4000-8000-0000000000cc" }));
+    await store.insertDraft(fakePackVersion({ version: "1.0.0", status: "draft" }));
+    await store.insertDraft(fakePackVersion({ version: "1.1.0", status: "published", channel: "beta", publishedAt: "2026-06-11T00:00:00.000Z", publishedBy: "00000000-0000-4000-8000-0000000000cc" }));
     const refused: UnreadableRow[] = [];
     const report = (row: UnreadableRow): void => {
       refused.push(row);

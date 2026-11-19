@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { REPO_ROOT } from "./workspace-sql-scan.js";
+import { REPO_ROOT, scanWorkspaceSql } from "./workspace-sql-scan.js";
 
 /**
  * The rule: **no table the Article 17 erasure protects may carry a cascading `tenant_id` reference
@@ -98,6 +98,18 @@ export const RECORD_RETENTION_FINDING_KINDS = [
    * and `references: TENANT_FK` and so is blind to a CASCADE on any other column.
    */
   "fenced_table_cascade_parent_unfenced",
+  /**
+   * A table the catalog fences with `tenantUndeletableRecord` that `TENANT_UNDELETABLE_TABLES` does
+   * not declare — a denial added without the reason this rule requires beside it.
+   */
+  "undeletable_table_undeclared_here",
+  /** A table declared undeletable here that the catalog does not fence: the reason with no fence. */
+  "declared_undeletable_unfenced",
+  /**
+   * A table declared undeletable that the erasure also retains. It is already fenced for the
+   * retention reason, and a second reason would let either set change without the other noticing.
+   */
+  "undeletable_table_is_retained",
 ] as const;
 export type RecordRetentionFindingKind = (typeof RECORD_RETENTION_FINDING_KINDS)[number];
 
@@ -362,7 +374,78 @@ export function readDeleteFencedTables(root: string = REPO_ROOT): readonly strin
         `renamed or removed, so this parse no longer finds the policies it reports on`,
     );
   }
-  return [...src.matchAll(/retainedRecordNoTenantDelete\("([a-z_]+)"\)/g)].map((m) => m[1]!);
+  return [
+    ...[...src.matchAll(/retainedRecordNoTenantDelete\("([a-z_]+)"\)/g)].map((m) => m[1]!),
+    ...readUndeletableTables(root),
+  ];
+}
+
+/**
+ * The tables a tenant must not be able to delete rows from although the Article 17 erasure does
+ * **not** retain them, each with the reason (M-01 slice, triaging ADR-0400's 91 writerless
+ * unfenced tables). The criterion is narrower than "nothing deletes it": the rows must be the
+ * platform's own evidence about the tenant, which something outside the tenant relies on, and a
+ * tenant-context `DELETE` of them must be detected by nothing. The rest of the 91 stay unfenced on
+ * ADR-0400's rule that a denial needs a reason rather than an opportunity.
+ *
+ * `feature_flag_changes` met the criterion and is deliberately **absent**: its `flag_id` is an
+ * `ON DELETE CASCADE` child of `meta.feature_flags`, which carries no fence, so a fence on the
+ * history would be reachable around through the flag (`fenced_table_cascade_parent_unfenced` said so
+ * when it was tried). Fencing the flags table too would deny a tenant deleting its own flag, which
+ * is a product decision rather than evidence-keeping.
+ *
+ * Compared against the catalog's `tenantUndeletableRecord(…)` calls in both directions, and each
+ * entry must have no `DELETE` writer anywhere in the workspace (`undeletableTablesWithDeleteWriters`),
+ * because a fence on a table with a legitimate tenant-context deleter breaks that route silently.
+ */
+export const TENANT_UNDELETABLE_TABLES: readonly { readonly table: string; readonly reason: string }[] =
+  Object.freeze([
+    {
+      table: "crypto_audit",
+      reason: "the audit of key-management acts on the tenant's keys; deleting it hides a key change",
+    },
+    {
+      table: "dr_drill_executions",
+      reason: "disaster-recovery evidence a certification report reads; a drill must not be unrun",
+    },
+    {
+      table: "dr_failover_executions",
+      reason: "the record that a failover happened, read by DR readiness and certification",
+    },
+    {
+      table: "dr_readiness_snapshots",
+      reason: "the readiness history a certification control signs; deleting it rewrites the record",
+    },
+    {
+      table: "notification_suppressions",
+      reason:
+        "stops the platform re-sending to an address that hard-bounced or complained; a tenant " +
+        "deleting it re-opens a consent or deliverability block the platform owes the recipient",
+    },
+    {
+      table: "slo_enforcement_actions",
+      reason: "the SLO loop's record of the incidents, pages and kill switches it enacted",
+    },
+  ]);
+
+/** The tables the catalog fences with `tenantUndeletableRecord`, read as text. */
+export function readUndeletableTables(root: string = REPO_ROOT): readonly string[] {
+  const src = readFileSync(join(root, CATALOG), "utf8");
+  return [...src.matchAll(/tenantUndeletableRecord\("([a-z_]+)"\)/g)].map((m) => m[1]!);
+}
+
+/**
+ * The declared-undeletable tables some workspace source issues a `DELETE` against. Empty is the only
+ * passing result. Separate from `auditRecordRetention` because it reads the whole workspace's SQL
+ * rather than a fixture tree.
+ */
+export function undeletableTablesWithDeleteWriters(): readonly string[] {
+  const declared = new Set(TENANT_UNDELETABLE_TABLES.map((d) => d.table));
+  const hits = new Set<string>();
+  for (const ref of scanWorkspaceSql().references) {
+    if (ref.via === "delete" && declared.has(ref.table)) hits.add(ref.table);
+  }
+  return [...hits].sort();
 }
 
 /** Both directions of the rule. An empty array is the only passing result. */
@@ -456,13 +539,47 @@ export function auditRecordRetention(
       });
     }
   }
+  const undeletable = new Set(readUndeletableTables(root));
+  const declaredUndeletable = new Set(TENANT_UNDELETABLE_TABLES.map((d) => d.table));
+  for (const table of [...undeletable].sort()) {
+    if (!declaredUndeletable.has(table)) {
+      findings.push({
+        kind: "undeletable_table_undeclared_here",
+        table,
+        detail:
+          `${table} is fenced with tenantUndeletableRecord and TENANT_UNDELETABLE_TABLES gives no ` +
+          `reason for it; declare the reason, or remove the fence`,
+      });
+    }
+  }
+  for (const table of [...declaredUndeletable].sort()) {
+    if (!undeletable.has(table)) {
+      findings.push({
+        kind: "declared_undeletable_unfenced",
+        table,
+        detail:
+          `${table} is declared undeletable here and the catalog does not fence it; add ` +
+          `tenantUndeletableRecord("${table}") to its policies, or drop the declaration`,
+      });
+    }
+    if (retained.has(table)) {
+      findings.push({
+        kind: "undeletable_table_is_retained",
+        table,
+        detail:
+          `${table} is retained by the Article 17 erasure and so already fenced for that reason; ` +
+          `use retainedRecordNoTenantDelete and drop it from TENANT_UNDELETABLE_TABLES`,
+      });
+    }
+  }
   for (const table of [...fenced].sort()) {
-    if (!retained.has(table)) {
+    if (!retained.has(table) && !declaredUndeletable.has(table)) {
       findings.push({
         kind: "fenced_table_not_protected",
         table,
         detail:
-          `${table} carries a restrictive DELETE policy and is in neither retention set, so the ` +
+          `${table} carries a restrictive DELETE policy, is in neither retention set and is not ` +
+          `declared in TENANT_UNDELETABLE_TABLES, so the ` +
           `fence's argument — that something outside the tenant is entitled to read these rows ` +
           `afterwards — does not apply to it; if the table has a tenant-context DELETE writer ` +
           `the fence breaks that route, answering 404 for a record that exists`,

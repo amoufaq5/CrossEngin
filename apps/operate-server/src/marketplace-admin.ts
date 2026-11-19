@@ -1,26 +1,33 @@
 import type { PathSegment, ResolvedPrincipal, RouteDefinition } from "@crossengin/api-gateway";
 import type { ExtraGatewayRoute } from "@crossengin/operate-runtime";
 import type { Handler, HandlerOutput, PrincipalRoles } from "@crossengin/api-gateway-runtime";
+import { ed25519PublicKeyFingerprint } from "@crossengin/crypto";
 import {
   PackCompatibilitySchema,
   PackManifestSchema,
   PackSignatureSchema,
   SECURITY_REVIEW_STATUSES,
+  verifyPackPublisher,
   type PackCompatibility,
   type PackManifest,
+  type PackPublisherRegistry,
   type PackSignature,
+  type PublisherRefusal,
   type SecurityReviewStatus,
   type TenantContext,
 } from "@crossengin/marketplace";
 import type { PersistentMarketplaceInstallEngine, PostgresInstallationStore } from "@crossengin/marketplace-runtime-pg";
 import { z } from "zod";
 
-/** One installable pack version as the catalog holds it — everything the install engine needs. */
+/**
+ * One installable pack version as the catalog holds it. It carries no key: the signature names its
+ * signer by fingerprint and the platform's publisher registry decides whether that signer may sign
+ * this pack, because a key written beside the bundle it vouches for vouches for nothing.
+ */
 export interface PackCatalogEntry {
   readonly pack: PackManifest;
   readonly version: string;
   readonly signature: PackSignature;
-  readonly publisherPublicKeyBase64: string;
   readonly compatibility: PackCompatibility;
   readonly securityReviewStatus: SecurityReviewStatus;
 }
@@ -35,7 +42,10 @@ const CatalogEntrySchema = z.object({
   pack: PackManifestSchema,
   version: z.string().min(1),
   signature: PackSignatureSchema,
-  publisherPublicKeyBase64: z.string().min(1),
+  // Accepted so a catalog written before the registry still loads, and compared rather than
+  // silently stripped: a stated key that disagrees with the signature it sits beside is a catalog
+  // naming a different signer than it thinks, which is worth refusing at boot.
+  publisherPublicKeyBase64: z.string().min(1).optional(),
   compatibility: PackCompatibilitySchema,
   securityReviewStatus: z.enum(SECURITY_REVIEW_STATUSES),
 });
@@ -64,19 +74,67 @@ export class InMemoryPackCatalog implements PackCatalog {
 /** Parses + validates a catalog JSON document (`{ packs: [...] }`) into a catalog. */
 export function loadPackCatalog(json: string): InMemoryPackCatalog {
   const parsed = CatalogFileSchema.parse(JSON.parse(json));
-  return new InMemoryPackCatalog(parsed.packs);
+  return new InMemoryPackCatalog(
+    parsed.packs.map((entry) => {
+      const { publisherPublicKeyBase64, ...rest } = entry;
+      if (
+        publisherPublicKeyBase64 !== undefined &&
+        ed25519PublicKeyFingerprint(publisherPublicKeyBase64) !== entry.signature.publicKeyFingerprint
+      ) {
+        throw new Error(
+          `catalog entry ${entry.pack.id}@${entry.version} states a publisher key that did not produce its signature`,
+        );
+      }
+      return rest;
+    }),
+  );
 }
+
+export interface PackCatalogFinding {
+  readonly packId: string;
+  readonly version: string;
+  readonly refusal: PublisherRefusal;
+  readonly detail: string;
+}
+
+/** The catalog entries the registry would refuse at install, so an operator hears it at boot. */
+export function surveyPackCatalog(catalog: PackCatalog, publishers: PackPublisherRegistry): readonly PackCatalogFinding[] {
+  const out: PackCatalogFinding[] = [];
+  for (const e of catalog.list()) {
+    const v = verifyPackPublisher({ manifest: e.pack, signature: e.signature, registry: publishers });
+    if (!v.ok) out.push({ packId: e.pack.id, version: e.version, refusal: v.refusal, detail: v.detail });
+  }
+  return out;
+}
+
+/**
+ * What an install does in this deployment, sent with every admitted install so the response cannot
+ * be read as more than it is. Nothing in this repository loads a pack bundle, and nothing consults
+ * an installation's permission grants, so an install is a record of a tenant's request — it is
+ * admitted against the publisher registry and the compatibility envelope, and that is all.
+ */
+export const PACK_INSTALL_EFFECT = Object.freeze({
+  executesPack: false,
+  grantsConsulted: false,
+  detail:
+    "recorded only: this deployment runs no pack installer and reads no installation's permission grants, " +
+    "so an install is a record of the request and an uninstall removes the record",
+});
 
 /** The handler context for the marketplace admin routes. */
 export interface MarketplaceAdminContext {
   readonly engine: PersistentMarketplaceInstallEngine;
   readonly store: PostgresInstallationStore;
   readonly catalog: PackCatalog;
+  readonly publishers: PackPublisherRegistry;
   readonly principalRoles: (principal: ResolvedPrincipal | null) => PrincipalRoles;
   /** Roles permitted to manage installs. Fail-closed: empty ⇒ nobody. */
   readonly adminRoles: ReadonlySet<string>;
-  /** The deployment's tenant context (platform/region/plan/compliance) for compatibility checks. */
-  readonly tenantContext: TenantContext;
+  /**
+   * What this deployment knows about one tenant, asked per install. A fact it does not know is
+   * `null`, which refuses only a pack that constrains it (`checkCompatibility`).
+   */
+  readonly tenantContext: (tenantId: string) => Promise<TenantContext>;
 }
 
 function json(status: number, body: unknown): HandlerOutput {
@@ -116,16 +174,16 @@ export function buildPackInstallHandler(ctx: MarketplaceAdminContext): Handler {
       version: entry.version,
       compatibility: entry.compatibility,
       signature: entry.signature,
-      publisherPublicKeyBase64: entry.publisherPublicKeyBase64,
+      publishers: ctx.publishers,
       securityReviewStatus: entry.securityReviewStatus,
-      tenantContext: ctx.tenantContext,
+      tenantContext: await ctx.tenantContext(tenantId),
     });
 
     if (decision.outcome === "rejected") {
-      return json(409, { status: "rejected", reason: decision.reason });
+      return json(409, { status: "rejected", reason: decision.reason, reasons: decision.reasons });
     }
     const status = decision.outcome === "admitted" ? 201 : 200;
-    return json(status, { status: decision.outcome, installation: decision.installation });
+    return json(status, { status: decision.outcome, installation: decision.installation, effect: PACK_INSTALL_EFFECT });
   };
 }
 
@@ -165,8 +223,7 @@ export function buildPackUninstallHandler(ctx: MarketplaceAdminContext): Handler
     if (installation === null) return json(404, { error: "installation_not_found", detail: id });
 
     try {
-      const uninstalling = await ctx.engine.beginUninstall(installation);
-      const gone = await ctx.engine.completeUninstall(uninstalling, uninstalledBy);
+      const gone = await ctx.engine.uninstall(installation, uninstalledBy);
       return json(200, { status: gone.status, installation: gone });
     } catch (err) {
       return json(409, { error: "invalid_transition", detail: err instanceof Error ? err.message : String(err) });

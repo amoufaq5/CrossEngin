@@ -6,6 +6,7 @@ import { buildErpCorePack } from "@crossengin/pack-erp-core";
 import { describe, expect, it } from "vitest";
 
 import { compileOperateServer, defaultEffectStamps, type CompiledOperateServer } from "./compile.js";
+import type { ChildRemovalQuery, ChildRemovers, EntityWriteAuditEvent, EntityWriteAuditor } from "./entity-audit.js";
 import {
   APPROVE_CLASS_QUALIFIED_TRANSITIONS,
   APPROVE_CLASS_TRANSITION_NAMES,
@@ -65,7 +66,7 @@ interface Rig {
   ): Promise<HandlerOutput>;
 }
 
-function rig(options: { segregationOfDuties?: boolean } = {}): Rig {
+function rig(options: { segregationOfDuties?: boolean; entityAudit?: EntityWriteAuditor } = {}): Rig {
   const store = new InMemoryEntityStore();
   const allocator = new InMemorySequenceAllocator();
   const server = compileOperateServer(CORE, {
@@ -74,6 +75,7 @@ function rig(options: { segregationOfDuties?: boolean } = {}): Rig {
     principalRoles: (p) => ({ primaryRole: p?.grantedScopes[0] ?? "anonymous" }),
     clock: { now: () => new Date("2026-06-03T12:00:00.000Z") },
     ...(options.segregationOfDuties !== undefined ? { segregationOfDuties: options.segregationOfDuties } : {}),
+    ...(options.entityAudit !== undefined ? { entityAudit: options.entityAudit } : {}),
   });
   return {
     server,
@@ -432,14 +434,61 @@ describe("created_by and updated_by", () => {
     for (const l of lines) expect(l).toMatchObject({ created_by: carol.id, updated_by: carol.id });
   });
 
-  it("are null for a credential that names no person, never the key's shared placeholder", async () => {
+  it("carry no value for a credential that names no person, never the key's shared placeholder", async () => {
     const r = rig();
     const id = await vendor(r, serviceKey);
     const stored = await r.store.get(TENANT, "Vendor", id);
-    expect(stored?.["created_by"]).toBeNull();
-    expect(stored?.["updated_by"]).toBeNull();
+    // The stamp is `null`, which every store serves as absent (ADR-0414 Q4) — the column store
+    // never could hold the difference — so what matters is that no id was written.
+    expect(stored).not.toBeNull();
+    expect(stored).not.toHaveProperty("created_by");
+    expect(stored).not.toHaveProperty("updated_by");
   });
 });
+
+/**
+ * An auditor that keeps the trail in memory and answers removals the way the Postgres reader does:
+ * a delete, or an update whose `after` names a different parent, whose `before` named this one.
+ */
+class TrailAuditor implements EntityWriteAuditor {
+  readonly events: EntityWriteAuditEvent[] = [];
+  readonly asked: ChildRemovalQuery[] = [];
+  constructor(private readonly answer?: ChildRemovers | "throw") {}
+
+  async record(event: EntityWriteAuditEvent): Promise<void> {
+    this.events.push(event);
+  }
+
+  async childRemovers(query: ChildRemovalQuery): Promise<ChildRemovers> {
+    this.asked.push(query);
+    if (this.answer === "throw") throw new Error("trail down");
+    if (this.answer !== undefined) return this.answer;
+    const removers = this.events
+      .filter(
+        (e) =>
+          e.tenantId === query.tenantId &&
+          e.entity === query.childEntity &&
+          e.before?.[query.parentField] === query.parentId &&
+          (e.after === null || e.after[query.parentField] !== query.parentId),
+      )
+      .map((e) => e.actorUserId);
+    return { kind: "read", removers };
+  }
+}
+
+async function billWithTwoLines(r: Rig, caller: Caller): Promise<{ id: string; big: string }> {
+  const id = await bill(r, caller);
+  const line = async (amount: string): Promise<string> => {
+    const out = await r.invoke(op("BillLine", "create"), {
+      caller,
+      body: { bill_id: id, description: "widgets", quantity: 1, unit_price: amount, amount },
+    });
+    expect(out.status).toBe(201);
+    return body(out)["id"] as string;
+  };
+  await line("1.00");
+  return { id, big: await line("100000.00") };
+}
 
 describe("segregation of duties", () => {
   it("names the approve-class transitions erp-core declares", () => {
@@ -498,11 +547,11 @@ describe("segregation of duties", () => {
   });
 
   it("says at boot whether it is on, and names what it gates either way", () => {
-    const off = formatSegregationOfDuties(CORE, false);
+    const off = formatSegregationOfDuties(CORE, false, true);
     expect(off).toMatch(/^\[sod\] segregation of duties: off/);
     expect(off).toContain("--segregation-of-duties");
     expect(off).toContain("11 approve-class transition(s)");
-    const on = formatSegregationOfDuties(CORE, true);
+    const on = formatSegregationOfDuties(CORE, true, true);
     expect(on).toMatch(/^\[sod\] segregation of duties: on/);
     expect(on).toContain("Payment.complete");
     expect(on).toContain(MAKER_CHECKER_ERRORS.same_person);
@@ -545,6 +594,100 @@ describe("segregation of duties", () => {
     expect(String(body(out)["detail"])).toContain("BillLine");
     const carol: Caller = { id: "33333333-3333-4333-8333-333333333333", kind: "user" };
     expect((await r.invoke(transition("Bill", "approve"), { caller: carol, params: { id } })).status).toBe(200);
+  });
+
+  it("refuses an approver who deleted somebody else's line, read from the audit trail", async () => {
+    // Measured live before this: Bob writes lines of 1.00 and 100 000.00, Alice deletes the second
+    // and approves the first — 204 then 200, because the rows read held only Bob's line.
+    const trail = new TrailAuditor();
+    const r = rig({ segregationOfDuties: true, entityAudit: trail });
+    const { id, big } = await billWithTwoLines(r, bob);
+    expect((await r.invoke(op("BillLine", "delete"), { caller: alice, params: { id: big } })).status).toBe(204);
+    const out = await r.invoke(transition("Bill", "approve"), { caller: alice, params: { id } });
+    expect(out.status).toBe(422);
+    expect(body(out)["error"]).toBe(MAKER_CHECKER_ERRORS.same_person);
+    expect(String(body(out)["detail"])).toContain("deleted or moved away");
+    expect((await r.store.get(TENANT, "Bill", id))?.["state"]).toBe("draft");
+    expect(trail.asked).toEqual([
+      {
+        tenantId: TENANT,
+        childEntity: "BillLine",
+        parentField: "bill_id",
+        parentId: id,
+        parentCreatedAt: (await r.store.get(TENANT, "Bill", id))?.["created_at"],
+      },
+    ]);
+    expect(typeof trail.asked[0]?.parentCreatedAt).toBe("string");
+    const carol: Caller = { id: "33333333-3333-4333-8333-333333333333", kind: "user" };
+    expect((await r.invoke(transition("Bill", "approve"), { caller: carol, params: { id } })).status).toBe(200);
+  });
+
+  it("counts a line moved to another bill as taken away from this one", async () => {
+    const trail = new TrailAuditor();
+    const r = rig({ segregationOfDuties: true, entityAudit: trail });
+    const { id, big } = await billWithTwoLines(r, bob);
+    const other = await bill(r, bob);
+    const moved = await r.invoke(op("BillLine", "update"), { caller: alice, params: { id: big }, body: { bill_id: other } });
+    expect(moved.status).toBe(200);
+    const out = await r.invoke(transition("Bill", "approve"), { caller: alice, params: { id } });
+    expect(body(out)["error"]).toBe(MAKER_CHECKER_ERRORS.same_person);
+    // The bill it was moved to holds a line Alice last wrote, which the row read already refuses.
+    expect(body(await r.invoke(transition("Bill", "approve"), { caller: alice, params: { id: other } }))["error"]).toBe(
+      MAKER_CHECKER_ERRORS.same_person,
+    );
+  });
+
+  it("admits the approver when the removal was somebody else's", async () => {
+    const trail = new TrailAuditor();
+    const r = rig({ segregationOfDuties: true, entityAudit: trail });
+    const { id, big } = await billWithTwoLines(r, bob);
+    expect((await r.invoke(op("BillLine", "delete"), { caller: bob, params: { id: big } })).status).toBe(204);
+    expect((await r.invoke(transition("Bill", "approve"), { caller: alice, params: { id } })).status).toBe(200);
+  });
+
+  it("refuses as unverifiable when the trail cannot be read, or a removal names no person", async () => {
+    const unreadable = new TrailAuditor({ kind: "unreadable", reason: "PgError 42501" });
+    const r = rig({ segregationOfDuties: true, entityAudit: unreadable });
+    const { id } = await billWithTwoLines(r, bob);
+    const a = await r.invoke(transition("Bill", "approve"), { caller: alice, params: { id } });
+    expect(body(a)["error"]).toBe(MAKER_CHECKER_ERRORS.unverifiable);
+    expect(String(body(a)["detail"])).toContain("audit trail could not be read");
+
+    const throwing = new TrailAuditor("throw");
+    const r2 = rig({ segregationOfDuties: true, entityAudit: throwing });
+    const b = await billWithTwoLines(r2, bob);
+    expect(body(await r2.invoke(transition("Bill", "approve"), { caller: alice, params: { id: b.id } }))["error"]).toBe(
+      MAKER_CHECKER_ERRORS.unverifiable,
+    );
+
+    const trail = new TrailAuditor();
+    const r3 = rig({ segregationOfDuties: true, entityAudit: trail });
+    const c = await billWithTwoLines(r3, bob);
+    expect((await r3.invoke(op("BillLine", "delete"), { caller: serviceKey, params: { id: c.big } })).status).toBe(204);
+    const out = await r3.invoke(transition("Bill", "approve"), { caller: alice, params: { id: c.id } });
+    expect(body(out)["error"]).toBe(MAKER_CHECKER_ERRORS.unverifiable);
+    expect(String(body(out)["detail"])).toContain("names no person");
+  });
+
+  it("does not ask the trail when the rows already decide, nor when no trail is mounted", async () => {
+    const trail = new TrailAuditor();
+    const r = rig({ segregationOfDuties: true, entityAudit: trail });
+    const id = await bill(r, bob);
+    await r.invoke(op("BillLine", "create"), {
+      caller: alice,
+      body: { bill_id: id, description: "widgets", quantity: 1, unit_price: "5.00", amount: "5.00" },
+    });
+    expect(body(await r.invoke(transition("Bill", "approve"), { caller: alice, params: { id } }))["error"]).toBe(
+      MAKER_CHECKER_ERRORS.same_person,
+    );
+    expect(trail.asked).toEqual([]);
+    // No auditor: the removal is not checked — the boot line says so rather than the check pretending.
+    const bare = rig({ segregationOfDuties: true });
+    const { id: b, big } = await billWithTwoLines(bare, bob);
+    await bare.invoke(op("BillLine", "delete"), { caller: alice, params: { id: big } });
+    expect((await bare.invoke(transition("Bill", "approve"), { caller: alice, params: { id: b } })).status).toBe(200);
+    expect(formatSegregationOfDuties(CORE, true, false)).toContain("is NOT checked");
+    expect(formatSegregationOfDuties(CORE, true, true)).toContain("deleted or moved one away");
   });
 
   it("refuses an unstamped line as unverifiable rather than passing it", async () => {
@@ -606,7 +749,7 @@ describe("segregation of duties", () => {
   });
 
   it("says at boot which approvals still admit their last editor", () => {
-    const on = formatSegregationOfDuties(CORE, true);
+    const on = formatSegregationOfDuties(CORE, true, true);
     expect(on).toContain("last editor");
     expect(on).toContain("Expense.reimburse");
     expect(on).not.toContain("Bill.approve, Bill.mark_paid)");

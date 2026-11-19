@@ -468,14 +468,12 @@ describe("runChat", () => {
     }
   });
 
-  it("says nothing about a file root when no file tool is enabled", async () => {
-    const provider = new StubProvider([
-      { kind: "text", text: "ack" },
-      { kind: "usage_final", usage: { inputTokens: 1, outputTokens: 1, cost: 0 } },
-    ]);
-    const { ctx, err } = buffers({ env: { ANTHROPIC_API_KEY: "sk-test" }, providerOverride: provider });
-    expect(await runChat(parsed("chat", "--prompt=hi", "--file-root=/"), ctx)).toBe(0);
-    expect(err()).not.toContain("file root");
+  it("refuses --file-root when no file tool is enabled, before any provider call", async () => {
+    for (const extra of [[], ["--no-tools", "--allow-file-read"]]) {
+      const { ctx, err } = buffers({ env: { ANTHROPIC_API_KEY: "sk-test" }, providerOverride: new StubProvider([]) });
+      expect(await runChat(parsed("chat", "--prompt=hi", "--file-root=/tmp", ...extra), ctx), extra.join(" ")).toBe(2);
+      expect(err()).toContain("--file-root has no effect");
+    }
   });
 
   it("threads transcriptOverride through to the chat loop", async () => {

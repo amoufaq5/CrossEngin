@@ -102,6 +102,25 @@ describe("PersistentAccessReviewRuntime.planAutoRevocations", () => {
     expect(decisions[0]?.reason).toBe("no_response_auto_default");
   });
 
+  it("moves each revoked item to auto_revoked after its decision, so a decision is never orphaned from its item (H-19)", async () => {
+    const conn = new FakeConn();
+    const runtime = build(conn);
+    const campaign = await runtime.startCampaign(makeCampaign());
+    const items = await runtime.generateItems(campaign, [grant()], [principal()]);
+    conn.calls.length = 0;
+    const decisions = await runtime.planAutoRevocations(items, campaign, NOW);
+    const writes = conn.calls.filter(
+      (c) =>
+        c.sql.includes("INSERT INTO meta.access_review_decisions") ||
+        c.sql.includes("INSERT INTO meta.access_review_items"),
+    );
+    expect(writes).toHaveLength(decisions.length * 2);
+    expect(writes[0]?.sql).toContain("access_review_decisions");
+    expect(writes[1]?.sql).toContain("access_review_items");
+    expect(writes[1]?.params).toContain("auto_revoked");
+    expect(writes[1]?.params).toContain(decisions[0]?.id);
+  });
+
   it("writes nothing when the policy is non-revoking", async () => {
     const conn = new FakeConn();
     const runtime = build(conn);

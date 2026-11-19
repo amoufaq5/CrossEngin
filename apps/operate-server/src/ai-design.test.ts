@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import type {
@@ -16,6 +19,7 @@ import {
   type Manifest,
 } from "@crossengin/kernel/manifest";
 import { buildErpCorePack } from "@crossengin/pack-erp-core";
+import { stripComments } from "@crossengin/testing/strategy";
 
 import {
   DESIGN_EXAMPLE_MANIFEST,
@@ -35,6 +39,7 @@ import {
   normalizeGeneratedManifest,
   type DesignCompletionProvider,
   type DesignProgress,
+  type DesignSpend,
 } from "./ai-design.js";
 
 type Turn = readonly CompletionChunk[] | Error;
@@ -70,6 +75,7 @@ function textTurn(text: string, usage?: { input: number; output: number; cost: n
   return chunks;
 }
 
+const DESIGN_TENANT = "00000000-0000-4000-8000-0000000000d1";
 const VALID_JSON = JSON.stringify(DESIGN_EXAMPLE_MANIFEST);
 
 /**
@@ -307,8 +313,12 @@ describe("buildDesignSystemPrompt", () => {
     const withParent = buildDesignSystemPrompt({
       parentPack: { slug: CORE_SLUG, entityNames: Array.from({ length: 51 }, (_, i) => `Entity${i}`) },
     });
-    expect(buildDesignSystemPrompt({ parentPack: null }).length).toBeLessThan(9668);
-    expect(withParent.length).toBeLessThan(9668);
+    // 9668 was twice the 4,834-character spec ADR-0368 measured. P2.2's field-grant syntax and its
+    // worked instance in the example cost 1,223 more (8,749 → 9,972 with a 51-name parent), about
+    // 350 input tokens per attempt at the estimator's 3.5 chars/token — the price of a design whose
+    // classified fields someone can read.
+    expect(buildDesignSystemPrompt({ parentPack: null }).length).toBeLessThan(10_500);
+    expect(withParent.length).toBeLessThan(10_500);
     expect(withParent.length).toBeGreaterThan(buildDesignSystemPrompt({ parentPack: null }).length);
   });
 });
@@ -434,7 +444,7 @@ describe("designManifest — happy path", () => {
     const { provider, requests } = scriptedProvider([
       textTurn("```json\n" + VALID_JSON + "\n```"),
     ]);
-    const result = await designManifest({ provider, parentPack: null, description: "a field service business" });
+    const result = await designManifest({ tenantId: DESIGN_TENANT, provider, parentPack: null, description: "a field service business" });
     expect(result.ok).toBe(true);
     expect(result.attempts).toBe(1);
     expect(result.manifestHash).toMatch(/^[0-9a-f]{64}$/);
@@ -445,7 +455,7 @@ describe("designManifest — happy path", () => {
 
   it("sends the DESIGN system prompt, planner task, jsonMode, and default maxTokens", async () => {
     const { provider, requests } = scriptedProvider([textTurn(VALID_JSON)]);
-    await designManifest({ provider, parentPack: null, description: "desc" });
+    await designManifest({ tenantId: DESIGN_TENANT, provider, parentPack: null, description: "desc" });
     const req = requests[0];
     expect(req?.task).toBe("planner");
     expect(req?.jsonMode).toBe(true);
@@ -459,7 +469,7 @@ describe("designManifest — happy path", () => {
 
   it("threads model and name into the request", async () => {
     const { provider, requests } = scriptedProvider([textTurn(VALID_JSON)]);
-    await designManifest({ provider, parentPack: null, description: "desc", name: "Acme", model: "claude-opus-4-7" });
+    await designManifest({ tenantId: DESIGN_TENANT, provider, parentPack: null, description: "desc", name: "Acme", model: "claude-opus-4-7" });
     expect(requests[0]?.model).toBe("claude-opus-4-7");
     expect(requests[0]?.messages[1]?.content).toContain("Application name: Acme");
   });
@@ -468,7 +478,7 @@ describe("designManifest — happy path", () => {
     const { provider } = scriptedProvider([
       textTurn(VALID_JSON, { input: 100, output: 50, cost: 0.01 }),
     ]);
-    const result = await designManifest({
+    const result = await designManifest({ tenantId: DESIGN_TENANT,
       provider,
       parentPack: null,
       description: "desc",
@@ -483,7 +493,7 @@ describe("designManifest — happy path", () => {
     delete bare["meta"];
     delete bare["manifestVersion"];
     const { provider } = scriptedProvider([textTurn(JSON.stringify(bare))]);
-    const result = await designManifest({ provider, parentPack: null, description: "desc", name: "Bare App" });
+    const result = await designManifest({ tenantId: DESIGN_TENANT, provider, parentPack: null, description: "desc", name: "Bare App" });
     expect(result.ok).toBe(true);
     const meta = result.manifest?.["meta"] as Record<string, unknown>;
     expect(meta["name"]).toBe("Bare App");
@@ -497,7 +507,7 @@ describe("designManifest — retry loop", () => {
       textTurn(brokenManifestJson()),
       textTurn(VALID_JSON),
     ]);
-    const result = await designManifest({ provider, parentPack: null, description: "desc" });
+    const result = await designManifest({ tenantId: DESIGN_TENANT, provider, parentPack: null, description: "desc" });
     expect(result.ok).toBe(true);
     expect(result.attempts).toBe(2);
     expect(requests).toHaveLength(2);
@@ -519,7 +529,7 @@ describe("designManifest — retry loop", () => {
       textTurn(schemaInvalid),
       textTurn(VALID_JSON),
     ]);
-    const result = await designManifest({ provider, parentPack: null, description: "desc" });
+    const result = await designManifest({ tenantId: DESIGN_TENANT, provider, parentPack: null, description: "desc" });
     expect(result.ok).toBe(true);
     expect(result.attempts).toBe(2);
     const corrective = requests[1]?.messages.filter((m) => m.role === "user").at(-1);
@@ -531,7 +541,7 @@ describe("designManifest — retry loop", () => {
       textTurn("I cannot answer in JSON, sorry."),
       textTurn(VALID_JSON),
     ]);
-    const result = await designManifest({ provider, parentPack: null, description: "desc" });
+    const result = await designManifest({ tenantId: DESIGN_TENANT, provider, parentPack: null, description: "desc" });
     expect(result.ok).toBe(true);
     expect(result.attempts).toBe(2);
     const corrective = requests[1]?.messages.filter((m) => m.role === "user").at(-1);
@@ -543,7 +553,7 @@ describe("designManifest — retry loop", () => {
       new Error("boom"),
       textTurn(VALID_JSON),
     ]);
-    const result = await designManifest({ provider, parentPack: null, description: "desc" });
+    const result = await designManifest({ tenantId: DESIGN_TENANT, provider, parentPack: null, description: "desc" });
     expect(result.ok).toBe(true);
     expect(result.attempts).toBe(2);
     expect(requests[1]?.messages).toHaveLength(2);
@@ -551,7 +561,7 @@ describe("designManifest — retry loop", () => {
 
   it("gives up after maxAttempts when every response is invalid", async () => {
     const { provider, requests } = scriptedProvider([textTurn(brokenManifestJson())]);
-    const result = await designManifest({ provider, parentPack: null, description: "desc" });
+    const result = await designManifest({ tenantId: DESIGN_TENANT, provider, parentPack: null, description: "desc" });
     expect(result.ok).toBe(false);
     expect(result.attempts).toBe(MAX_DESIGN_ATTEMPTS);
     expect(requests).toHaveLength(MAX_DESIGN_ATTEMPTS);
@@ -563,7 +573,7 @@ describe("designManifest — retry loop", () => {
 
   it("honors a maxAttempts override", async () => {
     const { provider, requests } = scriptedProvider([textTurn("not json")]);
-    const result = await designManifest({ provider, parentPack: null, description: "desc", maxAttempts: 2 });
+    const result = await designManifest({ tenantId: DESIGN_TENANT, provider, parentPack: null, description: "desc", maxAttempts: 2 });
     expect(result.ok).toBe(false);
     expect(result.attempts).toBe(2);
     expect(requests).toHaveLength(2);
@@ -574,7 +584,7 @@ describe("designManifest — retry loop", () => {
       textTurn(brokenManifestJson(), { input: 100, output: 40, cost: 0.02 }),
       textTurn(VALID_JSON, { input: 200, output: 60, cost: 0.03 }),
     ]);
-    const result = await designManifest({ provider, parentPack: null, description: "desc" });
+    const result = await designManifest({ tenantId: DESIGN_TENANT, provider, parentPack: null, description: "desc" });
     expect(result.ok).toBe(true);
     expect(result.usage).toEqual({ inputTokens: 300, outputTokens: 100, cost: 0.05 });
   });
@@ -583,7 +593,7 @@ describe("designManifest — retry loop", () => {
 describe("designManifest — size limits", () => {
   it("rejects an oversized description without calling the provider", async () => {
     const { provider, requests } = scriptedProvider([textTurn(VALID_JSON)]);
-    const result = await designManifest({
+    const result = await designManifest({ tenantId: DESIGN_TENANT,
       provider,
       parentPack: null,
       description: "x".repeat(MAX_DESIGN_DESCRIPTION_CHARS + 1),
@@ -598,7 +608,7 @@ describe("designManifest — size limits", () => {
     const { provider } = scriptedProvider([
       textTurn("{".repeat(MAX_DESIGN_RESPONSE_CHARS + 1)),
     ]);
-    const result = await designManifest({ provider, parentPack: null, description: "desc", maxAttempts: 1 });
+    const result = await designManifest({ tenantId: DESIGN_TENANT, provider, parentPack: null, description: "desc", maxAttempts: 1 });
     expect(result.ok).toBe(false);
     expect(result.attempts).toBe(1);
     expect(result.issues[0]).toContain(`${MAX_DESIGN_RESPONSE_CHARS}`);
@@ -615,7 +625,7 @@ describe("buildDesignDesigner", () => {
       maxTokens: 4096,
       providerLabel: "anthropic/claude-opus-4-7",
     });
-    const result = await designer({ description: "desc", name: "Closed Over" });
+    const result = await designer({ tenantId: DESIGN_TENANT, description: "desc", name: "Closed Over" });
     expect(result.ok).toBe(true);
     expect(result.providerLabel).toBe("anthropic/claude-opus-4-7");
     expect(requests[0]?.model).toBe("claude-opus-4-7");
@@ -734,11 +744,29 @@ describe("ensureRolesInManifest", () => {
           }
           continue;
         }
+        if (op === "fields") {
+          // A grafted role gains no field-level read and no right to change a value: only the
+          // `create` arm moves, because the entity `create` graft would otherwise leave a required
+          // field uncreatable by that role (ADR-0348: supplying a value discloses nothing).
+          const designed = (DESIGN_EXAMPLE_MANIFEST["permissions"] as Record<string, Record<string, unknown>>)[
+            entity
+          ]?.["fields"] as Record<string, Record<string, unknown>>;
+          const out = grant as Record<string, Record<string, { roles: string[] }>>;
+          expect(Object.keys(out)).toEqual(Object.keys(designed));
+          for (const [field, perm] of Object.entries(out)) {
+            expect(perm["read"]).toEqual(designed[field]?.["read"]);
+            expect(perm["update"]).toEqual(designed[field]?.["update"]);
+            expect(perm["create"]?.roles).toContain("erp_admin");
+            asserted += 1;
+          }
+          continue;
+        }
         expect((grant as { roles: string[] }).roles).toContain("erp_admin");
         asserted += 1;
       }
     }
-    expect(asserted).toBe(12);
+    // 12 entity and transition grants, plus the example's 2 field grants' create arms.
+    expect(asserted).toBe(14);
   });
 
   it("is a no-op for an empty role list and never duplicates an existing role", () => {
@@ -760,7 +788,7 @@ describe("ensureRolesInManifest", () => {
         { kind: "usage_final", usage: { inputTokens: 10, outputTokens: 20, cost: 0.001 } },
       ] as unknown as readonly CompletionChunk[],
     ]);
-    const result = await designManifest({
+    const result = await designManifest({ tenantId: DESIGN_TENANT,
       provider,
       parentPack: null,
       description: "field service business",
@@ -773,7 +801,7 @@ describe("ensureRolesInManifest", () => {
 });
 
 describe("ensureRolesInManifest — transition + field grants", () => {
-  it("grafts into transition grants but never into field-level grants", () => {
+  it("grafts into transition grants and never into a field's read grant", () => {
     const manifest = {
       ...(DESIGN_EXAMPLE_MANIFEST as Record<string, unknown>),
       permissions: {
@@ -795,7 +823,94 @@ describe("ensureRolesInManifest — transition + field grants", () => {
     expect((customer["transitions"] as Record<string, { roles: string[] }>)["archive"]?.roles).toContain("erp_admin");
     const fields = customer["fields"] as Record<string, { read: { roles: string[] } }>;
     expect(fields["contact_email"]?.read.roles).toEqual(["app_admin"]);
+    expect(fields["contact_email"]).not.toHaveProperty("create");
     expect((customer["list"] as { roles: string[] }).roles).toContain("erp_admin");
+  });
+
+  type FieldPerms = Record<string, Record<string, { roles: string[]; abac?: string }>>;
+
+  function customerWithFields(fields: Record<string, unknown>, extra: Record<string, unknown> = {}) {
+    const base = JSON.parse(JSON.stringify(DESIGN_EXAMPLE_MANIFEST)) as {
+      roles: Record<string, unknown>;
+      permissions: Record<string, Record<string, unknown>>;
+      entities: Array<{ name: string; fields: Array<Record<string, unknown>> }>;
+    };
+    const customer = base.permissions["Customer"] ?? {};
+    base.permissions["Customer"] = { ...customer, ...extra, fields };
+    return base;
+  }
+
+  function graftedCustomerFields(manifest: Record<string, unknown>): FieldPerms {
+    const grafted = ensureRolesInManifest(manifest, ["erp_admin"]);
+    const perms = grafted["permissions"] as Record<string, Record<string, unknown>>;
+    return (perms["Customer"]?.["fields"] ?? {}) as FieldPerms;
+  }
+
+  it("adds the deployment role to a field's create arm only, leaving read and update as designed", () => {
+    const fields = graftedCustomerFields(
+      customerWithFields({
+        contact_email: {
+          read: { roles: ["app_admin", "app_user"] },
+          update: { roles: ["app_admin"] },
+          create: { roles: ["app_admin", "app_user"] },
+        },
+      }),
+    );
+    const email = fields["contact_email"];
+    expect(email?.["create"]?.roles).toEqual(["app_admin", "app_user", "erp_admin"]);
+    expect(email?.["read"]?.roles).toEqual(["app_admin", "app_user"]);
+    expect(email?.["update"]?.roles).toEqual(["app_admin"]);
+  });
+
+  it("keeps a spec-compliant required classified field valid once the deployment role is grafted", () => {
+    const manifest = customerWithFields({
+      contact_email: {
+        read: { roles: ["app_admin", "app_user"] },
+        update: { roles: ["app_admin"] },
+        create: { roles: ["app_admin", "app_user"] },
+      },
+    });
+    const customer = manifest.entities.find((e) => e.name === "Customer");
+    const email = customer?.fields.find((f) => f["name"] === "contact_email");
+    if (email === undefined) throw new Error("fixture: Customer.contact_email missing");
+    email["required"] = true;
+    expect(tryValidateManifest(ManifestSchema.parse(manifest))).toEqual({ ok: true });
+    const grafted = ensureRolesInManifest(manifest, ["erp_admin"]);
+    expect(tryValidateManifest(ManifestSchema.parse(grafted))).toEqual({ ok: true });
+  });
+
+  it("materialises the create arm from update keeping only roles the entity create grant names", () => {
+    const manifest = customerWithFields(
+      {
+        contact_email: {
+          read: { roles: ["app_admin", "app_user", "editor"] },
+          update: { roles: ["app_admin", "editor"] },
+        },
+      },
+      {
+        read: { roles: ["app_admin", "app_user", "editor"] },
+        update: { roles: ["app_admin", "editor"] },
+      },
+    );
+    manifest.roles["editor"] = { name: "editor", label: { en: "Editor" }, description: "edits" };
+    expect(tryValidateManifest(ManifestSchema.parse(manifest))).toEqual({ ok: true });
+    const fields = graftedCustomerFields(manifest);
+    expect(fields["contact_email"]?.["create"]?.roles).toEqual(["app_admin", "erp_admin"]);
+    expect(fields["contact_email"]?.["update"]?.roles).toEqual(["app_admin", "editor"]);
+    const grafted = ensureRolesInManifest(manifest, ["erp_admin"]);
+    expect(tryValidateManifest(ManifestSchema.parse(grafted))).toEqual({ ok: true });
+  });
+
+  it("leaves a grant carrying an ABAC obligation alone", () => {
+    const fields = graftedCustomerFields(
+      customerWithFields({
+        contact_email: {
+          read: { roles: ["app_admin"] },
+          create: { roles: ["app_admin"], abac: "own_rows" },
+        },
+      }),
+    );
+    expect(fields["contact_email"]?.["create"]).toEqual({ roles: ["app_admin"], abac: "own_rows" });
   });
 });
 
@@ -803,7 +918,7 @@ describe("designManifest — progress", () => {
   it("reports generating then validating on a first-try success, with no retrying", async () => {
     const { provider } = scriptedProvider([textTurn(VALID_JSON)]);
     const { events, listener } = collector();
-    const result = await designManifest({
+    const result = await designManifest({ tenantId: DESIGN_TENANT,
       provider,
       parentPack: null,
       description: "desc",
@@ -825,7 +940,7 @@ describe("designManifest — progress", () => {
   it("reports a retrying phase carrying the issues, then a second generating pass", async () => {
     const { provider } = scriptedProvider([textTurn(brokenManifestJson()), textTurn(VALID_JSON)]);
     const { events, listener } = collector();
-    const result = await designManifest({
+    const result = await designManifest({ tenantId: DESIGN_TENANT,
       provider,
       parentPack: null,
       description: "desc",
@@ -849,7 +964,7 @@ describe("designManifest — progress", () => {
   it("numbers attempts from 1 and carries maxAttempts on every event", async () => {
     const { provider } = scriptedProvider([textTurn("not json"), textTurn(VALID_JSON)]);
     const { events, listener } = collector();
-    await designManifest({ provider, parentPack: null, description: "desc", maxAttempts: 2, onProgress: listener });
+    await designManifest({ tenantId: DESIGN_TENANT, provider, parentPack: null, description: "desc", maxAttempts: 2, onProgress: listener });
     expect(events.every((e) => e.maxAttempts === 2)).toBe(true);
     expect(events[0]?.attempt).toBe(1);
     expect(new Set(events.map((e) => e.attempt))).toEqual(new Set([1, 2]));
@@ -859,7 +974,7 @@ describe("designManifest — progress", () => {
   it("never emits retrying after the final attempt fails", async () => {
     const { provider } = scriptedProvider([textTurn(brokenManifestJson())]);
     const { events, listener } = collector();
-    const result = await designManifest({
+    const result = await designManifest({ tenantId: DESIGN_TENANT,
       provider,
       parentPack: null,
       description: "desc",
@@ -879,7 +994,7 @@ describe("designManifest — progress", () => {
     const total = 4000;
     const { provider } = scriptedProvider([chunkedTurn("x".repeat(total), chunkSize)]);
     const { events, listener } = collector();
-    await designManifest({ provider, parentPack: null, description: "desc", maxAttempts: 1, onProgress: listener });
+    await designManifest({ tenantId: DESIGN_TENANT, provider, parentPack: null, description: "desc", maxAttempts: 1, onProgress: listener });
     const generating = events.filter((e) => e.phase === "generating");
     const expected = total / DESIGN_PROGRESS_CHARS_STEP + 1;
     expect(generating.length).toBeLessThanOrEqual(expected);
@@ -892,7 +1007,7 @@ describe("designManifest — progress", () => {
   it("resets outputChars at the start of each attempt", async () => {
     const { provider } = scriptedProvider([textTurn("y".repeat(1200)), textTurn(VALID_JSON)]);
     const { events, listener } = collector();
-    await designManifest({ provider, parentPack: null, description: "desc", onProgress: listener });
+    await designManifest({ tenantId: DESIGN_TENANT, provider, parentPack: null, description: "desc", onProgress: listener });
     const firstOfAttemptTwo = events.find((e) => e.attempt === 2);
     expect(firstOfAttemptTwo?.phase).toBe("generating");
     expect(firstOfAttemptTwo?.outputChars).toBe(0);
@@ -907,7 +1022,7 @@ describe("designManifest — progress", () => {
   it("survives a listener that throws on every event", async () => {
     const { provider } = scriptedProvider([textTurn(brokenManifestJson()), textTurn(VALID_JSON)]);
     let calls = 0;
-    const result = await designManifest({
+    const result = await designManifest({ tenantId: DESIGN_TENANT,
       provider,
       parentPack: null,
       description: "desc",
@@ -924,7 +1039,7 @@ describe("designManifest — progress", () => {
   it("emits retrying with the provider error message when an attempt throws", async () => {
     const { provider } = scriptedProvider([new Error("boom"), textTurn(VALID_JSON)]);
     const { events, listener } = collector();
-    const result = await designManifest({
+    const result = await designManifest({ tenantId: DESIGN_TENANT,
       provider,
       parentPack: null,
       description: "desc",
@@ -941,7 +1056,7 @@ describe("designManifest — progress", () => {
     const { provider } = scriptedProvider([textTurn(VALID_JSON)]);
     const designer = buildDesignDesigner({ provider, parentPack: null });
     const { events, listener } = collector();
-    const result = await designer({ description: "desc", onProgress: listener });
+    const result = await designer({ tenantId: DESIGN_TENANT, description: "desc", onProgress: listener });
     expect(result.ok).toBe(true);
     expect(phaseSequence(events)).toEqual(["generating", "validating"]);
   });
@@ -950,12 +1065,12 @@ describe("designManifest — progress", () => {
     const { provider } = scriptedProvider([textTurn(VALID_JSON)]);
     const builderSink = collector();
     const designer = buildDesignDesigner({ provider, parentPack: null, onProgress: builderSink.listener });
-    await designer({ description: "desc" });
+    await designer({ tenantId: DESIGN_TENANT, description: "desc" });
     expect(builderSink.events.length).toBeGreaterThan(0);
 
     const before = builderSink.events.length;
     const perCall = collector();
-    await designer({ description: "desc", onProgress: perCall.listener });
+    await designer({ tenantId: DESIGN_TENANT, description: "desc", onProgress: perCall.listener });
     expect(perCall.events.length).toBeGreaterThan(0);
     expect(builderSink.events).toHaveLength(before);
   });
@@ -1067,7 +1182,7 @@ describe("buildDesignProviderFromEnv — self-hosted model", () => {
       textTurn("not json", { input: 100, output: 200, cost: 0 }),
       textTurn(VALID_JSON, { input: 150, output: 900, cost: 0 }),
     ]);
-    const result = await designManifest({ provider, parentPack: null, description: "a field service business" });
+    const result = await designManifest({ tenantId: DESIGN_TENANT, provider, parentPack: null, description: "a field service business" });
     expect(result.ok).toBe(true);
     expect(result.usage).toEqual({ inputTokens: 250, outputTokens: 1100, cost: 0 });
   });
@@ -1106,7 +1221,7 @@ describe("designManifest — diagnosable failure classification (ADR-0280)", () 
 
   async function failWith(text: string): Promise<Awaited<ReturnType<typeof designManifest>>> {
     const { provider } = mockProvider([textTurn(text)]);
-    return designManifest({ provider, parentPack: null, description: "desc", maxAttempts: 1 });
+    return designManifest({ tenantId: DESIGN_TENANT, provider, parentPack: null, description: "desc", maxAttempts: 1 });
   }
 
   it("every failure kind maps to exactly one fault", () => {
@@ -1126,7 +1241,7 @@ describe("designManifest — diagnosable failure classification (ADR-0280)", () 
 
   it("classifies leading prose then JSON as a prose-wrapped recovery, not a failure", async () => {
     const { provider } = mockProvider([textTurn(`Certainly! Here it is:\n\n${VALID_JSON}\n\nEnjoy.`)]);
-    const r = await designManifest({ provider, parentPack: null, description: "desc", maxAttempts: 1 });
+    const r = await designManifest({ tenantId: DESIGN_TENANT, provider, parentPack: null, description: "desc", maxAttempts: 1 });
     expect(r.ok).toBe(true);
     expect(r.failure).toBeNull();
     expect(r.recovery).toBe("surrounding_prose");
@@ -1134,7 +1249,7 @@ describe("designManifest — diagnosable failure classification (ADR-0280)", () 
 
   it("recovers a fenced manifest and still reports the fence", async () => {
     const { provider } = mockProvider([textTurn(`\`\`\`json\n${VALID_JSON}\n\`\`\``)]);
-    const r = await designManifest({ provider, parentPack: null, description: "desc", maxAttempts: 1 });
+    const r = await designManifest({ tenantId: DESIGN_TENANT, provider, parentPack: null, description: "desc", maxAttempts: 1 });
     expect(r.ok).toBe(true);
     expect(r.recovery).toBe("code_fence");
     expect(r.diagnosis).toHaveLength(1);
@@ -1186,14 +1301,14 @@ describe("designManifest — diagnosable failure classification (ADR-0280)", () 
 
   it("classifies an empty reply as empty_response", async () => {
     const { provider } = mockProvider([[]]);
-    const r = await designManifest({ provider, parentPack: null, description: "desc", maxAttempts: 1 });
+    const r = await designManifest({ tenantId: DESIGN_TENANT, provider, parentPack: null, description: "desc", maxAttempts: 1 });
     expect(r.failure).toBe("empty_response");
     expect(r.diagnosis[0]?.shape).toBe("empty");
   });
 
   it("classifies a provider throw as a provider fault, not a model one", async () => {
     const { provider } = mockProvider([new Error("connect ECONNREFUSED")]);
-    const r = await designManifest({ provider, parentPack: null, description: "desc", maxAttempts: 1 });
+    const r = await designManifest({ tenantId: DESIGN_TENANT, provider, parentPack: null, description: "desc", maxAttempts: 1 });
     expect(r.failure).toBe("provider_error");
     expect(r.fault).toBe("provider");
     expect(r.diagnosis[0]?.shape).toBeNull();
@@ -1201,7 +1316,7 @@ describe("designManifest — diagnosable failure classification (ADR-0280)", () 
 
   it("classifies an over-long description as the caller's fault before any call", async () => {
     const { provider, requests } = mockProvider([textTurn(VALID_JSON)]);
-    const r = await designManifest({
+    const r = await designManifest({ tenantId: DESIGN_TENANT,
       provider,
       parentPack: null,
       description: "x".repeat(MAX_DESIGN_DESCRIPTION_CHARS + 1),
@@ -1216,7 +1331,7 @@ describe("designManifest — diagnosable failure classification (ADR-0280)", () 
       textTurn("no json at all"),
       textTurn(`\`\`\`json\n${VALID_JSON}\n\`\`\``),
     ]);
-    const r = await designManifest({ provider, parentPack: null, description: "desc" });
+    const r = await designManifest({ tenantId: DESIGN_TENANT, provider, parentPack: null, description: "desc" });
     expect(r.ok).toBe(true);
     expect(r.diagnosis.map((d) => d.failure)).toEqual(["not_json", null]);
     expect(r.diagnosis.map((d) => d.attempt)).toEqual([1, 2]);
@@ -1233,7 +1348,7 @@ describe("designManifest — diagnosable failure classification (ADR-0280)", () 
       textTurn('```json\n{"entities": [,]}\n```'),
       textTurn(VALID_JSON),
     ]);
-    await designManifest({ provider, parentPack: null, description: "desc" });
+    await designManifest({ tenantId: DESIGN_TENANT, provider, parentPack: null, description: "desc" });
     const corrective = requests[1]?.messages.filter((m) => m.role === "user").at(-1);
     expect(corrective?.content).toContain("code fence");
   });
@@ -1246,7 +1361,7 @@ describe("designManifest — diagnosable failure classification (ADR-0280)", () 
       textTurn('{"reply": "no"}'),
       textTurn(VALID_JSON),
     ]);
-    const out = await designManifest({ provider, parentPack: null, description: "desc" });
+    const out = await designManifest({ tenantId: DESIGN_TENANT, provider, parentPack: null, description: "desc" });
     expect(out.ok).toBe(false);
     // One call, not two: the second turn was never asked for.
     expect(requests).toHaveLength(1);
@@ -1258,7 +1373,7 @@ describe("designManifest — diagnosable failure classification (ADR-0280)", () 
       textTurn("not json at all"),
       textTurn(VALID_JSON),
     ]);
-    const out = await designManifest({ provider, parentPack: null, description: "desc" });
+    const out = await designManifest({ tenantId: DESIGN_TENANT, provider, parentPack: null, description: "desc" });
     expect(out.ok).toBe(true);
     expect(requests).toHaveLength(2);
   });
@@ -1268,7 +1383,7 @@ describe("designManifest — diagnosable failure classification (ADR-0280)", () 
       textTurn(VALID_JSON.slice(0, 200)),
       textTurn(VALID_JSON),
     ]);
-    await designManifest({ provider, parentPack: null, description: "desc" });
+    await designManifest({ tenantId: DESIGN_TENANT, provider, parentPack: null, description: "desc" });
     const corrective = requests[1]?.messages.filter((m) => m.role === "user").at(-1);
     expect(corrective?.content).toContain("smaller manifest");
   });
@@ -1276,7 +1391,7 @@ describe("designManifest — diagnosable failure classification (ADR-0280)", () 
   it("surfaces the classification on the retrying progress event", async () => {
     const seen: DesignProgress[] = [];
     const { provider } = mockProvider([textTurn("[1, 2, 3]"), textTurn(VALID_JSON)]);
-    await designManifest({
+    await designManifest({ tenantId: DESIGN_TENANT,
       provider,
       parentPack: null,
       description: "desc",
@@ -1318,21 +1433,21 @@ describe("designManifest — per-request cost ceiling (ADR-0267)", () => {
 
   it("leaves a run unpriced when no ceiling is configured", async () => {
     const { provider, requests } = pricedProvider([textTurn(VALID_JSON)], PAID);
-    const r = await designManifest({ provider, parentPack: null, description: "desc" });
+    const r = await designManifest({ tenantId: DESIGN_TENANT, provider, parentPack: null, description: "desc" });
     expect(r.ok).toBe(true);
     expect(requests).toHaveLength(1);
   });
 
   it("admits a request whose estimate fits under the ceiling", async () => {
     const { provider, requests } = pricedProvider([textTurn(VALID_JSON)], PAID);
-    const r = await designManifest({ provider, parentPack: null, description: "desc", maxRequestDollars: 1 });
+    const r = await designManifest({ tenantId: DESIGN_TENANT, provider, parentPack: null, description: "desc", maxRequestDollars: 1 });
     expect(r.ok).toBe(true);
     expect(requests).toHaveLength(1);
   });
 
   it("refuses to send a request estimated over the ceiling, and does not retry it", async () => {
     const { provider, requests } = pricedProvider([textTurn(VALID_JSON)], PAID);
-    const r = await designManifest({
+    const r = await designManifest({ tenantId: DESIGN_TENANT,
       provider,
       parentPack: null,
       description: "desc",
@@ -1347,7 +1462,7 @@ describe("designManifest — per-request cost ceiling (ADR-0267)", () => {
 
   it("refuses a configured ceiling it cannot compute (provider publishes no pricing)", async () => {
     const { provider, requests } = pricedProvider([textTurn(VALID_JSON)], undefined);
-    const r = await designManifest({ provider, parentPack: null, description: "desc", maxRequestDollars: 10 });
+    const r = await designManifest({ tenantId: DESIGN_TENANT, provider, parentPack: null, description: "desc", maxRequestDollars: 10 });
     expect(r.ok).toBe(false);
     expect(r.failure).toBe("request_cost_ceiling");
     expect(r.issues[0]).toContain("no pricing");
@@ -1357,7 +1472,7 @@ describe("designManifest — per-request cost ceiling (ADR-0267)", () => {
   it("a free-priced self-hosted provider is never refused by the ceiling", async () => {
     const free: ProviderPricing = { inputPerMillionTokens: 0, outputPerMillionTokens: 0 };
     const { provider } = pricedProvider([textTurn(VALID_JSON)], free);
-    const r = await designManifest({ provider, parentPack: null, description: "desc", maxRequestDollars: 0 });
+    const r = await designManifest({ tenantId: DESIGN_TENANT, provider, parentPack: null, description: "desc", maxRequestDollars: 0 });
     expect(r.ok).toBe(true);
   });
 
@@ -1367,7 +1482,7 @@ describe("designManifest — per-request cost ceiling (ADR-0267)", () => {
 
   it("abandons a stream mid-flight once accrued output breaks the ceiling", async () => {
     const { provider } = pricedProvider([chunkedTurn(RUNAWAY, 500), textTurn(VALID_JSON)], PAID);
-    const r = await designManifest({
+    const r = await designManifest({ tenantId: DESIGN_TENANT,
       provider,
       parentPack: null,
       description: "desc",
@@ -1387,7 +1502,7 @@ describe("designManifest — per-request cost ceiling (ADR-0267)", () => {
       [chunkedTurn(RUNAWAY, 500), textTurn(VALID_JSON)],
       PAID,
     );
-    const r = await designManifest({
+    const r = await designManifest({ tenantId: DESIGN_TENANT,
       provider,
       parentPack: null,
       description: "desc",
@@ -1404,7 +1519,7 @@ describe("designManifest — per-request cost ceiling (ADR-0267)", () => {
       [textTurn(VALID_JSON, { input: 10, output: 10, cost: 5 })],
       PAID,
     );
-    const r = await designManifest({ provider, parentPack: null, description: "desc", maxRequestDollars: 0.5 });
+    const r = await designManifest({ tenantId: DESIGN_TENANT, provider, parentPack: null, description: "desc", maxRequestDollars: 0.5 });
     expect(r.ok).toBe(true);
     expect(r.usage?.cost).toBe(5);
     expect(requests).toHaveLength(1);
@@ -1415,7 +1530,7 @@ describe("designManifest — per-request cost ceiling (ADR-0267)", () => {
       [textTurn("not json", { input: 10, output: 10, cost: 5 })],
       PAID,
     );
-    const r = await designManifest({ provider, parentPack: null, description: "desc", maxRequestDollars: 0.5 });
+    const r = await designManifest({ tenantId: DESIGN_TENANT, provider, parentPack: null, description: "desc", maxRequestDollars: 0.5 });
     expect(r.ok).toBe(false);
     expect(r.failure).toBe("not_json");
     expect(r.attempts).toBe(1);
@@ -1437,7 +1552,7 @@ describe("designManifest — per-request cost ceiling (ADR-0267)", () => {
       ],
       PAID,
     );
-    const r = await designManifest({
+    const r = await designManifest({ tenantId: DESIGN_TENANT,
       provider,
       parentPack: null,
       description: "desc",
@@ -1458,7 +1573,7 @@ describe("designManifest — per-request cost ceiling (ADR-0267)", () => {
       ],
       PAID,
     );
-    const r = await designManifest({
+    const r = await designManifest({ tenantId: DESIGN_TENANT,
       provider,
       parentPack: null,
       description: "desc",
@@ -1467,5 +1582,274 @@ describe("designManifest — per-request cost ceiling (ADR-0267)", () => {
     });
     expect(r.ok).toBe(true);
     expect(requests).toHaveLength(2);
+  });
+});
+
+describe("designManifest — the tenant and the monthly reservation (M-16, M-17)", () => {
+  const PAID: ProviderPricing = { inputPerMillionTokens: 3, outputPerMillionTokens: 15 };
+
+  function paid(turns: readonly Turn[]): { provider: DesignCompletionProvider; requests: CompletionRequest[] } {
+    const scripted = scriptedProvider(turns);
+    return { provider: { complete: scripted.provider.complete, pricing: PAID }, requests: scripted.requests };
+  }
+
+  interface Ledger {
+    readonly reserved: number[];
+    readonly settled: Array<{ reserved: number; actual: number }>;
+    readonly spend: DesignSpend;
+  }
+
+  function ledger(answer: "reserve" | "refuse" | "throw" = "reserve"): Ledger {
+    const reserved: number[] = [];
+    const settled: Array<{ reserved: number; actual: number }> = [];
+    const spend: DesignSpend = async (dollars) => {
+      reserved.push(dollars);
+      if (answer === "throw") throw new Error("ledger down");
+      if (answer === "refuse") return null;
+      return {
+        dollars,
+        settle: async (actual) => {
+          settled.push({ reserved: dollars, actual });
+        },
+      };
+    };
+    return { reserved, settled, spend };
+  }
+
+  it("names the tenant on every provider request, not a constant", async () => {
+    const { provider, requests } = paid([textTurn("[1]"), textTurn(VALID_JSON)]);
+    await designManifest({ tenantId: DESIGN_TENANT, provider, parentPack: null, description: "desc" });
+    expect(requests.length).toBeGreaterThan(0);
+    for (const req of requests) expect(req.tenantId).toBe(DESIGN_TENANT);
+  });
+
+  it("reserves the estimate before the call and settles to the provider's reported cost", async () => {
+    const { provider, requests } = paid([textTurn(VALID_JSON, { input: 100, output: 50, cost: 0.0042 })]);
+    const l = ledger();
+    const r = await designManifest({ tenantId: DESIGN_TENANT, provider, parentPack: null, description: "desc", spend: l.spend });
+    expect(r.ok).toBe(true);
+    expect(requests).toHaveLength(1);
+    expect(l.reserved).toHaveLength(1);
+    // 8192 output tokens at $15/M bound the estimate from below at $0.12.
+    expect(l.reserved[0]).toBeGreaterThan(0.12);
+    expect(l.settled).toEqual([{ reserved: l.reserved[0], actual: 0.0042 }]);
+  });
+
+  it("sends nothing when the month refuses the reservation, and does not retry", async () => {
+    const { provider, requests } = paid([textTurn(VALID_JSON)]);
+    const l = ledger("refuse");
+    const r = await designManifest({ tenantId: DESIGN_TENANT, provider, parentPack: null, description: "desc", spend: l.spend });
+    expect(r.ok).toBe(false);
+    expect(r.failure).toBe("monthly_budget_exhausted");
+    expect(r.fault).toBe("request");
+    expect(r.attempts).toBe(1);
+    expect(requests).toHaveLength(0);
+    expect(r.issues[0]).toMatch(/cannot absorb/);
+  });
+
+  it("refuses rather than spends when the ledger cannot be written", async () => {
+    const { provider, requests } = paid([textTurn(VALID_JSON)]);
+    const r = await designManifest({ tenantId: DESIGN_TENANT, provider, parentPack: null, description: "desc", spend: ledger("throw").spend });
+    expect(r.failure).toBe("monthly_budget_exhausted");
+    expect(r.issues[0]).toMatch(/could not be charged.*no request was sent/);
+    expect(requests).toHaveLength(0);
+  });
+
+  it("charges an attempt that failed before any output only its input, and one that produced output its reservation", async () => {
+    const silent = paid([new Error("ECONNREFUSED")]);
+    const l1 = ledger();
+    await designManifest({ tenantId: DESIGN_TENANT, provider: silent.provider, parentPack: null, description: "desc", spend: l1.spend, maxAttempts: 1 });
+    expect(l1.settled).toHaveLength(1);
+    expect(l1.settled[0]!.actual).toBeGreaterThan(0);
+    expect(l1.settled[0]!.actual).toBeLessThan(l1.settled[0]!.reserved / 10);
+
+    const partial: Turn = [{ kind: "text", text: '{"meta":' }];
+    const broke = scriptedProvider([partial]);
+    const brokeProvider: DesignCompletionProvider = {
+      pricing: PAID,
+      complete: (req) =>
+        (async function* (): AsyncGenerator<CompletionChunk> {
+          for await (const c of broke.provider.complete(req)) yield c;
+          throw new Error("stream reset");
+        })(),
+    };
+    const l2 = ledger();
+    await designManifest({ tenantId: DESIGN_TENANT, provider: brokeProvider, parentPack: null, description: "desc", spend: l2.spend, maxAttempts: 1 });
+    expect(l2.settled).toEqual([{ reserved: l2.reserved[0], actual: l2.reserved[0] }]);
+  });
+
+  it("refuses a run under a monthly ledger when the provider publishes no price", async () => {
+    const { provider, requests } = scriptedProvider([textTurn(VALID_JSON)]);
+    const r = await designManifest({ tenantId: DESIGN_TENANT, provider, parentPack: null, description: "desc", spend: ledger().spend });
+    expect(r.failure).toBe("monthly_budget_exhausted");
+    expect(requests).toHaveLength(0);
+  });
+});
+
+describe("buildDesignDesigner — the per-request ceiling and the budget are wired (M-16)", () => {
+  const PAID: ProviderPricing = { inputPerMillionTokens: 3, outputPerMillionTokens: 15 };
+
+  it("refuses a request over --ai-max-request-dollars before calling the provider", async () => {
+    const scripted = scriptedProvider([textTurn(VALID_JSON)]);
+    const designer = buildDesignDesigner({
+      provider: { complete: scripted.provider.complete, pricing: PAID },
+      parentPack: null,
+      maxRequestDollars: 0.01,
+    });
+    const r = await designer({ tenantId: DESIGN_TENANT, description: "desc" });
+    expect(r.failure).toBe("request_cost_ceiling");
+    expect(scripted.requests).toHaveLength(0);
+  });
+
+  it("charges the tenant it was called for and seeds and feeds that tenant's estimator correction", async () => {
+    const scripted = scriptedProvider([textTurn(VALID_JSON, { input: 10, output: 10, cost: 0.001 })]);
+    const reservedFor: string[] = [];
+    const inflationAsked: string[] = [];
+    const observed: Array<{ tenantId: string; ratio: number }> = [];
+    const designer = buildDesignDesigner({
+      provider: { complete: scripted.provider.complete, pricing: PAID },
+      parentPack: null,
+      maxRequestDollars: 10,
+      budget: {
+        reserve: async (tenantId, dollars) => {
+          reservedFor.push(tenantId);
+          return { dollars, settle: async () => undefined };
+        },
+        inflationFor: async (tenantId) => {
+          inflationAsked.push(tenantId);
+          return 4;
+        },
+        observeInflation: async (tenantId, ratio) => {
+          observed.push({ tenantId, ratio });
+        },
+      },
+    });
+    const r = await designer({ tenantId: DESIGN_TENANT, description: "desc" });
+    expect(r.ok).toBe(true);
+    expect(reservedFor).toEqual([DESIGN_TENANT]);
+    expect(inflationAsked).toEqual([DESIGN_TENANT]);
+    expect(observed).toHaveLength(1);
+    expect(observed[0]!.tenantId).toBe(DESIGN_TENANT);
+    // The seeded correction raised the estimate, so the realised ratio is below 1/4.
+    expect(observed[0]!.ratio).toBeLessThan(0.25);
+  });
+});
+
+describe("serve() hands the designer the ceilings it is configured with (M-16)", () => {
+  // Text, because `serve()` needs a live Postgres to reach and the defect was a wiring one: the
+  // designer was built with neither option, and a conditional spread passes the type check whether
+  // or not the field is there, so only reading the call site can say it is.
+  const src = stripComments(readFileSync(resolve(import.meta.dirname, "./node.ts"), "utf8"));
+  const start = src.indexOf("buildDesignDesigner({");
+  const call = src.slice(start, src.indexOf("parentPack:", start));
+
+  it("passes --ai-max-request-dollars and the monthly budget to buildDesignDesigner", () => {
+    expect(start).toBeGreaterThan(0);
+    expect(call).toContain("maxRequestDollars: options.aiMaxRequestDollars");
+    expect(call).toContain("{ budget }");
+  });
+
+  it("builds the budget before the designer, and no route or job records spend after the fact", () => {
+    expect(src.indexOf("const budget =")).toBeGreaterThan(0);
+    expect(src.indexOf("const budget =")).toBeLessThan(start);
+    expect(src).not.toMatch(/startDesignJob\(\s*\{[^}]*budget/);
+    expect(src).not.toContain("maxUsdPerRequest");
+  });
+
+  it("passes the provider timeout and a declared price to the provider build, and gates residency", () => {
+    expect(src).toContain("inactivityTimeoutMs: options.aiProviderTimeoutMs");
+    expect(src).toContain("declaredPrice: options.aiModelPrice");
+    expect(src).toContain("{ providerAdmission }");
+    expect(src).toContain("if (pricingDecision.refusal !== null) throw");
+  });
+});
+
+describe("the design spec teaches the field-grant syntax its classification rule needs (P2.2)", () => {
+  // The spec told the model to classify sensitive fields and never said how to grant one, so every
+  // AI design classified fields and granted none — and an ungranted classified field falls to the
+  // classification default, which no role reads unless the deployment declares one privileged.
+  type Grants = Record<string, Record<string, { fields?: Record<string, Record<string, unknown>> }>>;
+
+  function classifiedWithoutGrant(manifest: Record<string, unknown>): string[] {
+    const permissions = (manifest["permissions"] ?? {}) as Grants[string];
+    const missing: string[] = [];
+    for (const entity of (manifest["entities"] ?? []) as Array<{
+      name: string;
+      fields: Array<{ name: string; classification?: string }>;
+    }>) {
+      for (const field of entity.fields) {
+        if (field.classification === undefined) continue;
+        const grant = permissions[entity.name]?.fields?.[field.name];
+        if (grant?.["read"] === undefined) missing.push(`${entity.name}.${field.name}`);
+      }
+    }
+    return missing;
+  }
+
+  function mockReplying(texts: readonly string[]): {
+    provider: DesignCompletionProvider;
+    requests: CompletionRequest[];
+  } {
+    const requests: CompletionRequest[] = [];
+    let index = 0;
+    const provider = new MockLlmProvider({
+      completeBehavior: (req: CompletionRequest): AsyncIterable<CompletionChunk> => {
+        requests.push(req);
+        const text = texts[Math.min(index, texts.length - 1)] ?? "";
+        index += 1;
+        return (async function* (): AsyncGenerator<CompletionChunk> {
+          yield { kind: "text", text };
+        })();
+      },
+    });
+    return { provider, requests };
+  }
+
+  it("states the shape and the coherence rules, with and without a parent", () => {
+    for (const prompt of [
+      buildDesignSystemPrompt({ parentPack: null }),
+      buildDesignSystemPrompt({ parentPack: { slug: "operate-erp/core", entityNames: ["Invoice"] } }),
+    ]) {
+      expect(prompt).toContain(
+        "permissions.<Entity>.fields = { <field_name>: { read: { roles: [...] }, update: { roles: [...] }, create?: { roles: [...] } } }",
+      );
+      expect(prompt).toContain("Give EVERY classified field a field grant");
+      expect(prompt).toContain("every update role must also be a read role");
+      expect(prompt).toContain("on a required field, create (or update) must name every role");
+    }
+  });
+
+  it("shows a grant for every field the worked example classifies", () => {
+    const parsed = ManifestSchema.parse(DESIGN_EXAMPLE_MANIFEST);
+    expect((parsed.entities ?? []).flatMap((e) => e.fields.filter((f) => f.classification !== undefined))).toHaveLength(2);
+    expect(classifiedWithoutGrant(DESIGN_EXAMPLE_MANIFEST)).toEqual([]);
+    // The create arm is shown once, so the model sees the set-once form as well as the plain one.
+    expect(parsed.permissions?.["ServiceVisit"]?.fields?.["quoted_price"]?.create?.roles).toEqual([
+      "app_admin",
+      "app_user",
+    ]);
+  });
+
+  it("carries the grants through the design loop when the model follows the example", async () => {
+    const { provider, requests } = mockReplying([VALID_JSON]);
+    const r = await designManifest({ tenantId: DESIGN_TENANT, provider, parentPack: null, description: "a field service business" });
+    expect(r.ok).toBe(true);
+    expect(requests[0]?.messages[0]?.content).toContain("permissions.<Entity>.fields");
+    expect(classifiedWithoutGrant(r.manifest ?? {})).toEqual([]);
+    const parsed = ManifestSchema.parse(r.manifest);
+    expect(tryValidateManifest(parsed)).toEqual({ ok: true });
+  });
+
+  it("feeds an incoherent field grant back to the model rather than accepting it", async () => {
+    const blind = JSON.parse(VALID_JSON) as Grants & Record<string, unknown>;
+    const customer = (blind["permissions"] as Grants[string])["Customer"]!;
+    customer.fields = { contact_email: { read: { roles: ["app_admin"] }, update: { roles: ["app_admin", "app_user"] } } };
+    // app_user may not update Customer at all, and may not read the field it would overwrite.
+    const { provider, requests } = mockReplying([JSON.stringify(blind), VALID_JSON]);
+    const r = await designManifest({ tenantId: DESIGN_TENANT, provider, parentPack: null, description: "desc" });
+    expect(r.ok).toBe(true);
+    expect(r.attempts).toBe(2);
+    const feedback = requests[1]?.messages.map((m) => m.content).join("\n") ?? "";
+    expect(feedback).toContain("permissions.Customer.fields.contact_email");
   });
 });

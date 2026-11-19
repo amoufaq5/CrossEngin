@@ -15,6 +15,7 @@ import {
   type DigestMember,
   type DigestSummary,
 } from "./digest-assembly.js";
+import { htmlMarkupRefusals } from "./notification-template-routes.js";
 
 export const DIGEST_TEMPLATE_VARIABLES: readonly TemplateVariable[] = [
   TemplateVariableSchema.parse({
@@ -181,10 +182,24 @@ export function renderDigest(input: {
   // digest never supplies, or be written for another channel entirely. A half-rendered notice
   // still carrying `{{...}}` is worse than the platform default, so any such override is dropped
   // and the built-in content renders instead.
+  //
+  // And its rendered body must pass the authoring allowlist again, because this body reaches the
+  // console's `dangerouslySetInnerHTML` and the store is not a trust boundary: the routes vet what
+  // they write, and a row they did not write (stored before they existed, or by SQL) was vetted by
+  // nothing. Checked twice, because each reading sees what the other cannot: the *source* is what
+  // the authoring route judged, and only there can the URL rule tell a placeholder in an origin
+  // (`https://app{{x}}`, refused) from one after it; the *rendered* body is the string a browser
+  // parses, and only there is a placeholder in a tag or attribute name visible as markup. Dropped
+  // to the default rather than sanitised, for the authoring route's reason — a sanitiser that
+  // rewrites the body shows the tenant something they did not write.
   const override = input.content;
-  if (override !== undefined && override.channel === "in_app") {
+  if (
+    override !== undefined &&
+    override.channel === "in_app" &&
+    htmlMarkupRefusals("htmlBody", override.htmlBody).length === 0
+  ) {
     const attempt = renderTemplateContent(override, context);
-    if (attempt.missing.length === 0) {
+    if (attempt.missing.length === 0 && htmlMarkupRefusals("htmlBody", attempt.rendered.body).length === 0) {
       return {
         title: attempt.rendered.title,
         body: attempt.rendered.body,

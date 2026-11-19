@@ -24,7 +24,11 @@ export interface ClaimOptions {
 /** The durable queue the worker pulls from — satisfied by the Postgres `claimDueTimers` / `releaseTimerClaim`. */
 export interface TimerClaimer {
   claim(opts: ClaimOptions): Promise<readonly ClaimedTimer[]>;
-  release(opts: { readonly timerId: string; readonly workerId: string }): Promise<void>;
+  release(opts: {
+    readonly timerId: string;
+    readonly workerId: string;
+    readonly tenantId: string;
+  }): Promise<void>;
 }
 
 /**

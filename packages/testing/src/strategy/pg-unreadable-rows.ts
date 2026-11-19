@@ -1932,34 +1932,31 @@ export const UNREADABLE_ROW_SITES: readonly UnreadableRowDeclaration[] = Object.
     file: "packages/ai-architect-pg/src/message-store.ts",
     scope: "listForSession",
     conversion: "rowToRecord",
-    reason: "record_asserted_not_parsed",
-    fencedBy: "nothing",
+    reason: "unmigrated",
     consequence:
-      "a transcript row outside its contract is served to the design-review surface unexamined",
+      "latent while the read has no caller outside its tests: a row whose timestamp is not an instant (a stored 'infinity') throws and takes the session's whole list with it, while every other contract clause is still unchecked on read",
     note:
-      "ADR-0362's class, in the Architect transcript: rowToRecord returns a bare object literal typed as the record, so no clause of the contract has ever been checked on read and a row edited into a shape the contract forbids is served as if it were valid.",
+      "rowToRecord turns the TIMESTAMPTZ columns into ISO strings through requireIsoInstant, which throws on a value that is not an instant — before that the record carried node-postgres's Date typed as a string (ADR-0331's class). The old declaration's 'served to the design-review surface' named a consumer that does not exist: no non-test caller reads this list.",
   },
   {
     file: "packages/ai-architect-pg/src/proposal-store.ts",
     scope: "listForSession",
     conversion: "rowToRecord",
-    reason: "record_asserted_not_parsed",
-    fencedBy: "nothing",
+    reason: "unmigrated",
     consequence:
-      "a transcript row outside its contract is served to the design-review surface unexamined",
+      "latent while the read has no caller outside its tests: a row whose timestamp is not an instant (a stored 'infinity') throws and takes the session's whole list with it, while every other contract clause is still unchecked on read",
     note:
-      "ADR-0362's class, in the Architect transcript: rowToRecord returns a bare object literal typed as the record, so no clause of the contract has ever been checked on read and a row edited into a shape the contract forbids is served as if it were valid.",
+      "rowToRecord turns the TIMESTAMPTZ columns into ISO strings through requireIsoInstant, which throws on a value that is not an instant — before that the record carried node-postgres's Date typed as a string (ADR-0331's class). The old declaration's 'served to the design-review surface' named a consumer that does not exist: no non-test caller reads this list.",
   },
   {
     file: "packages/ai-architect-pg/src/session-store.ts",
     scope: "listForTenant",
     conversion: "rowToRecord",
-    reason: "record_asserted_not_parsed",
-    fencedBy: "nothing",
+    reason: "unmigrated",
     consequence:
-      "a transcript row outside its contract is served to the design-review surface unexamined",
+      "latent while the read has no caller outside its tests: a row whose timestamp is not an instant (a stored 'infinity') throws and takes the session's whole list with it, while every other contract clause is still unchecked on read",
     note:
-      "ADR-0362's class, in the Architect transcript: rowToRecord returns a bare object literal typed as the record, so no clause of the contract has ever been checked on read and a row edited into a shape the contract forbids is served as if it were valid.",
+      "rowToRecord turns the TIMESTAMPTZ columns into ISO strings through requireIsoInstant, which throws on a value that is not an instant — before that the record carried node-postgres's Date typed as a string (ADR-0331's class). The old declaration's 'served to the design-review surface' named a consumer that does not exist: no non-test caller reads this list.",
   },
   {
     file: "packages/operate-runtime-pg/src/entity-ops.ts",

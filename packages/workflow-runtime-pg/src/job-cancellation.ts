@@ -1,4 +1,4 @@
-import type { PgConnection } from "@crossengin/kernel-pg";
+import { assertScopeTenantId, type PgConnection } from "@crossengin/kernel-pg";
 import {
   planJobCancellation,
   type JobCancellationCheckpoint,
@@ -253,6 +253,12 @@ export interface FinalizeCancelledJobRunOptions {
   /** Wall time spent inside the handler before it stopped; `null` when it never ran. */
   readonly durationMs?: number | null;
   readonly schema?: string;
+  /**
+   * The worker finalizing under its claim (`claimed_by = …`), so a worker whose lease was taken does
+   * not write the terminal status for a run another worker now holds. Absent or `null` for a caller
+   * that holds no claim — the reaper finalizes runs whose lease is gone.
+   */
+  readonly claimedBy?: string | null;
 }
 
 /**
@@ -272,6 +278,7 @@ export async function finalizeCancelledJobRun(
   options: FinalizeCancelledJobRunOptions,
 ): Promise<boolean> {
   const schema = checkSchema(options.schema);
+  const fenced = options.claimedBy ?? null;
   const result = await withTenantContext(conn, options.tenantId, async (tx) =>
     tx.query(
       `UPDATE ${schema}.job_runs
@@ -279,8 +286,15 @@ export async function finalizeCancelledJobRun(
             cancelled_at_checkpoint = $5, claimed_by = NULL, claim_expires_at = NULL
       WHERE run_id = $1 AND tenant_id = $2::uuid
         AND status IN ('pending', 'running')
-        AND cancel_requested_at IS NOT NULL`,
-      [options.runId, options.tenantId, options.now, options.durationMs ?? null, options.checkpoint],
+        AND cancel_requested_at IS NOT NULL${fenced === null ? "" : " AND claimed_by = $6"}`,
+      [
+        options.runId,
+        options.tenantId,
+        options.now,
+        options.durationMs ?? null,
+        options.checkpoint,
+        ...(fenced === null ? [] : [fenced]),
+      ],
     ),
   );
   return (result.rowCount ?? 0) > 0;
@@ -290,6 +304,11 @@ export interface ReapCancelledJobRunsOptions {
   readonly now: string;
   readonly limit?: number;
   readonly schema?: string;
+  /**
+   * Confines the sweep to one tenant — the form `claimDueJobsPerTenant` runs under each tenant's own
+   * context, since a session the policy confines sees no tenant's rows unscoped.
+   */
+  readonly tenantId?: string;
 }
 
 export interface ReapedJobRun {
@@ -306,13 +325,10 @@ export interface ReapedJobRun {
  *
  * `FOR UPDATE SKIP LOCKED` so every worker in the fleet can sweep on each poll without contending.
  *
- * **Deliberately *not* wrapped in `withTenantContext`** (ADR-0389), where its three siblings above
- * are. This sweep is cross-tenant by design — the `FOR UPDATE SKIP LOCKED` selection spans every
- * tenant and the statement *returns* the tenant ids it found, which is how a caller learns whose runs
- * it finalized — so there is no single scope to set, and setting one would silently turn a fleet-wide
- * reaper into a single-tenant one. It is the `claimDueJobs` asymmetry one function over: what a
- * confined session can see on this path is the question `probeJobQueueVisibility` in `job-claim.ts`
- * answers at boot (ADR-0334), rather than one this statement can answer per row.
+ * With `tenantId` it is confined to that tenant and runs under the caller's tenant context, which is
+ * how the job claimer drives it — once per tenant, inside `claimDueJobsPerTenant`'s transaction — so
+ * it reaches the rows a confined session can see. It deliberately sets no context of its own, so a
+ * caller holding an exempt session may still sweep every tenant in one statement by omitting it.
  */
 export async function reapCancelledJobRuns(
   conn: PgConnection,
@@ -322,12 +338,19 @@ export async function reapCancelledJobRuns(
   const limit = options.limit ?? DEFAULT_REAP_LIMIT;
   if (!Number.isInteger(limit) || limit < 1) throw new Error(`invalid limit: ${String(limit)}`);
 
+  const params: unknown[] = [options.now, limit];
+  let tenantPredicate = "";
+  if (options.tenantId !== undefined) {
+    assertScopeTenantId(options.tenantId);
+    params.push(options.tenantId);
+    tenantPredicate = "\n          AND tenant_id = $3::uuid";
+  }
   const result = await conn.query<{ run_id: unknown; tenant_id: unknown }>(
     `WITH abandoned AS (
        SELECT id
          FROM ${schema}.job_runs
         WHERE status IN ('pending', 'running')
-          AND cancel_requested_at IS NOT NULL
+          AND cancel_requested_at IS NOT NULL${tenantPredicate}
           AND (claimed_by IS NULL OR claim_expires_at IS NULL OR claim_expires_at <= $1::timestamptz)
         ORDER BY cancel_requested_at ASC
         LIMIT $2
@@ -339,7 +362,7 @@ export async function reapCancelledJobRuns(
        FROM abandoned
       WHERE j.id = abandoned.id
      RETURNING j.run_id, j.tenant_id`,
-    [options.now, limit],
+    params,
   );
   return result.rows.map((r) => ({ runId: str(r.run_id), tenantId: str(r.tenant_id) }));
 }

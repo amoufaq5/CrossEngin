@@ -167,6 +167,24 @@ function fakeAuditDb(): FakeDb {
       return { rows: [{ audit_rows: matched.length }], rowCount: 1 };
     }
 
+    if (sql.includes("array_agg(actor ->> 'userId')")) {
+      const json = (v: unknown): Row | null =>
+        v === null || v === undefined ? null : ((typeof v === "string" ? JSON.parse(v) : v) as Row);
+      const [, , field, parent] = p;
+      const removers: (string | null)[] = [];
+      let withheld = false;
+      for (const r of matched) {
+        const before = json(r["before"]);
+        const after = json(r["after"]);
+        const ref = before?.[String(field)];
+        if (typeof ref === "object" && ref !== null) withheld = true;
+        else if (ref === parent && (after === null || after[String(field)] !== parent)) {
+          removers.push((json(r["actor"])?.["userId"] as string | null | undefined) ?? null);
+        }
+      }
+      return { rows: [{ removers, withheld }], rowCount: 1 };
+    }
+
     const limitParam = paramIndex(sql, /LIMIT \$(\d+)/);
     const limit = limitParam === null ? matched.length : Number(p[limitParam - 1]);
     // Rows are returned exactly as stored: one written through `emit` carries its
@@ -298,6 +316,9 @@ describe("audit-log-store — emit is append-only", () => {
     // An exact list, so a future rewrite path cannot be added without this test noticing.
     expect(names.sort()).toEqual([
       "anchors",
+      // Reads: who detached a child from its parent, for segregation of duties. Neither writes.
+      "childDetachments",
+      "childDetachmentsWithin",
       "constructor",
       "countSince",
       "emit",
@@ -458,6 +479,76 @@ describe("audit-log-store — emitWithin joins the caller's transaction", () => 
     const back = auditEntryFromRow(db.rows[0]!);
     expect(back.before).toEqual(entry.before);
     expect(back.diff).toEqual(entry.diff);
+  });
+});
+
+describe("audit-log-store — childDetachments", () => {
+  const PARENT = "bill_parent_1";
+  const removal = (over: Row): Row =>
+    storedRow({ entity: "BillLine", occurred_at: "2026-08-02T09:00:00.000Z", ...over });
+  const actor = (userId: string | null): Row => ({ kind: userId === null ? "system" : "user", userId, sessionId: null, ip: null, userAgent: null });
+  const query = (parentCreatedAt: string | null = "2026-08-01T00:00:00.000Z") => ({
+    tenantId: TENANT_A,
+    childEntity: "BillLine",
+    parentField: "bill_id",
+    parentId: PARENT,
+    parentCreatedAt,
+  });
+
+  it("names whoever deleted a child or moved it to another parent, under the tenant's own context", async () => {
+    const db = fakeAuditDb();
+    db.rows.push(
+      removal({ id: ENTRY_1, actor: actor(USER_A), before: { bill_id: PARENT }, after: null }),
+      removal({ id: ENTRY_2, actor: actor("u-mover"), before: { bill_id: PARENT }, after: { bill_id: "bill_other" } }),
+      removal({ id: ENTRY_3, actor: actor("u-editor"), before: { bill_id: PARENT }, after: { bill_id: PARENT } }),
+      removal({ actor: actor("u-elsewhere"), before: { bill_id: "bill_other" }, after: null }),
+      removal({ tenant_id: TENANT_B, actor: actor("u-other-tenant"), before: { bill_id: PARENT }, after: null }),
+      removal({ actor: actor("u-before-parent"), occurred_at: "2026-07-01T00:00:00.000Z", before: { bill_id: PARENT }, after: null }),
+    );
+    const out = await new PostgresAuditEmitter(db.conn).childDetachments(query());
+    expect(out).toEqual({ removers: [USER_A, "u-mover"], withheld: false });
+    const stmt = statements(db.captured)[0]!;
+    expect(db.captured[0]?.sql).toContain("set_config('app.current_tenant_id'");
+    expect(stmt.params).toEqual([TENANT_A, "BillLine", "bill_id", PARENT, "2026-08-01T00:00:00.000Z"]);
+    expect(stmt.sql).toContain("tenant_id = $1::uuid");
+    expect(stmt.sql).toContain("interval '1 hour'");
+  });
+
+  it("binds no lower bound when the parent carries no created_at, and admits a removal with no person", async () => {
+    const db = fakeAuditDb();
+    db.rows.push(removal({ actor: actor(null), before: { bill_id: PARENT }, after: null }));
+    const out = await new PostgresAuditEmitter(db.conn).childDetachments(query(null));
+    expect(out).toEqual({ removers: [null], withheld: false });
+    const stmt = statements(db.captured)[0]!;
+    expect(stmt.params).toHaveLength(4);
+    expect(stmt.sql).not.toContain("$5");
+  });
+
+  it("says the trail is withheld when a candidate row's parent reference is a redaction marker", async () => {
+    const db = fakeAuditDb();
+    db.rows.push(removal({ before: { bill_id: { $redacted: "pii" } }, after: null }));
+    expect(await new PostgresAuditEmitter(db.conn).childDetachments(query())).toEqual({ removers: [], withheld: true });
+  });
+
+  it("reads inside a caller's transaction without setting a context of its own", async () => {
+    const db = fakeAuditDb();
+    db.rows.push(removal({ before: { bill_id: PARENT }, after: null }));
+    const emitter = new PostgresAuditEmitter(db.conn);
+    const out = await db.conn.transaction(async (tx) => {
+      await tx.query("SELECT set_config('app.current_tenant_id', $1, true)", [TENANT_A]);
+      return emitter.childDetachmentsWithin(tx, query());
+    });
+    expect(out.removers).toEqual([USER_A]);
+    expect(db.captured.filter(isSetConfig)).toHaveLength(1);
+  });
+
+  it("refuses a removers column that is not a text array rather than reading it as nobody", async () => {
+    const tx = {
+      query: (async () => ({ rows: [{ removers: "{a}", withheld: false }], rowCount: 1 })) as PgConnection["query"],
+    } as PgConnection;
+    await expect(new PostgresAuditEmitter(fakeAuditDb().conn).childDetachmentsWithin(tx, query())).rejects.toThrow(
+      /not a text array/,
+    );
   });
 });
 

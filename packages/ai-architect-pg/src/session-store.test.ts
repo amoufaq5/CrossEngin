@@ -1,21 +1,14 @@
-import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
+import { tenantScopedConnection, type StatementHandler } from "./test-fakes.js";
 import { PostgresArchitectSessionStore } from "./session-store.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 const SESSION_UUID = "00000000-0000-4000-8000-000000000002";
 const TS = "2026-05-17T12:00:00.000Z";
 
-function mockConnection(
-  handler: (sql: string, params: readonly unknown[] | undefined) => PgQueryResult<Record<string, unknown>>,
-): PgConnection {
-  return {
-    query: vi.fn(async (sql: string, params?: readonly unknown[]) => handler(sql, params)) as PgConnection["query"],
-    transaction: vi.fn() as PgConnection["transaction"],
-    withAdvisoryLock: vi.fn() as PgConnection["withAdvisoryLock"],
-    close: vi.fn() as PgConnection["close"],
-  };
+function mockConnection(handler: StatementHandler): ReturnType<typeof tenantScopedConnection> {
+  return tenantScopedConnection(handler);
 }
 
 function sessionRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -88,7 +81,8 @@ describe("PostgresArchitectSessionStore.endSession", () => {
     const conn = mockConnection((sql, params) => {
       expect(sql).toContain("UPDATE meta.architect_sessions");
       expect(sql).toContain("ended_at = now()");
-      expect(params).toEqual([SESSION_UUID, 3, 100, 50, 10, 0.001]);
+      expect(sql).toContain("WHERE id = $1 AND tenant_id = $7");
+      expect(params).toEqual([SESSION_UUID, 3, 100, 50, 10, 0.001, TENANT]);
       return {
         rows: [
           sessionRow({
@@ -105,6 +99,7 @@ describe("PostgresArchitectSessionStore.endSession", () => {
     });
     const store = new PostgresArchitectSessionStore(conn);
     const record = await store.endSession({
+      tenantId: TENANT,
       id: SESSION_UUID,
       turnCount: 3,
       inputTokens: 100,
@@ -122,6 +117,7 @@ describe("PostgresArchitectSessionStore.endSession", () => {
     const store = new PostgresArchitectSessionStore(conn);
     expect(
       await store.endSession({
+        tenantId: TENANT,
         id: SESSION_UUID,
         turnCount: 0,
         inputTokens: 0,
@@ -137,13 +133,13 @@ describe("PostgresArchitectSessionStore.getById", () => {
   it("returns the record when present", async () => {
     const conn = mockConnection(() => ({ rows: [sessionRow()], rowCount: 1 }));
     const store = new PostgresArchitectSessionStore(conn);
-    expect((await store.getById(SESSION_UUID))?.id).toBe(SESSION_UUID);
+    expect((await store.getById(TENANT, SESSION_UUID))?.id).toBe(SESSION_UUID);
   });
 
   it("returns null when absent", async () => {
     const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
     const store = new PostgresArchitectSessionStore(conn);
-    expect(await store.getById(SESSION_UUID)).toBeNull();
+    expect(await store.getById(TENANT, SESSION_UUID)).toBeNull();
   });
 });
 
@@ -166,5 +162,54 @@ describe("PostgresArchitectSessionStore.listForTenant", () => {
     });
     const store = new PostgresArchitectSessionStore(conn);
     await store.listForTenant({ tenantId: TENANT });
+  });
+});
+
+describe("every statement runs under the session's own tenant (M-17)", () => {
+  // The single isolation policy on meta.architect_sessions is ALL-scope, so without the context a
+  // non-owner's INSERT raises, its UPDATE matches nothing and its reads come back empty.
+  const OTHER = "00000000-0000-4000-8000-0000000000ff";
+
+  it("scopes the insert, the update and both reads, and says so in the predicate as well", async () => {
+    const conn = mockConnection(() => ({ rows: [sessionRow()], rowCount: 1 }));
+    const store = new PostgresArchitectSessionStore(conn);
+    await store.startSession({ tenantId: TENANT, sessionId: "cli-abc", model: "m", systemPromptSha256: null });
+    await store.endSession({
+      tenantId: TENANT,
+      id: SESSION_UUID,
+      turnCount: 1,
+      inputTokens: 1,
+      outputTokens: 1,
+      cachedInputTokens: 0,
+      costUsd: 0,
+    });
+    await store.getById(TENANT, SESSION_UUID);
+    await store.listForTenant({ tenantId: TENANT });
+    expect(conn.statements).toHaveLength(4);
+    for (const st of conn.statements) expect(st.tenant).toBe(TENANT);
+    for (const st of conn.statements.slice(1)) expect(st.sql).toContain("tenant_id = $");
+  });
+
+  it("refuses a tenant id that is not a uuid before issuing anything", async () => {
+    const conn = mockConnection(() => ({ rows: [sessionRow()], rowCount: 1 }));
+    const store = new PostgresArchitectSessionStore(conn);
+    await expect(store.getById("operate-design", SESSION_UUID)).rejects.toThrow(/invalid tenantId/);
+    expect(conn.statements).toHaveLength(0);
+  });
+
+  it("asks only for the named tenant's row", async () => {
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
+    await new PostgresArchitectSessionStore(conn).getById(OTHER, SESSION_UUID);
+    expect(conn.statements[0]).toMatchObject({ tenant: OTHER, params: [SESSION_UUID, OTHER] });
+  });
+
+  it("reads a timestamp node-postgres hands back as a Date as an ISO instant", async () => {
+    const conn = mockConnection(() => ({
+      rows: [sessionRow({ started_at: new Date(TS), ended_at: new Date(TS) })],
+      rowCount: 1,
+    }));
+    const record = await new PostgresArchitectSessionStore(conn).getById(TENANT, SESSION_UUID);
+    expect(record?.startedAt).toBe(TS);
+    expect(record?.endedAt).toBe(TS);
   });
 });

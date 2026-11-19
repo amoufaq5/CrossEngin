@@ -655,6 +655,9 @@ describe("buildOpenApiDocument — a page is not described as a record", () => {
     // asserted present and required.
     expect(pageProps["limit"]!["type"]).toBe("integer");
     expect(page["required"]).toEqual(["limit", "nextCursor"]);
+    // A narrowed search is declared and optional: the handler omits it unless a field was left out.
+    expect(pageProps["searchNarrowedBy"]).toMatchObject({ type: "array", items: { type: "string" } });
+    expect(String(pageProps["searchNarrowedBy"]!["description"])).toContain("was not looked for");
   });
 
   it("describes a read 200 as the bare entity, and never as a page", () => {

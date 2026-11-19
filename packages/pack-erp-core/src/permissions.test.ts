@@ -150,8 +150,14 @@ describe("sensitive-classified field grants", () => {
   it("finds the pack's classified fields", () => {
     // Vacuity guard: every assertion below iterates this set, so an empty or shrunken census
     // would make them all pass having checked nothing.
-    expect(SENSITIVE.length).toBe(21);
+    expect(SENSITIVE.length).toBe(28);
     expect(SENSITIVE.filter((s) => s.required).map((s) => `${s.entity}.${s.field}`).sort()).toEqual([
+      "Account.billing_email",
+      "Contact.email",
+      "Contact.family_name",
+      "Contact.given_name",
+      "Employee.family_name",
+      "Employee.given_name",
       "Employee.work_email",
       "FixedAsset.acquisition_cost",
       "Lead.full_name",
@@ -206,10 +212,24 @@ describe("sensitive-classified field grants", () => {
     expect(fp?.create).not.toEqual(fp?.update);
   });
 
-  it("drops the general observer from every classified field it granted", () => {
-    for (const { entity, field, perms } of SENSITIVE) {
-      const fp = perms.fields?.[field];
-      expect(roles(fp?.read), `${entity}.${field}`).not.toContain("erp_viewer");
-    }
+  // The fields classified so their values stay out of the retained audit trail (ADR-0428) rather
+  // than to narrow who reads them: a customer's contact details and an employee's name are what the
+  // read-only role is for, so the observer keeps them. Exact in both directions, so a newly
+  // classified field cannot join it by omission and a listed one cannot quietly lose the observer.
+  const OBSERVER_READABLE = [
+    "Account.billing_email",
+    "Contact.email",
+    "Contact.family_name",
+    "Contact.given_name",
+    "Contact.phone",
+    "Employee.family_name",
+    "Employee.given_name",
+  ];
+
+  it("drops the general observer from every classified field it granted, but the declared few", () => {
+    const observerReads = SENSITIVE.filter(({ field, perms }) =>
+      roles(perms.fields?.[field]?.read).includes("erp_viewer"),
+    ).map(({ entity, field }) => `${entity}.${field}`);
+    expect(observerReads.sort()).toEqual(OBSERVER_READABLE);
   });
 });

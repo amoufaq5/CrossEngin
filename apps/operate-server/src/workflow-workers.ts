@@ -448,6 +448,7 @@ export class WorkflowWorkerSupervisor {
         worker: new WorkflowTimerWorker({
           workerId: input.workerId,
           claimer: buildTimerClaimer(input.conn, schemaOpt),
+          claimRenewer: buildClaimRenewer(input.conn, { leaseMs: config.leaseMs, now, ...schemaOpt }),
           processor: this.timerProcessor(input, timerLedger, renewIntervalMs, now, sleep),
           batchLimit: config.batchLimit,
           leaseMs: config.leaseMs,
@@ -484,6 +485,11 @@ export class WorkflowWorkerSupervisor {
           worker: new WorkflowActivityWorker({
             workerId: input.workerId,
             claimer: buildActivityClaimer(input.conn, schemaOpt),
+            claimRenewer: buildActivityClaimRenewer(input.conn, {
+              leaseMs: config.leaseMs,
+              now,
+              ...schemaOpt,
+            }),
             processor: this.activityProcessor(
               input,
               renewIntervalMs,
@@ -536,6 +542,7 @@ export class WorkflowWorkerSupervisor {
             ...(events.onJobsReaped !== undefined ? { onReaped: events.onJobsReaped } : {}),
           }),
           processor: this.jobProcessor(jobEngine, input, watcher, renewIntervalMs, now, sleep),
+          claimRenewer: buildJobClaimRenewer(input.conn, { leaseMs: config.leaseMs, now, ...schemaOpt }),
           batchLimit: config.batchLimit,
           leaseMs: config.leaseMs,
           idlePollMs: config.idlePollMs,
@@ -716,6 +723,7 @@ export class WorkflowWorkerSupervisor {
             renewer,
             timerId: timer.timerId,
             workerId: input.workerId,
+            tenantId: timer.tenantId,
             intervalMs: renewIntervalMs,
             sleep,
             onLeaseLost: () => events.onLeaseLost?.("timer", timer.timerId),
@@ -749,6 +757,7 @@ export class WorkflowWorkerSupervisor {
             renewer,
             timerId: activity.activityId,
             workerId: input.workerId,
+            tenantId: activity.tenantId,
             intervalMs: renewIntervalMs,
             sleep,
             onLeaseLost: () => events.onLeaseLost?.("activity", activity.activityId),
@@ -784,7 +793,11 @@ export class WorkflowWorkerSupervisor {
     return {
       process: async (job) => {
         const run = (signal?: AbortSignal): Promise<unknown> =>
-          jobEngine.executeJobRun(job.jobId, job.tenantId, signal !== undefined ? { signal } : {});
+          jobEngine.executeJobRun(job.jobId, job.tenantId, {
+            // The fence: a run this worker's lease no longer covers is neither started nor finalized.
+            claimedBy: input.workerId,
+            ...(signal !== undefined ? { signal } : {}),
+          });
         const execute =
           watcher === undefined
             ? run()
@@ -800,6 +813,7 @@ export class WorkflowWorkerSupervisor {
           renewer,
           timerId: job.jobId,
           workerId: input.workerId,
+          tenantId: job.tenantId,
           intervalMs: renewIntervalMs,
           sleep,
           onLeaseLost: () => events.onLeaseLost?.("job", job.jobId),

@@ -1,5 +1,7 @@
-import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
-import { describe, expect, it, vi } from "vitest";
+import type { PgConnection } from "@crossengin/kernel-pg";
+import { describe, expect, it } from "vitest";
+
+import { tenantScopedConnection, type RecordedStatement } from "./test-fakes.js";
 
 import { PostgresTranscript } from "./transcript.js";
 
@@ -11,30 +13,17 @@ const PROP_ID = "00000000-0000-4000-8000-000000000005";
 const TS = "2026-05-17T12:00:00.000Z";
 const HASH = "a".repeat(64);
 
-interface CapturedCall {
-  sql: string;
-  params: readonly unknown[] | undefined;
-}
-
 function mockConnection(rows: Array<Record<string, unknown>>): {
   conn: PgConnection;
-  calls: CapturedCall[];
+  calls: RecordedStatement[];
 } {
-  const calls: CapturedCall[] = [];
   let idx = 0;
-  const conn: PgConnection = {
-    query: vi.fn(async (sql: string, params?: readonly unknown[]) => {
-      calls.push({ sql, params });
-      const row = rows[idx];
-      idx += 1;
-      if (row === undefined) return { rows: [], rowCount: 0 } as PgQueryResult<Record<string, unknown>>;
-      return { rows: [row], rowCount: 1 } as PgQueryResult<Record<string, unknown>>;
-    }) as PgConnection["query"],
-    transaction: vi.fn() as PgConnection["transaction"],
-    withAdvisoryLock: vi.fn() as PgConnection["withAdvisoryLock"],
-    close: vi.fn() as PgConnection["close"],
-  };
-  return { conn, calls };
+  const conn = tenantScopedConnection(() => {
+    const row = rows[idx];
+    idx += 1;
+    return row === undefined ? { rows: [], rowCount: 0 } : { rows: [row], rowCount: 1 };
+  });
+  return { conn, calls: conn.statements };
 }
 
 describe("PostgresTranscript", () => {
@@ -180,6 +169,10 @@ describe("PostgresTranscript", () => {
     expect(calls[2]?.sql).toContain("INSERT INTO meta.architect_tool_invocations");
     expect(calls[3]?.sql).toContain("INSERT INTO meta.architect_proposals");
     expect(calls[4]?.sql).toContain("UPDATE meta.architect_sessions");
+    // Every write, including the closing UPDATE, ran under the session's tenant — which as the
+    // non-owner serving role is the difference between a row and a 42501 (M-17).
+    expect(calls.map((c) => c.tenant)).toEqual([TENANT, TENANT, TENANT, TENANT, TENANT]);
+    expect(calls[4]?.params?.[6]).toBe(TENANT);
   });
 
   it("throws if onMessage is called before onSessionStart", async () => {

@@ -68,6 +68,8 @@ export interface InstanceCancelResultLike {
   readonly signalDeliveredActivityIds: readonly string[];
   readonly compensationOutcome: InstanceCancelCompensationOutcome;
   readonly compensatedActivityIds: readonly string[];
+  /** A compensation that was run and did not succeed: its side effect still stands. */
+  readonly failedCompensationActivityIds: readonly string[];
   readonly unreversedActivityIds: readonly string[];
 }
 
@@ -255,6 +257,7 @@ export function actorForInstanceCancel(principal: ResolvedPrincipal): InstanceCa
 export interface InstanceCancelEffects {
   readonly compensationOutcome: InstanceCancelCompensationOutcome | null;
   readonly compensatedActivityIds: readonly string[] | null;
+  readonly failedCompensationActivityIds: readonly string[] | null;
   readonly unreversedActivityIds: readonly string[] | null;
   readonly cancelledTimerIds: readonly string[] | null;
   readonly beforeHandlerActivityIds: readonly string[] | null;
@@ -265,6 +268,7 @@ export interface InstanceCancelEffects {
 const UNKNOWN_EFFECTS: InstanceCancelEffects = {
   compensationOutcome: null,
   compensatedActivityIds: null,
+  failedCompensationActivityIds: null,
   unreversedActivityIds: null,
   cancelledTimerIds: null,
   beforeHandlerActivityIds: null,
@@ -287,6 +291,7 @@ export function effectsFor(result: InstanceCancelResultLike): InstanceCancelEffe
   return {
     compensationOutcome: result.compensationOutcome,
     compensatedActivityIds: result.compensatedActivityIds,
+    failedCompensationActivityIds: result.failedCompensationActivityIds,
     unreversedActivityIds: result.unreversedActivityIds,
     cancelledTimerIds: result.cancelledTimerIds,
     beforeHandlerActivityIds: result.beforeHandlerActivityIds,

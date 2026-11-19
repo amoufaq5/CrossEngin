@@ -1,3 +1,4 @@
+import { moneyUnits, unitsOf, unitsToNumber } from "./money.js";
 import type { EntityRecord } from "./store.js";
 
 /** An aging bucket by days overdue; `maxDays === null` is the open-ended tail. */
@@ -28,17 +29,26 @@ export interface DocumentAging {
   readonly bucket: string;
 }
 
+/** One currency's open balances. */
+export interface AgingCurrencyTotals {
+  readonly totalsByBucket: Readonly<Record<string, number>>;
+  readonly totalOpen: number;
+}
+
 export interface AgingReport {
   readonly asOf: string;
   readonly documents: readonly DocumentAging[];
+  /**
+   * Summed over every document, whatever its currency — a figure only when `currency` is non-null.
+   * With documents in more than one currency it adds euros to dollars, so a reader wanting a total
+   * then reads `totalsByCurrency`.
+   */
   readonly totalsByBucket: Readonly<Record<string, number>>;
   readonly totalOpen: number;
+  /** The one currency every document is in, or null when they are in several. */
   readonly currency: string | null;
-}
-
-function num(v: unknown): number {
-  const n = typeof v === "number" ? v : Number(v);
-  return Number.isFinite(n) ? n : 0;
+  /** The same totals per currency, which is the only form that is a quantity with mixed currencies. */
+  readonly totalsByCurrency: Readonly<Record<string, AgingCurrencyTotals>>;
 }
 
 /** Whole days between two ISO dates (a − b), UTC; positive when `a` is later. */
@@ -102,10 +112,12 @@ export function computeAging(input: AgingInput): AgingReport {
   const currencyField = input.currencyField ?? "currency";
   const buckets = input.buckets ?? DEFAULT_AGING_BUCKETS;
 
+  // Every figure in exact ledger units, handed back as numbers only at the end: the per-addition
+  // rounding of doubles this replaced is exact only while every partial sum stays under 2^53 / 100.
   const documents: DocumentAging[] = [];
-  const totalsByBucket: Record<string, number> = {};
-  for (const b of buckets) totalsByBucket[b.label] = 0;
-  let totalOpen = 0;
+  const bucketUnits = new Map<string, bigint>(buckets.map((b) => [b.label, 0n]));
+  let openUnitsTotal = 0n;
+  const perCurrency = new Map<string, { buckets: Map<string, bigint>; open: bigint }>();
   const currencies = new Set<string>();
 
   const cn = input.creditNote;
@@ -117,32 +129,33 @@ export function computeAging(input: AgingInput): AgingReport {
     const ref = doc[cn.refField];
     return typeof ref === "string" ? (byId.get(ref) ?? null) : null;
   };
-  const openOf = (doc: EntityRecord): number => {
+  const openOf = (doc: EntityRecord): bigint => {
     const id = String(doc["id"] ?? "");
-    const withheld = input.withholdingField === undefined ? 0 : Math.max(0, num(doc[input.withholdingField]));
-    const owed = num(doc[totalField]) - withheld - (input.appliedByDocument.get(id) ?? 0);
-    return Math.round((isCreditNote(doc) ? -owed : owed) * 100) / 100;
+    const withheldRaw = input.withholdingField === undefined ? 0n : unitsOf(doc[input.withholdingField]);
+    const withheld = withheldRaw > 0n ? withheldRaw : 0n;
+    const owed = unitsOf(doc[totalField]) - withheld - (moneyUnits(input.appliedByDocument.get(id) ?? 0) ?? 0n);
+    return isCreditNote(doc) ? -owed : owed;
   };
   // Each credited document's open balance, net of every credit note against it.
-  const groupOpen = new Map<string, number>();
+  const groupOpen = new Map<string, bigint>();
   for (const doc of input.documents) {
     const original = originalOf(doc);
     if (original === null) continue;
     const key = String(original["id"]);
-    groupOpen.set(key, Math.round(((groupOpen.get(key) ?? openOf(original)) + openOf(doc)) * 100) / 100);
+    groupOpen.set(key, (groupOpen.get(key) ?? openOf(original)) + openOf(doc));
   }
 
   for (const doc of input.documents) {
     const id = String(doc["id"] ?? "");
     if (id === "") continue;
-    const total = num(doc[totalField]);
+    const total = unitsToNumber(unitsOf(doc[totalField]));
     const applied = input.appliedByDocument.get(id) ?? 0;
     const open = openOf(doc);
     const original = originalOf(doc);
     const group = groupOpen.get(original !== null ? String(original["id"]) : id);
     if (group !== undefined) {
-      if (group === 0) continue;
-    } else if (isCreditNote(doc) ? open === 0 : open <= 0) {
+      if (group === 0n) continue;
+    } else if (isCreditNote(doc) ? open === 0n : open <= 0n) {
       continue;
     }
     const dueRaw = (original ?? doc)[dueDateField];
@@ -151,15 +164,19 @@ export function computeAging(input: AgingInput): AgingReport {
     const bucket = bucketFor(daysOverdue, buckets);
     const currency = typeof doc[currencyField] === "string" ? (doc[currencyField] as string) : "USD";
     currencies.add(currency);
-    totalsByBucket[bucket] = Math.round((totalsByBucket[bucket]! + open) * 100) / 100;
-    totalOpen = Math.round((totalOpen + open) * 100) / 100;
+    bucketUnits.set(bucket, (bucketUnits.get(bucket) ?? 0n) + open);
+    openUnitsTotal += open;
+    const mine = perCurrency.get(currency) ?? { buckets: new Map(buckets.map((b) => [b.label, 0n])), open: 0n };
+    mine.buckets.set(bucket, (mine.buckets.get(bucket) ?? 0n) + open);
+    mine.open += open;
+    perCurrency.set(currency, mine);
     documents.push({
       id,
       number: typeof doc[numberField] === "string" ? (doc[numberField] as string) : id,
       currency,
       total,
       applied,
-      open,
+      open: unitsToNumber(open),
       dueDate,
       daysOverdue,
       bucket,
@@ -167,11 +184,16 @@ export function computeAging(input: AgingInput): AgingReport {
   }
 
   documents.sort((a, b) => b.daysOverdue - a.daysOverdue || a.number.localeCompare(b.number));
+  const asNumbers = (m: ReadonlyMap<string, bigint>): Record<string, number> =>
+    Object.fromEntries([...m].map(([k, v]) => [k, unitsToNumber(v)]));
   return {
     asOf: input.asOf.slice(0, 10),
     documents,
-    totalsByBucket,
-    totalOpen,
+    totalsByBucket: asNumbers(bucketUnits),
+    totalOpen: unitsToNumber(openUnitsTotal),
     currency: currencies.size === 1 ? [...currencies][0]! : null,
+    totalsByCurrency: Object.fromEntries(
+      [...perCurrency].map(([currency, t]) => [currency, { totalsByBucket: asNumbers(t.buckets), totalOpen: unitsToNumber(t.open) }]),
+    ),
   };
 }

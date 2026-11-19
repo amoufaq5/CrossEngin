@@ -179,7 +179,7 @@ describe("operate-server — authenticates a JWT via a remote JWKS", () => {
     const header = b64url(Buffer.from(JSON.stringify({ alg: "EdDSA", typ: "JWT", kid: "k1" })).toString("base64"));
     const payload = b64url(
       Buffer.from(
-        JSON.stringify({ iss: ISS, aud: AUD, sub: "u1", scope: "store_manager", exp: nowS + 3600, nbf: nowS - 60 }),
+        JSON.stringify({ iss: ISS, aud: AUD, sub: "u1", tenant_id: "00000000-0000-4000-8000-000000000001", scope: "store_manager", exp: nowS + 3600, nbf: nowS - 60 }),
       ).toString("base64"),
     );
     const sig = b64url(signEd25519(kp.privateKeyBase64, kp.publicKeyBase64, new TextEncoder().encode(`${header}.${payload}`)));

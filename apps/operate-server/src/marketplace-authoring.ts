@@ -4,7 +4,9 @@ import {
   DISTRIBUTION_CHANNELS,
   PackManifestSchema,
   PackSignatureSchema,
+  PackVersionRecordSchema,
 } from "@crossengin/marketplace";
+import { PackSubmissionError, type PackSubmissionRefusal } from "@crossengin/marketplace-runtime";
 import type {
   PersistentPackSubmissionEngine,
   PostgresPackVersionStore,
@@ -28,14 +30,15 @@ const SHA256 = /^[0-9a-f]{64}$/;
 const SubmitBodySchema = z
   .object({
     packId: z.string().min(1),
-    version: z.string().min(1),
+    // The record's own field, so a version the store would refuse is a 400 here and not a ZodError
+    // thrown past the refusal map as a 500.
+    version: PackVersionRecordSchema.innerType().shape.version,
     manifest: PackManifestSchema,
     channel: z.enum(DISTRIBUTION_CHANNELS),
     bundleSha256: z.string().regex(SHA256),
     bundleSizeBytes: z.number().int().positive(),
     manifestSha256: z.string().regex(SHA256),
     signature: PackSignatureSchema,
-    publicKeyBase64: z.string().min(1),
     changelog: z.string().min(1),
   })
   .strict();
@@ -73,8 +76,29 @@ function isDenial(v: { readonly principalId: string } | HandlerOutput): v is Han
   return "kind" in v;
 }
 
-function submissionErrorStatus(message: string): number {
-  return /signature/i.test(message) ? 400 : 409;
+/**
+ * The status each refusal answers, as a total map so a new refusal is a compile error here. A signer
+ * the registry does not admit for this pack is a 403 — the request is well formed and the caller is
+ * not allowed to publish it — where the old mapping keyed a 400 on the word "signature" in a message.
+ */
+const SUBMISSION_REFUSAL_STATUS: Readonly<Record<PackSubmissionRefusal, number>> = Object.freeze({
+  publisher_unregistered: 403,
+  pack_outside_publisher_namespace: 403,
+  author_kind_not_registered: 403,
+  signature_invalid: 400,
+  pack_id_mismatch: 400,
+  manifest_digest_mismatch: 400,
+  version_exists: 409,
+  version_changed: 409,
+  illegal_transition: 409,
+  review_not_open: 409,
+  review_not_cleared: 409,
+});
+
+/** A refusal becomes its status; anything else is not a refusal and propagates as a 500. */
+function refusalOutput(err: unknown, error: string): HandlerOutput {
+  if (!(err instanceof PackSubmissionError)) throw err;
+  return json(SUBMISSION_REFUSAL_STATUS[err.reason], { error, reason: err.reason, detail: err.message });
 }
 
 /** `POST /v1/authoring/packs` — submit a new signed pack version (→ draft). */
@@ -88,8 +112,7 @@ export function buildSubmitHandler(ctx: MarketplaceAuthoringContext): Handler {
       const version = await ctx.engine.submit(parsed.data);
       return json(201, { status: version.status, version });
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return json(submissionErrorStatus(message), { error: "submission_rejected", detail: message });
+      return refusalOutput(err, "submission_rejected");
     }
   };
 }
@@ -133,8 +156,7 @@ function step(
       const version = await run(loaded, g.principalId, body);
       return json(200, { version });
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return json(submissionErrorStatus(message), { error: "transition_rejected", detail: message });
+      return refusalOutput(err, "transition_rejected");
     }
   };
 }

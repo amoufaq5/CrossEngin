@@ -19,6 +19,8 @@ import {
   COLUMN_KEY_TTL_FLAG,
   DATA_KEY_SHREDDABILITY,
   DEFAULT_COLUMN_KEY_TTL_MS,
+  ColumnKeyLedger,
+  ColumnKeySeedUnavailable,
   buildEnvelopeKeySource,
   formatColumnKeyMode,
   formatShreddability,
@@ -413,6 +415,29 @@ describe("buildEnvelopeKeySource", () => {
       mayHoldCiphertext: countingProbe(false).probe,
     });
     await source(TENANT_A);
+    expect(ensureCalls).toHaveLength(1);
+    expect(ensureCalls[0]?.options?.seed).toBeUndefined();
+  });
+
+  it("refuses, provisioning nothing, when the seed secret is no longer held and the tenant may hold ciphertext", async () => {
+    const { store, ensureCalls } = fakeStore();
+    const source = buildEnvelopeKeySource({
+      store,
+      secret: null,
+      mayHoldCiphertext: countingProbe(true).probe,
+    });
+    await expect(source(TENANT_A)).rejects.toBeInstanceOf(ColumnKeySeedUnavailable);
+    expect(ensureCalls).toHaveLength(0);
+  });
+
+  it("still provisions a random key without the seed secret when the tenant holds no ciphertext", async () => {
+    const { store, ensureCalls } = fakeStore();
+    const source = buildEnvelopeKeySource({
+      store,
+      secret: null,
+      mayHoldCiphertext: countingProbe(false).probe,
+    });
+    await expect(source(TENANT_A)).resolves.toBe(dataKeyToColumnKey(RANDOM_DEK));
     expect(ensureCalls).toHaveLength(1);
     expect(ensureCalls[0]?.options?.seed).toBeUndefined();
   });
@@ -812,5 +837,112 @@ describe("DATA_KEY_PROVENANCES", () => {
   it("is the set shreddabilityOf is total over", () => {
     const provenances: readonly DataKeyProvenance[] = DATA_KEY_PROVENANCES;
     expect([...provenances].sort()).toEqual(["random", "seeded_from_derived"]);
+  });
+});
+
+describe("load-first resolution, the ledger and the opportunistic re-wrap", () => {
+  function storeWithRow(kekGeneration: number, currentKekGeneration: number) {
+    const calls: string[] = [];
+    const row: StoredDataKey = {
+      tenantId: TENANT_A,
+      generation: 5,
+      kekGeneration,
+      provenance: "random",
+      dek: RANDOM_DEK,
+    };
+    const store = {
+      currentKekGeneration,
+      load: async (): Promise<StoredDataKey | null> => {
+        calls.push("load");
+        return row;
+      },
+      ensure: async (): Promise<StoredDataKey> => {
+        calls.push("ensure");
+        return row;
+      },
+      rewrap: async (tenantId: string, options?: { readonly opportunistic?: boolean }) => {
+        calls.push(`rewrap:${String(options?.opportunistic)}`);
+        return {
+          tenantId,
+          generation: 5,
+          fromKekGeneration: kekGeneration,
+          toKekGeneration: currentKekGeneration,
+          outcome: "rewrapped" as const,
+        };
+      },
+    };
+    return { calls, store: store as unknown as PostgresDataKeyStore };
+  }
+
+  it("reads an existing row without taking ensure's exclusive lock", async () => {
+    const { calls, store } = storeWithRow(1, 1);
+    const source = buildEnvelopeKeySource({ store, secret: SECRET, mayHoldCiphertext: async () => true });
+    await source(TENANT_A);
+    expect(calls).toEqual(["load"]);
+  });
+
+  it("records the key's tenant and generation for the write-time fence", async () => {
+    const { store } = storeWithRow(1, 1);
+    const ledger = new ColumnKeyLedger();
+    const source = buildEnvelopeKeySource({
+      store,
+      secret: SECRET,
+      mayHoldCiphertext: async () => true,
+      ledger,
+    });
+    const key = await source(TENANT_A);
+    expect(ledger.originOf(key)).toEqual({ tenantId: TENANT_A, generation: 5 });
+  });
+
+  it("re-wraps opportunistically, never by waiting, when the row names a retired KEK", async () => {
+    const { calls, store } = storeWithRow(1, 2);
+    const seen: string[] = [];
+    const source = buildEnvelopeKeySource({
+      store,
+      secret: SECRET,
+      mayHoldCiphertext: async () => true,
+      onRewrap: (o) => seen.push(o.outcome),
+    });
+    await source(TENANT_A);
+    expect(calls).toEqual(["load", "rewrap:true"]);
+    expect(seen).toEqual(["rewrapped"]);
+  });
+
+  it("does not re-wrap a row already under the current KEK", async () => {
+    const { calls, store } = storeWithRow(2, 2);
+    await buildEnvelopeKeySource({ store, secret: SECRET, mayHoldCiphertext: async () => true })(
+      TENANT_A,
+    );
+    expect(calls).toEqual(["load"]);
+  });
+
+  it("serves the key even when the re-wrap throws", async () => {
+    const { store } = storeWithRow(1, 2);
+    (store as unknown as { rewrap: () => Promise<never> }).rewrap = async () => {
+      throw new Error("lock trouble");
+    };
+    const key = await buildEnvelopeKeySource({
+      store,
+      secret: SECRET,
+      mayHoldCiphertext: async () => true,
+    })(TENANT_A);
+    expect(key).toBe(dataKeyToColumnKey(RANDOM_DEK));
+  });
+
+  it("evicts a cached entry the fence superseded, so the next call re-resolves", async () => {
+    const { calls, store } = storeWithRow(1, 1);
+    const ledger = new ColumnKeyLedger();
+    const source = buildEnvelopeKeySource({
+      store,
+      secret: SECRET,
+      mayHoldCiphertext: async () => true,
+      ledger,
+    });
+    await source(TENANT_A);
+    await source(TENANT_A);
+    expect(calls).toEqual(["load"]);
+    ledger.supersede(TENANT_A);
+    await source(TENANT_A);
+    expect(calls).toEqual(["load", "load"]);
   });
 });

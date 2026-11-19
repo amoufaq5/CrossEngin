@@ -3,6 +3,10 @@ import { describe, expect, it } from "vitest";
 import {
   API_KEY_SPEC_SOURCES,
   API_KEY_SPECS_VAR,
+  apiKeyTokenWeakness,
+  estimateTokenBits,
+  formatWeakApiKeyTokens,
+  surveyApiKeyTokens,
   ApiKeySpecResolutionSchema,
   formatApiKeySpecSource,
   resolveApiKeySpecs,
@@ -162,5 +166,50 @@ describe("formatApiKeySpecSource", () => {
       expect(formatApiKeySpecSource(r).length).toBeGreaterThan(20);
     }
     expect([...sources].sort()).toEqual([...API_KEY_SPEC_SOURCES].sort());
+  });
+});
+
+describe("api-key token strength", () => {
+  // Built by interpolation so the scanner sees no literal token-shaped value (ADR-0420).
+  const hex48 = "0123456789abcdef".repeat(3);
+  const base64url43 = "Ab3-_Zq9xY".repeat(4) + "Kp7";
+
+  it("accepts the documented generators' output, including hex", () => {
+    expect(apiKeyTokenWeakness(hex48)).toBeNull();
+    expect(estimateTokenBits(hex48)).toBe(192);
+    expect(apiKeyTokenWeakness(base64url43)).toBeNull();
+  });
+
+  it("accepts a 48-char hex token that does NOT contain all 16 digits, which refuseWeakSecret would refuse", () => {
+    // Twelve of sixteen digits: a perfectly random `openssl rand -hex 24` lands here ~55% of the
+    // time, so a distinct-byte floor of 16 is the wrong instrument for this credential.
+    const twelve = "0123456789ab".repeat(4);
+    expect(new Set(twelve).size).toBe(12);
+    expect(apiKeyTokenWeakness(twelve)).toBeNull();
+  });
+
+  it("refuses a short word, a repeated character and the .env.example placeholder", () => {
+    expect(apiKeyTokenWeakness(["key", "manager"].join("-"))).toBe("too_little_entropy");
+    expect(apiKeyTokenWeakness("dev" + "key")).toBe("too_few_distinct_characters");
+    expect(apiKeyTokenWeakness("a".repeat(64))).toBe("too_few_distinct_characters");
+    expect(apiKeyTokenWeakness(`REPLACE_WITH_${"STRONG"}_TOKEN`)).toBe("unreplaced_placeholder");
+    // 31 hex characters is 124 bits — just under the floor, which fixes where the line is.
+    expect(apiKeyTokenWeakness(hex48.slice(0, 31))).toBe("too_little_entropy");
+    expect(apiKeyTokenWeakness(hex48.slice(0, 32))).toBeNull();
+  });
+
+  it("names the position and role of a weak token and never the token", () => {
+    const weakToken = ["key", "manager"].join("-");
+    const weak = surveyApiKeyTokens([
+      { key: hex48, role: "erp_admin" },
+      { key: weakToken, role: "store_manager" },
+    ]);
+    expect(weak).toEqual([{ position: 2, role: "store_manager", weakness: "too_little_entropy" }]);
+    for (const allowed of [false, true]) {
+      const line = formatWeakApiKeyTokens(weak, allowed);
+      expect(line).not.toContain(weakToken);
+      expect(line).toContain("#2 (role store_manager)");
+    }
+    expect(formatWeakApiKeyTokens(weak, false)).toContain("--allow-weak-api-keys");
   });
 });

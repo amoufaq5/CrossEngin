@@ -96,13 +96,24 @@ describe("PostgresUsageRecordStore.listUnsynced / markSynced", () => {
     expect(seen[0]?.detail).not.toContain("not_a_meter");
   });
 
-  it("marks a record synced by id, guarded on still-unsynced", async () => {
+  it("marks a record synced by its idempotency key and keeps the first report on a re-mark", async () => {
     const { conn, calls } = fakePg();
-    await new PostgresUsageRecordStore(conn).markSynced(TENANT, "33333333-3333-3333-3333-333333333333", "mbur_1", "2026-07-02T00:00:00.000Z");
+    const key = record("33333333-3333-3333-3333-333333333333").idempotencyKey;
+    await new PostgresUsageRecordStore(conn).markSynced(TENANT, key, "mbur_1", "2026-07-02T00:00:00.000Z");
     const update = calls.find((c) => c.sql.includes("UPDATE"))!;
-    expect(update.sql).toContain("SET synced_to_stripe_at = $2");
-    expect(update.sql).toContain("WHERE id = $1 AND synced_to_stripe_at IS NULL");
-    expect(update.params).toEqual(["33333333-3333-3333-3333-333333333333", "2026-07-02T00:00:00.000Z", "mbur_1"]);
+    expect(update.sql).toContain("COALESCE(synced_to_stripe_at, $2)");
+    expect(update.sql).toContain("WHERE idempotency_key = $1");
+    expect(update.sql).not.toContain("WHERE id = $1");
+    expect(update.params).toEqual([key, "2026-07-02T00:00:00.000Z", "mbur_1"]);
+  });
+
+  // The defect: the store's conflict arm left the row's id behind and rewrote the document with a
+  // newer one, so marking by the document's id matched nothing and every sync re-sent the record.
+  it("throws when no row carries the key, rather than marking nothing in silence", async () => {
+    const { conn } = fakePg([], { writeRowCount: () => 0 });
+    await expect(
+      new PostgresUsageRecordStore(conn).markSynced(TENANT, "tenant=x", "mbur_1", "2026-07-02T00:00:00.000Z"),
+    ).rejects.toThrow(/no usage record carries/);
   });
 });
 
@@ -129,7 +140,8 @@ describe("UsageStripeSync", () => {
     expect(reporter.calls[0]?.subscriptionItemId).toBe("si_ai");
     expect(reporter.calls[0]?.quantity).toBe(200); // 200.4 rounded
     expect(reporter.calls[0]?.idempotencyKey).toBeDefined();
-    expect(calls.some((c) => c.sql.includes("UPDATE") && c.sql.includes("synced_to_stripe_at"))).toBe(true);
+    const mark = calls.find((c) => c.sql.includes("UPDATE") && c.sql.includes("synced_to_stripe_at"));
+    expect(mark?.params[0]).toBe(record("33333333-3333-3333-3333-333333333333").idempotencyKey);
   });
 
   it("skips records with no subscription-item mapping without reporting", async () => {

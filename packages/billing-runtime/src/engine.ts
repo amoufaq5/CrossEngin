@@ -10,7 +10,7 @@ import {
 import { RandomUuidGenerator, SystemClock, type Clock, type UuidGenerator } from "./clock.js";
 import { type MeteredUsageEvent } from "./ingest.js";
 import { usageRecordFrom } from "./ingest.js";
-import { UsageMeter, type MeterBucket, type RecordResult } from "./meter.js";
+import { UsageMeter, type DedupStats, type MeterBucket, type RecordResult } from "./meter.js";
 import { draftInvoice, hasBillableUsage, type MeterUsage } from "./invoicing.js";
 
 export interface BillingMeteringEngineOptions {
@@ -76,6 +76,15 @@ export class BillingMeteringEngine {
 
   usage(subscriptionId: string): readonly MeterBucket[] {
     return this.meter.bucketsFor(subscriptionId);
+  }
+
+  /** Removes and returns a subscription's accumulated buckets, for a caller that will persist them. */
+  takeSubscriptionUsage(subscriptionId: string): readonly MeterBucket[] {
+    return this.meter.takeSubscription(subscriptionId);
+  }
+
+  dedupStats(): DedupStats {
+    return this.meter.dedupStats();
   }
 
   /** Drops a subscription's accumulated buckets (e.g. after a usage flush persists them). */

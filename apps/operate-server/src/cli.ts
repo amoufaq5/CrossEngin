@@ -7,7 +7,12 @@ import {
 } from "@crossengin/api-gateway-pg";
 import { REQUIRED_JWT_CLAIMS } from "@crossengin/api-gateway-runtime";
 import { REGIONS } from "@crossengin/residency";
-import { DELETION_SUBSYSTEMS, SUBSYSTEM_DISPOSITIONS } from "@crossengin/tenant-lifecycle";
+import { PackCompatibilitySchema, PackPublisherRegistry, parsePackPublisherSpec } from "@crossengin/marketplace";
+import {
+  DEFAULT_DELETION_GRACE_DAYS,
+  DELETION_SUBSYSTEMS,
+  SUBSYSTEM_DISPOSITIONS,
+} from "@crossengin/tenant-lifecycle";
 import {
   parsePgPoolSetting,
   pgPoolSettingForFlag,
@@ -19,8 +24,18 @@ import {
 } from "@crossengin/types/meta-schema";
 
 import { COLUMN_ENCRYPTION_SECRET_VAR } from "./column-encryption.js";
+import {
+  httpListenerSettingForFlag,
+  parseHttpListenerSetting,
+  resolveHttpListenerSettings,
+  type HttpListenerSettings,
+} from "./http-listener.js";
+import { PRE_AUTH_LIMIT_FLAG, parsePreAuthLimitPolicy, type PreAuthLimitPolicy } from "./pre-auth-limit.js";
 import { ALLOW_CURSOR_DISCLOSURE_FLAG } from "./cursor-encryption.js";
 import { ALLOW_UNCOVERED_SETTLEMENT_FLAG } from "./settlement-coverage-survey.js";
+import type { DeclaredModelPrice } from "./ai-design.js";
+import { AiModelPriceInvalid, parseDeclaredModelPrice } from "./ai-design-pricing.js";
+import { parseAiProviderRef } from "./ai-provider-residency.js";
 import {
   COLUMN_KEY_MODES,
   COLUMN_KEY_MODE_FLAG,
@@ -35,10 +50,6 @@ import {
   SENSITIVE_FIELD_ROLE_FLAG,
 } from "./sensitive-field-policy.js";
 import {
-  DEFAULT_DELETION_APPROVED_BY,
-  DEFAULT_DELETION_EXECUTED_BY,
-} from "./deletion-scheduler.js";
-import {
   MIN_LOGIN_LOCKOUT_ATTEMPTS,
   MIN_LOGIN_LOCKOUT_SECONDS,
   DEFAULT_LOGIN_LOCKOUT_ATTEMPTS,
@@ -50,10 +61,21 @@ import {
   DEFAULT_SESSION_TOKEN_SECONDS,
 } from "./token-mint.js";
 import { CREDENTIAL_PEPPER_VAR, TOKEN_SIGNING_KEY_VAR } from "./credential-auth-env.js";
+import {
+  DEFAULT_MIN_PASSWORD_LENGTH,
+  MAX_PASSWORD_LENGTH,
+  MIN_MIN_PASSWORD_LENGTH,
+} from "./credential-routes.js";
 import type { SetCredentialOptions } from "./set-credential.js";
 import { NEW_PASSWORD_VAR } from "./set-credential.js";
 import { parseHmacKeySpec, parseJwksKeySpec, parseMtlsClientSpec } from "./principals.js";
 import { BUILTIN_PACK_NAMES } from "./manifest-source.js";
+import {
+  RETENTION_FLAG,
+  RetentionPolicyError,
+  resolveRetentionPolicy,
+  type RetentionPolicy,
+} from "./operational-retention.js";
 import { DEFAULT_ADMIN_ROLES } from "./recipient-resolver.js";
 import { MIN_FAX_SUPPRESSION_THRESHOLD } from "@crossengin/notification-providers";
 import { DEFAULT_UNREAD_SCAN_LIMIT, MAX_UNREAD_SCAN_LIMIT } from "./read-state-routes.js";
@@ -213,6 +235,24 @@ export interface ServeOptions {
   /** Consecutive failed passwords before an account locks. Refused below the floor, not clamped. */
   readonly loginLockoutAttempts: number | null;
   readonly loginLockoutSeconds: number | null;
+  /**
+   * The shortest password the credential routes and `set-credential` accept (H-07). Null is
+   * `DEFAULT_MIN_PASSWORD_LENGTH`. Checked when a password is SET, never at login, so an existing
+   * hash under a shorter password keeps working until its holder changes it.
+   */
+  readonly minPasswordLength: number | null;
+  /**
+   * Boot with an `--api-key` / `OPERATE_API_KEY_SPECS` token whose estimated entropy is under the
+   * floor, which otherwise refuses the boot (M-28). Announced at boot; a short token is a guessable
+   * credential, so the hatch exists for a deployment rotating keys rather than as a default.
+   */
+  readonly allowWeakApiKeys: boolean;
+  /**
+   * Let a bearer token signed by a key this deployment does not mint with carry a platform role
+   * (H-04). Off, such a token has every platform-authority role removed from its scopes, so an
+   * IdP's `scope` cannot grant tenant provision or deletion. Announced at boot either way.
+   */
+  readonly idpPlatformRoles: boolean;
   /** Path to an offline Ed25519 license token file (on-prem subscription entitlement). */
   readonly licenseFile: string | null;
   /** The licensor's Ed25519 public key (base64) used to verify the license. */
@@ -295,14 +335,26 @@ export interface ServeOptions {
    * Enforce `meta.tenants.status` on the request path (ADR-0334): a `suspended` / `archived` /
    * `pending_deletion` tenant is read-only and a `deleted` one is refused outright.
    *
-   * Opt-in, because the gate refuses a credential whose tenant has no `meta.tenants` row and
-   * `--api-key 'key:role:tenant'` specs name arbitrary UUIDs that nothing requires to exist. A boot
-   * survey names those tenants before the first request rather than leaving an operator to infer it
-   * from a 403.
+   * **On by default on a Postgres store**, with `--no-tenant-status-gate` as the announced hatch.
+   * ADR-0334 left it opt-in because the gate refuses a credential whose tenant has no
+   * `meta.tenants` row — and ADR-0376 measured what that "working" request was: a 200 writing
+   * records under a `tenant_id` with no parent, while a suspended or `pending_deletion` tenant went
+   * on writing into data about to be destroyed. Serving an unprovisioned tenant is not a correct
+   * answer, so refusing it breaks nothing that worked (ADR-0338's rule); the shipped compose has
+   * passed the flag since ADR-0376, so the binary default now agrees with the deployment. A boot
+   * survey still names unprovisioned API-key tenants before the first request.
    */
   readonly tenantStatusGate: boolean;
+  /** How the gate's setting was reached, so the boot line can say a default is a default. */
+  readonly tenantStatusGateSource: "flag" | "default" | "disabled_by_flag" | "not_applicable";
   /** How long a resolved tenant status is cached (ms). Default 30s. */
   readonly tenantStatusTtlMs: number | null;
+  /**
+   * A per-process bound on requests before authentication, keyed on address and credential shape.
+   * `null` is off, the default — on the shipped stack every caller reaches the API from the proxy's
+   * one address, so a per-address bound is a single shared budget there (see `pre-auth-limit.ts`).
+   */
+  readonly preAuthRateLimit: PreAuthLimitPolicy | null;
   /**
    * Mount the platform **user registry** (`meta.users` + `meta.user_tenant_membership`).
    *
@@ -331,12 +383,17 @@ export interface ServeOptions {
    * second tombstone id and then answers `409 scope_empty` for a request that had succeeded.
    *
    * The guarantee it buys is bounded and stated rather than implied (`IDEMPOTENCY_GUARANTEE`):
-   * there is no reserve step between the read at stage 10 and the write after the handler commits,
-   * so two *concurrent* retries of one key can still both execute. What Postgres buys is the
-   * **sequential** case — a timeout, then a retry seconds later, anywhere in the fleet — which is
-   * what clients actually produce.
+   * the gateway reserves the key before the handler runs, so a concurrent retry is answered `409`
+   * in progress across the fleet, and a handler outliving the reservation's lease is the bound.
    */
   readonly pgIdempotencyStore: boolean;
+  /**
+   * The operational-table retention policy, or `null` when `--retention-sweep` is absent and
+   * nothing is pruned. Opt-in because the sweep deletes rows a working deployment keeps today —
+   * an old in-app notice disappears from its reader's inbox — so it is an operator's decision and
+   * not an upgrade's (ADR-0338's rule read the other way). The boot line says either way.
+   */
+  readonly retention: RetentionPolicy | null;
   /**
    * Persist this fraction of `PipelineExecution` rows — the writer
    * `meta.gateway_pipeline_executions` never had, and the only thing that gives `GatewayReplayer`
@@ -384,6 +441,16 @@ export interface ServeOptions {
   readonly packCatalogFile: string | null;
   /** Enable the third-party authoring routes (/v1/authoring/packs — submit/review/publish pack versions). Needs pg. */
   readonly marketplaceAuthoring: boolean;
+  /**
+   * The platform's pinned publisher keys, each `<namespace>:<authorKind>:<publicKeyBase64>`. A pack is
+   * verified against the registered key its signature names, never a key supplied with it; both
+   * marketplace surfaces refuse to mount with none.
+   */
+  readonly packPublisherKeys: readonly string[];
+  /** The platform version a pack's compatibility envelope is compared against; unknown when absent. */
+  readonly marketplacePlatformVersion: string | null;
+  /** Roles allowed to install and uninstall catalog packs for their tenant (default erp_admin). */
+  readonly packAdminRoles: readonly string[];
   /** This instance's serving region id (from @crossengin/residency) — enables residency edge routing with --residency-file. */
   readonly region: string | null;
   /** Path to a residency file ({tenants:[{tenantId, profile}]}) — the tenant→region directory (requires --region). */
@@ -481,6 +548,14 @@ export interface ServeOptions {
   readonly stripeUsageSyncConfig: string | null;
   /** Per-request USD ceiling on AI design spend; null leaves the per-request gate off (the monthly one still applies). */
   readonly aiMaxRequestDollars: number | null;
+  /** How long a provider call may go without sending a byte before it is aborted; null is the provider default. */
+  readonly aiProviderTimeoutMs: number | null;
+  /** A declared per-token price for the configured model, which the ceilings are computed from. */
+  readonly aiModelPrice: DeclaredModelPrice | null;
+  /** Serve a model with no catalogue or declared price, whose ceilings then bound nothing. */
+  readonly allowUnpricedModel: boolean;
+  /** Where the AI provider runs, as a residency profile's allowedLlmProviders names it. */
+  readonly aiProviderRef: string | null;
   /** Expose the notification-template authoring routes under /v1/notification-templates (draft/review/approve/retire over meta.notification_templates; needs --store pg). */
   readonly notificationTemplateRoutes: boolean;
   /** Roles permitted to draft and submit a template (repeatable; default erp_admin). */
@@ -653,8 +728,13 @@ export interface ServeOptions {
   readonly deletionRunnerMs: number | null;
   /** The actor unattended deletions execute as (default `system:deletion-runner`). */
   readonly deletionRunnerExecutedBy: string | null;
-  /** Who authorised unattended execution (default `system:retention-policy`). Must differ from the executor — four-eyes still applies. */
-  readonly deletionRunnerApprovedBy: string | null;
+  /**
+   * Days a verified deletion request waits before the runner may execute it (default
+   * `DEFAULT_DELETION_GRACE_DAYS`, 0 to run at the next tick). The wait is the window in which a
+   * verify can still be rejected — the cancellation — and it yields to the Article 12(3) deadline,
+   * so it can never cause a breach.
+   */
+  readonly deletionGraceDays: number;
   /** Requests the runner may take per tick (default 5). Each one is a whole tenant's data. */
   readonly deletionRunnerBatchSize: number | null;
   /** Maximum buffered request body, as bytes or a size like 25mb (default 10mb, floor 1kb, ceiling 1gb). */
@@ -665,6 +745,11 @@ export interface ServeOptions {
    * reads these — migrate and the operator subcommands run unbounded on purpose.
    */
   readonly pgPool: Partial<PgPoolSettings>;
+  /**
+   * Overrides of the HTTP listener's bounds and the shutdown grace (`DEFAULT_HTTP_LISTENER_SETTINGS`
+   * in `http-listener.ts`); a key absent here takes that default.
+   */
+  readonly httpListener: Partial<HttpListenerSettings>;
   /**
    * Per-route body-size overrides as `<path-prefix>=<size>` (repeatable), longest prefix winning.
    *
@@ -684,6 +769,21 @@ export interface ServeOptions {
 export class CliUsageError extends Error {}
 
 const DEFAULT_PORT = 8787;
+
+/**
+ * Refused and never clamped (ADR-0332): a floor of 1 is the defect restated, and raising it for the
+ * operator would leave the deployment believing it had configured something it had not.
+ */
+export function parseMinPasswordLength(raw: string): number {
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < MIN_MIN_PASSWORD_LENGTH || n > MAX_PASSWORD_LENGTH) {
+    throw new CliUsageError(
+      `invalid --min-password-length: ${raw} (integer ${MIN_MIN_PASSWORD_LENGTH.toString()}..` +
+        `${MAX_PASSWORD_LENGTH.toString()}; a lower floor is refused rather than raised for you)`,
+    );
+  }
+  return n;
+}
 
 function takeValue(arg: string, next: string | undefined, flag: string): string {
   if (arg.includes("=")) return arg.slice(arg.indexOf("=") + 1);
@@ -729,6 +829,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let credentialLogin = false;
   let sessionTokenTtl: number | null = null;
   let loginLockoutAttempts: number | null = null;
+  let minPasswordLength: number | null = null;
+  let allowWeakApiKeys = false;
+  let idpPlatformRoles = false;
   let loginLockoutSeconds: number | null = null;
   let licenseFile: string | null = null;
   let licenseKey: string | null = null;
@@ -759,6 +862,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   const rateLimitPolicySpecs: string[] = [];
   let rateLimitDefaultPolicyId: string | null = null;
   let idempotencyStoreKind: string | null = null;
+  let retentionSweep = false;
+  const retentionSpecs: string[] = [];
   let gatewayCaptureRate: string | null = null;
   const gatewayCaptureOperations: string[] = [];
   let platformUserRoutes = false;
@@ -767,11 +872,15 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let preferenceRoutes = false;
   const preferenceRoles: string[] = [];
   const preferenceAdminRoles: string[] = [];
-  let tenantStatusGate = false;
+  let tenantStatusGateFlag: "on" | "off" | null = null;
   let tenantStatusTtlMs: number | null = null;
+  let preAuthRateLimit: PreAuthLimitPolicy | null = null;
   const jobInvokeActionRoles: string[] = [];
   let packCatalogFile: string | null = null;
   let marketplaceAuthoring = false;
+  const packPublisherKeys: string[] = [];
+  let marketplacePlatformVersion: string | null = null;
+  const packAdminRoles: string[] = [];
   let region: string | null = null;
   let residencyFile: string | null = null;
   let residencyStore = false;
@@ -809,6 +918,10 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let meteringConfig: string | null = null;
   let stripeUsageSyncConfig: string | null = null;
   let aiMaxRequestDollars: number | null = null;
+  let aiProviderTimeoutMs: number | null = null;
+  let aiModelPrice: DeclaredModelPrice | null = null;
+  let allowUnpricedModel = false;
+  let aiProviderRef: string | null = null;
   let notificationTemplateRoutes = false;
   const notificationTemplateAuthorRoles: string[] = [];
   const notificationTemplateApproverRoles: string[] = [];
@@ -848,10 +961,11 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let deletionRequestDeadlineDays: number | null = null;
   let deletionRunnerMs: number | null = null;
   let deletionRunnerExecutedBy: string | null = null;
-  let deletionRunnerApprovedBy: string | null = null;
+  let deletionGraceDays: number = DEFAULT_DELETION_GRACE_DAYS;
   let deletionRunnerBatchSize: number | null = null;
   let maxRequestBodyBytes: number | null = null;
   const pgPool: { -readonly [K in keyof PgPoolSettings]?: number } = {};
+  const httpListener: { -readonly [K in keyof HttpListenerSettings]?: number } = {};
   const maxRequestBodyRouteSpecs: string[] = [];
   let help = false;
   let version = false;
@@ -1009,6 +1123,13 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       }
       loginLockoutSeconds = n;
       i += consumed();
+    } else if (arg === "--min-password-length" || arg.startsWith("--min-password-length=")) {
+      minPasswordLength = parseMinPasswordLength(takeValue(arg, next, "--min-password-length"));
+      i += consumed();
+    } else if (arg === "--allow-weak-api-keys") {
+      allowWeakApiKeys = true;
+    } else if (arg === "--idp-platform-roles") {
+      idpPlatformRoles = true;
     } else if (arg === "--license" || arg.startsWith("--license=")) {
       licenseFile = takeValue(arg, next, "--license");
       i += consumed();
@@ -1209,6 +1330,11 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     } else if (arg === "--idempotency-store" || arg.startsWith("--idempotency-store=")) {
       idempotencyStoreKind = takeValue(arg, next, "--idempotency-store");
       i += consumed();
+    } else if (arg === "--retention-sweep") {
+      retentionSweep = true;
+    } else if (arg === RETENTION_FLAG || arg.startsWith(`${RETENTION_FLAG}=`)) {
+      retentionSpecs.push(takeValue(arg, next, RETENTION_FLAG));
+      i += consumed();
     } else if (
       arg === "--gateway-execution-capture" ||
       arg.startsWith("--gateway-execution-capture=")
@@ -1240,8 +1366,25 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     } else if (arg === "--preference-admin-role" || arg.startsWith("--preference-admin-role=")) {
       preferenceAdminRoles.push(takeValue(arg, next, "--preference-admin-role"));
       i += consumed();
-    } else if (arg === "--tenant-status-gate") {
-      tenantStatusGate = true;
+    } else if (arg === "--tenant-status-gate" || arg === "--no-tenant-status-gate") {
+      const wanted = arg === "--tenant-status-gate" ? "on" : "off";
+      if (tenantStatusGateFlag !== null && tenantStatusGateFlag !== wanted) {
+        throw new CliUsageError(
+          "--tenant-status-gate and --no-tenant-status-gate contradict each other; pass one",
+        );
+      }
+      tenantStatusGateFlag = wanted;
+    } else if (arg === PRE_AUTH_LIMIT_FLAG || arg.startsWith(`${PRE_AUTH_LIMIT_FLAG}=`)) {
+      if (preAuthRateLimit !== null) {
+        throw new CliUsageError(`${PRE_AUTH_LIMIT_FLAG} given twice; pass it once`);
+      }
+      const raw = takeValue(arg, next, PRE_AUTH_LIMIT_FLAG);
+      try {
+        preAuthRateLimit = parsePreAuthLimitPolicy(raw);
+      } catch (err) {
+        throw new CliUsageError(err instanceof Error ? err.message : String(err));
+      }
+      i += consumed();
     } else if (arg === "--tenant-status-ttl-ms" || arg.startsWith("--tenant-status-ttl-ms=")) {
       const raw = takeValue(arg, next, "--tenant-status-ttl-ms");
       const n = Number(raw);
@@ -1262,6 +1405,25 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       i += consumed();
     } else if (arg === "--marketplace-authoring") {
       marketplaceAuthoring = true;
+    } else if (arg === "--pack-publisher-key" || arg.startsWith("--pack-publisher-key=")) {
+      const raw = takeValue(arg, next, "--pack-publisher-key");
+      try {
+        parsePackPublisherSpec(raw);
+      } catch (err) {
+        throw new CliUsageError(`invalid --pack-publisher-key: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      packPublisherKeys.push(raw);
+      i += consumed();
+    } else if (arg === "--marketplace-platform-version" || arg.startsWith("--marketplace-platform-version=")) {
+      const raw = takeValue(arg, next, "--marketplace-platform-version");
+      if (!PackCompatibilitySchema.safeParse({ minPlatformVersion: raw }).success) {
+        throw new CliUsageError(`invalid --marketplace-platform-version: ${raw} (a semver such as 1.4.0)`);
+      }
+      marketplacePlatformVersion = raw;
+      i += consumed();
+    } else if (arg === "--pack-admin-role" || arg.startsWith("--pack-admin-role=")) {
+      packAdminRoles.push(takeValue(arg, next, "--pack-admin-role"));
+      i += consumed();
     } else if (arg === "--region" || arg.startsWith("--region=")) {
       const raw = takeValue(arg, next, "--region");
       if (!(REGIONS as readonly string[]).includes(raw)) {
@@ -1388,6 +1550,33 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
         throw new CliUsageError(`invalid --ai-max-request-dollars: ${raw} (> 0)`);
       }
       aiMaxRequestDollars = n;
+      i += consumed();
+    } else if (arg === "--ai-provider-timeout-ms" || arg.startsWith("--ai-provider-timeout-ms=")) {
+      const raw = takeValue(arg, next, "--ai-provider-timeout-ms");
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < 1000 || n > 3_600_000) {
+        throw new CliUsageError(`invalid --ai-provider-timeout-ms: ${raw} (an integer from 1000 to 3600000)`);
+      }
+      aiProviderTimeoutMs = n;
+      i += consumed();
+    } else if (arg === "--ai-model-price" || arg.startsWith("--ai-model-price=")) {
+      const raw = takeValue(arg, next, "--ai-model-price");
+      try {
+        aiModelPrice = parseDeclaredModelPrice(raw);
+      } catch (err) {
+        if (err instanceof AiModelPriceInvalid) throw new CliUsageError(err.message);
+        throw err;
+      }
+      i += consumed();
+    } else if (arg === "--ai-allow-unpriced-model") {
+      allowUnpricedModel = true;
+    } else if (arg === "--ai-provider-ref" || arg.startsWith("--ai-provider-ref=")) {
+      const raw = takeValue(arg, next, "--ai-provider-ref");
+      try {
+        aiProviderRef = parseAiProviderRef(raw);
+      } catch (err) {
+        throw new CliUsageError(err instanceof Error ? err.message : String(err));
+      }
       i += consumed();
     } else if (arg === "--notification-template-routes") {
       notificationTemplateRoutes = true;
@@ -1721,7 +1910,22 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       arg === "--deletion-runner-approved-by" ||
       arg.startsWith("--deletion-runner-approved-by=")
     ) {
-      deletionRunnerApprovedBy = takeValue(arg, next, "--deletion-runner-approved-by");
+      // Refused by name rather than ignored (H-05): the approver of an unattended deletion is the
+      // principal who verified the request, recorded when they did it. A configured string was a
+      // claim that somebody approved, typed by the operator who started the binary.
+      takeValue(arg, next, "--deletion-runner-approved-by");
+      throw new CliUsageError(
+        "--deletion-runner-approved-by is no longer accepted: the runner's approver is the " +
+          "principal who verified each request, and the runner refuses a request whose verifier " +
+          "is its own executor. Remove the flag",
+      );
+    } else if (arg === "--deletion-grace-days" || arg.startsWith("--deletion-grace-days=")) {
+      const raw = takeValue(arg, next, "--deletion-grace-days");
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < 0 || n > 90) {
+        throw new CliUsageError(`invalid --deletion-grace-days: ${raw} (0..90)`);
+      }
+      deletionGraceDays = n;
       i += consumed();
     } else if (
       arg === "--deletion-runner-batch-size" ||
@@ -1745,6 +1949,18 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       const parsed = parseRequestBodyLimit(raw);
       if (!parsed.ok) throw new CliUsageError(`invalid --max-request-body: ${parsed.reason}`);
       maxRequestBodyBytes = parsed.bytes;
+      i += consumed();
+    } else if (httpListenerSettingForFlag(arg.split("=")[0] ?? "") !== undefined) {
+      const flag = arg.split("=")[0] ?? "";
+      const key = httpListenerSettingForFlag(flag);
+      const raw = takeValue(arg, next, flag);
+      if (key === undefined) throw new CliUsageError(`unknown flag: ${flag}`);
+      if (httpListener[key] !== undefined) throw new CliUsageError(`${flag} given more than once`);
+      try {
+        httpListener[key] = parseHttpListenerSetting(key, raw);
+      } catch (err) {
+        throw new CliUsageError(err instanceof Error ? err.message : String(err));
+      }
       i += consumed();
     } else if (pgPoolSettingForFlag(arg.split("=")[0] ?? "") !== undefined) {
       const flag = arg.split("=")[0] ?? "";
@@ -1839,18 +2055,6 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       "--deletion-request-routes / --deletion-runner-ms require a Postgres store (--store pg or pg-columns)",
     );
   }
-  if (
-    (deletionRunnerExecutedBy ?? DEFAULT_DELETION_EXECUTED_BY) ===
-    (deletionRunnerApprovedBy ?? DEFAULT_DELETION_APPROVED_BY)
-  ) {
-    // Compared against the *resolved* pair, not the flags: passing only
-    // `--deletion-runner-executed-by system:retention-policy` would otherwise pass here and throw at
-    // the runner's construction, which is at boot. Four-eyes holds for an unattended deletion exactly
-    // as it does for a human one.
-    throw new CliUsageError(
-      "--deletion-runner-executed-by must differ from --deletion-runner-approved-by (four-eyes principle)",
-    );
-  }
   if ((auditReadRoutes || notificationTemplateRoutes) && store === "memory") {
     // Refused here rather than warned about at boot, like every sibling above: both surfaces read and
     // write `meta.*` tables, so on the memory store they cannot work at all — and `--audit-read-routes`
@@ -1886,9 +2090,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   if (stripeWebhookSecret !== null && store === "memory") {
     throw new CliUsageError("--stripe-webhook-secret requires a Postgres store (--store pg or pg-columns)");
   }
-  if (planCatalogFile !== null && stripeWebhookSecret === null) {
-    throw new CliUsageError("--plan-catalog requires --stripe-webhook-secret (it feeds webhook record caps)");
-  }
+  // `--plan-catalog` without a webhook secret, and `--stripe-usage-sync-config` without an API key,
+  // are refused at BOOT now (`stripeRequirementRefusal`), over the resolved secrets: the secret may
+  // arrive through STRIPE_WEBHOOK_SECRET / STRIPE_API_KEY, which this parser cannot see by design.
   if (stripeApiKey !== null && billingPortalReturnUrl === null && stripeUsageSyncConfig === null) {
     throw new CliUsageError(
       "--stripe-api-key requires --billing-portal-return-url or --stripe-usage-sync-config (nothing would use the key)",
@@ -1896,9 +2100,6 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   }
   if (stripeApiKey !== null && store === "memory") {
     throw new CliUsageError("--stripe-api-key requires a Postgres store (--store pg or pg-columns)");
-  }
-  if (stripeUsageSyncConfig !== null && stripeApiKey === null) {
-    throw new CliUsageError("--stripe-usage-sync-config requires --stripe-api-key");
   }
   if (scheduleMs !== null && store === "memory") {
     throw new CliUsageError("--schedule-ms requires a Postgres store (--store pg or pg-columns)");
@@ -2101,6 +2302,29 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       );
     }
   }
+  let retention: RetentionPolicy | null = null;
+  if (retentionSpecs.length > 0 && !retentionSweep) {
+    // The specs alone would be parsed and then read by nothing — an operator who wrote
+    // `--retention job_runs=30` believes their queue is bounded.
+    throw new CliUsageError(
+      `${RETENTION_FLAG} requires --retention-sweep: the policy is read only by the sweep, so` +
+        " without it nothing is pruned",
+    );
+  }
+  if (retentionSweep) {
+    if (store === "memory") {
+      throw new CliUsageError(
+        "--retention-sweep requires a Postgres store (--store pg or pg-columns): there are no" +
+          " operational tables to prune under --store memory",
+      );
+    }
+    try {
+      retention = resolveRetentionPolicy(retentionSpecs);
+    } catch (err) {
+      if (err instanceof RetentionPolicyError) throw new CliUsageError(err.message);
+      throw err;
+    }
+  }
   let gatewayExecutionCapture: GatewayExecutionCaptureConfig | null = null;
   if (gatewayCaptureRate !== null) {
     const rate = Number(gatewayCaptureRate);
@@ -2195,6 +2419,11 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   }
   // A pool bound with no pool is a setting read, validated and ignored, which reads to an operator
   // as tuned.
+  try {
+    resolveHttpListenerSettings(httpListener);
+  } catch (err) {
+    throw new CliUsageError(err instanceof Error ? err.message : String(err));
+  }
   const pgPoolFlagsGiven = Object.keys(pgPool);
   if (pgPoolFlagsGiven.length > 0 && store === "memory") {
     throw new CliUsageError(
@@ -2204,19 +2433,32 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   }
   // The gate reads `meta.tenants`, which the memory store does not have — and unlike a scheduler
   // that would merely go quiet, a gate whose directory throws refuses *every* request with a 503.
-  if (tenantStatusGate && store === "memory") {
+  if (tenantStatusGateFlag === "on" && store === "memory") {
     throw new CliUsageError(
       "--tenant-status-gate requires a Postgres store (--store pg or pg-columns): the gate reads" +
         " meta.tenants, which the memory store has no registry for, so every request would be" +
         " refused 503 rather than gated.",
     );
   }
+  // The memory store has no registry to gate on, so a default does not reach it; only an explicit
+  // request is refused above.
+  const tenantStatusGate =
+    tenantStatusGateFlag === "on" || (tenantStatusGateFlag === null && store !== "memory");
+  const tenantStatusGateSource: ServeOptions["tenantStatusGateSource"] =
+    tenantStatusGateFlag === "on"
+      ? "flag"
+      : tenantStatusGateFlag === "off"
+        ? "disabled_by_flag"
+        : store === "memory"
+          ? "not_applicable"
+          : "default";
   // A TTL for a gate that is not mounted is the same silence as `--workflow-worker-config` without
   // workers: read, validated, ignored, and the operator believes they tuned something.
   if (tenantStatusTtlMs !== null && !tenantStatusGate) {
     throw new CliUsageError(
       "--tenant-status-ttl-ms has no effect without --tenant-status-gate: it tunes how long the" +
-        " gate caches a tenant's status, and no gate is mounted.",
+        " gate caches a tenant's status, and no gate is mounted (--no-tenant-status-gate, or a" +
+        " memory store).",
     );
   }
   for (const spec of jobInvokeActionRoles) {
@@ -2230,6 +2472,35 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   }
   if (packCatalogFile !== null && store === "memory") {
     throw new CliUsageError("--pack-catalog requires a Postgres store (--store pg or pg-columns)");
+  }
+  // Without a registered publisher key the only key a pack's signature could be checked against is
+  // one supplied beside it, which proves nothing — so a marketplace surface with no key refuses
+  // rather than verifying a signature against its own signer. The registry is also built here so an
+  // overlapping or ambiguous set is refused at parse rather than at the first install.
+  if ((packCatalogFile !== null || marketplaceAuthoring) && packPublisherKeys.length === 0) {
+    throw new CliUsageError(
+      `${packCatalogFile !== null ? "--pack-catalog" : "--marketplace-authoring"} requires at least one --pack-publisher-key <namespace>:<authorKind>:<publicKeyBase64>: a pack is verified against a key the platform registered, never one shipped with it`,
+    );
+  }
+  // These configure a surface; given without one they would be read by nothing (ADR-0368's rule).
+  if (packCatalogFile === null) {
+    const inert = [
+      ...(packAdminRoles.length > 0 ? ["--pack-admin-role"] : []),
+      ...(marketplacePlatformVersion !== null ? ["--marketplace-platform-version"] : []),
+      ...(packPublisherKeys.length > 0 && !marketplaceAuthoring ? ["--pack-publisher-key"] : []),
+    ];
+    if (inert.length > 0) {
+      throw new CliUsageError(
+        `${inert.join(", ")} configure${inert.length === 1 ? "s" : ""} a marketplace surface and none is mounted: pass --pack-catalog${inert.includes("--pack-publisher-key") ? " or --marketplace-authoring" : ""}`,
+      );
+    }
+  }
+  if (packPublisherKeys.length > 0) {
+    try {
+      new PackPublisherRegistry(packPublisherKeys.map(parsePackPublisherSpec));
+    } catch (err) {
+      throw new CliUsageError(`invalid --pack-publisher-key set: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
   if (residencyFile !== null && region === null) {
     throw new CliUsageError("--residency-file requires --region (this instance's serving region)");
@@ -2361,6 +2632,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       ["--session-token-ttl", sessionTokenTtl],
       ["--login-lockout-attempts", loginLockoutAttempts],
       ["--login-lockout-seconds", loginLockoutSeconds],
+      ["--min-password-length", minPasswordLength],
     ] as const) {
       if (value !== null) {
         throw new CliUsageError(`${flag} requires --credential-login`);
@@ -2398,6 +2670,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     sessionTokenTtl,
     loginLockoutAttempts,
     loginLockoutSeconds,
+    minPasswordLength,
+    allowWeakApiKeys,
+    idpPlatformRoles,
     licenseFile,
     licenseKey,
     stripeWebhookSecret,
@@ -2438,6 +2713,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     workflowDeferActivities,
     rateLimitPolicies,
     pgIdempotencyStore,
+    retention,
     gatewayExecutionCapture,
     platformUserRoutes,
     platformUserRoles,
@@ -2446,10 +2722,15 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     preferenceRoles,
     preferenceAdminRoles,
     tenantStatusGate,
+    tenantStatusGateSource,
     tenantStatusTtlMs,
+    preAuthRateLimit,
     jobInvokeActionRoles,
     packCatalogFile,
     marketplaceAuthoring,
+    packPublisherKeys,
+    marketplacePlatformVersion,
+    packAdminRoles: packAdminRoles.length > 0 ? packAdminRoles : ["erp_admin"],
     region,
     residencyFile,
     residencyStore,
@@ -2491,6 +2772,10 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     meteringConfig,
     stripeUsageSyncConfig,
     aiMaxRequestDollars,
+    aiProviderTimeoutMs,
+    aiModelPrice,
+    allowUnpricedModel,
+    aiProviderRef,
     notificationTemplateRoutes,
     notificationTemplateAuthorRoles:
       notificationTemplateAuthorRoles.length > 0 ? notificationTemplateAuthorRoles : ["erp_admin"],
@@ -2544,10 +2829,11 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     deletionRequestDeadlineDays,
     deletionRunnerMs,
     deletionRunnerExecutedBy,
-    deletionRunnerApprovedBy,
+    deletionGraceDays,
     deletionRunnerBatchSize,
     maxRequestBodyBytes,
     pgPool,
+    httpListener,
     maxRequestBodyRoutes: parsedRouteLimits.limits,
     defaultScheme,
     help,
@@ -2719,6 +3005,99 @@ Options:
   -h, --help           Show this help
 `;
 
+/**
+ * Options for the `column-schema` maintenance subcommand: apply `--store pg-columns`' DDL **as the
+ * schema's owner** and grant the serving role its DML, before the API boots.
+ *
+ * `document-indexes`' reason one store over (ADR-0423). Measured on PG 16 as the shipped serving
+ * role, the column store's boot DDL raised at its first statement (`CREATE SCHEMA IF NOT EXISTS`,
+ * `permission denied for database`), and every later statement is refused to a non-owner even when
+ * its object exists — `CREATE TABLE IF NOT EXISTS` by schema privilege, `ADD COLUMN IF NOT EXISTS`
+ * and `CREATE INDEX IF NOT EXISTS` by ownership — so the API cannot apply it and only verifies.
+ */
+export interface ColumnSchemaOptions {
+  readonly pack: string | null;
+  readonly manifestPath: string | null;
+  readonly schema: string | null;
+  /** Roles granted USAGE on the schema and the four DML privileges on every planned table. */
+  readonly grantTo: readonly string[];
+  readonly help: boolean;
+}
+
+const ROLE_NAME = /^[A-Za-z_][A-Za-z0-9_$]{0,62}$/;
+
+/** Parses the argv *after* the `column-schema` token. */
+export function parseColumnSchemaArgs(argv: readonly string[]): ColumnSchemaOptions {
+  let pack: string | null = null;
+  let manifestPath: string | null = null;
+  let schema: string | null = null;
+  const grantTo: string[] = [];
+  let help = false;
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === undefined) continue;
+    const next = argv[i + 1];
+    const consumed = (): number => (isInline(arg) ? 0 : 1);
+    if (arg === "--help" || arg === "-h") {
+      help = true;
+    } else if (arg === "--pack" || arg.startsWith("--pack=")) {
+      pack = takeValue(arg, next, "--pack");
+      i += consumed();
+    } else if (arg === "--manifest" || arg.startsWith("--manifest=")) {
+      manifestPath = takeValue(arg, next, "--manifest");
+      i += consumed();
+    } else if (arg === "--schema" || arg.startsWith("--schema=")) {
+      schema = takeValue(arg, next, "--schema");
+      i += consumed();
+    } else if (arg === "--grant-to" || arg.startsWith("--grant-to=")) {
+      const role = takeValue(arg, next, "--grant-to");
+      if (!ROLE_NAME.test(role)) {
+        throw new CliUsageError(`--grant-to: '${role}' is not a role name (letters, digits, _ and $)`);
+      }
+      if (!grantTo.includes(role)) grantTo.push(role);
+      i += consumed();
+    } else {
+      throw new CliUsageError(`unknown argument: ${arg}`);
+    }
+  }
+  if (!help) {
+    if (pack === null && manifestPath === null) {
+      throw new CliUsageError("one of --pack or --manifest is required");
+    }
+    if (pack !== null && manifestPath !== null) {
+      throw new CliUsageError("--pack and --manifest are mutually exclusive");
+    }
+  }
+  return { pack, manifestPath, schema, grantTo, help };
+}
+
+export const columnSchemaHelpText = `operate-server column-schema — apply --store pg-columns' tables as the owner
+
+Usage:
+  operate-server column-schema --pack <name> [--schema <name>] [--grant-to <role>]...
+  operate-server column-schema --manifest <file.json> [--schema <name>] [--grant-to <role>]...
+
+Creates and migrates the per-entity tables --store pg-columns serves from (the
+same DDL the API applied at boot before it connected as a role that owns
+nothing), then grants each --grant-to role USAGE on the schema and SELECT,
+INSERT, UPDATE and DELETE on every planned table. Run it as the schema's OWNER
+(the role that runs migrate), before the API boots, for the pack the API
+serves: Postgres refuses CREATE TABLE IF NOT EXISTS and ADD COLUMN IF NOT EXISTS
+to a non-owner even when the object exists, so the API only verifies the schema
+and refuses at boot, naming what is missing, when it does not match the
+manifest. Idempotent. Uses standard PG* env vars for the connection.
+
+Exits 1 when the DDL or a grant fails, 2 on a usage error, 0 otherwise. A unique
+index that existing duplicate rows prevent is reported and does not fail it.
+
+Options:
+  --pack <name>        Built-in vertical pack: ${BUILTIN_PACK_NAMES.join(", ")}
+  --manifest <file>    Path to a resolved manifest JSON document
+  --schema <name>      Schema holding the entity tables (default public)
+  --grant-to <role>    A role to grant DML to (repeatable); none grants nothing
+  -h, --help           Show this help
+`;
+
 export const pruneHelpText = `operate-server prune-links — remove a tenant's dangling m2m association links
 
 Usage:
@@ -2860,6 +3239,7 @@ Usage:
 Subcommands (each takes --help):
   prune-links          Remove a tenant's dangling m2m links
   document-indexes     Build --store pg's unique indexes as the table owner (before the API)
+  column-schema        Apply --store pg-columns' tables and grants as the owner (before the API)
   verify-chain         Verify the audit chain's links, signatures and anchors
   replay               Re-derive each subsystem's projections from its log and report drift
   rekey                Move one tenant's at-rest column key to a fresh random data key
@@ -2994,14 +3374,29 @@ Options:
                        for you: a threshold of 1 locks a real user out on one typo
   --login-lockout-seconds <n>
                        How long that lock lasts (>= ${MIN_LOGIN_LOCKOUT_SECONDS.toString()}, default ${DEFAULT_LOGIN_LOCKOUT_SECONDS.toString()})
+  --min-password-length <n>
+                       Shortest password a credential route or set-credential accepts
+                       (${MIN_MIN_PASSWORD_LENGTH.toString()}..${MAX_PASSWORD_LENGTH.toString()}, default ${DEFAULT_MIN_PASSWORD_LENGTH.toString()}; requires --credential-login).
+                       Checked when a password is set, never at login, so an
+                       existing shorter password works until it is changed
+  --allow-weak-api-keys
+                       Boot although an api-key token's estimated entropy is under
+                       the floor (refused otherwise; announced at boot)
+  --idp-platform-roles Let a bearer token signed by a key this deployment does not
+                       mint with (--jwks-key/--jwks-file/--jwks-url) carry a platform
+                       role. Off, such a token's platform roles are removed, so an
+                       IdP's scope cannot grant tenant provision or deletion
   --license <file>     Offline Ed25519 license token file (on-prem entitlement)
   --license-key <b64>  Licensor Ed25519 public key, base64 (required with --license)
   --stripe-webhook-secret <s>  Enable POST /v1/webhooks/stripe → billing_subscriptions
-                       (needs --store pg|pg-columns; also enforces the subscription gate)
+                       (needs --store pg|pg-columns; also enforces the subscription gate).
+                       Prefer STRIPE_WEBHOOK_SECRET in the environment: argv is readable
+                       via ps. Both may be set only if they agree
   --plan-catalog <file>  Plan-catalog JSON {plans:[...]} resolving webhook record caps
-                       by plan/price id (requires --stripe-webhook-secret)
+                       by plan/price id (requires a webhook secret, flag or environment)
   --stripe-api-key <sk>  Stripe secret key — enables POST /v1/meta/billing-portal
-                       (needs --store pg|pg-columns + --billing-portal-return-url)
+                       (needs --store pg|pg-columns + --billing-portal-return-url).
+                       Prefer STRIPE_API_KEY in the environment, for the same reason
   --billing-portal-return-url <url>  Where Stripe returns the customer after the portal
   --schedule-ms <n>    Cron scheduler tick interval (ms, >=1000) — enqueues the
                        manifest's scheduled jobs into job_runs (needs --store pg|pg-columns)
@@ -3087,6 +3482,15 @@ Options:
                        pg deduplicates a sequential retry fleet-wide; two CONCURRENT retries of one
                        key can still both execute (there is no reserve step). Needs --store pg or
                        pg-columns
+  --retention-sweep    Prune operational tables hourly, per tenant, in batches: terminal job_runs
+                       older than 90 days (the newest run of each job is kept: it is the cron
+                       scheduler's memory), gateway_pipeline_executions and rate_limit_decisions
+                       older than 30, and finished notification_dispatches older than 365 -- which
+                       removes an old in-app notice from its reader's inbox, which is why this is
+                       opt-in. Never touches a retained or audit table. Needs a Postgres store
+  --retention <table>=<days|off>  Override one table's period (repeatable, 1..36500 days). Needs
+                       --retention-sweep. rate_limit_decisions may not be pruned sooner than
+                       gateway_pipeline_executions, which names its decision rows
   --gateway-execution-capture <rate>  Persist this fraction of PipelineExecution rows, which is what
                        gives GatewayReplayer anything to read. No default: ~2100 B/row incl. indexes
                        is ~6.6 TB/yr at 100 req/s and ~66 TB/yr at 1,000 req/s unsampled, so the
@@ -3127,17 +3531,36 @@ Options:
                        Without it the status is a column nothing on the request path reads, so a
                        tenant whose Article 17 erasure is queued goes on accepting writes into data
                        about to be destroyed. /v1/platform routes are exempt — they act on the
-                       deployment, not on the caller's tenant. Opt-in: a credential whose tenant has
-                       no meta.tenants row is refused 403, and a boot survey names those tenants
-                       before the first request. Needs --store pg|pg-columns
+                       deployment, not on the caller's tenant. ON by default on --store pg and
+                       pg-columns: a credential whose tenant has no meta.tenants row is refused 403,
+                       and a boot survey names those tenants before the first request. Explicitly
+                       passing it under --store memory is refused
+  --no-tenant-status-gate  Turn the gate off, announced at boot. Every tenant status is then
+                       unenforced on the request path
   --tenant-status-ttl-ms <ms>  How long a resolved tenant status is cached (1000..300000, default
                        30000). This is how long a state change takes to bite; the floor keeps the
                        gate off the per-request query path. With --tenant-status-gate
+  --pre-auth-rate-limit <requests>/<seconds>  Bound requests per (address, credential shape)
+                       BEFORE authentication, the login route included, per process; over it is
+                       429 with retry-after. Off by default: behind a proxy the address is the
+                       proxy's unless --trusted-edge-client-cert is passed (then the rightmost
+                       x-forwarded-for entry), so without it this is one budget shared by every
+                       caller
   --pack-catalog <file>  Marketplace pack-catalog JSON ({packs:[...]}) — enables the admin pack
                        routes GET /v1/admin/packs, POST /v1/admin/packs/install,
                        POST /v1/admin/packs/{id}/uninstall (needs --store pg|pg-columns)
   --marketplace-authoring  Enable the third-party authoring routes under /v1/authoring/packs —
-                       submit a signed pack version, review it, publish/withdraw (needs --store pg)
+                       submit a signed pack version, review it, publish/withdraw (needs --store pg).
+                       A submitted version is immutable: re-submitting one is 409 version_exists
+  --pack-publisher-key <namespace>:<authorKind>:<publicKeyBase64>  A publisher key the platform
+                       pins (repeatable; required by --pack-catalog and --marketplace-authoring).
+                       A pack must be signed by a registered key whose namespace covers its id, and
+                       its manifest may claim only the author kind registered with that key
+  --marketplace-platform-version <semver>  The platform version pack compatibility is checked
+                       against. Unknown without it, which refuses every pack whose envelope
+                       constrains the platform version
+  --pack-admin-role <role>  Role allowed to install and uninstall catalog packs for its tenant
+                       (repeatable; default erp_admin)
   --platform-admin     Expose the platform super-admin routes under /v1/platform — list/create/suspend/
                        archive/reactivate tenants + stats over meta.tenants (needs --store pg|pg-columns)
   --platform-admin-role <role>  Role allowed to call the /v1/platform routes (repeatable; default
@@ -3182,6 +3605,18 @@ Options:
   --ai-max-request-dollars <n>  Per-REQUEST USD ceiling, refused before the call rather than
                        discovered after it. The monthly ceiling still applies; this bounds one
                        prompt. Off by default
+  --ai-provider-timeout-ms <n>  Abort a provider call that sends nothing for this long (ms,
+                       1000-3600000; default 120000). An inactivity deadline, so a slow stream
+                       that keeps sending is never cut off
+  --ai-model-price <in>:<out>[:<cachedIn>]  Declare the configured model's price, USD per million
+                       tokens; both ceilings are computed from it. Needed for a model the built-in
+                       catalogue does not price, and to correct a stale catalogue price
+  --ai-allow-unpriced-model  Serve a model with no catalogue or declared price. Its ceilings then
+                       admit every request; refused at boot without this flag or --ai-model-price
+  --ai-provider-ref <provider:qualifier>  Where the AI provider runs, as a tenant residency
+                       profile's allowedLlmProviders names it (e.g. anthropic:us). A tenant whose
+                       profile does not list it is refused AI design; undeclared, every profiled
+                       tenant is refused
   --notification-template-routes  Expose template authoring under /v1/notification-templates —
                        draft, submit, approve/reject, retire (needs --store pg)
   --notification-template-author-role <r>  Role permitted to draft and submit (repeatable;
@@ -3328,8 +3763,10 @@ Options:
                        irreversible and a boot is when a misconfiguration is most likely
   --deletion-runner-executed-by <a>  Actor unattended deletions execute as (default
                        system:deletion-runner)
-  --deletion-runner-approved-by <a>  Who authorised unattended execution (default
-                       system:retention-policy). Must differ from the executor
+  --deletion-grace-days <n>  Days a verified deletion request waits before the runner may
+                       execute it (0..90, default ${DEFAULT_DELETION_GRACE_DAYS.toString()}). Rejecting the request inside the window
+                       cancels it; the wait shortens itself so it can never cross the Article
+                       12(3) deadline. The approver is the principal who verified the request
   --deletion-runner-batch-size <n>  Requests the runner may take per tick (1..100, default 5).
                        Each one is a whole tenant's data, and they run serially
   --max-request-body-route <prefix>=<size>  Per-route override, longest path prefix winning
@@ -3353,6 +3790,17 @@ Options:
                        (1000..86400000, or 0; default 60000). All six bound the serving connection
                        only and are printed at boot; migrate and the operator subcommands
                        (rekey, replay, verify-chain, prune-links, set-credential) run unbounded
+  --http-headers-timeout-ms <ms>  How long a client may take to send the request head (1000..600000,
+                       default 60000)
+  --http-request-timeout-ms <ms>  How long a client may take to send the whole request (1000..3600000,
+                       default 300000; must not be below the headers timeout)
+  --http-keep-alive-timeout-ms <ms>  Idle keep-alive before the server closes a socket (1000..600000,
+                       default 125000, longer than Caddy's 2-minute upstream idle so the proxy never
+                       reuses a socket this server is closing)
+  --http-max-connections <n>  Open sockets the listener accepts (1..1000000, default 4096)
+  --shutdown-grace-ms <ms>  On SIGTERM, how long in-flight requests may finish before their sockets
+                       are closed (0..300000, default 8000, inside Docker's 10 s stop timeout); the
+                       database pool is closed after them. All five are printed at boot
   --design-review      Expose the platform design-review queue (/v1/platform/design-reviews)
   --design-review-role <r>  Role permitted to decide reviews (repeatable; default platform_admin)
   --require-design-review   Require platform approval before a tenant activates a proposal
@@ -3628,6 +4076,7 @@ export function parseRekeyArgs(argv: readonly string[]): RekeyOptions {
   let schema: string | null = null;
   let dataSchema: string | null = null;
   let allowLiveRekey = false;
+  let rewrapKek = false;
   let columnKeyTtlMs: number | null = null;
   let format: "human" | "json" = "human";
   let help = false;
@@ -3655,6 +4104,8 @@ export function parseRekeyArgs(argv: readonly string[]): RekeyOptions {
       i += consumed();
     } else if (arg === "--allow-live-rekey") {
       allowLiveRekey = true;
+    } else if (arg === "--rewrap-kek") {
+      rewrapKek = true;
     } else if (arg === COLUMN_KEY_TTL_FLAG || arg.startsWith(`${COLUMN_KEY_TTL_FLAG}=`)) {
       const raw = takeValue(arg, next, COLUMN_KEY_TTL_FLAG);
       const n = Number(raw);
@@ -3697,6 +4148,13 @@ export function parseRekeyArgs(argv: readonly string[]): RekeyOptions {
     if (confirmTenantId.toLowerCase() !== tenantId.toLowerCase()) {
       throw new CliUsageError("--confirm-tenant must equal --tenant");
     }
+    // A re-wrap changes no column key, so the hatch for a live rekey has nothing to admit there;
+    // accepting it silently would let an operator believe the two runs are one.
+    if (rewrapKek && allowLiveRekey) {
+      throw new CliUsageError(
+        "--rewrap-kek changes no column key, so --allow-live-rekey has nothing to allow; drop it",
+      );
+    }
   }
 
   return {
@@ -3706,6 +4164,7 @@ export function parseRekeyArgs(argv: readonly string[]): RekeyOptions {
     schema,
     dataSchema,
     allowLiveRekey,
+    rewrapKek,
     columnKeyTtlMs,
     format,
     help,
@@ -3727,6 +4186,7 @@ export function parseSetCredentialArgs(argv: readonly string[]): SetCredentialOp
   let schema: string | null = null;
   let format: "human" | "json" = "human";
   let help = false;
+  let minPasswordLength: number | null = null;
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -3735,6 +4195,9 @@ export function parseSetCredentialArgs(argv: readonly string[]): SetCredentialOp
     const consumed = (): number => (isInline(arg) ? 0 : 1);
     if (arg === "--help" || arg === "-h") {
       help = true;
+    } else if (arg === "--min-password-length" || arg.startsWith("--min-password-length=")) {
+      minPasswordLength = parseMinPasswordLength(takeValue(arg, next, "--min-password-length"));
+      i += consumed();
     } else if (arg === "--user" || arg.startsWith("--user=")) {
       userId = takeValue(arg, next, "--user");
       i += consumed();
@@ -3779,7 +4242,14 @@ export function parseSetCredentialArgs(argv: readonly string[]): SetCredentialOp
       `--user and --confirm-user differ (${userId} vs ${confirmUserId})`,
     );
   }
-  return { userId, confirmUserId, schema, format, help: false };
+  return {
+    userId,
+    confirmUserId,
+    schema,
+    format,
+    help: false,
+    ...(minPasswordLength !== null ? { minPasswordLength } : {}),
+  };
 }
 
 export const setCredentialCliHelpText = `operate-server set-credential — set a user's login password
@@ -3798,6 +4268,9 @@ Options:
   --user <uuid>          The meta.users row to set a password on
   --confirm-user <uuid>  The same id again (required; there is no --yes)
   --schema <name>        Meta-schema name (default meta)
+  --min-password-length <n>
+                         The floor the server's credential routes enforce (default
+                         ${DEFAULT_MIN_PASSWORD_LENGTH.toString()}); pass the same value as the server's flag
   --format human|json    Output format (default human)
 
 Exit: 0 when the credential was set; 1 when refused; 2 on a usage error.
@@ -3836,9 +4309,14 @@ Options:
                            A serving process holding the previous key in cache would write new
                            values under it, splitting this tenant's data across two keys with
                            nothing recording which — the one outcome here that cannot be undone.
+  --rewrap-kek             Re-wrap the tenant's current data key under the current
+                           key-encryption-key generation instead of rekeying it: the secret-rotation
+                           step. No column is re-encrypted and no write gate applies. Needs
+                           COLUMN_ENCRYPTION_SECRET_PREVIOUS while rows still name the old one.
   --format human|json      Output format (default human)
 
-The deployment secret is read from COLUMN_ENCRYPTION_SECRET and never from argv. Postgres: standard
+The deployment secret is read from COLUMN_ENCRYPTION_SECRET (with COLUMN_ENCRYPTION_SECRET_PREVIOUS
+and COLUMN_ENCRYPTION_SECRET_GENERATION during a rotation) and never from argv. Postgres: standard
 PG* env vars; run as a role row-level security does not confine, because a confined session's
 "0 rows re-encrypted" is indistinguishable from "this tenant holds no ciphertext".
 

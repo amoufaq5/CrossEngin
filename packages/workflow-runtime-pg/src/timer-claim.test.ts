@@ -2,6 +2,7 @@ import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 import { describe, expect, it } from "vitest";
 
 import { claimDueTimers, releaseTimerClaim, renewTimerClaim } from "./timer-claim.js";
+import { SET_TENANT_CONTEXT_SQL } from "./tenant-context.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 const NOW = "2026-05-17T12:00:00.000Z";
@@ -10,16 +11,26 @@ function mockConnection(
   rows: readonly Record<string, unknown>[],
   capture?: Array<{ sql: string; params: readonly unknown[] | undefined }>,
 ): PgConnection {
-  return {
+  const conn: PgConnection = {
     query: (async (sql: string, params?: readonly unknown[]): Promise<PgQueryResult> => {
+      // The tenant context is recorded nowhere else, so it is kept out of `capture[0]` by design and
+      // asserted separately; the claim statements stay at the index the claim tests read.
+      if (sql === SET_TENANT_CONTEXT_SQL) {
+        contexts.push(String(params?.[0]));
+        return { rows: [], rowCount: 1 };
+      }
       if (capture !== undefined) capture.push({ sql, params });
       return { rows, rowCount: rows.length };
     }) as PgConnection["query"],
-    transaction: (async () => undefined) as unknown as PgConnection["transaction"],
+    transaction: (async <T,>(fn: (tx: PgConnection) => Promise<T>): Promise<T> =>
+      fn(conn)) as PgConnection["transaction"],
     withAdvisoryLock: (async () => undefined) as unknown as PgConnection["withAdvisoryLock"],
     close: (async () => undefined) as PgConnection["close"],
   };
+  return conn;
 }
+
+const contexts: string[] = [];
 
 describe("claimDueTimers", () => {
   const timerRow = {
@@ -100,13 +111,19 @@ describe("claimDueTimers", () => {
 });
 
 describe("releaseTimerClaim", () => {
-  it("clears the claim only for this worker + a still-scheduled timer", async () => {
+  it("clears the claim only for this worker + a still-scheduled timer, under its own tenant", async () => {
     const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
-    await releaseTimerClaim(mockConnection([], capture), { timerId: "wft_tim00001", workerId: "worker-A" });
+    contexts.length = 0;
+    await releaseTimerClaim(mockConnection([], capture), {
+      timerId: "wft_tim00001",
+      workerId: "worker-A",
+      tenantId: TENANT,
+    });
     const { sql, params } = capture[0]!;
     expect(sql).toContain("SET claimed_by = NULL, claim_expires_at = NULL");
-    expect(sql).toContain("claimed_by = $2 AND status = 'scheduled'");
-    expect(params).toEqual(["wft_tim00001", "worker-A"]);
+    expect(sql).toContain("claimed_by = $2 AND status = 'scheduled' AND tenant_id = $3::uuid");
+    expect(params).toEqual(["wft_tim00001", "worker-A", TENANT]);
+    expect(contexts).toEqual([TENANT]);
   });
 });
 
@@ -114,30 +131,33 @@ describe("renewTimerClaim", () => {
   it("extends the lease only while still owned + scheduled, returning true on a row update", async () => {
     const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
     // one row updated ⇒ rowCount 1 ⇒ renewed
+    contexts.length = 0;
     const renewed = await renewTimerClaim(mockConnection([{}], capture), {
       timerId: "wft_tim00001",
       workerId: "worker-A",
+      tenantId: TENANT,
       now: NOW,
       leaseMs: 30_000,
     });
     expect(renewed).toBe(true);
     const { sql, params } = capture[0]!;
     expect(sql).toContain("SET claim_expires_at = $3::timestamptz");
-    expect(sql).toContain("claimed_by = $2 AND status = 'scheduled'");
-    expect(params).toEqual(["wft_tim00001", "worker-A", "2026-05-17T12:00:30.000Z"]);
+    expect(sql).toContain("claimed_by = $2 AND status = 'scheduled' AND tenant_id = $4::uuid");
+    expect(params).toEqual(["wft_tim00001", "worker-A", "2026-05-17T12:00:30.000Z", TENANT]);
+    expect(contexts).toEqual([TENANT]);
   });
 
   it("returns false when the lease was lost (no row updated)", async () => {
-    const lost = await renewTimerClaim(mockConnection([]), { timerId: "wft_tim00001", workerId: "worker-A", now: NOW });
+    const lost = await renewTimerClaim(mockConnection([]), { timerId: "wft_tim00001", workerId: "worker-A", tenantId: TENANT, now: NOW });
     expect(lost).toBe(false);
   });
 
   it("rejects an invalid leaseMs / schema", async () => {
     await expect(
-      renewTimerClaim(mockConnection([]), { timerId: "t", workerId: "w", now: NOW, leaseMs: 0 }),
+      renewTimerClaim(mockConnection([]), { timerId: "t", workerId: "w", tenantId: TENANT, now: NOW, leaseMs: 0 }),
     ).rejects.toThrow(/invalid leaseMs/);
     await expect(
-      renewTimerClaim(mockConnection([]), { timerId: "t", workerId: "w", now: NOW, schema: "x; DROP" }),
+      renewTimerClaim(mockConnection([]), { timerId: "t", workerId: "w", tenantId: TENANT, now: NOW, schema: "x; DROP" }),
     ).rejects.toThrow(/invalid schema/);
   });
 });

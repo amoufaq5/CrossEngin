@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { InMemoryEntityStore, type ListPage, type ListQuery } from "./store.js";
 import {
+  currencyPrecisionGuard,
   amountOwed,
   APPLIED_PAYMENT_EPSILON,
   childParentRefs,
@@ -284,6 +285,27 @@ describe("journalPostingGuard", () => {
           ["0.00", "120.00", "0", "0", "3.6725"],
         ]),
       ).toBeNull();
+    });
+
+    it("admits a functional-only FX line, which moves no transaction amount, and still balances the legs", async () => {
+      // A realized or unrealized FX difference exists only in the base currency: no AED moves, and
+      // 5.00 is the whole of the line. Stating it as an AED amount was the `amount = functional`
+      // fiction the revaluation used to post.
+      expect(
+        await twoLines([
+          ["0.00", "0.00", "5.00", "0.00", "3.6725"],
+          ["0.00", "0.00", "0.00", "5.00", "3.6725"],
+        ]),
+      ).toBeNull();
+      // The exemption is not a hole: the functional legs must still balance.
+      expect(
+        (
+          await twoLines([
+            ["0.00", "0.00", "5.00", "0.00", "3.6725"],
+            ["0.00", "0.00", "0.00", "4.00", "3.6725"],
+          ])
+        )?.error,
+      ).toBe("unbalanced_journal_entry");
     });
 
     it("refuses a stated functional amount beside a rate that is not a decimal", async () => {
@@ -1182,5 +1204,37 @@ describe("amountOwed", () => {
     expect(amountOwed({ total: 100 }, "total", "withholding_total")).toBe(100);
     expect(amountOwed({ total: 100, withholding_total: 5 }, "total", undefined)).toBe(100);
     expect(amountOwed({ total: 0.3, withholding_total: 0.1 }, "total", "withholding_total")).toBe(0.2);
+  });
+});
+
+describe("currencyPrecisionGuard", () => {
+  const store = new InMemoryEntityStore();
+  const input = (operation: "create" | "update" | "delete", after: number, before?: number) => ({
+    operation,
+    entity: "Currency",
+    tenantId: "t",
+    id: operation === "create" ? null : "c1",
+    before: before === undefined ? null : { decimal_places: before },
+    after: { decimal_places: after },
+    store,
+  });
+  const guard = currencyPrecisionGuard();
+
+  it("refuses a minor unit finer than the ledger on create and on a change", async () => {
+    expect((await guard(input("create", 3)))?.error).toBe("currency_precision_unsupported");
+    expect((await guard(input("update", 3, 2)))?.error).toBe("currency_precision_unsupported");
+  });
+
+  it("admits the ledger's own scale and coarser ones", async () => {
+    for (const dp of [0, 1, 2]) expect(await guard(input("create", dp))).toBeNull();
+  });
+
+  it("leaves a row stored before the guard editable and deletable", async () => {
+    expect(await guard(input("update", 3, 3))).toBeNull();
+    expect(await guard(input("delete", 3, 3))).toBeNull();
+  });
+
+  it("reads no other entity", async () => {
+    expect(await guard({ ...input("create", 3), entity: "Invoice" })).toBeNull();
   });
 });

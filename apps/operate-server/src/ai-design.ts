@@ -1,6 +1,7 @@
 import {
   StreamCostMeter,
   admitRequestCost,
+  estimateRequestCost,
   DESIGN_SHAPE_RETRIABILITY,
   classifyDesignOutput,
   reconcileRequestCost,
@@ -16,6 +17,7 @@ import type {
   Usage,
 } from "@crossengin/ai-providers";
 import {
+  ANTHROPIC_PRICING_AS_OF,
   AnthropicProvider,
   isAnthropicModel,
   type AnthropicModel,
@@ -24,7 +26,12 @@ import {
   DEFAULT_LOCAL_MODEL,
   LocalLlmProvider,
 } from "@crossengin/ai-providers-local";
-import { OpenAiProvider, isOpenAiChatModel } from "@crossengin/ai-providers-openai";
+import {
+  OPENAI_PRICING_AS_OF,
+  OpenAiProvider,
+  hasKnownPricing,
+  isOpenAiChatModel,
+} from "@crossengin/ai-providers-openai";
 import {
   ManifestSchema,
   manifestHash,
@@ -54,6 +61,7 @@ export interface DesignUsage {
 export const DESIGN_FAILURE_KINDS = [
   "description_too_long",
   "request_cost_ceiling",
+  "monthly_budget_exhausted",
   "response_cost_ceiling",
   "response_too_long",
   "provider_error",
@@ -75,6 +83,7 @@ export type DesignFault = (typeof DESIGN_FAULTS)[number];
 export const DESIGN_FAILURE_FAULT: Readonly<Record<DesignFailureKind, DesignFault>> = {
   description_too_long: "request",
   request_cost_ceiling: "request",
+  monthly_budget_exhausted: "request",
   response_cost_ceiling: "request",
   provider_error: "provider",
   response_too_long: "model_output",
@@ -149,10 +158,37 @@ export interface DesignProgress {
 export type DesignProgressListener = (progress: DesignProgress) => void;
 
 export type ManifestDesigner = (input: {
+  /** The tenant the design is for: carried to the provider request and charged the spend. */
+  tenantId: string;
   description: string;
   name?: string;
   onProgress?: DesignProgressListener;
 }) => Promise<DesignResult>;
+
+/**
+ * Money set aside against a tenant's month before a call, and settled with what the call cost.
+ * `settle` is given the attempt's actual dollars; the difference from `dollars` is what moves.
+ */
+export interface DesignSpendReservation {
+  readonly dollars: number;
+  settle(actualDollars: number): Promise<void>;
+}
+
+/**
+ * Reserves `dollars` against the tenant's month, or answers `null` when the month cannot absorb
+ * it. A throw is read as a refusal: a ledger that cannot be written is a spend nobody can bound.
+ */
+export type DesignSpend = (dollars: number) => Promise<DesignSpendReservation | null>;
+
+/**
+ * The slice of the deployment's AI budget a designer charges against. Structural so `ai-design.ts`
+ * does not depend on the budget module, and so a test needs no ledger.
+ */
+export interface DesignerBudget {
+  reserve(tenantId: string, dollars: number): Promise<DesignSpendReservation | null>;
+  inflationFor?(tenantId: string): Promise<number>;
+  observeInflation?(tenantId: string, ratio: number): Promise<void>;
+}
 
 export const MAX_DESIGN_DESCRIPTION_CHARS = 4000;
 export const MAX_DESIGN_ATTEMPTS = 3;
@@ -241,6 +277,15 @@ export const DESIGN_EXAMPLE_MANIFEST: Record<string, unknown> = {
       create: { roles: ["app_admin", "app_user"] },
       update: { roles: ["app_admin"] },
       delete: { roles: ["app_admin"] },
+      // Every classified field carries a grant. Without one the field falls to the classification
+      // default, which withholds it from every role the deployment has not declared privileged —
+      // so a design that classifies and does not grant ships fields nobody can read (P2.2).
+      fields: {
+        contact_email: {
+          read: { roles: ["app_admin", "app_user"] },
+          update: { roles: ["app_admin"] },
+        },
+      },
     },
     ServiceVisit: {
       list: { roles: ["app_admin", "app_user"] },
@@ -251,6 +296,14 @@ export const DESIGN_EXAMPLE_MANIFEST: Record<string, unknown> = {
       transitions: {
         start: { roles: ["app_admin", "app_user"] },
         close: { roles: ["app_admin"] },
+      },
+      fields: {
+        // Staff quote a price when they book the visit; only an administrator changes it after.
+        quoted_price: {
+          read: { roles: ["app_admin", "app_user"] },
+          create: { roles: ["app_admin", "app_user"] },
+          update: { roles: ["app_admin"] },
+        },
       },
     },
   },
@@ -337,6 +390,8 @@ export function buildDesignSystemPrompt(opts: {
     "- Each field: { name (snake_case), type, required?, classification? }.",
     "- Field type kinds: text {maxLength?}, long_text, integer {min?, max?}, decimal {precision, scale}, boolean, date, datetime, uuid, enum {values: [...]}, reference {target: EntityName}, json, email, phone, url, currency_amount.",
     '- Classify sensitive fields: "pii" (emails, names, addresses), "phi" (health data), "commercial_sensitive" (costs, margins, prices), "regulated". Any "phi"/"regulated" field REQUIRES its entity to carry the "auditable" trait.',
+    "- Give EVERY classified field a field grant, or no role can read it: permissions.<Entity>.fields = { <field_name>: { read: { roles: [...] }, update: { roles: [...] }, create?: { roles: [...] } } }.",
+    "- Field grant rules: each arm's roles must also appear in the entity's grant for the same operation; every update role must also be a read role; create (who may set it on a new record; absent means update) may name roles that cannot read it; on a required field, create (or update) must name every role the entity's create grant names.",
     '- relations: array of { kind: "many_to_one", from: EntityName, field: field_name, to: EntityName, onDelete: "restrict"|"cascade"|"set_null" } — one per reference field. Many-to-many associations use { kind: "many_to_many", left, right }.',
     "- roles: record keyed by role name (snake_case); each value { name (MUST equal its record key), label: { en: string }, description }.",
     "- permissions: record keyed by entity name; each value { list, read, create, update, delete }, each of those { roles: [...] }. Grant only roles declared in roles, for entities declared in entities.",
@@ -459,6 +514,49 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
+ * The ensured roles, added to the `create` arm of every field grant that has a write arm.
+ *
+ * Forced by the entity graft: `ensureRolesInManifest` puts the deployment's roles in the entity's
+ * `create` grant, and the kernel refuses a **required** field whose effective create grant
+ * (`create ?? update`) does not cover every entity creator — so a design that followed the spec
+ * and granted its required classified field to its own roles was refused for a role the model was
+ * never told about, on every attempt. Only `create`, because supplying a value discloses nothing
+ * (ADR-0348): no grafted role gains a read or the right to change a value afterwards. The arm is
+ * materialised from `update` when absent, which leaves `update` and `read` exactly as designed, and
+ * keeps only the roles the entity's own `create` grant names: an `update` role outside it could
+ * never create the record anyway, and naming it in a `create` arm is a kernel refusal. A
+ * grant carrying anything besides `roles` (an ABAC obligation) is left alone: copying it into a
+ * `create` arm would move an obligation into a position the boot check refuses, and dropping it
+ * would grant without it.
+ */
+function graftFieldCreateArms(
+  fields: Record<string, unknown>,
+  entityCreateRoles: readonly unknown[],
+  ensureRoles: readonly string[],
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [name, perm] of Object.entries(fields)) {
+    if (!isRecord(perm)) {
+      out[name] = perm;
+      continue;
+    }
+    const source = perm["create"] ?? perm["update"];
+    if (
+      !isRecord(source) ||
+      !Array.isArray(source["roles"]) ||
+      Object.keys(source).some((k) => k !== "roles")
+    ) {
+      out[name] = perm;
+      continue;
+    }
+    const roles = (source["roles"] as unknown[]).filter((r) => entityCreateRoles.includes(r));
+    for (const role of ensureRoles) if (!roles.includes(role)) roles.push(role);
+    out[name] = { ...perm, create: { roles } };
+  }
+  return out;
+}
+
+/**
  * Grafts the deployment's operator roles (the roles allowed to design/activate) into a
  * generated manifest: without this, activating a system whose AI-invented roles don't
  * include the operator's own role would sever the operator from the very API they created.
@@ -498,16 +596,29 @@ export function ensureRolesInManifest(
       return { ...grant, roles: merged };
     };
     for (const [op, grant] of Object.entries(entityPerms)) {
-      // `transitions` is a record of named grants (lifecycle endpoints); `fields` is
-      // deliberately untouched so grafted roles never gain field-level reads and
-      // classification redaction stays fail-closed for them.
+      // `transitions` is a record of named grants (lifecycle endpoints). `fields` never gains a
+      // read or an update for a grafted role, so classification redaction stays fail-closed for
+      // it — but see `graftFieldCreateArms`, which the entity `create` graft below makes necessary.
       if (op === "transitions" && isRecord(grant)) {
         entityPerms[op] = Object.fromEntries(
           Object.entries(grant).map(([name, t]) => [name, graftGrant(t)]),
         );
         continue;
       }
+      if (op === "fields") continue;
       entityPerms[op] = graftGrant(grant);
+    }
+    const createGrant = entityPerms["create"];
+    if (
+      isRecord(entityPerms["fields"]) &&
+      isRecord(createGrant) &&
+      Array.isArray(createGrant["roles"])
+    ) {
+      entityPerms["fields"] = graftFieldCreateArms(
+        entityPerms["fields"],
+        createGrant["roles"],
+        ensureRoles,
+      );
     }
     permissions[entityName] = entityPerms;
   }
@@ -518,6 +629,19 @@ export function ensureRolesInManifest(
 export async function designManifest(opts: {
   provider: DesignCompletionProvider;
   description: string;
+  /**
+   * The tenant this design is for. It is the `tenantId` on every provider request — which used to
+   * be the constant `"operate-design"` for every tenant, so a provider's per-tenant accounting,
+   * abuse limits or audit trail could not tell two tenants apart — and the tenant `spend` charges.
+   */
+  tenantId: string;
+  /**
+   * Charges each attempt against the tenant's month **before** the call, at the estimate, and
+   * settles it with the actual cost after. Absent leaves the month to the caller, which is the
+   * behaviour this replaced: a read of the month before the run and a write after it, between
+   * which any number of concurrent runs could spend the same headroom.
+   */
+  spend?: DesignSpend;
   /**
    * The pack this design extends, or `null` for a deployment that serves no named pack.
    *
@@ -597,12 +721,12 @@ export async function designManifest(opts: {
   const ceiling: PerRequestCostCeiling | null =
     opts.maxRequestDollars !== undefined ? { maxDollars: opts.maxRequestDollars } : null;
   const pricing = opts.provider.pricing;
-  if (ceiling !== null && pricing === undefined) {
+  if ((ceiling !== null || opts.spend !== undefined) && pricing === undefined) {
     // Fail closed: a configured ceiling that cannot be computed is not a ceiling. Sending
     // the request anyway would re-open exactly the hole the ceiling was added to close.
     return fail(
-      "request_cost_ceiling",
-      ["a per-request cost ceiling is configured but the provider publishes no pricing"],
+      ceiling !== null ? "request_cost_ceiling" : "monthly_budget_exhausted",
+      ["a cost ceiling is configured but the provider publishes no pricing"],
       0,
       null,
     );
@@ -679,18 +803,20 @@ export async function designManifest(opts: {
       messages: [...messages],
       maxTokens,
       jsonMode: true,
-      tenantId: "operate-design",
+      tenantId: opts.tenantId,
       sessionId,
       ...(opts.model !== undefined ? { model: opts.model } : {}),
     };
 
     let meter: StreamCostMeter | null = null;
     let estimatedDollars = 0;
-    if (ceiling !== null && pricing !== undefined) {
-      const promptChars = request.messages.reduce((n, m) => n + m.content.length, 0);
-      const admission = admitRequestCost(ceiling, {
+    // What the input alone is estimated at: the charge for an attempt that failed before a single
+    // output token arrived, when the provider never reported a usage.
+    let inputOnlyDollars = 0;
+    if ((ceiling !== null || opts.spend !== undefined) && pricing !== undefined) {
+      const estimateInput = {
         pricing,
-        promptChars,
+        promptChars: request.messages.reduce((n, m) => n + m.content.length, 0),
         // The script-aware reading beside the character count (ADR-0330), which takes the greater
         // of the two — so supplying the text can only ever raise the figure. This is the half of
         // ADR-0311's CJK note that reaches production: `.length` under-counts an ideographic
@@ -699,20 +825,41 @@ export async function designManifest(opts: {
         promptText: request.messages.map((m) => m.content),
         maxOutputTokens: maxTokens,
         inflation,
-      });
-      if (admission.outcome === "refuse") {
+      };
+      const estimate =
+        ceiling !== null ? admitRequestCost(ceiling, estimateInput) : null;
+      if (estimate !== null && estimate.outcome === "refuse") {
         // Terminal, not retryable: the prompt only ever grows across attempts, so the
         // next estimate cannot come out lower than this one.
-        record("request_cost_ceiling", [admission.reason], 0, null, null, true);
+        record("request_cost_ceiling", [estimate.reason], 0, null, null, true);
         break;
       }
-      if (admission.estimate.kind === "bounded") {
-        estimatedDollars = admission.estimate.dollars;
-        meter = new StreamCostMeter({
-          pricing,
-          ceiling,
-          inputTokens: admission.estimate.inputTokens,
-        });
+      const bounded = estimate?.estimate ?? estimateRequestCost(estimateInput);
+      if (bounded.kind === "bounded") {
+        estimatedDollars = bounded.dollars;
+        const inputOnly = estimateRequestCost({ ...estimateInput, maxOutputTokens: 0 });
+        inputOnlyDollars = inputOnly.kind === "bounded" ? inputOnly.dollars : bounded.dollars;
+        if (ceiling !== null) {
+          meter = new StreamCostMeter({ pricing, ceiling, inputTokens: bounded.inputTokens });
+        }
+      }
+    }
+
+    let reservation: DesignSpendReservation | null = null;
+    if (opts.spend !== undefined) {
+      let refusal: string | null = null;
+      try {
+        reservation = await opts.spend(estimatedDollars);
+        if (reservation === null) {
+          refusal = `the monthly AI design budget cannot absorb this request's estimated $${estimatedDollars.toFixed(4)}`;
+        }
+      } catch (err) {
+        refusal = `the monthly AI design budget could not be charged (${err instanceof Error ? err.message : String(err)}); no request was sent`;
+      }
+      if (refusal !== null) {
+        // Terminal: the month only fills up, so the next attempt's reservation is no smaller.
+        record("monthly_budget_exhausted", [refusal], 0, null, null, true);
+        break;
       }
     }
 
@@ -721,6 +868,7 @@ export async function designManifest(opts: {
     let overCost = false;
     let turnCost: number | null = null;
     let lastEmittedChars = 0;
+    let streamError: unknown = null;
     try {
       for await (const chunk of opts.provider.complete(request)) {
         if (chunk.kind === "text") {
@@ -749,9 +897,35 @@ export async function designManifest(opts: {
         }
       }
     } catch (err) {
+      streamError = err;
+    }
+
+    if (reservation !== null) {
+      // The provider's own figure when it reported one. Otherwise an estimate, and the direction
+      // is deliberate: a stream abandoned on the meter is charged what the meter counted, one that
+      // produced output and then broke keeps the whole reservation (`maxTokens` bounds what it can
+      // have been billed), and one that produced nothing is charged its input — a provider that
+      // refused the request bills nothing, but one that timed out mid-generation has read it.
+      const actual =
+        turnCost ??
+        (overCost && meter !== null
+          ? meter.dollars
+          : text.length > 0
+            ? reservation.dollars
+            : inputOnlyDollars);
+      try {
+        await reservation.settle(actual);
+      } catch (err) {
+        // The reservation stands, which over-counts by the difference: the safe direction for a
+        // ledger whose under-count is the hole this exists to close.
+        console.warn("[ai-design] could not settle the monthly charge; the reservation stands", err);
+      }
+    }
+
+    if (streamError !== null) {
       record(
         "provider_error",
-        [`provider error: ${err instanceof Error ? err.message : String(err)}`],
+        [`provider error: ${streamError instanceof Error ? streamError.message : String(streamError)}`],
         text.length,
         null,
         null,
@@ -940,9 +1114,15 @@ export function buildDesignDesigner(opts: {
   providerLabel?: string | null;
   ensureRoles?: readonly string[];
   maxRequestDollars?: number;
+  /**
+   * The deployment's monthly budget, charged per attempt before each call. Also the source of the
+   * per-tenant estimator correction (ADR-0330), which until this was built and read by nothing.
+   */
+  budget?: DesignerBudget;
   onProgress?: DesignProgressListener;
 }): ManifestDesigner {
   return async (input: {
+    tenantId: string;
     description: string;
     name?: string;
     onProgress?: DesignProgressListener;
@@ -950,10 +1130,24 @@ export function buildDesignDesigner(opts: {
     // A per-call listener replaces the builder-level one rather than composing with it,
     // so one invocation's progress never leaks into another caller's stream.
     const listener = input.onProgress ?? opts.onProgress;
+    const budget = opts.budget;
+    const inflation =
+      budget?.inflationFor !== undefined ? await budget.inflationFor(input.tenantId) : undefined;
     return designManifest({
       provider: opts.provider,
       description: input.description,
+      tenantId: input.tenantId,
       parentPack: opts.parentPack,
+      ...(budget !== undefined
+        ? { spend: (dollars: number) => budget.reserve(input.tenantId, dollars) }
+        : {}),
+      ...(inflation !== undefined ? { inflation } : {}),
+      ...(budget?.observeInflation !== undefined
+        ? {
+            onInflationObserved: (ratio: number) =>
+              budget.observeInflation?.(input.tenantId, ratio),
+          }
+        : {}),
       ...(input.name !== undefined ? { name: input.name } : {}),
       ...(opts.model !== undefined ? { model: opts.model } : {}),
       ...(opts.maxTokens !== undefined ? { maxTokens: opts.maxTokens } : {}),
@@ -965,10 +1159,36 @@ export function buildDesignDesigner(opts: {
   };
 }
 
+/**
+ * Where the price a provider charges came from. It decides whether a cost ceiling bounds anything:
+ * a ceiling over a model priced at $0 is satisfied by every request, so it reads as enforced and
+ * enforces nothing.
+ */
+export const AI_PRICING_PROVENANCES = ["catalogue", "declared", "self_hosted_free", "unpriced"] as const;
+export type AiPricingProvenance = (typeof AI_PRICING_PROVENANCES)[number];
+
+/** A price an operator declares for the configured model, USD per million tokens. */
+export interface DeclaredModelPrice {
+  readonly inputUsdPerMillion: number;
+  readonly outputUsdPerMillion: number;
+  /** Absent: charged at the input rate, which over-counts a cached read — the safe direction. */
+  readonly cachedInputUsdPerMillion?: number;
+}
+
 export interface DesignProviderBuild {
   readonly provider: DesignCompletionProvider;
   readonly providerLabel: string;
   readonly model: string;
+  readonly pricing: AiPricingProvenance;
+  /** The date the catalogue price was last checked, when `pricing` is `catalogue`. */
+  readonly pricingAsOf: string | null;
+}
+
+export interface DesignProviderBuildOptions {
+  readonly model?: string;
+  /** See `startInactivityWatchdog`; absent is the provider default. */
+  readonly inactivityTimeoutMs?: number;
+  readonly declaredPrice?: DeclaredModelPrice;
 }
 
 /**
@@ -995,8 +1215,12 @@ function resolveLocalBaseUrl(
 
 export function buildDesignProviderFromEnv(
   env: NodeJS.ProcessEnv,
-  opts?: { model?: string },
+  opts?: DesignProviderBuildOptions,
 ): DesignProviderBuild | null {
+  const declared = opts?.declaredPrice;
+  const timeout =
+    opts?.inactivityTimeoutMs !== undefined ? { inactivityTimeoutMs: opts.inactivityTimeoutMs } : {};
+  const cachedRate = (d: DeclaredModelPrice): number => d.cachedInputUsdPerMillion ?? d.inputUsdPerMillion;
   // Self-hosted first, and refused outright when its base URL is unusable. Unlike an API key, a
   // local base URL has exactly one meaning in this process — "run the model on our own hardware" —
   // so honouring a stray ANTHROPIC_API_KEY instead would ship the tenant's business description to
@@ -1004,23 +1228,61 @@ export function buildDesignProviderFromEnv(
   const local = resolveLocalBaseUrl(env);
   if (local.kind === "malformed") return null;
   if (local.kind === "present") {
-    // No catalogue to gate against: a local server names its own models, and the provider's pricing
-    // is zero per token, so a per-tenant cost ceiling never trips on self-hosted inference.
+    // No catalogue to gate against: a local server names its own models. Undeclared, its price is
+    // zero per token, so no cost ceiling bounds it — which the boot line says rather than implies.
     const model: string = opts?.model !== undefined && opts.model.length > 0 ? opts.model : DEFAULT_LOCAL_MODEL;
     const apiKey = env["LOCAL_LLM_API_KEY"];
     const provider = new LocalLlmProvider({
       defaultModel: model,
       baseUrl: local.baseUrl,
       ...(apiKey !== undefined && apiKey.length > 0 ? { apiKey } : {}),
+      ...timeout,
+      ...(declared !== undefined
+        ? {
+            pricingOverride: {
+              inputPerMillionTokens: declared.inputUsdPerMillion,
+              outputPerMillionTokens: declared.outputUsdPerMillion,
+              cachedInputPerMillionTokens: cachedRate(declared),
+            },
+          }
+        : {}),
     });
-    return { provider, providerLabel: `local/${model}`, model };
+    return {
+      provider,
+      providerLabel: `local/${model}`,
+      model,
+      pricing: declared !== undefined ? "declared" : "self_hosted_free",
+      pricingAsOf: null,
+    };
   }
   const anthropicKey = env["ANTHROPIC_API_KEY"];
   if (anthropicKey !== undefined && anthropicKey.length > 0) {
     const model: AnthropicModel =
       opts?.model !== undefined && isAnthropicModel(opts.model) ? opts.model : "claude-sonnet-4-6";
-    const provider = new AnthropicProvider({ apiKey: anthropicKey, defaultModel: model });
-    return { provider, providerLabel: `anthropic/${model}`, model };
+    const provider = new AnthropicProvider({
+      apiKey: anthropicKey,
+      defaultModel: model,
+      ...timeout,
+      ...(declared !== undefined
+        ? {
+            pricingOverride: {
+              inputUsdPerMillion: declared.inputUsdPerMillion,
+              cachedInputUsdPerMillion: cachedRate(declared),
+              outputUsdPerMillion: declared.outputUsdPerMillion,
+              // Anthropic bills a cache write at 1.25x its input rate; a declared price carries no
+              // separate figure, so the published multiplier is applied to the declared one.
+              cacheWriteUsdPerMillion: declared.inputUsdPerMillion * 1.25,
+            },
+          }
+        : {}),
+    });
+    return {
+      provider,
+      providerLabel: `anthropic/${model}`,
+      model,
+      pricing: declared !== undefined ? "declared" : "catalogue",
+      pricingAsOf: declared !== undefined ? null : ANTHROPIC_PRICING_AS_OF,
+    };
   }
   const openaiKey = env["OPENAI_API_KEY"];
   if (openaiKey !== undefined && openaiKey.length > 0) {
@@ -1037,8 +1299,29 @@ export function buildDesignProviderFromEnv(
       apiKey: openaiKey,
       defaultModel: model,
       ...(custom ? { baseUrl } : {}),
+      ...timeout,
+      ...(declared !== undefined
+        ? {
+            pricingOverride: {
+              inputUsdPerMillion: declared.inputUsdPerMillion,
+              cachedInputUsdPerMillion: cachedRate(declared),
+              outputUsdPerMillion: declared.outputUsdPerMillion,
+            },
+          }
+        : {}),
     });
-    return { provider, providerLabel: `openai/${model}`, model };
+    // A custom endpoint's model is absent from a catalogue that describes `api.openai.com`, and
+    // the provider prices it at 0 — which may be a bill (a proxy such as OpenRouter) or not (vLLM).
+    // Nothing here can tell which, so it is `unpriced` and not `self_hosted_free`.
+    const pricing: AiPricingProvenance =
+      declared !== undefined ? "declared" : hasKnownPricing(model) ? "catalogue" : "unpriced";
+    return {
+      provider,
+      providerLabel: `openai/${model}`,
+      model,
+      pricing,
+      pricingAsOf: pricing === "catalogue" ? OPENAI_PRICING_AS_OF : null,
+    };
   }
   return null;
 }

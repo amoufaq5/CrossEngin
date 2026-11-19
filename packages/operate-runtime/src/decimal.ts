@@ -113,6 +113,16 @@ function rescale(d: ExactDecimal, scale: number): ExactDecimal {
   return { negative: rounded === 0n ? false : d.negative, units: rounded, scale };
 }
 
+/** `d` at exactly `scale` fraction digits: widened losslessly, or rounded half away from zero. */
+export function quantizeDecimal(d: ExactDecimal, scale: number): ExactDecimal {
+  return rescale(d, scale);
+}
+
+/** `-d`, exactly. */
+export function negateDecimal(d: ExactDecimal): ExactDecimal {
+  return { ...d, negative: d.units === 0n ? false : !d.negative };
+}
+
 /** Digits before the point, after rounding to `scale` — what Postgres checks against `p - s`. */
 function integerDigits(d: ExactDecimal): number {
   const whole = d.units / 10n ** BigInt(d.scale);

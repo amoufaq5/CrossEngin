@@ -67,7 +67,7 @@ function storedDeclarer(): PostgresIncidentDeclarer {
 function sloFromDefaults(persisted: boolean): IncidentLifecycleSurveyInput["slo"] {
   // `--slo-defaults`' own path: the manifest-derived config, built exactly as `node.ts` builds it.
   const built = buildSloEnforcement(deriveSloConfig(buildErpCorePack()));
-  return { engines: built.engines, persisted };
+  return { engines: built.engines, persisted, escalationGrades: built.escalationGrades };
 }
 
 const NOTHING: IncidentLifecycleSurveyInput = {
@@ -84,7 +84,8 @@ const SHIPPED: IncidentLifecycleSurveyInput = {
 };
 
 const EVERYTHING: IncidentLifecycleSurveyInput = {
-  slo: sloFromDefaults(true),
+  // With an escalation declared on the availability engine, so the regrade writer is wired too.
+  slo: { ...sloFromDefaults(true)!, escalationGrades: { availability: ["sev1"], latency: [] } },
   integrity: {
     flag: "--integrity-proof-config",
     proof: DEFAULT_INTEGRITY_PROOF_CONFIG,
@@ -173,8 +174,23 @@ describe("the grades each escalator declares at come from the configs actually b
   it("reads the SLO grades off the thresholds the engines run on", () => {
     const burn = new Set(DEFAULT_BURN_RATE_THRESHOLDS.map((t) => t.severity));
     const latency = new Set(DEFAULT_LATENCY_THRESHOLDS.map((t) => t.severity));
-    expect(new Set(grades("slo-availability"))).toEqual(burn);
+    // EVERYTHING declares an availability escalation to sev1, which the engine can re-page at.
+    expect(new Set(grades("slo-availability"))).toEqual(new Set([...burn, "sev1"]));
     expect(new Set(grades("slo-latency"))).toEqual(latency);
+  });
+
+  it("adds an escalation grade, and the regrade writer, only from a built escalation", () => {
+    const plain = surveyIncidentLifecycle({ ...NOTHING, slo: sloFromDefaults(true) });
+    expect(plain.writers).not.toContain("regrader");
+    expect(new Set(plain.escalators[0]?.grades)).toEqual(
+      new Set(DEFAULT_BURN_RATE_THRESHOLDS.map((t) => t.severity)),
+    );
+    const memory = surveyIncidentLifecycle({
+      ...NOTHING,
+      slo: { ...sloFromDefaults(false)!, escalationGrades: { availability: ["sev1"], latency: [] } },
+    });
+    // No store, so no regrade can write a row.
+    expect(memory.writers).not.toContain("regrader");
   });
 
   it("reads the integrity grade off its parsed config, and the deletion grades off severity, overrides and the stall grade", () => {
@@ -259,9 +275,9 @@ describe("the reachable lifecycle is derived by running the writers", () => {
   it("prints the derived figure and every verb it is entitled to", () => {
     const line = formatIncidentLifecycle(survey);
     expect(line).toContain(
-      "incidents are declared by slo-availability at sev2/sev3, slo-latency at sev2/sev3, integrity-proof at sev1, deletion-evidence at sev1/sev2",
+      "incidents are declared by slo-availability at sev1/sev2/sev3, slo-latency at sev2/sev3, integrity-proof at sev1, deletion-evidence at sev1/sev2",
     );
-    expect(line).toContain("they reach 1 of 12 lifecycle edges (declared->cancelled, by the declarer's close-out) and the paged note and the stall-kind note move no status");
+    expect(line).toContain("they reach 1 of 12 lifecycle edges (declared->cancelled, by the declarer's close-out) and the paged note and the stall-kind note and the escalation regrade move no status");
     expect(line).toContain(
       "no HTTP route, and so no console page, can acknowledge, assign, advance, attach a postmortem to or close an incident",
     );
@@ -329,7 +345,10 @@ describe("the writer table is the whole set of automated writers of meta.inciden
     observationNote: /\bappendIncidentNote\(/,
   };
   const EXPECTED: Readonly<Record<string, readonly string[]>> = {
-    engine: ["packages/incident-response-runtime-pg/src/declarer.ts"],
+    engine: [
+      "packages/incident-response-runtime-pg/src/declarer.ts",
+      "packages/observability-runtime-pg/src/persisting-engine.ts",
+    ],
     store: [
       "apps/operate-server/src/node.ts",
       "packages/incident-response-runtime-pg/src/persisting-engine.ts",

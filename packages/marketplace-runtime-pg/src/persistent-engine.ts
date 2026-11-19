@@ -1,6 +1,8 @@
 import type { PackInstallation, PermissionResolution } from "@crossengin/marketplace";
 import {
+  INSTALL_WITHDRAWN_REASON,
   MarketplaceInstallEngine,
+  UNINSTALL_PATH,
   type Clock,
   type IdGenerator,
   type InstallDecision,
@@ -112,6 +114,25 @@ export class PersistentMarketplaceInstallEngine {
   /** Completes an uninstall and persists it. */
   async completeUninstall(installation: PackInstallation, uninstalledBy: string): Promise<PackInstallation> {
     return this.persist(this.engine.completeUninstall(installation, uninstalledBy));
+  }
+
+  /**
+   * Uninstalls from whatever state the installation is in, along {@link UNINSTALL_PATH}, persisting
+   * each step so the trail records a withdrawn install as failed-then-uninstalled rather than as
+   * having been installed.
+   */
+  async uninstall(installation: PackInstallation, uninstalledBy: string): Promise<PackInstallation> {
+    const path = UNINSTALL_PATH[installation.status];
+    switch (path) {
+      case "begin_then_complete":
+        return this.completeUninstall(await this.beginUninstall(installation), uninstalledBy);
+      case "fail_then_complete":
+        return this.completeUninstall(await this.fail(installation, INSTALL_WITHDRAWN_REASON), uninstalledBy);
+      case "complete":
+        return this.completeUninstall(installation, uninstalledBy);
+      case null:
+        throw new Error(`illegal installation transition ${installation.status} → uninstalled`);
+    }
   }
 
   /** Begins an update and persists it. */

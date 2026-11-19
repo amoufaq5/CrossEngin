@@ -7,12 +7,45 @@ import {
   ServiceAccountFcmTokenProvider,
   TwilioSmsSender,
   TwilioVoiceSender,
+  defaultEmailComposer,
+  defaultSmsComposer,
+  defaultVoiceComposer,
   normalizePrivateKeyPem,
   parseServiceAccountJson,
+  type EmailComposer,
   type MachineDetectionMode,
+  type SmsComposer,
+  type VoiceComposer,
 } from "@crossengin/notification-providers";
 
-import { InAppSender, SenderRegistry, type ChannelSender } from "./delivery-senders.js";
+import {
+  InAppSender,
+  SenderRegistry,
+  dispatchContentOf,
+  type ChannelSender,
+} from "./delivery-senders.js";
+
+/**
+ * The composers every provider is built with: the dispatch's rendered template when the drain could
+ * render one (`delivery-content.ts`, where the per-channel escaping happens), and the provider's own
+ * identifier-only notice otherwise. Push takes none — a push payload may not vary with content
+ * (ADR-0310) — so `FcmPushSender` keeps its own.
+ */
+export const renderedEmailComposer: EmailComposer = (request) => {
+  const content = dispatchContentOf(request);
+  if (content === null) return defaultEmailComposer(request);
+  return {
+    subject: content.subject,
+    textBody: content.body,
+    ...(content.htmlBody !== null ? { htmlBody: content.htmlBody } : {}),
+  };
+};
+
+export const renderedSmsComposer: SmsComposer = (request) =>
+  dispatchContentOf(request)?.body ?? defaultSmsComposer(request);
+
+export const renderedVoiceComposer: VoiceComposer = (request) =>
+  dispatchContentOf(request)?.body ?? defaultVoiceComposer(request);
 
 /**
  * Builds the channel senders from the environment.
@@ -176,6 +209,7 @@ function buildSes(env: NodeJS.ProcessEnv, skipped: string[]): ChannelSender | nu
     skipped,
     () =>
       new SesEmailSender({
+        compose: renderedEmailComposer,
         region,
         credentials: {
           accessKeyId,
@@ -237,6 +271,7 @@ function buildTwilio(env: NodeJS.ProcessEnv, skipped: string[]): ChannelSender |
     skipped,
     () =>
       new TwilioSmsSender({
+        compose: renderedSmsComposer,
         accountSid,
         // An API key pair is preferred over the account's auth token: it is revocable on its own and
         // scoped, where the auth token is the account's root credential.
@@ -373,6 +408,7 @@ function buildTwilioVoice(
     skipped,
     () =>
       new TwilioVoiceSender({
+        compose: renderedVoiceComposer,
         accountSid,
         ...credential,
         fromNumber,

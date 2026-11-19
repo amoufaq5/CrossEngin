@@ -17,19 +17,22 @@ import { hmacSha256Hex } from "./hmac.js";
 export const PASSWORD_KDF = "scrypt" as const;
 
 /**
- * scrypt cost, measured on a 4-core 2026 cloud VM (min-of-3, r=8, p=1, 64-byte output):
+ * scrypt cost, measured on a 4-core cloud VM (median of 7, 64-byte output):
  *
- *   N=2^14   56-70 ms    16 MiB
- *   N=2^15  114-144 ms   32 MiB   <- default
- *   N=2^16  218-475 ms   64 MiB
- *   N=2^17  501-981 ms  128 MiB
+ *   N=2^15 r=8 p=1    86 ms    32 MiB   <- the default until the audit's M-09
+ *   N=2^15 r=8 p=3   196 ms    32 MiB   <- default
+ *   N=2^16 r=8 p=2   290 ms    64 MiB
+ *   N=2^17 r=8 p=1   328 ms   128 MiB
  *
- * 2^15 is the default because the cost lands where an interactive login can afford it and the
- * memory stays inside a small VM. OWASP's floor is 2^17, which is ~700 ms here and 128 MiB per
- * concurrent login -- a real denial of service against a 4-thread pool -- so the parameters are
- * stored per hash and a deployment that can afford more raises `n` without invalidating anything.
+ * The last three rows are OWASP's equivalent minimum configurations, and the old default was a
+ * third of the cheapest of them. The default is the one row that buys the work **without** buying
+ * memory: `p` multiplies CPU and leaves the 32 MiB per derivation where it was, so the login
+ * admission bound and every small-VM measurement made at the old default still hold, while 2^17
+ * would quadruple what four concurrent logins hold. A stored hash keeps its own parameters, so this
+ * moves no existing password; a weaker one is re-hashed at its owner's next successful login
+ * (`passwordHashIsStale`).
  */
-export const PASSWORD_SCRYPT_DEFAULTS = Object.freeze({ n: 32768, r: 8, p: 1 });
+export const PASSWORD_SCRYPT_DEFAULTS = Object.freeze({ n: 32768, r: 8, p: 3 });
 
 /** 16 bytes, which is what the column's CHECK pins as 32 hex characters. */
 export const PASSWORD_SALT_BYTES = 16;
@@ -116,7 +119,7 @@ export interface PasswordScryptParams {
  * ~1,275 MB against a model of 1 GiB minus 384 bytes, so "stays allocatable on a small VM" is
  * understated by about 200 MB at the extreme.
  */
-export const PASSWORD_WORK_CEILING_FACTOR = 16;
+export const PASSWORD_WORK_CEILING = 4_194_304;
 /**
  * 1 GiB. Not expressed as a multiple, because what bounds it is the host and not the default.
  *
@@ -137,9 +140,18 @@ export const PASSWORD_WORK_CEILING_FACTOR = 16;
  */
 export const PASSWORD_MEMORY_CEILING_BYTES = 1_073_741_824;
 
-/** `n * r * p` for the shipped defaults, which both ceilings are stated relative to. */
+/** `n * r * p` for the shipped defaults. */
 export const PASSWORD_DEFAULT_WORK =
   PASSWORD_SCRYPT_DEFAULTS.n * PASSWORD_SCRYPT_DEFAULTS.r * PASSWORD_SCRYPT_DEFAULTS.p;
+
+/**
+ * The ceiling as a multiple of the current default -- derived, because the ceiling is absolute.
+ *
+ * It was the constant 16 while the default was `2^15 * 8 * 1`, and `PASSWORD_WORK_CEILING` is that
+ * product's value: raising the default's `p` to 3 must not raise what a **hostile stored row** may
+ * cost to verify, which is the bound ADR-0398 measured and argued. So the multiple fell to ~5.3.
+ */
+export const PASSWORD_WORK_CEILING_FACTOR = PASSWORD_WORK_CEILING / PASSWORD_DEFAULT_WORK;
 
 /**
  * Whether this build will derive under these parameters at all.
@@ -175,7 +187,7 @@ export function passwordParamsAreDerivable(params: PasswordScryptParams): boolea
   // RFC 7914 §6, enforced by OpenSSL under a misleading error code. `2 ** (16 * r)` is `Infinity`
   // for `r >= 64`, which is the right answer: there is no `n` the work ceiling admits at that `r`.
   if (n >= 2 ** (16 * r)) return false;
-  if (n * r * p > PASSWORD_DEFAULT_WORK * PASSWORD_WORK_CEILING_FACTOR) return false;
+  if (n * r * p > PASSWORD_WORK_CEILING) return false;
   return 128 * r * (n + p + 2) <= PASSWORD_MEMORY_CEILING_BYTES;
 }
 
@@ -195,12 +207,28 @@ export const PASSWORD_OUTCOME_ADMITS: Readonly<
 export interface ParsedPasswordHash {
   readonly kdf: typeof PASSWORD_KDF;
   readonly params: PasswordScryptParams;
+  /**
+   * Which of the deployment's peppers this hash was keyed with. `1` for every hash written before
+   * versions existed, which is why version 1 is also encoded in the legacy shape: a deployment that
+   * never rotates writes byte-identical hashes and needs no catalog change to keep writing them.
+   */
+  readonly pepperVersion: number;
   readonly saltHex: string;
   readonly hashHex: string;
 }
 
+/** The pepper version every unversioned hash was keyed with. */
+export const LEGACY_PEPPER_VERSION = 1;
+/** Four digits, matching the CHECK on `meta.users.credential_hash`. */
+export const MAX_PEPPER_VERSION = 9999;
+
+/**
+ * The three parameters are bounded at eight digits: the work ceiling admits nothing wider (its
+ * largest single parameter is ~4.2M, seven digits), so a longer run is a row this build would refuse
+ * anyway, and an unbounded `[0-9]+` let the column store a parameter string of any length.
+ */
 const ENCODED_RE =
-  /^scrypt\$([0-9]+)\$([0-9]+)\$([0-9]+)\$([0-9a-f]{32})\$([0-9a-f]{128})$/;
+  /^scrypt\$([0-9]{1,8})\$([0-9]{1,8})\$([0-9]{1,8})\$(?:k([1-9][0-9]{0,3})\$)?([0-9a-f]{32})\$([0-9a-f]{128})$/;
 
 /**
  * `scrypt$<N>$<r>$<p>$<saltHex>$<hashHex>`, the same shape the column's CHECK constrains.
@@ -212,7 +240,9 @@ const ENCODED_RE =
  */
 export function encodePasswordHash(parsed: ParsedPasswordHash): string {
   const { n, r, p } = parsed.params;
-  return `${parsed.kdf}$${n.toString()}$${r.toString()}$${p.toString()}$${parsed.saltHex}$${parsed.hashHex}`;
+  const version =
+    parsed.pepperVersion === LEGACY_PEPPER_VERSION ? "" : `k${parsed.pepperVersion.toString()}$`;
+  return `${parsed.kdf}$${n.toString()}$${r.toString()}$${p.toString()}$${version}${parsed.saltHex}$${parsed.hashHex}`;
 }
 
 /** `null` for anything this module did not produce -- never a throw, and never a partial parse. */
@@ -236,7 +266,37 @@ export function parsePasswordHash(encoded: string): ParsedPasswordHash | null {
   // The ceiling is on the two resources rather than on each parameter, because the hazard moves
   // between them: see `passwordParamsAreDerivable`.
   if (!passwordParamsAreDerivable(params)) return null;
-  return { kdf: PASSWORD_KDF, params, saltHex: m[4]!, hashHex: m[5]! };
+  const pepperVersion = m[4] === undefined ? LEGACY_PEPPER_VERSION : Number(m[4]);
+  return { kdf: PASSWORD_KDF, params, pepperVersion, saltHex: m[5]!, hashHex: m[6]! };
+}
+
+/**
+ * The deployment's peppers: the one new hashes are keyed with, and the retired ones still accepted
+ * for verifying hashes written before a rotation.
+ *
+ * A rotation is the reason this exists. Before it the pepper was one string and changing it made
+ * every stored password unverifiable at once -- so it was never rotated, which for a secret whose
+ * whole job is to survive a database read is the wrong default. With a ring the new pepper keys
+ * every new hash and every successful login re-keys that user's hash (`passwordHashIsStale`), so a
+ * retired pepper can be dropped once its hashes have drained.
+ */
+export interface PepperRing {
+  readonly version: number;
+  readonly pepper: string;
+  readonly retired: ReadonlyMap<number, string>;
+}
+
+/** A bare string is version 1 with nothing retired: every caller written before rings existed. */
+export type PepperSource = string | PepperRing;
+
+export function pepperRingOf(source: PepperSource): PepperRing {
+  if (typeof source !== "string") return source;
+  return { version: LEGACY_PEPPER_VERSION, pepper: source, retired: new Map() };
+}
+
+function pepperForVersion(ring: PepperRing, version: number): string | null {
+  if (version === ring.version) return ring.pepper;
+  return ring.retired.get(version) ?? null;
 }
 
 /**
@@ -300,7 +360,7 @@ export interface HashPasswordOptions {
 
 export async function hashPassword(
   password: string,
-  pepper: string,
+  pepper: PepperSource,
   opts: HashPasswordOptions = {},
 ): Promise<string> {
   const params = opts.params ?? PASSWORD_SCRYPT_DEFAULTS;
@@ -319,10 +379,15 @@ export async function hashPassword(
         ` r=${params.r.toString()} p=${params.p.toString()}`,
     );
   }
-  const derived = await deriveScrypt(password, pepper, salt, params);
+  const ring = pepperRingOf(pepper);
+  if (!Number.isInteger(ring.version) || ring.version < 1 || ring.version > MAX_PEPPER_VERSION) {
+    throw new Error(`pepper version must be an integer 1..${MAX_PEPPER_VERSION.toString()}`);
+  }
+  const derived = await deriveScrypt(password, ring.pepper, salt, params);
   return encodePasswordHash({
     kdf: PASSWORD_KDF,
     params,
+    pepperVersion: ring.version,
     saltHex: salt.toString("hex"),
     hashHex: derived.toString("hex"),
   });
@@ -340,14 +405,19 @@ export async function hashPassword(
 export async function verifyPassword(
   password: string,
   encodedHash: string,
-  pepper: string,
+  pepper: PepperSource,
 ): Promise<PasswordVerifyOutcome> {
   const parsed = parsePasswordHash(encodedHash);
   if (parsed === null) return "unreadable_hash";
+  // A hash keyed with a pepper this deployment no longer holds cannot be verified, which is the
+  // `unreadable_hash` fact: deriving under another pepper would answer `mismatched` and tell the
+  // owner their correct password is wrong -- and count it against their lockout.
+  const keyedWith = pepperForVersion(pepperRingOf(pepper), parsed.pepperVersion);
+  if (keyedWith === null) return "unreadable_hash";
   const expected = Buffer.from(parsed.hashHex, "hex");
   const derived = await deriveScrypt(
     password,
-    pepper,
+    keyedWith,
     Buffer.from(parsed.saltHex, "hex"),
     parsed.params,
   );
@@ -379,10 +449,10 @@ export async function verifyPassword(
  */
 export async function spendPasswordWork(
   password: string,
-  pepper: string,
+  pepper: PepperSource,
   params: PasswordScryptParams = PASSWORD_SCRYPT_DEFAULTS,
 ): Promise<PasswordVerifyOutcome> {
-  await deriveScrypt(password, pepper, randomBytes(PASSWORD_SALT_BYTES), params);
+  await deriveScrypt(password, pepperRingOf(pepper).pepper, randomBytes(PASSWORD_SALT_BYTES), params);
   return "mismatched";
 }
 
@@ -390,8 +460,10 @@ export async function spendPasswordWork(
 export function passwordHashIsStale(
   encodedHash: string,
   params: PasswordScryptParams = PASSWORD_SCRYPT_DEFAULTS,
+  pepper?: PepperSource,
 ): boolean {
   const parsed = parsePasswordHash(encodedHash);
   if (parsed === null) return false; // unreadable is a different problem with a different remedy
+  if (pepper !== undefined && parsed.pepperVersion !== pepperRingOf(pepper).version) return true;
   return parsed.params.n < params.n || parsed.params.r < params.r || parsed.params.p < params.p;
 }

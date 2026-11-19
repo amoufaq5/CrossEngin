@@ -359,6 +359,17 @@ export function markupRefusals(
 }
 
 /**
+ * The authoring rule for HTML markup, for a reader that is not the authoring route.
+ *
+ * The digest renderer is that reader: it hands a tenant's stored override to a browser as markup,
+ * and a row the routes never vetted — one stored before they existed, or written by anything but
+ * them — must meet the same allowlist on the way out that a new one meets on the way in.
+ */
+export function htmlMarkupRefusals(path: string, text: string): readonly ContentRefusal[] {
+  return markupRefusals(path, text, ALLOWED_MARKUP_TAGS, ALLOWED_MARKUP_ATTRS);
+}
+
+/**
  * A webhook payload template must be able to produce JSON. Placeholders are substituted with a
  * scalar first, so `{"n": {{count}}}` and `{"s": "{{name}}"}` both parse — and a template that
  * cannot parse either way is refused here rather than failing at delivery, once, per recipient.

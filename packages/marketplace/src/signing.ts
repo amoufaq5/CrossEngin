@@ -2,6 +2,7 @@ import {
   type KeyHandle,
   type KeyStore,
   ed25519PublicKeyFingerprint,
+  sha256,
   signEd25519,
   verifyEd25519,
 } from "@crossengin/crypto";
@@ -14,6 +15,15 @@ const SIGNATURE_DOMAIN_TAG = "crossengin.pack.v1\n";
 export function canonicalManifestBytes(manifest: PackManifest): Uint8Array {
   const json = canonicalStringify(manifest);
   return new TextEncoder().encode(SIGNATURE_DOMAIN_TAG + json);
+}
+
+/**
+ * The digest a pack version's `manifestSha256` must carry: sha256 over the exact bytes the signature
+ * covers. Derived rather than trusted, because a submission naming a digest of its own was stored as
+ * given — measured live, an arbitrary value beside a valid signature answered 201.
+ */
+export function packManifestDigest(manifest: PackManifest): string {
+  return sha256(canonicalManifestBytes(manifest));
 }
 
 function canonicalStringify(value: unknown): string {

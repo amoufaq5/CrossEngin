@@ -4,11 +4,13 @@ import type { PipelineExecution } from "@crossengin/api-gateway";
 import type { PgConnection } from "@crossengin/kernel-pg";
 import {
   EntityAuditUnrecorded,
+  type ChildRemovalQuery,
+  type ChildRemovers,
   type EntityWriteAuditEvent,
   type EntityWriteAuditor,
 } from "@crossengin/operate-runtime";
 
-import { auditActor, auditEntry } from "./audit-log-store.js";
+import { auditActor, auditEntry, type ChildDetachmentRows } from "./audit-log-store.js";
 import type { AuditLogEntry } from "@crossengin/auth";
 
 /** The slice of `PostgresAuditEmitter` the recorder writes through. */
@@ -16,6 +18,8 @@ export interface EntityAuditSink {
   emitWithin(tx: PgConnection, entry: AuditLogEntry): Promise<void>;
   emit(entry: AuditLogEntry): Promise<void>;
   anchors(): boolean;
+  childDetachments(query: ChildRemovalQuery): Promise<ChildDetachmentRows>;
+  childDetachmentsWithin(tx: PgConnection, query: ChildRemovalQuery): Promise<ChildDetachmentRows>;
 }
 
 export interface EntityAuditRecorderOptions {
@@ -88,6 +92,29 @@ export class EntityAuditRecorder implements EntityWriteAuditor {
     // A write background work made has no request the observer will ever see complete, so a mark for
     // it would sit in the set until evicted, crowding out the marks that are consumed.
     if (this.opts.sink.anchors() && event.origin === undefined) this.remember(event.requestId);
+  }
+
+  /**
+   * Who removed a child from its parent, from the trail this recorder writes — read inside the
+   * caller's transaction when there is one, because the approval that asks holds the parent's lock
+   * and a second pooled connection while one is held is ADR-0422's deadlock. Any failure, and a row
+   * whose parent reference was withheld, answers `unreadable`: a check that could not read the trail
+   * must not read as "nobody removed anything".
+   */
+  async childRemovers(query: ChildRemovalQuery): Promise<ChildRemovers> {
+    try {
+      const tx = this.opts.currentTransaction();
+      const rows =
+        tx === undefined
+          ? await this.opts.sink.childDetachments(query)
+          : await this.opts.sink.childDetachmentsWithin(tx, query);
+      if (rows.withheld) {
+        return { kind: "unreadable", reason: `a ${query.childEntity} row's ${query.parentField} is withheld in the trail` };
+      }
+      return { kind: "read", removers: rows.removers };
+    } catch (err) {
+      return { kind: "unreadable", reason: describe(err) };
+    }
   }
 
   /**

@@ -324,3 +324,80 @@ describe("LatencySloEngine — a rollback that cannot be recorded never costs th
     expect(decision.plan.killSwitch?.justification).not.toMatch(/rolled|safe value/i);
   });
 });
+
+describe("LatencySloEngine — escalation and kill-switch release (M-23, ADR-0415)", () => {
+  it("escalates a sev3 ticket that persists to sev2, re-pages on the new route, and regrades", async () => {
+    const clock = new FixedClock(BASE);
+    const regraded: string[] = [];
+    const engine = new LatencySloEngine({
+      alertPolicy: policy,
+      systemActorUserId: SYSTEM_ACTOR,
+      registrations: [{ ...registration, escalation: { afterMs: 30 * 60_000, severity: "sev2" } }],
+      clock,
+      regrader: {
+        regrade: async (_id, input): Promise<void> => {
+          regraded.push(input.severity);
+        },
+      },
+    });
+    recordLatencies(engine, 400, 30, BASE.getTime());
+    expect((await engine.evaluate())[0]?.kind).toBe("breach_opened");
+    clock.advance(31 * 60_000);
+    recordLatencies(engine, 400, 30, clock.nowMs());
+    const escalated = (await engine.evaluate(clock.now()))[0];
+    if (escalated?.kind !== "breach_escalated") throw new Error("expected escalation");
+    expect([escalated.fromSeverity, escalated.severity]).toEqual(["sev3", "sev2"]);
+    expect(escalated.pages[0]?.channels[0]?.kind).toBe("pagerduty_phone");
+    expect(regraded).toEqual(["sev2"]);
+    clock.advance(60_000);
+    recordLatencies(engine, 400, 30, clock.nowMs());
+    expect((await engine.evaluate(clock.now()))[0]?.kind).toBe("breach_ongoing");
+  });
+
+  it("does not escalate a breach already opened at or above the escalation grade", async () => {
+    const clock = new FixedClock(BASE);
+    const engine = new LatencySloEngine({
+      alertPolicy: policy,
+      systemActorUserId: SYSTEM_ACTOR,
+      registrations: [{ ...registration, escalation: { afterMs: 30 * 60_000, severity: "sev2" } }],
+      clock,
+    });
+    recordLatencies(engine, 700, 30, BASE.getTime());
+    expect((await engine.evaluate())[0]?.kind).toBe("breach_opened");
+    clock.advance(31 * 60_000);
+    recordLatencies(engine, 700, 30, clock.nowMs());
+    expect((await engine.evaluate(clock.now()))[0]?.kind).toBe("breach_ongoing");
+  });
+
+  it("releases the recorded kill switch on recovery and records it with an expiry", async () => {
+    const clock = new FixedClock(BASE);
+    const released: string[] = [];
+    const expiries: (string | null)[] = [];
+    const engine = new LatencySloEngine({
+      alertPolicy: policy,
+      systemActorUserId: SYSTEM_ACTOR,
+      registrations: [registration],
+      clock,
+      killSwitchRecorder: {
+        record: async (ks): Promise<void> => {
+          expiries.push(ks.expiresAt);
+        },
+      },
+      killSwitchReleaser: {
+        release: async (id): Promise<boolean> => {
+          released.push(id);
+          return true;
+        },
+      },
+    });
+    recordLatencies(engine, 700, 30, BASE.getTime());
+    const opened = (await engine.evaluate())[0];
+    if (opened?.kind !== "breach_opened") throw new Error("expected breach");
+    expect(expiries).toEqual([new Date(BASE.getTime() + 86_400_000).toISOString()]);
+    clock.advance(10 * 60_000);
+    recordLatencies(engine, 80, 30, clock.nowMs());
+    const recovered = (await engine.evaluate(clock.now()))[0];
+    expect(recovered).toMatchObject({ kind: "recovered", killSwitchRelease: "released" });
+    expect(released).toEqual([opened.plan.killSwitch?.id]);
+  });
+});

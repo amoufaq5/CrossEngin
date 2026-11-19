@@ -176,3 +176,54 @@ describe("completeNonStreaming()", () => {
     expect(res.choices[0]?.message.content).toBe("ok");
   });
 });
+
+describe("declared price and inactivity timeout", () => {
+  const usageStream = (): string =>
+    sse(
+      { choices: [{ index: 0, delta: { content: "ok" }, finish_reason: "stop" }] },
+      { choices: [], usage: { prompt_tokens: 10, completion_tokens: 2 } },
+    );
+
+  async function finalCost(p: LocalLlmProvider): Promise<number> {
+    let cost = -1;
+    for await (const chunk of p.complete(req())) if (chunk.kind === "usage_final") cost = chunk.usage.cost;
+    return cost;
+  }
+
+  it("costs 0 undeclared and the declared price when one is given", async () => {
+    const fetch: FetchLike = async () => streamResponse(usageStream());
+    expect(await finalCost(new LocalLlmProvider({ fetch }))).toBe(0);
+    const priced = new LocalLlmProvider({
+      fetch,
+      pricingOverride: { inputPerMillionTokens: 1_000_000, outputPerMillionTokens: 2_000_000 },
+    });
+    expect(priced.pricing.inputPerMillionTokens).toBe(1_000_000);
+    // 10 in at $1 + 2 out at $2.
+    expect(await finalCost(priced)).toBeCloseTo(14, 6);
+  });
+
+  it("aborts a call the server never answers", async () => {
+    let seen: AbortSignal | undefined;
+    const p = new LocalLlmProvider({
+      inactivityTimeoutMs: 30,
+      fetch: async (_url, init) => {
+        seen = init.signal;
+        return new Promise(() => undefined);
+      },
+    });
+    const err = await (async () => {
+      try {
+        for await (const _ of p.complete(req())) void _;
+        return null;
+      } catch (e) {
+        return e;
+      }
+    })();
+    expect(err).toBeInstanceOf(LocalProviderError);
+    expect((err as LocalProviderError).kind).toBe("timeout_error");
+    expect(seen?.aborted).toBe(true);
+    await expect(p.embed({ texts: ["a"], tenantId: "00000000-0000-4000-8000-000000000001" })).rejects.toMatchObject({
+      kind: "timeout_error",
+    });
+  });
+});

@@ -1,5 +1,16 @@
-import { parseDecimal } from "./decimal.js";
+import { type ExactDecimal, parseDecimal, renderDecimal } from "./decimal.js";
 import { drainList, ReadCeilingExceeded } from "./list-drain.js";
+import {
+  convertBalanced,
+  convertUnits,
+  moneyUnits,
+  positiveRate,
+  RATE_ONE,
+  rateWire,
+  renderMoney,
+  unitsOf,
+  unitsToNumber,
+} from "./money.js";
 import { postingPeriodFor, PostingRefused, type PostingPeriodConfig } from "./posting-period.js";
 import { determineDocumentTax, type DocumentTaxDetermination, type TaxDeterminationConfig } from "./tax-determination.js";
 import type { EntityRecord } from "./store.js";
@@ -53,6 +64,12 @@ export interface JournalReversalConfig {
   readonly maxLines?: number;
   /** The fiscal calendar a posting's period is resolved from; absent, no period is resolved. */
   readonly periods?: PostingPeriodConfig;
+  /**
+   * Postings that reverse **part** of another: an entry numbered `<base><sourceSuffix>` may have had
+   * part of it reversed by `<base><reversalSuffix>`, which leaves it `posted` because the rest still
+   * stands. Reversing it then reverses only what still stands.
+   */
+  readonly partialReversals?: readonly { readonly sourceSuffix: string; readonly reversalSuffix: string }[];
   readonly clock?: { now(): Date };
 }
 
@@ -116,10 +133,6 @@ function optionalNum(v: unknown): number | null {
   if (parsed === null) return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
-}
-
-function swapAmount(a: unknown, b: unknown): boolean {
-  return num(a) !== 0 || num(b) !== 0;
 }
 
 /**
@@ -218,16 +231,55 @@ const LINE_COPY_SKIP = new Set<string>([
   "description",
 ]);
 
+/** A stored rate in one spelling, so `1` and `1.0000000000` are one line dimension. */
+function canonicalRate(value: unknown): string {
+  const r = positiveRate(value ?? 1);
+  if (r === null) return String(value);
+  let units = r.units;
+  let scale = r.scale;
+  while (scale > 0 && units % 10n === 0n) {
+    units /= 10n;
+    scale -= 1;
+  }
+  return renderDecimal({ negative: false, units, scale });
+}
+
 /** A line's amounts in integer cents, both pairs. */
 function lineCents(line: EntityRecord): { d: bigint; c: bigint; fd: bigint; fc: bigint } {
-  const cents = (v: unknown): bigint => BigInt(Math.round(num(v) * 100));
-  return { d: cents(line["debit"]), c: cents(line["credit"]), fd: cents(line["functional_debit"]), fc: cents(line["functional_credit"]) };
+  return {
+    d: unitsOf(line["debit"]),
+    c: unitsOf(line["credit"]),
+    fd: unitsOf(line["functional_debit"]),
+    fc: unitsOf(line["functional_credit"]),
+  };
 }
 
 /** `cents × num / den`, rounded half away from zero, exact for any magnitude a ledger holds. */
 function scaleCents(cents: bigint, numerator: bigint, denominator: bigint): bigint {
   if (denominator === 0n) return 0n;
   return (cents * numerator * 2n + denominator) / (2n * denominator);
+}
+
+/**
+ * The one exchange rate every line of an entry carries, when every line moves a transaction amount
+ * at the same rate; null when they differ or a line is functional-only.
+ */
+function sharedRate(lines: readonly EntityRecord[]): ExactDecimal | null {
+  let rate: ExactDecimal | null = null;
+  for (const line of lines) {
+    const amounts = lineCents(line);
+    if (amounts.d === 0n && amounts.c === 0n) return null;
+    const r = positiveRate(line["fx_rate"] ?? 1);
+    if (r === null) return null;
+    if (rate !== null && renderDecimal(r) !== renderDecimal(rate)) {
+      // Same value, different scale (`1.1` against `1.1000000000`), is the same rate.
+      const scale = Math.max(r.scale, rate.scale);
+      const widen = (x: ExactDecimal): bigint => x.units * 10n ** BigInt(scale - x.scale);
+      if (widen(r) !== widen(rate)) return null;
+    }
+    rate = rate ?? r;
+  }
+  return rate;
 }
 
 /**
@@ -277,17 +329,28 @@ function mirrorLines(
     if (creditAnchor !== -1) shaped[creditAnchor]!.c += part.cents - sum("c");
   }
   const allEqual = shaped.every((s) => s.equalPairs);
+  const commonRate = part === null ? null : sharedRate(source);
   if (allEqual) {
     for (const s of shaped) {
       s.fd = s.d;
       s.fc = s.c;
     }
+  } else if (commonRate !== null) {
+    // One rate across every line (a foreign document's recognition): the scaled functional amounts
+    // are re-derived from the scaled transaction amounts at that rate, balanced, so each stays a
+    // rounding of its own product — scaling the source's functional legs and dumping the residual
+    // on one line would leave that line further than a cent from `amount × rate`.
+    const converted = convertBalanced(shaped.map((s) => ({ d: s.d, c: s.c })), commonRate);
+    shaped.forEach((s, i) => {
+      s.fd = converted[i]!.d;
+      s.fc = converted[i]!.c;
+    });
   } else if (part !== null && creditAnchor !== -1) {
     const fd = shaped.reduce((a, s) => a + s.fd, 0n);
     const fc = shaped.reduce((a, s) => a + s.fc, 0n);
     shaped[creditAnchor]!.fc += fd - fc;
   }
-  const money = (cents: bigint): number => Number(cents) / 100;
+  const money = unitsToNumber;
   const kept = part === null ? shaped : shaped.filter((s) => s.d !== 0n || s.c !== 0n || s.fd !== 0n || s.fc !== 0n);
   return kept.map((s) => {
     const out: EntityRecord = {};
@@ -385,6 +448,14 @@ export interface PostingReversalConfig {
   readonly reversalSuffix: string;
   /** `JournalEntry.source` of the reversing entry. */
   readonly sourceLabel: string;
+  /**
+   * The payment field naming this document. When set, leaving the state is **refused** while
+   * completed payments are applied to it: reversing the posting puts the whole control balance back
+   * while the settlement those payments posted stands, so a Bill of 200 with 50 paid, voided, left
+   * accounts payable 50 in debit — a balance owed by a vendor for a bill that no longer exists.
+   * Refunding the payment first reverses its settlement, and then the void is clean.
+   */
+  readonly refuseWhileSettledBy?: string;
   readonly entryEntity?: string;
   readonly lineEntity?: string;
   readonly periods?: PostingPeriodConfig;
@@ -425,6 +496,23 @@ export function postingReversalEffect(config: PostingReversalConfig): WriteEffec
     const docId = input.id;
     if (docId === null) return;
     const docNumber = typeof input.after[c.numberField] === "string" ? (input.after[c.numberField] as string) : docId;
+    if (c.refuseWhileSettledBy !== undefined) {
+      // One document's instalments, `paymentApplicationEffect`'s ceiling for the same read.
+      const settled = await readAppliedToDocument(input.store, input.tenantId, c.refuseWhileSettledBy, docId, {
+        ceiling: 10_000,
+      });
+      if (!settled.complete) {
+        throw new ReadCeilingExceeded("Payment", 10_000, "the payments applied to a document being voided");
+      }
+      if (settled.applied !== 0) {
+        throw new PostingRefused(
+          409,
+          "document_partly_settled",
+          `completed payments are applied to this ${c.entity}, so moving it to '${c.toState}' would reverse its ` +
+            `posting while their settlement stands; refund them first, then retry`,
+        );
+      }
+    }
     const source = await findEntryByNumber(input, c.entryEntity, `${docNumber}${c.sourceSuffix}`);
     if (source === null || source[DEFAULTS.stateField] !== DEFAULTS.postedState) return;
     await reverseEntry(input, {
@@ -469,6 +557,26 @@ export function journalReversalEffect(config: JournalReversalConfig = {}): Write
     const today = nowIso.slice(0, 10);
     const origNumber = typeof original[c.numberField] === "string" ? (original[c.numberField] as string) : originalId;
 
+    // A part-reversal whose source is itself reversed has nothing left to undo: the source was
+    // either reversed whole by this entry (a full credit marks it `reversed`) or reversed net of it
+    // (below), so reversing this one would put back what that reversal already took out. Measured
+    // before: an invoice of 110 credited 50, its recognition reversed, then the credit's posting
+    // reversed, left a receivable of 50 on a void invoice.
+    for (const pair of config.partialReversals ?? []) {
+      if (!origNumber.endsWith(pair.reversalSuffix)) continue;
+      const base = origNumber.slice(0, origNumber.length - pair.reversalSuffix.length);
+      const source = await findEntryByNumber(input, c.entryEntity, `${base}${pair.sourceSuffix}`);
+      if (source !== null && source[c.stateField] === c.reversedState) {
+        throw new PostingRefused(
+          409,
+          "reversal_source_already_reversed",
+          `${origNumber} reverses part or all of ${base}${pair.sourceSuffix}, which is already reversed, by this entry ` +
+            `or net of it; ` +
+            `reversing it too would reinstate an amount nothing owes`,
+        );
+      }
+    }
+
     const reversalEntry: EntityRecord = {
       [c.numberField]: `${origNumber}-REV`,
       [c.entryDateField]: today,
@@ -512,7 +620,14 @@ export function journalReversalEffect(config: JournalReversalConfig = {}): Write
     // original's id while writing the new entry's is also why interleaving would have been safe —
     // the drain's filter can never match a row this effect creates — but safe is not the same as
     // ordered, and the ordering is what makes the refusal clean.
-    const reversals: EntityRecord[] = [];
+    //
+    // Netted per line dimension (account, currency, rate, cost centre — everything but the amounts
+    // and the bookkeeping fields) against any part of this entry already reversed: a partial credit
+    // note posts the mirror of part of an invoice's recognition and leaves it `posted`, because the
+    // rest still stands — so a manual reverse of it afterwards used to reverse the whole of it again,
+    // and the credited part twice. Measured: an invoice of 110 credited 50, then reversed, left the
+    // receivable at −50.
+    const sourceLines: EntityRecord[] = [];
     const outcome = await drainList(
       input.store,
       input.tenantId,
@@ -520,30 +635,84 @@ export function journalReversalEffect(config: JournalReversalConfig = {}): Write
       { sort: [], filters: [{ field: c.lineEntryRefField, op: "eq", value: originalId }] },
       { ceiling: c.maxLines },
       (rows) => {
-        for (const line of rows) {
-          if (String(line[c.lineEntryRefField] ?? "") !== originalId) continue;
-          const reversed: EntityRecord = {};
-          for (const [k, v] of Object.entries(line)) {
-            if (!skip.has(k)) reversed[k] = v;
-          }
-          reversed[c.debitField] = num(line[c.creditField]);
-          reversed[c.creditField] = num(line[c.debitField]);
-          if (swapAmount(line[c.functionalDebitField], line[c.functionalCreditField])) {
-            reversed[c.functionalDebitField] = num(line[c.functionalCreditField]);
-            reversed[c.functionalCreditField] = num(line[c.functionalDebitField]);
-          }
-          const desc = typeof line[c.descriptionField] === "string" ? (line[c.descriptionField] as string) : "";
-          reversed[c.descriptionField] = `Reversal: ${desc}`.trim();
-          reversed.created_at = nowIso;
-          reversed.updated_at = nowIso;
-          Object.assign(reversed, attributedToTrigger(original));
-          reversals.push(reversed);
-        }
+        for (const line of rows) if (String(line[c.lineEntryRefField] ?? "") === originalId) sourceLines.push(line);
       },
     );
     if (!outcome.complete) {
       throw new ReadCeilingExceeded(c.lineEntity, c.maxLines, "a journal reversal");
     }
+    const partialLines: EntityRecord[] = [];
+    for (const pair of config.partialReversals ?? []) {
+      if (!origNumber.endsWith(pair.sourceSuffix)) continue;
+      const base = origNumber.slice(0, origNumber.length - pair.sourceSuffix.length);
+      const partial = await findEntryByNumber(input, c.entryEntity, `${base}${pair.reversalSuffix}`);
+      if (partial === null || partial[c.stateField] !== c.postedState) continue;
+      partialLines.push(
+        ...(await readEntryLines(input, String(partial["id"]), {
+          lineEntity: c.lineEntity,
+          lineEntryRefField: c.lineEntryRefField,
+          maxLines: c.maxLines,
+        })),
+      );
+    }
+    const amountFields = [c.debitField, c.creditField, c.functionalDebitField, c.functionalCreditField];
+    const dimensionKey = (line: EntityRecord): string =>
+      JSON.stringify(
+        Object.keys(line)
+          .filter((k) => !skip.has(k) && !amountFields.includes(k))
+          .sort()
+          .map((k) => [k, k === "fx_rate" ? canonicalRate(line[k]) : line[k]]),
+      );
+    // What still stands, per dimension: the source's lines less what the partial reversals mirrored.
+    const standing = new Map<string, { line: EntityRecord; tx: bigint; fn: bigint }>();
+    const fold = (line: EntityRecord, sign: bigint): void => {
+      const k = dimensionKey(line);
+      const tx = unitsOf(line[c.debitField]) - unitsOf(line[c.creditField]);
+      const fn = unitsOf(line[c.functionalDebitField]) - unitsOf(line[c.functionalCreditField]);
+      const was = standing.get(k);
+      standing.set(k, { line: was?.line ?? line, tx: (was?.tx ?? 0n) + sign * tx, fn: (was?.fn ?? 0n) + sign * fn });
+    };
+    // With nothing partly reversed, every line is mirrored as it stands, one for one — two lines on
+    // one account are two lines of the reversal, as they were of the entry. Only a partial reversal
+    // is netted per dimension, because only there is "what still stands" a difference of two sets.
+    const standingLines: { line: EntityRecord; tx: bigint; fn: bigint }[] = [];
+    if (partialLines.length === 0) {
+      for (const line of sourceLines) {
+        standingLines.push({
+          line,
+          tx: unitsOf(line[c.debitField]) - unitsOf(line[c.creditField]),
+          fn: unitsOf(line[c.functionalDebitField]) - unitsOf(line[c.functionalCreditField]),
+        });
+      }
+    } else {
+      for (const line of sourceLines) fold(line, 1n);
+      for (const line of partialLines) fold(line, 1n);
+      standingLines.push(...standing.values());
+    }
+    const reversals: EntityRecord[] = [];
+    for (const { line, tx, fn } of standingLines) {
+      if (partialLines.length > 0 && tx === 0n && fn === 0n) continue;
+      const reversed: EntityRecord = {};
+      for (const [k, v] of Object.entries(line)) {
+        if (!skip.has(k)) reversed[k] = v;
+      }
+      // The mirror of what stands: a net debit is reversed by a credit.
+      reversed[c.debitField] = unitsToNumber(tx < 0n ? -tx : 0n);
+      reversed[c.creditField] = unitsToNumber(tx > 0n ? tx : 0n);
+      // A line that stated no functional pair gets none: the guard reads an absent pair as "the
+      // transaction amount is the functional one", and a stated zero would say otherwise.
+      if (line[c.functionalDebitField] !== undefined || line[c.functionalCreditField] !== undefined || fn !== 0n) {
+        reversed[c.functionalDebitField] = unitsToNumber(fn < 0n ? -fn : 0n);
+        reversed[c.functionalCreditField] = unitsToNumber(fn > 0n ? fn : 0n);
+      }
+      const desc = typeof line[c.descriptionField] === "string" ? (line[c.descriptionField] as string) : "";
+      reversed[c.descriptionField] = `Reversal: ${desc}`.trim();
+      reversed.created_at = nowIso;
+      reversed.updated_at = nowIso;
+      Object.assign(reversed, attributedToTrigger(original));
+      reversals.push(reversed);
+    }
+    if (reversals.length === 0 && partialLines.length > 0) return; // the partial reversals left nothing standing
 
     const created = await createPostedEntry(input, c.entryEntity, reversalEntry, config.periods);
     const newId = String(created["id"]);
@@ -689,28 +858,25 @@ export function invoiceVoidCreditNoteEffect(config: InvoiceCreditNoteConfig = {}
     // Partial credit: when the invoice carries a `credit_amount` below its total,
     // the credit note is for that amount (single summary line); otherwise the
     // full invoice is credited (every line mirrored).
-    const total = num(original[c.totalField]);
-    const requested = optionalNum(original[c.creditAmountField]);
-    const isPartial = requested !== null && requested > 0 && requested < total;
-    const amount = isPartial ? requested : total;
+    const totalUnits = unitsOf(original[c.totalField]);
+    const requestedUnits = moneyUnits(original[c.creditAmountField]);
+    const isPartial = requestedUnits !== null && requestedUnits > 0n && requestedUnits < totalUnits;
+    const amountUnits = isPartial ? requestedUnits : totalUnits;
     // A partial credit carries the original's tax in proportion, rather than none: a credit of 55
     // against a 100 + 10 VAT invoice credits 50 of revenue and 5 of tax. Writing the whole amount as
     // net with zero tax told the customer their VAT was unchanged, while the GL — which reverses
     // the recognition entry in the same proportion — reduced it. Scaled in exact integer cents,
     // `creditNoteGlPostingEffect`'s own arithmetic, so the document and its posting agree.
-    let partialSubtotal = amount;
+    let partialSubtotal = amountUnits;
     if (isPartial) {
-      const totalCents = BigInt(Math.round(total * 100));
-      const partCents = BigInt(Math.round(amount * 100));
-      const scaled = (v: unknown): number =>
-        Number(scaleCents(BigInt(Math.round(num(v) * 100)), partCents, totalCents)) / 100;
-      const originalSubtotal = optionalNum(original[c.subtotalField]);
-      partialSubtotal = originalSubtotal === null ? amount : scaled(originalSubtotal);
-      creditNote[c.totalField] = amount;
-      creditNote[c.subtotalField] = partialSubtotal;
-      creditNote[c.taxTotalField] = Math.round((amount - partialSubtotal) * 100) / 100;
-      if (config.withholdingField !== undefined && optionalNum(original[config.withholdingField]) !== null) {
-        creditNote[config.withholdingField] = scaled(original[config.withholdingField]);
+      const scaled = (units: bigint): bigint => scaleCents(units, amountUnits, totalUnits);
+      const originalSubtotal = moneyUnits(original[c.subtotalField]);
+      partialSubtotal = originalSubtotal === null ? amountUnits : scaled(originalSubtotal);
+      creditNote[c.totalField] = unitsToNumber(amountUnits);
+      creditNote[c.subtotalField] = unitsToNumber(partialSubtotal);
+      creditNote[c.taxTotalField] = unitsToNumber(amountUnits - partialSubtotal);
+      if (config.withholdingField !== undefined && moneyUnits(original[config.withholdingField]) !== null) {
+        creditNote[config.withholdingField] = unitsToNumber(scaled(unitsOf(original[config.withholdingField])));
       }
       creditNote[c.notesField] = `Partial credit note for ${origNumber}`;
     } else {
@@ -744,9 +910,9 @@ export function invoiceVoidCreditNoteEffect(config: InvoiceCreditNoteConfig = {}
         [c.linePositionField]: 1,
         [c.descriptionField]: "Partial credit",
         [c.lineQuantityField]: 1,
-        [c.lineUnitPriceField]: partialSubtotal,
+        [c.lineUnitPriceField]: unitsToNumber(partialSubtotal),
         [c.lineTaxRateField]: 0,
-        [c.lineTotalField]: partialSubtotal,
+        [c.lineTotalField]: unitsToNumber(partialSubtotal),
         created_at: nowIso,
         updated_at: nowIso,
         ...attributedToTrigger(original),
@@ -881,15 +1047,22 @@ export function creditNoteGlPostingEffect(config: CreditNoteGlConfig = {}): Writ
     const wasIssued = typeof beforeState === "string" && c.issuedStates.includes(beforeState);
     const nowVoid = input.after[c.stateField] === c.voidState;
     if (!wasIssued || !nowVoid) return;
-    if (input.before?.[c.documentTypeField] === c.creditNoteType) return;
+    if (input.before?.[c.documentTypeField] === c.creditNoteType) {
+      if (config.recognitionEntrySuffix !== undefined) {
+        await voidCreditNote(input, { ...c, recognitionEntrySuffix: config.recognitionEntrySuffix, periods: config.periods, maxLines: config.maxLines });
+      }
+      return;
+    }
 
     const original = input.after;
     const originalId = input.id;
     if (originalId === null) return;
-    const total = num(original[c.totalField]);
-    const requested = optionalNum(original[c.creditAmountField]);
-    const amount = requested !== null && requested > 0 && requested < total ? requested : total;
-    if (amount <= 0) return;
+    const totalUnits = unitsOf(original[c.totalField]);
+    const requestedUnits = moneyUnits(original[c.creditAmountField]);
+    const amountUnits =
+      requestedUnits !== null && requestedUnits > 0n && requestedUnits < totalUnits ? requestedUnits : totalUnits;
+    if (amountUnits <= 0n) return;
+    const amount = unitsToNumber(amountUnits);
 
     const now = c.clock?.now() ?? new Date();
     const nowIso = now.toISOString();
@@ -919,7 +1092,7 @@ export function creditNoteGlPostingEffect(config: CreditNoteGlConfig = {}): Writ
         number: `${origNumber}-CN-GL`,
         sourceLabel: "invoice",
         memo: `Credit note GL posting for ${origNumber}`,
-        partCents: amount < total ? BigInt(Math.round(amount * 100)) : null,
+        partCents: amountUnits < totalUnits ? amountUnits : null,
         periods: config.periods,
         nowIso,
         actor: attributedToTrigger(original),
@@ -972,6 +1145,74 @@ export function creditNoteGlPostingEffect(config: CreditNoteGlConfig = {}): Writ
 }
 
 /**
+ * Voiding a credit note.
+ *
+ * One sent through the API posted its own recognition — the mirror of a sale — so voiding it
+ * reverses that posting and the receivable it reduced is owed again. Measured before: the void
+ * moved the document and nothing else, so the GL kept the credit while the credit note read `void`.
+ *
+ * One a void **issued** (numbered from its invoice, posted as `<invoice>-CN-GL`) is refused:
+ * reversing its posting would put the receivable back on an invoice that still reads `void`, and
+ * leaving the posting would keep a credit for a document that says it was withdrawn. Its invoice
+ * cannot be un-voided, so there is no state in which voiding it is coherent. Measured before, the
+ * void answered 200 and changed nothing in the GL.
+ */
+async function voidCreditNote(
+  input: WriteEffectInput,
+  c: {
+    readonly entryEntity: string;
+    readonly lineEntity: string;
+    readonly invoiceEntity: string;
+    readonly numberField: string;
+    readonly recognitionEntrySuffix: string;
+    readonly periods: PostingPeriodConfig | undefined;
+    readonly maxLines: number | undefined;
+    readonly clock?: { now(): Date };
+  },
+): Promise<void> {
+  const cn = input.after;
+  const cnId = input.id;
+  if (cnId === null) return;
+  const cnNumber = typeof cn[c.numberField] === "string" ? (cn[c.numberField] as string) : cnId;
+  const own = await findEntryByNumber(input, c.entryEntity, `${cnNumber}${c.recognitionEntrySuffix}`);
+  if (own !== null) {
+    if (own[DEFAULTS.stateField] !== DEFAULTS.postedState) return;
+    const nowIso = (c.clock?.now() ?? new Date()).toISOString();
+    await reverseEntry(input, {
+      entryEntity: c.entryEntity,
+      lineEntity: c.lineEntity,
+      lineEntryRefField: DEFAULTS.lineEntryRefField,
+      maxLines: c.maxLines ?? DEFAULTS.maxLines,
+      stateField: DEFAULTS.stateField,
+      postedState: DEFAULTS.postedState,
+      reversedState: DEFAULTS.reversedState,
+      source: own,
+      number: `${cnNumber}-VOID`,
+      sourceLabel: "invoice",
+      memo: `Reversal of credit note ${cnNumber}${c.recognitionEntrySuffix} (void)`,
+      partCents: null,
+      periods: c.periods,
+      nowIso,
+      actor: attributedToTrigger(cn),
+    });
+    return;
+  }
+  const of = cn["credit_note_of"];
+  if (typeof of !== "string" || of.length === 0) return;
+  const invoice = await input.store.get(input.tenantId, c.invoiceEntity, of);
+  const invoiceNumber = typeof invoice?.[c.numberField] === "string" ? (invoice[c.numberField] as string) : of;
+  if ((await findEntryByNumber(input, c.entryEntity, `${invoiceNumber}-CN-GL`)) !== null) {
+    throw new PostingRefused(
+      409,
+      "credit_note_issued_by_void",
+      `this credit note was issued by voiding invoice ${invoiceNumber}, which cannot be un-voided; voiding it would ` +
+        `either put the receivable back on a void invoice or keep a credit for a withdrawn document — issue a new ` +
+        `invoice for the amount instead`,
+    );
+  }
+}
+
+/**
  * Resolves a LedgerAccount `account_code` to its record id within the tenant, or null.
  *
  * `.find` with **no positional fallback**, converging on `resolveCurrencyId`, which made the
@@ -1000,16 +1241,136 @@ export async function resolveAccountId(
 
 type GlSide = "debit" | "credit";
 
-function glLine(
+/** A line an effect means to post: its account, its side, and its transaction amount in ledger units. */
+interface PlannedLine {
+  readonly account: string;
+  readonly description: string;
+  readonly side: GlSide;
+  readonly units: bigint;
+}
+
+/**
+ * Planned lines in one currency, at one rate, as the records a posting writes: the transaction
+ * amounts as planned and the functional amounts converted **and balanced** at the rate
+ * ({@link convertBalanced}), with the rate written beside them. Zero-amount lines are dropped.
+ *
+ * This replaces the `fx_rate: 1, functional = amount` every posting effect wrote, which for a
+ * document in a foreign currency put its foreign amounts into the base-currency ledger unconverted:
+ * an invoice of EUR 100 booked at 1.1 read USD 100 of revenue.
+ */
+function convertedLines(
+  base: Record<string, unknown>,
+  planned: readonly PlannedLine[],
+  rate: ExactDecimal,
+): Record<string, unknown>[] {
+  const kept = planned.filter((p) => p.units !== 0n);
+  const pairs = kept.map((p) => (p.side === "debit" ? { d: p.units, c: 0n } : { d: 0n, c: p.units }));
+  const functional = convertBalanced(pairs, rate);
+  return kept.map((p, i) => ({
+    ...base,
+    fx_rate: rateWire(rate),
+    ledger_account_id: p.account,
+    description: p.description,
+    debit: unitsToNumber(pairs[i]!.d),
+    credit: unitsToNumber(pairs[i]!.c),
+    functional_debit: unitsToNumber(functional[i]!.d),
+    functional_credit: unitsToNumber(functional[i]!.c),
+  }));
+}
+
+/**
+ * A line that moves the base currency only — a realized or unrealized exchange difference, which has
+ * no transaction amount for a rate to multiply. `units` positive debits, negative credits.
+ */
+function functionalOnlyLine(
   base: Record<string, unknown>,
   account: string,
   description: string,
-  side: GlSide,
-  amount: number,
+  units: bigint,
 ): Record<string, unknown> {
-  const debit = side === "debit" ? amount : 0;
-  const credit = side === "credit" ? amount : 0;
-  return { ...base, ledger_account_id: account, description, debit, credit, functional_debit: debit, functional_credit: credit };
+  return {
+    ...base,
+    ledger_account_id: account,
+    description,
+    debit: 0,
+    credit: 0,
+    functional_debit: unitsToNumber(units > 0n ? units : 0n),
+    functional_credit: unitsToNumber(units < 0n ? -units : 0n),
+  };
+}
+
+const FX_LOOKUP_DEFAULTS = {
+  functionalCurrency: "USD",
+  currencyEntity: "Currency",
+  currencyCodeField: "code",
+  exchangeRateEntity: "ExchangeRate",
+  rateFromField: "from_currency_id",
+  rateToField: "to_currency_id",
+  rateField: "rate",
+  rateDateField: "rate_date",
+} as const;
+
+/**
+ * How a posting effect finds the rate a document is booked at. Absent on an effect, every posting is
+ * at rate 1, which is the right answer only for a manifest that declares no exchange-rate tables.
+ */
+export interface PostingFxConfig {
+  /** The document's own date field the rate is taken on; absent or empty on the record, today. */
+  readonly dateField?: string;
+  /** The field the booking rate is stamped on, read first so a later posting uses the same rate. */
+  readonly bookingRateField?: string;
+  readonly functionalCurrency?: string;
+  readonly resolveFunctionalCurrency?: (tenantId: string) => Promise<string | undefined>;
+  readonly currencyEntity?: string;
+  readonly currencyCodeField?: string;
+  readonly exchangeRateEntity?: string;
+  readonly rateFromField?: string;
+  readonly rateToField?: string;
+  readonly rateField?: string;
+  readonly rateDateField?: string;
+}
+
+/**
+ * The rate a document in `currency` posts into the functional currency at, on `date`.
+ *
+ * Its own currency is rate 1. Otherwise the stamped booking rate if there is one, else the latest
+ * `ExchangeRate` on or before the date. With none, it **refuses** — `exchange_rate_unresolved` —
+ * when the tenant has declared its functional currency, because posting EUR amounts as USD is a wrong
+ * figure that balances (ADR-0378); and posts at rate 1 when it has not, because a tenant that has not
+ * said what its base currency is may well be booking in the currency it invoices in, and refusing
+ * that would refuse a correct posting. Before this, every case posted at rate 1.
+ */
+async function resolvePostingRate(
+  input: WriteEffectInput,
+  fx: PostingFxConfig | undefined,
+  record: EntityRecord,
+  currency: string | null,
+  today: string,
+  noun: string,
+): Promise<ExactDecimal> {
+  if (fx === undefined) return RATE_ONE;
+  const c = { ...FX_LOOKUP_DEFAULTS, ...fx };
+  const declared = fx.resolveFunctionalCurrency ? await fx.resolveFunctionalCurrency(input.tenantId) : undefined;
+  const functional = (declared ?? c.functionalCurrency).toUpperCase();
+  const own = (currency ?? functional).toUpperCase();
+  if (own === functional) return RATE_ONE;
+  if (fx.bookingRateField !== undefined) {
+    const stamped = positiveRate(record[fx.bookingRateField]);
+    if (stamped !== null) return stamped;
+  }
+  const dateRaw = fx.dateField !== undefined ? record[fx.dateField] : undefined;
+  const date = typeof dateRaw === "string" && dateRaw.length >= 10 ? dateRaw.slice(0, 10) : today;
+  const functionalId = await resolveCurrencyId(input, c, functional);
+  const rate = functionalId === null ? null : await lookupPeriodEndRate(input, c, own, functionalId, date);
+  if (rate !== null) return rate;
+  if (declared === undefined) return RATE_ONE;
+  throw new PostingRefused(
+    409,
+    "exchange_rate_unresolved",
+    `${noun} is in ${own} and this tenant's functional currency is ${functional}, but no ExchangeRate from ` +
+      `${own} to ${functional} is dated on or before ${date}; record one and retry — posting it without one ` +
+      `would carry ${own} amounts in the ledger as ${functional}`,
+  );
 }
 
 export interface RecognitionGlConfig {
@@ -1037,6 +1398,14 @@ export interface RecognitionGlConfig {
   readonly netDescription: string;
   readonly taxDescription: string;
   readonly skipDocumentType?: { readonly field: string; readonly value: string };
+  /**
+   * A document of this type is the contra of the one this effect recognises — a credit note against
+   * an invoice — and posts the same split with every side reversed: what recognition debits it
+   * credits. Checked before `skipDocumentType`.
+   */
+  readonly contraDocumentType?: { readonly field: string; readonly value: string };
+  /** How the document's booking rate is found; absent, it posts at rate 1. */
+  readonly fx?: PostingFxConfig;
   readonly resolveAccountCodes?: (tenantId: string) => Promise<{ control?: string; net?: string; tax?: string }>;
   /**
    * When set, the tax split is derived from the document's *lines* — each line's
@@ -1273,8 +1642,6 @@ const RECOGNITION_FALLBACKS = {
   accountCodeField: "account_code",
 } as const;
 
-const EPSILON = 0.005;
-
 /**
  * Recognition GL posting with a tax split: when a document reaches its recognized
  * state, posts the control account (AR/AP) at the gross total on `controlSide`,
@@ -1286,23 +1653,32 @@ const EPSILON = 0.005;
  */
 export function recognitionGlPostingEffect(config: RecognitionGlConfig): WriteEffect {
   const c = { ...RECOGNITION_FALLBACKS, ...config };
-  const opposite: GlSide = c.controlSide === "debit" ? "credit" : "debit";
+  const flip = (side: GlSide): GlSide => (side === "debit" ? "credit" : "debit");
   return async (input) => {
     if (input.entity !== c.entity) return;
     if (!entersState(input, c.stateField, c.triggerState)) return;
-    if (c.skipDocumentType !== undefined && input.after[c.skipDocumentType.field] === c.skipDocumentType.value) return;
+    const contra =
+      c.contraDocumentType !== undefined && input.after[c.contraDocumentType.field] === c.contraDocumentType.value;
+    if (!contra && c.skipDocumentType !== undefined && input.after[c.skipDocumentType.field] === c.skipDocumentType.value) return;
+    // A contra document posts the mirror: the control account on the other side, and everything
+    // that sits opposite it on recognition's control side.
+    const controlSide: GlSide = contra ? flip(c.controlSide) : c.controlSide;
+    const opposite: GlSide = flip(controlSide);
 
     const doc = input.after;
     const docId = input.id;
     if (docId === null) return;
-    const total = num(doc[c.totalField]);
-    if (total <= 0) return;
-    let subtotal = num(doc[c.subtotalField]);
-    let tax = num(doc[c.taxField]);
+    // In exact ledger units throughout. The split was compared within half a cent over doubles,
+    // which at scale 2 is the same verdict as equality — so the comparison is now equality, and
+    // no amount on its way to the ledger passes through a double sum.
+    const totalUnits = moneyUnits(doc[c.totalField]) ?? 0n;
+    if (totalUnits <= 0n) return;
+    let subtotalUnits = unitsOf(doc[c.subtotalField]);
+    let taxUnits = unitsOf(doc[c.taxField]);
     // Reconcile: fall back to a single net line at total when the split doesn't add up.
-    if (subtotal <= 0 || Math.abs(subtotal + tax - total) > EPSILON) {
-      subtotal = total;
-      tax = 0;
+    if (subtotalUnits <= 0n || subtotalUnits + taxUnits !== totalUnits) {
+      subtotalUnits = totalUnits;
+      taxUnits = 0n;
     }
     const docNumber = typeof doc[c.numberField] === "string" ? (doc[c.numberField] as string) : docId;
 
@@ -1311,7 +1687,7 @@ export function recognitionGlPostingEffect(config: RecognitionGlConfig): WriteEf
     // Withholding codes are a contra to the control account (deducted from what's paid),
     // so they reduce the control line rather than adding an opposite-side tax line.
     let taxGroups: TaxBreakdown["groups"] | null = null;
-    let withholdingTotal = 0;
+    let withholdingUnits = 0n;
     let determination: DocumentTaxDetermination = { kind: "off" };
     if (config.taxLines !== undefined) {
       const tc = { ...TAX_LINES_FALLBACKS, ...config.taxLines };
@@ -1393,10 +1769,12 @@ export function recognitionGlPostingEffect(config: RecognitionGlConfig): WriteEf
         const breakdown = computeLineTaxBreakdown(breakdownLines, rateByCode);
         // Accept the line-derived split only when its regular (non-withholding) tax
         // reconciles to the document total — withholding is a contra, not part of total.
-        if (breakdown.netTotal > 0 && Math.abs(breakdown.netTotal + breakdown.taxTotal - total) <= EPSILON) {
-          subtotal = breakdown.netTotal;
-          tax = breakdown.taxTotal;
-          withholdingTotal = breakdown.withholdingTotal;
+        const netUnits = moneyUnits(breakdown.netTotal) ?? 0n;
+        const breakdownTaxUnits = moneyUnits(breakdown.taxTotal) ?? 0n;
+        if (netUnits > 0n && netUnits + breakdownTaxUnits === totalUnits) {
+          subtotalUnits = netUnits;
+          taxUnits = breakdownTaxUnits;
+          withholdingUnits = moneyUnits(breakdown.withholdingTotal) ?? 0n;
           taxGroups = breakdown.groups;
           // Before anything is written: a self-assessed pair credited to the same account it debits
           // would post nothing a reader could see, so a config that names no liability account for it
@@ -1415,8 +1793,8 @@ export function recognitionGlPostingEffect(config: RecognitionGlConfig): WriteEf
           throw new PostingRefused(
             422,
             "tax_total_disagrees",
-            `the document total ${total.toFixed(2)} is not its lines' net ${breakdown.netTotal.toFixed(2)} plus the ` +
-              `tax ${breakdown.taxTotal.toFixed(2)} determined for jurisdiction '${determination.jurisdictionCode}' ` +
+            `the document total ${renderMoney(totalUnits)} is not its lines' net ${renderMoney(netUnits)} plus the ` +
+              `tax ${renderMoney(breakdownTaxUnits)} determined for jurisdiction '${determination.jurisdictionCode}' ` +
               `on ${determination.date}; correct the total or the lines' tax codes`,
           );
         }
@@ -1427,29 +1805,21 @@ export function recognitionGlPostingEffect(config: RecognitionGlConfig): WriteEf
     const nowIso = now.toISOString();
     const today = nowIso.slice(0, 10);
     const currency = typeof doc[c.currencyField] === "string" ? (doc[c.currencyField] as string) : "USD";
+    // Before anything is written: a refusal for a missing rate must leave nothing behind.
+    const rate = await resolvePostingRate(input, config.fx, doc, currency, today, `this ${c.entity}`);
 
     const codes = config.resolveAccountCodes ? await config.resolveAccountCodes(input.tenantId) : {};
     const controlAccount = (await resolveAccountId(input, c, codes.control)) ?? c.controlAccountRef;
     const netAccount = (await resolveAccountId(input, c, codes.net)) ?? c.netAccountRef;
     const taxAccount = (await resolveAccountId(input, c, codes.tax)) ?? c.taxAccountRef;
 
-    const entry = await createPostedEntry(input, c.entryEntity, {
-      entry_number: `${docNumber}${c.entrySuffix}`,
-      entry_date: today,
-      source: c.sourceValue,
-      state: "posted",
-      memo: `GL posting for ${docNumber}`,
-      posted_at: nowIso,
-      created_at: nowIso,
-      updated_at: nowIso,
-    }, config.periods);
-    const base = { journal_entry_id: String(entry["id"]), currency, fx_rate: 1, created_at: nowIso, updated_at: nowIso };
     // Withholding is deducted from the control account (the customer pays / vendor is paid
     // less), so the control line is the total net of withholding; the withheld amount goes
     // to the WHT account on the *same* side as the control.
-    const controlAmount = Math.round((total - withholdingTotal) * 100) / 100;
-    await input.store.create(input.tenantId, c.lineEntity, glLine(base, controlAccount, c.controlDescription, c.controlSide, controlAmount));
-    await input.store.create(input.tenantId, c.lineEntity, glLine(base, netAccount, c.netDescription, opposite, subtotal));
+    const planned: PlannedLine[] = [
+      { account: controlAccount, description: c.controlDescription, side: controlSide, units: totalUnits - withholdingUnits },
+      { account: netAccount, description: c.netDescription, side: opposite, units: subtotalUnits },
+    ];
     if (taxGroups !== null && taxGroups.length > 0) {
       // Per-code tax account resolution, most specific first: the code's own
       // `gl_account_code`, else the tenant's per-jurisdiction default (by the code's
@@ -1470,7 +1840,8 @@ export function recognitionGlPostingEffect(config: RecognitionGlConfig): WriteEf
       const determinationConfig = config.taxLines?.determination;
       let selfAssessedAccount: string | null = null;
       for (const group of taxGroups) {
-        if (group.tax <= EPSILON) continue;
+        const groupUnits = moneyUnits(group.tax) ?? 0n;
+        if (groupUnits <= 0n) continue;
         const accountCode =
           group.accountCode ?? (group.jurisdiction !== null ? jurisdictionAccounts[group.jurisdiction] : undefined);
         const account = accountCode !== undefined && accountCode.length > 0 ? await resolveCode(accountCode) : taxAccount;
@@ -1485,31 +1856,43 @@ export function recognitionGlPostingEffect(config: RecognitionGlConfig): WriteEf
             selfAssessedAccount =
               (await resolveAccountId(input, c, code)) ?? determinationConfig?.selfAssessedAccountRef ?? taxAccount;
           }
-          await input.store.create(
-            input.tenantId,
-            c.lineEntity,
-            glLine(base, account, `${c.taxDescription} (${group.label})`, opposite, group.tax),
-          );
-          await input.store.create(
-            input.tenantId,
-            c.lineEntity,
-            glLine(base, selfAssessedAccount, `Self-assessed tax payable (${group.label})`, c.controlSide, group.tax),
-          );
+          planned.push({ account, description: `${c.taxDescription} (${group.label})`, side: opposite, units: groupUnits });
+          planned.push({
+            account: selfAssessedAccount,
+            description: `Self-assessed tax payable (${group.label})`,
+            side: controlSide,
+            units: groupUnits,
+          });
           continue;
         }
-        const side: GlSide = group.withholding ? c.controlSide : opposite;
+        const side: GlSide = group.withholding ? controlSide : opposite;
         const desc = group.withholding ? `Withholding (${group.label})` : `${c.taxDescription} (${group.label})`;
-        await input.store.create(input.tenantId, c.lineEntity, glLine(base, account, desc, side, group.tax));
+        planned.push({ account, description: desc, side, units: groupUnits });
       }
-    } else if (tax > EPSILON) {
-      await input.store.create(input.tenantId, c.lineEntity, glLine(base, taxAccount, c.taxDescription, opposite, tax));
+    } else if (taxUnits > 0n) {
+      planned.push({ account: taxAccount, description: c.taxDescription, side: opposite, units: taxUnits });
+    }
+
+    const entry = await createPostedEntry(input, c.entryEntity, {
+      entry_number: `${docNumber}${c.entrySuffix}`,
+      entry_date: today,
+      source: c.sourceValue,
+      state: "posted",
+      memo: contra ? `Credit note GL posting for ${docNumber}` : `GL posting for ${docNumber}`,
+      posted_at: nowIso,
+      created_at: nowIso,
+      updated_at: nowIso,
+    }, config.periods);
+    const base = { journal_entry_id: String(entry["id"]), currency, created_at: nowIso, updated_at: nowIso };
+    for (const line of convertedLines(base, planned, rate)) {
+      await input.store.create(input.tenantId, c.lineEntity, line);
     }
 
     // Stamp the withholding total back onto the document (informational + prefills a WHT
     // certificate's amount). Direct store write — bypasses guards/effects, no recursion.
-    if (config.stampWithholdingField !== undefined && withholdingTotal > EPSILON) {
+    if (config.stampWithholdingField !== undefined && withholdingUnits > 0n) {
       await input.store.update(input.tenantId, c.entity, docId, {
-        [config.stampWithholdingField]: withholdingTotal,
+        [config.stampWithholdingField]: unitsToNumber(withholdingUnits),
         updated_at: nowIso,
       });
     }
@@ -1537,6 +1920,14 @@ export interface PaymentSettlementGlConfig {
   readonly arAccountRef?: string;
   readonly apAccountRef?: string;
   readonly fxAccountRef?: string;
+  /**
+   * How the payment's rate is found. With it, the control account is cleared at the rate the
+   * settled document was booked at and the cash at the rate the money moved at, and the difference is
+   * the realized exchange gain or loss, posted in the base currency only. Absent, everything is rate 1.
+   */
+  readonly fx?: PostingFxConfig;
+  /** The documents a payment settles, `[refField, entity]`, read for the rate they were booked at. */
+  readonly settledDocuments?: readonly { readonly refField: string; readonly entity: string }[];
   readonly clock?: { now(): Date };
 }
 
@@ -1636,9 +2027,8 @@ export function paymentSettlementGlPostingEffect(config: PaymentSettlementGlConf
     const pay = input.after;
     const payId = input.id;
     if (payId === null) return;
-    const amount = num(pay[c.amountField]);
-    if (amount <= 0) return;
-    const cashAmount = pay[c.cashAmountField] !== undefined ? num(pay[c.cashAmountField]) : amount;
+    const amountUnits = moneyUnits(pay[c.amountField]) ?? 0n;
+    if (amountUnits <= 0n) return;
     const inbound = pay[c.directionField] === c.inboundValue;
 
     const now = c.clock?.now() ?? new Date();
@@ -1646,6 +2036,28 @@ export function paymentSettlementGlPostingEffect(config: PaymentSettlementGlConf
     const today = nowIso.slice(0, 10);
     const payNumber = typeof pay[c.numberField] === "string" ? (pay[c.numberField] as string) : payId;
     const currency = typeof pay[c.currencyField] === "string" ? (pay[c.currencyField] as string) : "USD";
+
+    // Two rates, both resolved before anything is written. The control account is cleared at the
+    // rate its document was **booked** at, because that is what the ledger carries it at — clearing
+    // EUR 100 booked at 1.1 at today's 1.2 would leave 10 of receivable behind that no document
+    // owes. The cash is valued at what actually moved: `cash_amount`, the base-currency cash, when
+    // the payment states it, else today's rate. The two differ by exactly the realized gain or loss.
+    const cashUnitsStated = moneyUnits(pay[c.cashAmountField]);
+    const cashRate = cashUnitsStated === null
+      ? await resolvePostingRate(input, config.fx, pay, currency, today, "this payment")
+      : null;
+    let controlRate = cashRate ?? RATE_ONE;
+    let settled: Awaited<ReturnType<typeof settledDocumentRate>> = null;
+    if (config.fx !== undefined) {
+      settled = await settledDocumentRate(input, config, pay, currency);
+      if (settled !== null) controlRate = settled.rate;
+      else if (cashRate === null) {
+        controlRate = await resolvePostingRate(input, config.fx, pay, currency, today, "this payment");
+      }
+    }
+    const cashFunctional = cashUnitsStated ?? convertUnits(amountUnits, cashRate ?? RATE_ONE);
+    const controlFunctional =
+      settled !== null ? await clearedAtBookingRate(input, settled, amountUnits) : convertUnits(amountUnits, controlRate);
 
     const codes = config.resolveAccountCodes ? await config.resolveAccountCodes(input.tenantId) : {};
     const cashAccount = (await resolveAccountId(input, c, codes.cash)) ?? c.cashAccountRef;
@@ -1663,26 +2075,93 @@ export function paymentSettlementGlPostingEffect(config: PaymentSettlementGlConf
       created_at: nowIso,
       updated_at: nowIso,
     }, config.periods);
-    const base = { journal_entry_id: String(entry["id"]), currency, fx_rate: 1, created_at: nowIso, updated_at: nowIso };
+    const base = { journal_entry_id: String(entry["id"]), currency, created_at: nowIso, updated_at: nowIso };
+    const money = unitsToNumber;
+    // One line of `amount` in the payment's currency, its functional value stated and its rate the
+    // exact quotient — so `functional = amount × rate` holds for it by construction.
+    const line = (account: string, description: string, side: GlSide, functional: bigint): Record<string, unknown> => ({
+      ...base,
+      ledger_account_id: account,
+      description,
+      fx_rate: functional === amountUnits ? 1 : quotientRate(functional, amountUnits),
+      debit: side === "debit" ? money(amountUnits) : 0,
+      credit: side === "credit" ? money(amountUnits) : 0,
+      functional_debit: side === "debit" ? money(functional) : 0,
+      functional_credit: side === "credit" ? money(functional) : 0,
+    });
     const lines: Record<string, unknown>[] = [];
-    const fxDiff = cashAmount - amount; // cash moved minus balance cleared
+    // Positive when more base currency moved than the control account carried the balance at.
+    const fxDiff = cashFunctional - controlFunctional;
     if (inbound) {
-      lines.push(glLine(base, cashAccount, "Settlement — cash", "debit", cashAmount));
-      lines.push(glLine(base, arAccount, "Settlement — accounts receivable", "credit", amount));
-      if (Math.abs(fxDiff) > EPSILON) {
-        // more cash than AR cleared → FX gain (credit); less → FX loss (debit)
-        lines.push(glLine(base, fxAccount, "Realized FX gain/loss", fxDiff > 0 ? "credit" : "debit", Math.abs(fxDiff)));
-      }
+      lines.push(line(cashAccount, "Settlement — cash", "debit", cashFunctional));
+      lines.push(line(arAccount, "Settlement — accounts receivable", "credit", controlFunctional));
+      // more received than AR carried → FX gain (credit); less → FX loss (debit)
+      if (fxDiff !== 0n) lines.push(functionalOnlyLine(base, fxAccount, "Realized FX gain/loss", -fxDiff));
     } else {
-      lines.push(glLine(base, apAccount, "Settlement — accounts payable", "debit", amount));
-      lines.push(glLine(base, cashAccount, "Settlement — cash", "credit", cashAmount));
-      if (Math.abs(fxDiff) > EPSILON) {
-        // more cash paid than AP cleared → FX loss (debit); less → FX gain (credit)
-        lines.push(glLine(base, fxAccount, "Realized FX gain/loss", fxDiff > 0 ? "debit" : "credit", Math.abs(fxDiff)));
-      }
+      lines.push(line(apAccount, "Settlement — accounts payable", "debit", controlFunctional));
+      lines.push(line(cashAccount, "Settlement — cash", "credit", cashFunctional));
+      // more paid than AP carried → FX loss (debit); less → FX gain (credit)
+      if (fxDiff !== 0n) lines.push(functionalOnlyLine(base, fxAccount, "Realized FX gain/loss", fxDiff));
     }
-    for (const line of lines) await input.store.create(input.tenantId, c.lineEntity, line);
+    for (const l of lines) await input.store.create(input.tenantId, c.lineEntity, l);
   };
+}
+
+/** `functional / amount` as a rate, to the ten places an `fx_rate` column holds. */
+function quotientRate(functional: bigint, amount: bigint): string {
+  const scale = 10n ** 10n;
+  const scaled = (functional * scale * 2n + amount) / (2n * amount);
+  return renderDecimal({ negative: false, units: scaled, scale: 10 });
+}
+
+/**
+ * The rate the document a payment settles was booked at, when the payment names one in the same
+ * currency and it carries a stamped rate; else null.
+ */
+async function settledDocumentRate(
+  input: WriteEffectInput,
+  config: PaymentSettlementGlConfig,
+  pay: EntityRecord,
+  currency: string,
+): Promise<{ readonly rate: ExactDecimal; readonly refField: string; readonly documentId: string } | null> {
+  const bookingField = config.fx?.bookingRateField;
+  if (bookingField === undefined) return null;
+  for (const doc of config.settledDocuments ?? []) {
+    const ref = pay[doc.refField];
+    if (typeof ref !== "string" || ref.length === 0) continue;
+    const settled = await input.store.get(input.tenantId, doc.entity, ref);
+    if (settled === null) continue;
+    const docCurrency = typeof settled["currency"] === "string" ? (settled["currency"] as string) : null;
+    if (docCurrency !== null && docCurrency.toUpperCase() !== currency.toUpperCase()) continue;
+    const stamped = positiveRate(settled[bookingField]);
+    if (stamped !== null) return { rate: stamped, refField: doc.refField, documentId: ref };
+  }
+  return null;
+}
+
+/**
+ * The functional amount one payment clears from a document booked at `rate`: the conversion of
+ * everything applied so far less the conversion of everything applied before it. Converting each
+ * instalment on its own rounds each one, so three payments of EUR 33.33 + 33.33 + 33.35 against
+ * EUR 100.01 booked at 1.0731 cleared 107.33 from a receivable carried at 107.32 and left a cent
+ * on a paid invoice for ever; converting the running total clears exactly what was booked.
+ */
+async function clearedAtBookingRate(
+  input: WriteEffectInput,
+  settled: { readonly rate: ExactDecimal; readonly refField: string; readonly documentId: string },
+  amountUnits: bigint,
+): Promise<bigint> {
+  const read = await readAppliedToDocument(input.store, input.tenantId, settled.refField, settled.documentId, {
+    ceiling: 10_000,
+  });
+  if (!read.complete) {
+    throw new ReadCeilingExceeded("Payment", 10_000, "the payments applied to a document being settled");
+  }
+  // This payment is already `completed` in the store, so the read includes it.
+  const through = moneyUnits(read.applied) ?? 0n;
+  const before = through - amountUnits;
+  if (before < 0n) return convertUnits(amountUnits, settled.rate);
+  return convertUnits(through, settled.rate) - convertUnits(before, settled.rate);
 }
 
 export interface PaymentApplicationConfig {
@@ -1859,6 +2338,20 @@ interface FxRevalDocSpec {
    * balance by whatever the caller typed.
    */
   readonly withholdingField?: string;
+  /**
+   * A document of this type reduces the balance it is recorded against rather than adding to it, and
+   * is revalued with the document it credits — `computeAging`'s grouping. Its original is fetched by
+   * reference when it sits in one of `creditedStates` (a void issued the note, so the original is not
+   * open): a full void then nets to nothing, as its ledger does. Without this a sent credit note was
+   * revalued as one more receivable — measured, an invoice of EUR 100 at 1.1 sent and voided left a
+   * receivable of 0 in the ledger and the close revalued it by +10 at 1.2.
+   */
+  readonly creditNote?: {
+    readonly typeField: string;
+    readonly typeValue: string;
+    readonly refField: string;
+    readonly creditedStates: readonly string[];
+  };
 }
 
 export interface UnrealizedFxRevaluationConfig {
@@ -1948,8 +2441,6 @@ const FX_REVAL_FALLBACKS = {
   maxRows: 100_000,
 } as const;
 
-const FX_EPSILON = 0.005;
-
 /**
  * Unrealized FX revaluation at period close: when a `FiscalPeriod` transitions into
  * `closed` (status edge), revalues every open foreign-currency receivable/payable to
@@ -1967,11 +2458,12 @@ const FX_EPSILON = 0.005;
  *    the `Currency` whose `code` equals the document/functional currency to its id, then
  *    finding an `ExchangeRate` (from_currency_id → to_currency_id) at that rate. When no
  *    rate is found for a currency, that currency is skipped (it cannot be revalued).
- *  - Because the model does not store the original booking rate, the unrealized delta is
- *    approximated as `open × (periodEndRate − 1)` — i.e. the foreign open balance is
- *    treated as if carried at rate 1, and revalued to the period-end rate. This is an
- *    approximation; the offset is booked to the unrealized-FX account so the entry stays
- *    balanced regardless.
+ *  - The open balance is carried at the rate recognition booked it at — the document's stamped
+ *    booking rate, or 1 when none was stamped — so the unrealized delta is
+ *    `open × periodEndRate − open × bookingRate`, in exact ledger units, net of what an earlier
+ *    close already revalued. The delta is a **functional-currency** amount: a revaluation line
+ *    moves no transaction amount (its debit and credit are 0) and states only its functional
+ *    figure, because a currency's open balance does not change when its rate does.
  *
  * AR gain (foreign asset worth more) debits AR, credits unrealized FX; an AR loss is the
  * mirror. AP is the inverse (a higher rate increases a foreign liability → loss → debit
@@ -2036,14 +2528,36 @@ export function unrealizedFxRevaluationEffect(config: UnrealizedFxRevaluationCon
       applied: paymentRead.applied[i]!,
     }));
 
-    // Accumulate the open foreign balance per (currency, side); then one rate lookup per currency.
-    // We also accumulate Σ(open × bookingRate) so the revaluation compares against each
-    // document's *original booking rate* rather than a flat rate of 1.
-    const openByCurrencySide = new Map<string, number>(); // key `${currency}|${side}`
-    const bookedByCurrencySide = new Map<string, number>(); // Σ(open × booking_rate) in functional terms
-    const rateCache = new Map<string, number | null>();
+    // Accumulate the open foreign balance per (currency, side), and what the ledger carries it at:
+    // each document's open balance at the rate it was booked at, which is the functional amount its
+    // recognition posted. All in exact ledger units — the doubles this replaced summed `open ×
+    // booking_rate` across every open document and rounded once at the end.
+    const openByCurrencySide = new Map<string, bigint>(); // key `${currency}|${side}`
+    const bookedByCurrencySide = new Map<string, bigint>(); // functional, as booked
+    const rateCache = new Map<string, ExactDecimal | null>();
 
     for (const { spec: doc, applied } of sides) {
+      // One document's signed contribution: what it leaves open, at the rate it was booked at — a
+      // credit note's with its sign reversed.
+      const fold = (record: EntityRecord, sign: bigint): void => {
+        const docId = String(record["id"] ?? "");
+        if (docId === "") return;
+        const currency = typeof record[c.currencyField] === "string" ? (record[c.currencyField] as string).toUpperCase() : functional;
+        if (currency === functional) return; // only foreign-currency documents are revalued
+        const owed = moneyUnits(amountOwed(record, c.totalField, doc.withholdingField)) ?? 0n;
+        const open = owed - (moneyUnits(applied.get(docId) ?? 0) ?? 0n);
+        if (open <= 0n) return; // fully paid → nothing to revalue
+        // The rate the document was booked at; absent, 1 — which is what its recognition posted
+        // at before a booking rate was resolved, so the comparison is still against the ledger.
+        const bookingRate = positiveRate(record[c.bookingRateField]) ?? RATE_ONE;
+        const key = `${currency}|${doc.side}`;
+        openByCurrencySide.set(key, (openByCurrencySide.get(key) ?? 0n) + sign * open);
+        bookedByCurrencySide.set(key, (bookedByCurrencySide.get(key) ?? 0n) + sign * convertUnits(open, bookingRate));
+      };
+      const cn = doc.creditNote;
+      const isCreditNote = (record: EntityRecord): boolean => cn !== undefined && record[cn.typeField] === cn.typeValue;
+      // Only the references of open credit notes are held, never the open set itself.
+      const creditedRefs = new Set<string>();
       // The documents fold straight into the two per-(currency, side) maps, so this read needs no
       // array either — it is O(currencies) however many open documents there are.
       const docOutcome = await drainList(
@@ -2055,29 +2569,38 @@ export function unrealizedFxRevaluationEffect(config: UnrealizedFxRevaluationCon
         (rows) => {
           for (const record of rows) {
             if (!doc.openStates.includes(String(record["state"] ?? ""))) continue;
-            const docId = String(record["id"] ?? "");
-            if (docId === "") continue;
-            const currency = typeof record[c.currencyField] === "string" ? (record[c.currencyField] as string).toUpperCase() : functional;
-            if (currency === functional) continue; // only foreign-currency documents are revalued
-            const total = amountOwed(record, c.totalField, doc.withholdingField);
-            const open = Math.round((total - (applied.get(docId) ?? 0)) * 100) / 100;
-            if (open <= 0) continue; // fully paid → nothing to revalue
-            // The rate the document was booked at; absent → 1 (matching the legacy approximation).
-            const bookingRate = record[c.bookingRateField] !== undefined ? num(record[c.bookingRateField]) : 1;
-            const key = `${currency}|${doc.side}`;
-            openByCurrencySide.set(key, (openByCurrencySide.get(key) ?? 0) + open);
-            bookedByCurrencySide.set(key, (bookedByCurrencySide.get(key) ?? 0) + open * bookingRate);
+            if (isCreditNote(record)) {
+              fold(record, -1n);
+              const ref = record[cn!.refField];
+              if (typeof ref === "string" && ref.length > 0) creditedRefs.add(ref);
+            } else {
+              fold(record, 1n);
+            }
           }
         },
       );
       if (!docOutcome.complete) {
         throw new ReadCeilingExceeded(doc.entity, c.maxRows, "an unrealized FX revaluation");
       }
+      // An original in an open state was folded above; one a void issued the note from was not, and
+      // is folded once here so the pair nets as the ledger does.
+      for (const ref of creditedRefs) {
+        const original = await input.store.get(input.tenantId, doc.entity, ref);
+        if (original === null || isCreditNote(original)) continue;
+        const state = String(original["state"] ?? "");
+        if (!cn!.creditedStates.includes(state) || doc.openStates.includes(state)) continue;
+        fold(original, 1n);
+      }
     }
 
     const now = c.clock?.now() ?? new Date();
     const nowIso = now.toISOString();
 
+    // Each revalued (currency, side) moves functional amounts only: the foreign balance is unchanged
+    // — what changed is what it is worth in the base currency — so the adjustment has no transaction
+    // amount. It used to be posted as one, `amount = functional` at the period-end rate, which broke
+    // `functional = amount × fx_rate` on every revaluation line and put base-currency figures into the
+    // foreign currency's own balance (ADR-0429's open question).
     const lines: Record<string, unknown>[] = [];
     for (const [key, open] of openByCurrencySide) {
       const sep = key.lastIndexOf("|");
@@ -2091,28 +2614,21 @@ export function unrealizedFxRevaluationEffect(config: UnrealizedFxRevaluationCon
       }
       if (rate === null) continue; // no rate for this currency → skip
 
-      // Unrealized = (open × period-end rate) − Σ(open × booking rate). With no booking
-      // rate stored this collapses to open × (rate − 1) — the prior behavior.
       const booked = bookedByCurrencySide.get(key) ?? open;
-      const delta = Math.round((open * rate - booked) * 100) / 100;
-      if (Math.abs(delta) < FX_EPSILON) continue;
+      const delta = convertUnits(open, rate) - booked;
+      if (delta === 0n) continue;
 
       const controlAccount = side === "ar" ? arAccount : apAccount;
       const controlDesc = side === "ar"
         ? `Unrealized FX revaluation — AR ${currency}`
         : `Unrealized FX revaluation — AP ${currency}`;
       const fxDesc = `Unrealized FX gain/loss — ${currency}`;
-      const base = { journal_entry_id: "", currency, fx_rate: rate, created_at: nowIso, updated_at: nowIso };
-
-      // AR: a positive delta is a gain → debit AR, credit unrealized FX (mirror when negative).
-      // AP: a higher rate raises a foreign liability → loss → debit unrealized FX, credit AP
-      //     (so the AP control moves opposite to AR for the same delta sign).
-      const amount = Math.abs(delta);
-      const arGain = side === "ar" ? delta > 0 : delta < 0; // does the control account get debited?
-      const controlSide: GlSide = arGain ? "debit" : "credit";
-      const fxSide: GlSide = arGain ? "credit" : "debit";
-      lines.push(glLine(base, controlAccount, controlDesc, controlSide, amount));
-      lines.push(glLine(base, fxAccount, fxDesc, fxSide, amount));
+      const base = { journal_entry_id: "", currency, fx_rate: rateWire(rate), created_at: nowIso, updated_at: nowIso };
+      // A higher rate raises a foreign asset (AR: debit it, credit the unrealized account) and a
+      // foreign liability alike (AP: credit it, debit the unrealized account).
+      const controlUnits = side === "ar" ? delta : -delta;
+      lines.push(functionalOnlyLine(base, controlAccount, controlDesc, controlUnits));
+      lines.push(functionalOnlyLine(base, fxAccount, fxDesc, -controlUnits));
     }
 
     // **Idempotent across a reopen and a re-close.** The period's own revaluation entries already
@@ -2120,12 +2636,14 @@ export function unrealizedFxRevaluationEffect(config: UnrealizedFxRevaluationCon
     // once. Measured before: close → open → close posted two `2026-06-FXREVAL` entries of 10 each,
     // doubling the unrealized loss — and on `--store pg`, where `entry_number` is enforced unique,
     // the second close was a 500 instead. A later revaluation is numbered `-FXREVAL2`, `-FXREVAL3`.
+    // Netted on the functional amounts, which is what a revaluation moves; a revaluation posted
+    // before this change carried them equal to its transaction amounts, so it nets the same.
     const prior = await readPriorRevaluations(input, c, periodId, periodLabel);
     const net = new Map<string, { line: Record<string, unknown>; cents: bigint }>();
     const keyOf = (l: Record<string, unknown>): string => `${String(l["ledger_account_id"])}|${String(l["currency"])}`;
     for (const l of lines) {
       const k = keyOf(l);
-      const cents = BigInt(Math.round((num(l["debit"]) - num(l["credit"])) * 100));
+      const cents = unitsOf(l["functional_debit"]) - unitsOf(l["functional_credit"]);
       net.set(k, { line: l, cents: (net.get(k)?.cents ?? 0n) + cents });
     }
     for (const [k, p] of prior.byKey) {
@@ -2138,9 +2656,14 @@ export function unrealizedFxRevaluationEffect(config: UnrealizedFxRevaluationCon
     const posting: Record<string, unknown>[] = [];
     for (const { line, cents } of net.values()) {
       if (cents === 0n) continue;
-      const amount = Number(cents < 0n ? -cents : cents) / 100;
-      const side: GlSide = cents > 0n ? "debit" : "credit";
-      posting.push(glLine({ ...line, created_at: nowIso, updated_at: nowIso }, String(line["ledger_account_id"]), String(line["description"] ?? ""), side, amount));
+      posting.push(
+        functionalOnlyLine(
+          { ...line, created_at: nowIso, updated_at: nowIso },
+          String(line["ledger_account_id"]),
+          String(line["description"] ?? ""),
+          cents,
+        ),
+      );
     }
     if (posting.length === 0) return; // nothing to revalue, or already revalued as it stands
 
@@ -2270,7 +2793,7 @@ async function readPriorRevaluations(
         currency: String(l["currency"]),
         fxRate: l["fx_rate"] ?? 1,
         description: typeof l["description"] === "string" ? (l["description"] as string) : "Unrealized FX revaluation",
-        cents: (was?.cents ?? 0n) + amounts.d - amounts.c,
+        cents: (was?.cents ?? 0n) + amounts.fd - amounts.fc,
       });
     }
   }
@@ -2329,24 +2852,29 @@ export function bookingRateStampEffect(config: BookingRateStampConfig): WriteEff
     const doc = input.after;
     const docId = input.id;
     if (docId === null) return;
-    if (doc[c.bookingRateField] !== undefined && num(doc[c.bookingRateField]) > 0) return; // already stamped
+    if (positiveRate(doc[c.bookingRateField]) !== null) return; // already stamped
 
     const resolved = config.resolveFunctionalCurrency ? await config.resolveFunctionalCurrency(input.tenantId) : undefined;
     const functional = (resolved ?? c.functionalCurrency).toUpperCase();
     const currency = typeof doc[c.currencyField] === "string" ? (doc[c.currencyField] as string).toUpperCase() : functional;
     if (currency === functional) return; // functional-currency document → rate 1, nothing to stamp
 
+    const nowIso = (c.clock?.now() ?? new Date()).toISOString();
+    // Today when the document carries no date, which is the day `resolvePostingRate` takes the
+    // recognition's rate on too: the stamp and the posting must name one rate, or a later
+    // revaluation measures the difference from a rate the ledger was never booked at.
     const dateRaw = doc[c.dateField];
-    const date = typeof dateRaw === "string" && dateRaw.length > 0 ? dateRaw.slice(0, 10) : null;
-    if (date === null) return;
+    const date = typeof dateRaw === "string" && dateRaw.length >= 10 ? dateRaw.slice(0, 10) : nowIso.slice(0, 10);
 
     const functionalCurrencyId = await resolveCurrencyId(input, c, functional);
     if (functionalCurrencyId === null) return;
     const rate = await lookupPeriodEndRate(input, c, currency, functionalCurrencyId, date);
     if (rate === null) return;
 
-    const nowIso = (c.clock?.now() ?? new Date()).toISOString();
-    await input.store.update(input.tenantId, c.entity, docId, { [c.bookingRateField]: rate, updated_at: nowIso });
+    await input.store.update(input.tenantId, c.entity, docId, {
+      [c.bookingRateField]: renderDecimal(rate),
+      updated_at: nowIso,
+    });
   };
 }
 
@@ -2399,7 +2927,7 @@ async function lookupPeriodEndRate(
   docCurrency: string,
   functionalCurrencyId: string,
   endDate: string,
-): Promise<number | null> {
+): Promise<ExactDecimal | null> {
   const fromId = await resolveCurrencyId(input, c, docCurrency);
   if (fromId === null) return null;
   const page = await input.store.listPage(input.tenantId, c.exchangeRateEntity, {
@@ -2418,7 +2946,9 @@ async function lookupPeriodEndRate(
     const dateRaw = r[c.rateDateField];
     const date = typeof dateRaw === "string" && dateRaw.length > 0 ? dateRaw.slice(0, 10) : null;
     if (date === null || date > endDate) continue; // rate must be on/before the period end
-    return num(r[c.rateField]);
+    // Exact, and only a positive one: a zero or negative stored rate is no rate, not a rate of zero
+    // that would convert every amount it touches to nothing.
+    return positiveRate(r[c.rateField]);
   }
   return null;
 }
@@ -2438,6 +2968,14 @@ export interface WhtCertificateClearingConfig {
   readonly resolveAccountCodes?: (tenantId: string) => Promise<{ whtReceivable?: string; taxRecoverable?: string }>;
   readonly whtReceivableAccountRef?: string;
   readonly taxRecoverableAccountRef?: string;
+  /**
+   * How the certificate's rate is found: the rate of the invoice it names when that invoice carries
+   * one in the same currency (the rate the withholding was booked at), else the rate on its own date.
+   */
+  readonly fx?: PostingFxConfig;
+  /** The certificate's reference to the invoice the tax was withheld on, and that entity. */
+  readonly invoiceRefField?: string;
+  readonly invoiceEntity?: string;
   readonly periods?: PostingPeriodConfig;
   readonly clock?: { now(): Date };
 }
@@ -2475,14 +3013,26 @@ export function whtCertificateClearingEffect(config: WhtCertificateClearingConfi
     const cert = input.after;
     const certId = input.id;
     if (certId === null) return;
-    const amount = num(cert[c.amountField]);
-    if (amount <= 0) return;
+    const amountUnits = moneyUnits(cert[c.amountField]) ?? 0n;
+    if (amountUnits <= 0n) return;
 
     const now = c.clock?.now() ?? new Date();
     const nowIso = now.toISOString();
     const today = nowIso.slice(0, 10);
     const certNumber = typeof cert[c.numberField] === "string" ? (cert[c.numberField] as string) : certId;
     const currency = typeof cert[c.currencyField] === "string" ? (cert[c.currencyField] as string) : "USD";
+    // The withholding was booked at the invoice's rate, so that is the rate it is reclassed at —
+    // reclassing it at today's would leave a residue in the receivable the recognition debited.
+    let rate: ExactDecimal | null = null;
+    const invoiceRef = cert[c.invoiceRefField ?? "invoice_id"];
+    if (config.fx?.bookingRateField !== undefined && typeof invoiceRef === "string" && invoiceRef.length > 0) {
+      const invoice = await input.store.get(input.tenantId, c.invoiceEntity ?? "Invoice", invoiceRef);
+      const invoiceCurrency = typeof invoice?.["currency"] === "string" ? (invoice["currency"] as string) : null;
+      if (invoice !== null && invoiceCurrency !== null && invoiceCurrency.toUpperCase() === currency.toUpperCase()) {
+        rate = positiveRate(invoice[config.fx.bookingRateField]);
+      }
+    }
+    rate ??= await resolvePostingRate(input, config.fx, cert, currency, today, "this WHT certificate");
 
     const codes = config.resolveAccountCodes ? await config.resolveAccountCodes(input.tenantId) : {};
     const recoverableAccount = (await resolveAccountId(input, c, codes.taxRecoverable)) ?? c.taxRecoverableAccountRef;
@@ -2498,9 +3048,14 @@ export function whtCertificateClearingEffect(config: WhtCertificateClearingConfi
       created_at: nowIso,
       updated_at: nowIso,
     }, config.periods);
-    const base = { journal_entry_id: String(entry["id"]), currency, fx_rate: 1, created_at: nowIso, updated_at: nowIso };
+    const base = { journal_entry_id: String(entry["id"]), currency, created_at: nowIso, updated_at: nowIso };
     // Reclass the withheld tax: debit income-tax-recoverable, credit WHT-receivable.
-    await input.store.create(input.tenantId, c.lineEntity, glLine(base, recoverableAccount, "WHT — income tax recoverable", "debit", amount));
-    await input.store.create(input.tenantId, c.lineEntity, glLine(base, whtAccount, "WHT — receivable cleared", "credit", amount));
+    const planned: PlannedLine[] = [
+      { account: recoverableAccount, description: "WHT — income tax recoverable", side: "debit", units: amountUnits },
+      { account: whtAccount, description: "WHT — receivable cleared", side: "credit", units: amountUnits },
+    ];
+    for (const line of convertedLines(base, planned, rate)) {
+      await input.store.create(input.tenantId, c.lineEntity, line);
+    }
   };
 }

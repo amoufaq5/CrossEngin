@@ -117,7 +117,7 @@ export class UsageStripeSync {
         timestamp: Math.floor(Date.parse(record.period.end) / 1000),
         idempotencyKey: record.idempotencyKey,
       });
-      await this.store.markSynced(tenantId, record.id, stripe.id, this.now().toISOString());
+      await this.store.markSynced(tenantId, record.idempotencyKey, stripe.id, this.now().toISOString());
       synced += 1;
     }
     return { synced, skipped, unreadable };

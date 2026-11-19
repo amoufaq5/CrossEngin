@@ -49,6 +49,24 @@ describe("processTimerBatch", () => {
     expect(released).toEqual(["b"]); // handed back for retry
   });
 
+  it("releases under the claimed timer's own tenant", async () => {
+    const seen: string[] = [];
+    const claimer: TimerClaimer = {
+      claim: async () => [timer("a"), { ...timer("b"), tenantId: "00000000-0000-4000-8000-000000000002" }],
+      release: async ({ timerId, tenantId }) => void seen.push(`${timerId}@${tenantId}`),
+    };
+    const processor: TimerProcessor = {
+      process: async () => {
+        throw new Error("boom");
+      },
+    };
+    await processTimerBatch(claimer, processor, OPTS);
+    expect(seen).toEqual([
+      "a@00000000-0000-4000-8000-000000000001",
+      "b@00000000-0000-4000-8000-000000000002",
+    ]);
+  });
+
   it("swallows a release failure (the lease recovers the timer anyway)", async () => {
     const processor: TimerProcessor = { process: async () => Promise.reject(new Error("boom")) };
     const result = await processTimerBatch(claimerOf([timer("a")], [], true), processor, OPTS);
@@ -97,5 +115,21 @@ describe("processTimerBatch", () => {
     expect(seen).toEqual(["a:worker_stopping"]);
     expect(result.succeeded).toEqual([]);
     expect(result.claimed).toBe(1);
+  });
+});
+
+describe("processTimerBatch — each timer's claim is reaffirmed before it fires", () => {
+  it("fires a timer it still holds and skips one whose claim was taken", async () => {
+    const processed: string[] = [];
+    const released: string[] = [];
+    const result = await processTimerBatch(
+      claimerOf([timer("a"), timer("b")], released),
+      { process: async (t) => void processed.push(t.timerId) },
+      OPTS,
+      { claimRenewer: { renew: async (o) => o.timerId === "a" && o.workerId === "worker-A" } },
+    );
+    expect(processed).toEqual(["a"]);
+    expect(result.skipped).toEqual([{ timerId: "b", reason: "lease_lost" }]);
+    expect(released).toEqual([]);
   });
 });

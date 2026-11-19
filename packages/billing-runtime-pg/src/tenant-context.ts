@@ -10,14 +10,24 @@ export const SET_TENANT_CONTEXT_SQL = "SELECT set_config('app.current_tenant_id'
 
 const TENANT_ID_RE = /^[0-9a-fA-F-]{1,64}$/;
 
+export function assertTenantIdShape(tenantId: string): void {
+  if (!TENANT_ID_RE.test(tenantId)) {
+    throw new Error(`invalid tenantId for RLS context: ${JSON.stringify(tenantId)}`);
+  }
+}
+
+/** The same setting inside a transaction the caller already holds, for a write spanning tenants. */
+export async function setTenantContextWithin(tx: PgConnection, tenantId: string): Promise<void> {
+  assertTenantIdShape(tenantId);
+  await tx.query(SET_TENANT_CONTEXT_SQL, [tenantId]);
+}
+
 export async function withTenantContext<T>(
   conn: PgConnection,
   tenantId: string,
   fn: (tx: PgConnection) => Promise<T>,
 ): Promise<T> {
-  if (!TENANT_ID_RE.test(tenantId)) {
-    throw new Error(`invalid tenantId for RLS context: ${JSON.stringify(tenantId)}`);
-  }
+  assertTenantIdShape(tenantId);
   return conn.transaction(async (tx) => {
     await tx.query(SET_TENANT_CONTEXT_SQL, [tenantId]);
     return fn(tx);

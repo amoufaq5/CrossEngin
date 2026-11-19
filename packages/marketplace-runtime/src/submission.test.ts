@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { generateEd25519Keypair } from "@crossengin/crypto";
 import {
+  packManifestDigest,
   PackManifestSchema,
+  PackPublisherRegistry,
+  parsePackPublisherSpec,
   signPackManifest,
+  type PackAuthorKind,
   type PackManifest,
   type PackSignature,
 } from "@crossengin/marketplace";
@@ -44,16 +48,18 @@ function submitInput(m: PackManifest, overrides: Partial<SubmitVersionInput> = {
     channel: "stable",
     bundleSha256: SHA,
     bundleSizeBytes: 4096,
-    manifestSha256: SHA,
+    manifestSha256: packManifestDigest(m),
     signature,
-    publicKeyBase64: keypair.publicKeyBase64,
     changelog: "Initial release",
     ...overrides,
   };
 }
 
-function engine(): PackSubmissionEngine {
-  return new PackSubmissionEngine({ clock: new FixedClock("2026-06-15T00:00:00.000Z") });
+function engine(kind: PackAuthorKind = "community", publicKeyBase64 = keypair.publicKeyBase64): PackSubmissionEngine {
+  return new PackSubmissionEngine({
+    clock: new FixedClock("2026-06-15T00:00:00.000Z"),
+    publishers: new PackPublisherRegistry([parsePackPublisherSpec(`com.acme:${kind}:${publicKeyBase64}`)]),
+  });
 }
 
 describe("PackSubmissionEngine.submit", () => {
@@ -67,7 +73,7 @@ describe("PackSubmissionEngine.submit", () => {
     const official = manifest({
       author: { kind: "crossengin_official", name: "CrossEngin", email: "x@crossengin.io", verifiedAt: "2026-01-01T00:00:00.000Z" },
     });
-    const draft = engine().submit(submitInput(official));
+    const draft = engine("crossengin_official").submit(submitInput(official));
     expect(draft.securityReviewStatus).toBe("exempt");
   });
 
@@ -77,14 +83,52 @@ describe("PackSubmissionEngine.submit", () => {
       requiresPhiAccess: true,
       handlesUserData: true,
     });
-    expect(engine().submit(submitInput(phi)).securityReviewStatus).toBe("pending");
+    expect(engine("certified_partner").submit(submitInput(phi)).securityReviewStatus).toBe("pending");
   });
 
-  it("rejects a submission whose signature does not verify", () => {
-    const wrongKey = generateEd25519Keypair();
-    expect(() =>
-      engine().submit(submitInput(manifest(), { publicKeyBase64: wrongKey.publicKeyBase64 })),
-    ).toThrow(PackSubmissionError);
+  function refusal(fn: () => unknown): string | null {
+    try {
+      fn();
+      return null;
+    } catch (err) {
+      return err instanceof PackSubmissionError ? err.reason : `not a PackSubmissionError: ${String(err)}`;
+    }
+  }
+
+  it("refuses a signer the platform has not registered, however valid its own signature", () => {
+    const registeredElsewhere = generateEd25519Keypair();
+    expect(refusal(() => engine("community", registeredElsewhere.publicKeyBase64).submit(submitInput(manifest())))).toBe(
+      "publisher_unregistered",
+    );
+  });
+
+  it("refuses a manifest claiming an author kind above the publisher's registration", () => {
+    const claimed = manifest({
+      author: { kind: "crossengin_official", name: "Not Really", verifiedAt: "2026-01-01T00:00:00.000Z" },
+    });
+    expect(refusal(() => engine("community").submit(submitInput(claimed)))).toBe("author_kind_not_registered");
+  });
+
+  it("refuses a packId that is not the signed manifest's id", () => {
+    expect(refusal(() => engine().submit(submitInput(manifest(), { packId: "com.acme.other" })))).toBe(
+      "pack_id_mismatch",
+    );
+  });
+
+  it("refuses a manifest digest that is not the signed manifest's", () => {
+    // Found live: an arbitrary digest beside a valid signature was stored as given. The digest is
+    // derived from the bytes the signature covers, so a caller cannot name one of its own.
+    expect(refusal(() => engine().submit(submitInput(manifest(), { manifestSha256: "b".repeat(64) })))).toBe(
+      "manifest_digest_mismatch",
+    );
+    expect(engine().submit(submitInput(manifest())).manifestSha256).toBe(packManifestDigest(manifest()));
+  });
+
+  it("refuses a pack id outside the publisher's namespace", () => {
+    const outside = manifest({ id: "org.rival.loyalty" });
+    expect(refusal(() => engine().submit(submitInput(outside, { packId: "org.rival.loyalty" })))).toBe(
+      "pack_outside_publisher_namespace",
+    );
   });
 });
 
@@ -110,8 +154,22 @@ describe("PackSubmissionEngine — review + publish", () => {
     expect(() => e.publish(failed, { publishedBy: "sec-team" })).toThrow(/stable/);
   });
 
-  it("publishes an exempt trusted author's pack straight through", () => {
+  it("refuses a failed review on a non-stable channel as a refusal, not a schema error", () => {
     const e = engine();
+    const inReview = e.submitForReview(e.submit(submitInput(manifest(), { channel: "beta" })));
+    const failed = e.recordReview(inReview, { status: "failed", reviewer: "sec-team" });
+    let caught: unknown = null;
+    try {
+      e.publish(failed, { publishedBy: "sec-team" });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(PackSubmissionError);
+    expect((caught as PackSubmissionError).reason).toBe("review_not_cleared");
+  });
+
+  it("publishes an exempt trusted author's pack straight through", () => {
+    const e = engine("crossengin_official");
     const official = manifest({
       author: { kind: "crossengin_official", name: "CrossEngin", email: "x@crossengin.io", verifiedAt: "2026-01-01T00:00:00.000Z" },
     });
@@ -135,7 +193,7 @@ describe("PackSubmissionEngine — review + publish", () => {
 
 describe("PackSubmissionEngine — retire", () => {
   it("deprecates + withdraws a published version with a reason", () => {
-    const e = engine();
+    const e = engine("crossengin_official");
     const official = manifest({
       author: { kind: "crossengin_official", name: "CrossEngin", email: "x@crossengin.io", verifiedAt: "2026-01-01T00:00:00.000Z" },
     });

@@ -798,11 +798,18 @@ describe("paymentSettlementGlPostingEffect (partial + FX)", () => {
     await complete(store, String(pay.id), pay);
     const entry = (await store.list(TENANT, "JournalEntry"))[0]!;
     const lines = (await store.list(TENANT, "JournalLine")).filter((l) => l.journal_entry_id === entry.id);
-    expect(lines.find((l) => l.ledger_account_id === "cash")!.debit).toBe(105);
-    expect(lines.find((l) => l.ledger_account_id === "accounts_receivable")!.credit).toBe(100);
+    // The payment's own amount moves on both sides; the cash is worth more in the base currency than
+    // the receivable it cleared, and the difference is a functional-only gain. It used to be posted as
+    // transaction amounts, which put 5 of base currency into the payment's own currency balance.
+    const cash = lines.find((l) => l.ledger_account_id === "cash")!;
+    expect([cash.debit, cash.functional_debit, cash.fx_rate]).toEqual([100, 105, "1.0500000000"]);
+    const ar = lines.find((l) => l.ledger_account_id === "accounts_receivable")!;
+    expect([ar.credit, ar.functional_credit, ar.fx_rate]).toEqual([100, 100, 1]);
     const fx = lines.find((l) => l.ledger_account_id === "fx_gain_loss")!;
-    expect(fx.credit).toBe(5); // gain
-    expect(lines.reduce((s, l) => s + Number(l.debit), 0)).toBe(lines.reduce((s, l) => s + Number(l.credit), 0));
+    expect([fx.debit, fx.credit, fx.functional_credit]).toEqual([0, 0, 5]); // gain
+    const sum = (k: string) => lines.reduce((s, l) => s + Number(l[k]), 0);
+    expect(sum("debit")).toBe(sum("credit"));
+    expect(sum("functional_debit")).toBe(sum("functional_credit"));
   });
 
   it("books a realized FX loss when cash received is short of the AR cleared", async () => {
@@ -812,8 +819,10 @@ describe("paymentSettlementGlPostingEffect (partial + FX)", () => {
     const entry = (await store.list(TENANT, "JournalEntry"))[0]!;
     const lines = (await store.list(TENANT, "JournalLine")).filter((l) => l.journal_entry_id === entry.id);
     const fx = lines.find((l) => l.ledger_account_id === "fx_gain_loss")!;
-    expect(fx.debit).toBe(5); // loss
-    expect(lines.reduce((s, l) => s + Number(l.debit), 0)).toBe(lines.reduce((s, l) => s + Number(l.credit), 0));
+    expect([fx.debit, fx.credit, fx.functional_debit]).toEqual([0, 0, 5]); // loss
+    const sum = (k: string) => lines.reduce((s, l) => s + Number(l[k]), 0);
+    expect(sum("debit")).toBe(sum("credit"));
+    expect(sum("functional_debit")).toBe(sum("functional_credit"));
   });
 
   it("settles an outbound payment: debit AP, credit cash", async () => {
@@ -955,12 +964,17 @@ describe("unrealizedFxRevaluationEffect", () => {
 
     const lines = (await store.list(TENANT, "JournalLine")).filter((l) => l.journal_entry_id === entry.id);
     expect(lines.length).toBe(2);
-    const totalDebit = lines.reduce((s, l) => s + Number(l.debit), 0);
-    const totalCredit = lines.reduce((s, l) => s + Number(l.credit), 0);
+    const totalDebit = lines.reduce((s, l) => s + Number(l.functional_debit), 0);
+    const totalCredit = lines.reduce((s, l) => s + Number(l.functional_credit), 0);
     expect(totalDebit).toBeCloseTo(totalCredit, 6);
-    // AR gain (rate 1.1 → +100): debit AR, credit unrealized FX.
-    const arLine = lines.find((l) => Number(l.debit) > 0)!;
-    expect(Number(arLine.debit)).toBeCloseTo(100, 6);
+    // AR gain (rate 1.1 → +100): debit AR, credit unrealized FX — in the base currency only. The
+    // foreign balance did not change, so no line moves a transaction amount.
+    const arLine = lines.find((l) => Number(l.functional_debit) > 0)!;
+    expect(Number(arLine.functional_debit)).toBeCloseTo(100, 6);
+    expect(lines.map((l) => [l.debit, l.credit])).toEqual([
+      [0, 0],
+      [0, 0],
+    ]);
   });
 
   it("uses the latest rate on/before the period end date", async () => {
@@ -973,8 +987,8 @@ describe("unrealizedFxRevaluationEffect", () => {
     const period = await store.create(TENANT, "FiscalPeriod", { status: "closing", end_date: "2026-06-30", name: "2026-06" });
 
     await effect(closeInput(store, String(period.id)));
-    const arLine = (await store.list(TENANT, "JournalLine")).find((l) => Number(l.debit) > 0)!;
-    expect(Number(arLine.debit)).toBeCloseTo(200, 6); // 1000 × (1.2 − 1)
+    const arLine = (await store.list(TENANT, "JournalLine")).find((l) => Number(l.functional_debit) > 0)!;
+    expect(Number(arLine.functional_debit)).toBeCloseTo(200, 6); // 1000 × (1.2 − 1)
   });
 
   it("posts no entry when there are no foreign-currency documents", async () => {
@@ -1005,8 +1019,8 @@ describe("unrealizedFxRevaluationEffect", () => {
     const period = await store.create(TENANT, "FiscalPeriod", { status: "closing", end_date: "2026-06-30", name: "2026-06" });
 
     await effect(closeInput(store, String(period.id)));
-    const arLine = (await store.list(TENANT, "JournalLine")).find((l) => Number(l.debit) > 0)!;
-    expect(Number(arLine.debit)).toBeCloseTo(60, 6); // open 600 × (1.1 − 1)
+    const arLine = (await store.list(TENANT, "JournalLine")).find((l) => Number(l.functional_debit) > 0)!;
+    expect(Number(arLine.functional_debit)).toBeCloseTo(60, 6); // open 600 × (1.1 − 1)
   });
 
   it("mirrors AP: a higher rate raises a foreign payable → loss → debit unrealized FX, credit AP", async () => {
@@ -1019,14 +1033,14 @@ describe("unrealizedFxRevaluationEffect", () => {
     const entry = (await store.list(TENANT, "JournalEntry")).find((e) => e.entry_number === "2026-06-FXREVAL")!;
     const lines = (await store.list(TENANT, "JournalLine")).filter((l) => l.journal_entry_id === entry.id);
     expect(lines.length).toBe(2);
-    const totalDebit = lines.reduce((s, l) => s + Number(l.debit), 0);
-    const totalCredit = lines.reduce((s, l) => s + Number(l.credit), 0);
+    const totalDebit = lines.reduce((s, l) => s + Number(l.functional_debit), 0);
+    const totalCredit = lines.reduce((s, l) => s + Number(l.functional_credit), 0);
     expect(totalDebit).toBeCloseTo(totalCredit, 6);
     // AP control credited (liability grows), unrealized FX debited (loss).
     const apLine = lines.find((l) => l.description === "Unrealized FX revaluation — AP EUR")!;
-    expect(Number(apLine.credit)).toBeCloseTo(100, 6);
+    expect(Number(apLine.functional_credit)).toBeCloseTo(100, 6);
     const fxLine = lines.find((l) => l.description === "Unrealized FX gain/loss — EUR")!;
-    expect(Number(fxLine.debit)).toBeCloseTo(100, 6);
+    expect(Number(fxLine.functional_debit)).toBeCloseTo(100, 6);
   });
 });
 
@@ -1056,8 +1070,8 @@ describe("unrealizedFxRevaluationEffect — booking rate", () => {
     await store.create(TENANT, "Invoice", { invoice_number: "INV-1", state: "sent", total: 1000, currency: "EUR", booking_rate: 1.1 });
     const period = await store.create(TENANT, "FiscalPeriod", { status: "closing", end_date: "2026-06-30", name: "2026-06" });
     await effect(close(store, String(period.id)));
-    const arLine = (await store.list(TENANT, "JournalLine")).find((l) => Number(l.debit) > 0)!;
-    expect(Number(arLine.debit)).toBeCloseTo(100, 6);
+    const arLine = (await store.list(TENANT, "JournalLine")).find((l) => Number(l.functional_debit) > 0)!;
+    expect(Number(arLine.functional_debit)).toBeCloseTo(100, 6);
   });
 
   it("posts no entry when the period-end rate equals the booking rate (no movement)", async () => {
@@ -1630,8 +1644,8 @@ describe("unrealizedFxRevaluationEffect — the whole payment and document sets"
   it("nets every payment page against every document page (one pass, no payment rows retained)", async () => {
     const { store, periodId } = await threeHalfPaidInvoices(true);
     await unrealizedFxRevaluationEffect({ functionalCurrency: "USD", clock })(close(pagedAt(store, 1), periodId));
-    const arLine = (await store.list(TENANT, "JournalLine")).find((l) => Number(l.debit) > 0)!;
-    expect(Number(arLine.debit)).toBeCloseTo(150, 6); // open 3 × 500 = 1500 × (1.1 − 1)
+    const arLine = (await store.list(TENANT, "JournalLine")).find((l) => Number(l.functional_debit) > 0)!;
+    expect(Number(arLine.functional_debit)).toBeCloseTo(150, 6); // open 3 × 500 = 1500 × (1.1 − 1)
   });
 
   it("refuses on the payment read rather than revaluing documents as if unpaid", async () => {
@@ -1677,8 +1691,8 @@ describe("unrealizedFxRevaluationEffect — the whole payment and document sets"
     await unrealizedFxRevaluationEffect({ functionalCurrency: "USD", clock })(close(pagedAt(store, 1), String(period.id)));
     const lines = await store.list(TENANT, "JournalLine");
     // AR open 600 → a 60 gain; AP open 100 → a 10 loss.
-    expect(Number(lines.find((l) => l.description === "Unrealized FX revaluation — AR EUR")!.debit)).toBeCloseTo(60, 6);
-    expect(Number(lines.find((l) => l.description === "Unrealized FX revaluation — AP EUR")!.credit)).toBeCloseTo(10, 6);
+    expect(Number(lines.find((l) => l.description === "Unrealized FX revaluation — AR EUR")!.functional_debit)).toBeCloseTo(60, 6);
+    expect(Number(lines.find((l) => l.description === "Unrealized FX revaluation — AP EUR")!.functional_credit)).toBeCloseTo(10, 6);
   });
 });
 
