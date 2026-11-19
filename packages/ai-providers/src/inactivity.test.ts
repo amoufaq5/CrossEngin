@@ -59,11 +59,14 @@ describe("resolveInactivityTimeoutMs", () => {
 
 describe("startInactivityWatchdog", () => {
   it("lets a slow stream finish when every gap is under the timeout, whatever its total length", async () => {
-    const wd = startInactivityWatchdog(60);
+    const wd = startInactivityWatchdog(200);
     try {
-      // 6 chunks x 30ms = 180ms in total: three times the timeout, never silent for 60ms.
-      const out = await drain(wd.watch(streamOf(["a", "b", "c", "d", "e", "f"], 30)));
-      expect(out).toBe("abcdef");
+      // 12 chunks x 25ms = 300ms in total: half again the timeout, never silent for 200ms. The gap is
+      // an eighth of the timeout because a full workspace sweep loads the CPU: at 30ms against 60ms
+      // one late timer tick was enough to fire the watchdog and fail this test on a correct stream.
+      const chunks = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"];
+      const out = await drain(wd.watch(streamOf(chunks, 25)));
+      expect(out).toBe(chunks.join(""));
       expect(wd.timedOut).toBe(false);
       expect(wd.signal.aborted).toBe(false);
     } finally {

@@ -677,8 +677,10 @@ describe("the secrets .env.example ships", () => {
 
   it("leaves the at-rest secret commented, because the shipped pack declares no phi field", () => {
     // The asymmetry is measured on the pack this compose serves and not chosen: resolved erp-core
-    // has 0 phi/regulated fields and 1 sortable classified field. Uncommenting this one would ask
-    // an operator to generate a secret nothing reads.
+    // has 0 phi/regulated fields and 4 sortable classified fields (Account.billing_email and
+    // Employee.given_name / family_name / work_email, re-measured after ADR-0443's M-26) — which
+    // is the cursor secret's case, not this one's. Uncommenting this one would ask an operator to
+    // generate a secret nothing reads.
     expect(env).toMatch(/^#COLUMN_ENCRYPTION_SECRET=/m);
   });
 

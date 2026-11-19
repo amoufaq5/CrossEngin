@@ -4,12 +4,12 @@ import { generateEd25519Keypair } from "@crossengin/crypto";
 import { InMemoryEntityStore, LicenseEntitlementResolver, signLicense } from "@crossengin/operate-runtime";
 import { buildProfileFromTemplate } from "@crossengin/residency";
 import { InMemoryTenantResidencyDirectory } from "@crossengin/residency-runtime";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { RawHttpRequest } from "./http.js";
 import { loadBuiltinPack } from "./manifest-source.js";
 import { parseApiKeySpec } from "./principals.js";
-import { OperateHttpServer, buildOperateHttpServer } from "./server.js";
+import { OperateHttpServer, buildOperateHttpServer, logGatewayInternalError } from "./server.js";
 import { PreAuthLimiter } from "./pre-auth-limit.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
@@ -730,5 +730,29 @@ describe("OperateHttpServer — the pre-authentication bound", () => {
     for (let i = 0; i < 20; i += 1) {
       expect((await httpServer.dispatch(anonymous, null)).status).toBe(401);
     }
+  });
+});
+
+describe("logGatewayInternalError's tag", () => {
+  it("files a failure the caller was answered with as [5xx], and a swallowed one as [post-commit]", () => {
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((line: unknown) => {
+      lines.push(String(line));
+    });
+    try {
+      logGatewayInternalError(new Error("boom"), { requestId: "req_a", stage: "dispatch_handler", answered: "500" });
+      logGatewayInternalError(new Error("disk full"), {
+        requestId: "req_b",
+        stage: "dispatch_handler",
+        answered: "success",
+      });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(lines[0]?.startsWith("[5xx] req_a dispatch_handler")).toBe(true);
+    // The caller got a 2xx, so this line must not read as a 5xx an operator would go looking for.
+    expect(lines[1]?.startsWith("[post-commit] req_b dispatch_handler")).toBe(true);
+    expect(lines[1]).not.toContain("[5xx]");
+    expect(lines[1]).toContain("answered 409 until the reservation lease lapses, then may run again");
   });
 });

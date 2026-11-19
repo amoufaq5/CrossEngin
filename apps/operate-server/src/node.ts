@@ -2761,6 +2761,9 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
                 " tenant could not be restored from pending_deletion; restore it by hand",
               err,
             ),
+          // The move back to `active` is a lifecycle transition and is recorded as the reject
+          // route records it, or the trail's last word on this tenant stays `schedule_deletion`.
+          ...(lifecycleEvents !== null ? { lifecycleEvents } : {}),
           graceMs: options.deletionGraceDays * 86_400_000,
           principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
           deleteRoles: new Set(options.tenantDeletionRoles),

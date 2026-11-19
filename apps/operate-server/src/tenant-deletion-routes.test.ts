@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { ResolvedPrincipal } from "@crossengin/api-gateway";
 import type { Handler, HandlerInput } from "@crossengin/api-gateway-runtime";
-import type { RowRead } from "@crossengin/kernel-pg";
+import type { PgConnection, RowRead } from "@crossengin/kernel-pg";
+import { PostgresLifecycleEventStore } from "@crossengin/tenant-lifecycle-pg";
 
 import {
   tenantWideErasureHonours,
@@ -126,6 +127,27 @@ const OK_OUTCOME: DeletionOutcomeLike = {
   },
 };
 
+const EVENT_ID = "4f1e2d3c-5b6a-4978-8a9b-0c1d2e3f4a5b";
+
+/** A connection that records each statement and can be told to refuse every one. */
+function recordingPg(throws = false): {
+  readonly conn: PgConnection;
+  readonly statements: Array<{ sql: string; params: readonly unknown[] }>;
+} {
+  const statements: Array<{ sql: string; params: readonly unknown[] }> = [];
+  const conn: PgConnection = {
+    query: (async (sql: string, params?: readonly unknown[]) => {
+      statements.push({ sql, params: params ?? [] });
+      if (throws) throw new Error("relation does not exist");
+      return { rows: [], rowCount: 1 };
+    }) as PgConnection["query"],
+    transaction: (async <T>(fn: (tx: PgConnection) => Promise<T>) => fn(conn)) as PgConnection["transaction"],
+    withAdvisoryLock: (async <T>(_k: bigint, fn: () => Promise<T>) => fn()) as PgConnection["withAdvisoryLock"],
+    close: (async () => undefined) as PgConnection["close"],
+  };
+  return { conn, statements };
+}
+
 interface Harness {
   readonly ctx: TenantDeletionRoutesContext;
   readonly events: TenantDeletionEvent[];
@@ -160,6 +182,7 @@ function harness(
     readonly request?: ApprovingRequestLike | null;
     readonly requestReadThrows?: boolean;
     readonly claimReturnsNull?: boolean;
+    readonly rejectReturnsNull?: boolean;
   } = {},
 ): Harness {
   const events: TenantDeletionEvent[] = [];
@@ -175,6 +198,7 @@ function harness(
       transition: async (_id, to, fields): Promise<ApprovingRequestLike | null> => {
         requestMoves.push({ to, fields: { ...fields } });
         if (to === "in_progress" && behaviour.claimReturnsNull === true) return null;
+        if (to === "rejected" && behaviour.rejectReturnsNull === true) return null;
         return approvingOf({ status: to });
       },
     },
@@ -596,36 +620,143 @@ describe("the delete route", () => {
     expect(h.events[0]?.operation).toBe(TENANT_DELETE_REFUSED_OPERATION);
   });
 
-  it("restores the tenant when a refusal settles its request rejected", async () => {
+  describe("restoring the tenant after a refused deletion", () => {
     // Found live on the confined role: every attempt is refused `rls_would_confine_this_session`,
     // the refusal closes the verified request for good, and the tenant the verify route made
     // read-only sat in `pending_deletion` with nothing left holding it. The reject route restores
-    // through the same mover, so this path must too.
-    const restored: string[] = [];
-    const tenantState = {
-      markPendingDeletion: async () => ({ moved: false, fromState: null }),
-      restore: async (id: string) => {
-        restored.push(id);
-        return { moved: true, fromState: "pending_deletion" as const };
-      },
-    };
-    const refusal = {
+    // through the same mover and records the move in the trail, so this path must do both.
+    const RETURNED = {
       outcome: {
         ok: false as const,
         refusals: [{ stage: "erase", reason: "rls_would_confine_this_session", detail: "meta.x" }],
       },
     };
-    const h = harness({}, refusal);
-    const res = await call({ ...h.ctx, tenantState }, DELETE, { parsedBody: BODY });
-    expect(res.status).toBe(409);
-    expect(res.body["requestStatus"]).toBe("rejected");
-    expect(res.body["tenantRestored"]).toBe(true);
-    expect(restored).toHaveLength(1);
+    const THROWN = {
+      deleteThrows: Object.assign(new Error("rolled back"), {
+        name: "DeletionPipelineAborted",
+        refusals: [{ stage: "erase", reason: "rls_would_confine_this_session", detail: "meta.x" }],
+      }),
+    };
 
-    // With no mover wired the response claims nothing rather than a restore it did not attempt.
-    const bare = harness({}, refusal);
-    const unwired = await call(bare.ctx, DELETE, { parsedBody: BODY });
-    expect(unwired.body["tenantRestored"]).toBeNull();
+    function wired(opts: {
+      readonly restoreThrows?: boolean;
+      readonly moved?: boolean;
+      readonly trailThrows?: boolean;
+      readonly noTrail?: boolean;
+    } = {}): {
+      readonly over: Partial<TenantDeletionRoutesContext>;
+      readonly restored: string[];
+      readonly restoreErrors: string[];
+      readonly statements: Array<{ sql: string; params: readonly unknown[] }>;
+    } {
+      const restored: string[] = [];
+      const restoreErrors: string[] = [];
+      const pg = recordingPg(opts.trailThrows === true);
+      const over: Partial<TenantDeletionRoutesContext> = {
+        tenantState: {
+          markPendingDeletion: async () => ({ moved: false, fromState: null }),
+          restore: async (id: string) => {
+            restored.push(id);
+            if (opts.restoreThrows === true) throw new Error("tenants unreachable");
+            return opts.moved === false
+              ? { moved: false, fromState: null }
+              : { moved: true, fromState: "pending_deletion" as const };
+          },
+        },
+        onRestoreError: (_err, id) => restoreErrors.push(id),
+        ...(opts.noTrail === true
+          ? {}
+          : { lifecycleEvents: new PostgresLifecycleEventStore(pg.conn), newEventId: () => EVENT_ID }),
+      };
+      return { over, restored, restoreErrors, statements: pg.statements };
+    }
+
+    const trailInsert = (statements: Array<{ sql: string; params: readonly unknown[] }>) =>
+      statements.filter((s) => s.sql.includes("INSERT INTO meta.tenant_lifecycle_events"));
+
+    for (const [arm, behaviour, error] of [
+      ["a returned refusal", RETURNED, "deletion_refused"],
+      ["a proven rollback", THROWN, "deletion_rolled_back"],
+    ] as const) {
+      it(`restores the path tenant and records the move, on ${arm}`, async () => {
+        const w = wired();
+        const h = harness(w.over, behaviour);
+        const res = await call(h.ctx, DELETE, { parsedBody: BODY });
+        expect(res.status).toBe(409);
+        expect(res.body["error"]).toBe(error);
+        expect(res.body["requestStatus"]).toBe("rejected");
+        expect(res.body["tenantRestored"]).toBe(true);
+        expect(res.body["lifecycleRecorded"]).toBe(true);
+        expect(w.restored).toEqual([TENANT]);
+        const inserts = trailInsert(w.statements);
+        expect(inserts).toHaveLength(1);
+        // The trail's last word must be the restore, from `pending_deletion` to `active`.
+        expect(inserts[0]?.params).toContain("restore");
+        expect(inserts[0]?.params).toContain("pending_deletion");
+        expect(inserts[0]?.params).toContain(EVENT_ID);
+      });
+    }
+
+    it("records nothing when the restore matched no row, and still claims the request let go", async () => {
+      const w = wired({ moved: false });
+      const res = await call(harness(w.over, RETURNED).ctx, DELETE, { parsedBody: BODY });
+      expect(res.body["tenantRestored"]).toBe(true);
+      // `false`, not `null`: a trail is kept and this transition is not in it, because none happened.
+      expect(res.body["lifecycleRecorded"]).toBe(false);
+      expect(trailInsert(w.statements)).toEqual([]);
+    });
+
+    it("reports a restore that threw, and writes no trail for it", async () => {
+      const w = wired({ restoreThrows: true });
+      const res = await call(harness(w.over, THROWN).ctx, DELETE, { parsedBody: BODY });
+      expect(res.status).toBe(409);
+      expect(res.body["tenantRestored"]).toBe(false);
+      expect(res.body["lifecycleRecorded"]).toBe(false);
+      expect(w.restoreErrors).toEqual([TENANT]);
+      expect(trailInsert(w.statements)).toEqual([]);
+    });
+
+    it("reports a trail that could not be written without failing the refusal", async () => {
+      const w = wired({ trailThrows: true });
+      const res = await call(harness(w.over, RETURNED).ctx, DELETE, { parsedBody: BODY });
+      expect(res.status).toBe(409);
+      expect(res.body["tenantRestored"]).toBe(true);
+      expect(res.body["lifecycleRecorded"]).toBe(false);
+    });
+
+    it("does not restore when the request did not reach rejected", async () => {
+      // Someone else moved the request first: it no longer reads `rejected`, so this refusal has no
+      // standing to restore the tenant, and the response claims neither a restore nor a trail entry.
+      const w = wired();
+      const res = await call(harness(w.over, { ...RETURNED, rejectReturnsNull: true }).ctx, DELETE, {
+        parsedBody: BODY,
+      });
+      expect(res.status).toBe(409);
+      expect(res.body["requestStatus"]).not.toBe("rejected");
+      expect(res.body["tenantRestored"]).toBeNull();
+      expect(res.body["lifecycleRecorded"]).toBeNull();
+      expect(w.restored).toEqual([]);
+    });
+
+    it("does not restore on an unproven failure, whose outcome is unknown", async () => {
+      const w = wired();
+      const res = await call(harness(w.over, { deleteThrows: new Error("connection reset") }).ctx, DELETE, {
+        parsedBody: BODY,
+      });
+      expect(res.status).toBe(500);
+      expect(w.restored).toEqual([]);
+      expect(trailInsert(w.statements)).toEqual([]);
+    });
+
+    it("claims nothing with no mover wired, and null for the trail with none kept", async () => {
+      const bare = await call(harness({}, RETURNED).ctx, DELETE, { parsedBody: BODY });
+      expect(bare.body["tenantRestored"]).toBeNull();
+      expect(bare.body["lifecycleRecorded"]).toBeNull();
+      const w = wired({ noTrail: true });
+      const untrailed = await call(harness(w.over, RETURNED).ctx, DELETE, { parsedBody: BODY });
+      expect(untrailed.body["tenantRestored"]).toBe(true);
+      expect(untrailed.body["lifecycleRecorded"]).toBeNull();
+    });
   });
 
   it("records the deletion with its tombstone and chain hash", async () => {

@@ -132,8 +132,16 @@ loosened, because the stores already answered such a write differently, so no co
   - `Employee.family_name` is `pii` and the default list sort in all seven packs, so
     `list_sort_addresses_withheld_field` would now name 8 fields instead of 1. Latent: no pack
     declares a row-filtering policy.
-  - `erp-core` gains a sortable classified field, so the cursor-disclosure survey grows on the
-    shipped default; it is sealed when `CURSOR_ENCRYPTION_SECRET` is set.
+  - `erp-core` gains sortable classified fields — the survey reads 4 after this change
+    (`Account.billing_email` and `Employee.given_name` / `family_name` / `work_email`), measured over
+    the resolved pack after the commit. `Employee.family_name` is also the list's **default** sort,
+    so on a deployment that has not set `CURSOR_ENCRYPTION_SECRET` every unsealed Employee cursor
+    now carries a classified value with no `?sort` at all. That is not a disclosure on the shipped
+    packs: every role that may list Employee may also read `family_name` (its field grant is
+    `HR_READERS`, the same set as the entity's `list`), so nothing withheld travels; the field whose
+    value a caller can extract this way remains `?sort=work_email`. A pack that narrowed
+    `family_name`'s read grant would make the default sort the disclosing member. Sealed when the
+    secret is set, which `.env.example` ships uncommented (ADR-0377).
   - A client sending a number to a string field gets 422 `type` on both stores.
 - **Neutral:** `erp-healthcare` already needed `--store pg-columns` with `COLUMN_ENCRYPTION_SECRET`, or
   `--allow-plaintext-phi` on `pg`, because of `mrn`; that requirement is unchanged. The shipped compose

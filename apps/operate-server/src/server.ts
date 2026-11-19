@@ -385,12 +385,27 @@ export function logServerError(event: ServerErrorEvent): void {
   }
 }
 
-/** The stack of a stage or handler that threw, under the id the caller was told to quote. */
+/**
+ * The stack of a stage or handler that threw, under the id the caller was told to quote.
+ *
+ * Tagged by what the caller got. `[5xx]` pairs with `logServerError`'s line for the same request;
+ * `[post-commit]` is a failure the gateway swallowed after the handler succeeded, so the caller has a
+ * 2xx and there is no 5xx to pair with — filing it as one would send an operator looking for a failed
+ * handler on a write that committed, when what failed is the replay record that stops a retry.
+ */
 export function logGatewayInternalError(
   err: unknown,
-  at: { readonly requestId: string; readonly stage: string },
+  at: { readonly requestId: string; readonly stage: string; readonly answered: "500" | "success" },
 ): void {
   const detail = err instanceof Error ? (err.stack ?? err.message) : "non_error_thrown";
+  if (at.answered === "success") {
+    console.error(
+      `[post-commit] ${at.requestId} ${at.stage} answered 2xx, but completing the idempotency record` +
+        ` failed: a retry with the same key is answered 409 until the reservation lease lapses, then` +
+        ` may run again: ${detail}`,
+    );
+    return;
+  }
   console.error(`[5xx] ${at.requestId} ${at.stage} ${detail}`);
 }
 

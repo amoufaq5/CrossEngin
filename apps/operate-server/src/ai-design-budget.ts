@@ -3,9 +3,10 @@
  *
  * The persistence dependency is structural (`MonthlySpendStore`) rather than a
  * direct import so the deployment can inject `PostgresTenantCostStore` from
- * `@crossengin/ai-architect-runtime-pg` — whose `getMonthly` / `addMonthly`
- * satisfy this shape exactly (atomic `INSERT … ON CONFLICT`, tenant RLS, so the
- * ceiling holds across replicas) — while this module stays offline-testable.
+ * `@crossengin/ai-architect-runtime-pg`, whose three methods satisfy this shape exactly — while this
+ * module stays offline-testable. `reserveMonthly` is the conditional atomic charge that keeps the
+ * ceiling across replicas; `addMonthly` settles the difference afterwards (an upsert for a top-up,
+ * a floored `UPDATE` for a refund); `getMonthly` reads the month's total. All run under tenant RLS.
  */
 
 export interface MonthlySpendStore {

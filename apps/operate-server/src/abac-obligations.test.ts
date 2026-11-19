@@ -1229,8 +1229,9 @@ describe("the list_sort_addresses_withheld_field refusal", () => {
    *
    * No pack declares an `abac` grant, so the refusal is vacuous today — which is why the sweep has
    * to *add* a record-bearing `list` obligation to every entity before it can see anything. What it
-   * then finds is the one pair the rule would name the moment somebody declares such a policy for
-   * real.
+   * then finds is the two (entity, field) pairs the rule would name the moment somebody declares
+   * such a policy for real: `Patient.family_name` and `Employee.family_name`, the second inherited
+   * by every pack — eight (pack, field) entries in all since ADR-0443 classified the latter.
    */
   it("names Patient.family_name and each pack's Employee.family_name, and nothing else", async () => {
     const found: string[] = [];

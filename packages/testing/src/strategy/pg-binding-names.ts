@@ -346,8 +346,12 @@ export const BINDING_NAME_DIVERGENCES: readonly BindingNameDivergence[] = Object
       "total — used as both on purpose: on the INSERT arm the row does not exist so the first " +
       "increment *is* the total, and on conflict the same value is re-read through " +
       "`EXCLUDED.dollars_used` and added, which is an atomic accumulate with no read-modify-write " +
-      "race across nodes. Both callers pass a per-call cost and the wrapper returns early at or " +
-      "below zero, so the `dollars_used >= 0` CHECK holds.",
+      "race across nodes. The delta is signed: the CLI passes a per-turn cost (never negative), " +
+      "while operate-server's `SpendReservation.settle` passes `actual - reserved`, which is " +
+      "negative whenever a design cost less than its reservation. A negative delta goes through " +
+      "`UPDATE … SET dollars_used = GREATEST(0, dollars_used + $3)` and never the INSERT, because " +
+      "Postgres checks the proposed INSERT row against the `dollars_used >= 0` CHECK before " +
+      "conflict resolution — that arm and the non-negative INSERT are what keep the CHECK.",
   },
   {
     table: "job_runs",

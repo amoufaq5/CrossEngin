@@ -123,15 +123,16 @@ export const LIFECYCLE_EVENT_COLUMNS = [
  * prints. Same shape and same purpose as `JOB_KIND_PRODUCERS` (ADR-0334).
  *
  * `"none"` is a *declaration* that nothing enqueues this action, not a to-do: `cancel_deletion`
- * targets `archived` (`ACTION_TARGET_STATE`), and the only route that un-schedules a deletion —
- * ADR-0334's deletion-request reject — returns the tenant to `active`, which is `restore`. So
+ * targets `archived` (`ACTION_TARGET_STATE`), and both routes that un-schedule a deletion —
+ * ADR-0334's deletion-request reject, and the synchronous delete route when the deletion it ran
+ * was refused (ADR-0446) — return the tenant to `active`, which is `restore`. So
  * `cancel_deletion` has no producer by design rather than by omission, and naming a fix that would
  * not work is worse than naming none.
  */
 export const LIFECYCLE_ACTION_PRODUCERS: Readonly<Record<LifecycleAction, string>> = Object.freeze({
   activate: "operate-server/platform-admin",
   suspend: "operate-server/platform-admin",
-  restore: "operate-server/deletion-request-routes",
+  restore: "operate-server/deletion-request-routes, operate-server/tenant-deletion-routes",
   archive: "operate-server/platform-admin",
   schedule_deletion: "operate-server/deletion-request-routes",
   cancel_deletion: "none",

@@ -194,10 +194,27 @@ export interface GatewayRuntimeOptions {
   readonly redactionRegistry?: RedactionRegistry;
   /**
    * Receives every exception the pipeline caught — a handler that threw, or a stage that did — with
-   * the request id the caller was handed. The caller's 500 names nothing else, so this is where the
-   * diagnosis goes. Absent, the message survives only in the recorded stage reason.
+   * the request id the caller was handed. Where the caller got a 500, that 500 names nothing else, so
+   * this is where the diagnosis goes; absent, the message survives only in the recorded stage reason.
+   *
+   * `answered` says which kind of catch it was. `"500"` is a failure the caller was answered with.
+   * `"success"` is a failure **after** the handler succeeded that the pipeline swallowed so the
+   * caller still got its 2xx — today, completing the durable idempotency record failing. The
+   * reservation it would have replaced stays `in_progress`, so a retry with the same key is answered
+   * 409 until the reservation lease lapses and then executes again (a throw does not prove the write
+   * failed — a lost COMMIT acknowledgement throws too — so this is a risk, not a certainty). A
+   * reporter must not file the second as
+   * a 5xx: an operator following that request id would look for a failed handler on a write that
+   * committed.
    */
-  readonly onInternalError?: (err: unknown, at: { readonly requestId: string; readonly stage: PipelineStage }) => void;
+  readonly onInternalError?: (err: unknown, at: InternalErrorSite) => void;
+}
+
+/** Where `onInternalError` was called from, and whether the caller's response was a 500. */
+export interface InternalErrorSite {
+  readonly requestId: string;
+  readonly stage: PipelineStage;
+  readonly answered: "500" | "success";
 }
 
 export interface HandleResult {
@@ -307,9 +324,7 @@ export class GatewayRuntime {
   private readonly idempotencyLeaseSeconds: number;
   private readonly idempotencyMaxStoredBodyBytes: number;
   private readonly redactionRegistry: RedactionRegistry | null;
-  private readonly onInternalError:
-    | ((err: unknown, at: { readonly requestId: string; readonly stage: PipelineStage }) => void)
-    | null;
+  private readonly onInternalError: ((err: unknown, at: InternalErrorSite) => void) | null;
 
   constructor(opts: GatewayRuntimeOptions) {
     this.routes = opts.routes;
@@ -393,7 +408,7 @@ export class GatewayRuntime {
         denial = await run();
       } catch (err) {
         await this.abandonReservation(ctx);
-        this.reportInternalError(err, ctx.request.id, stage);
+        this.reportInternalError(err, ctx.request.id, stage, "500");
         const env = internalServerError({
           reason: STAGE_THREW_CLIENT_DETAIL,
           correlationId: ctx.request.correlationId ?? undefined,
@@ -1439,10 +1454,15 @@ export class GatewayRuntime {
     }
   }
 
-  private reportInternalError(err: unknown, requestId: string, stage: PipelineStage): void {
+  private reportInternalError(
+    err: unknown,
+    requestId: string,
+    stage: PipelineStage,
+    answered: InternalErrorSite["answered"],
+  ): void {
     if (this.onInternalError === null) return;
     try {
-      this.onInternalError(err, { requestId, stage });
+      this.onInternalError(err, { requestId, stage, answered });
     } catch {
       // A reporter that throws must not turn a 500 into a lost response.
     }
@@ -1610,7 +1630,7 @@ export class GatewayRuntime {
       // would mean the gateway importing the pg or crypto packages. Such a map can only be built
       // from the other end — by the throwers declaring what they are — so do not attempt it here.
       await this.abandonReservation(ctx);
-      this.reportInternalError(err, ctx.request.id, "dispatch_handler");
+      this.reportInternalError(err, ctx.request.id, "dispatch_handler", "500");
       const env = internalServerError({
         reason: HANDLER_THREW_CLIENT_DETAIL,
         correlationId: ctx.request.correlationId ?? undefined,
@@ -1722,7 +1742,9 @@ export class GatewayRuntime {
       });
       ctx.idempotencyReserved = false;
     } catch (err) {
-      this.reportInternalError(err, ctx.request.id, "dispatch_handler");
+      // Swallowed: the handler committed and the caller gets its success. What failed is the replay
+      // record, so the report says the caller was answered rather than filing a 500 that never was.
+      this.reportInternalError(err, ctx.request.id, "dispatch_handler", "success");
     }
   }
 

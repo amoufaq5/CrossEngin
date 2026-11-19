@@ -2,7 +2,12 @@ import type { PathSegment, ResolvedPrincipal, RouteDefinition } from "@crossengi
 import type { Handler, HandlerOutput, PrincipalRoles } from "@crossengin/api-gateway-runtime";
 import type { RowRead } from "@crossengin/kernel-pg";
 import type { ExtraGatewayRoute } from "@crossengin/operate-runtime";
-import type { TenantStateMover } from "./deletion-request-routes.js";
+import {
+  recordTenantLifecycle,
+  type TenantLifecycleTrail,
+  type TenantMoveOutcome,
+  type TenantStateMover,
+} from "./deletion-request-routes.js";
 import { z } from "zod";
 import {
   DeletionAttestationSchema,
@@ -329,6 +334,16 @@ export interface TenantDeletionRoutesContext {
    */
   readonly tenantState?: TenantStateMover;
   readonly onRestoreError?: (err: unknown, tenantId: string) => void;
+  /**
+   * Where the restore is recorded as a lifecycle transition, through the reject route's own
+   * recorder. Without it the verify route's `schedule_deletion` was the last event while the row
+   * was back at `active`, so the permanent trail and the tenant row disagreed. Optional for the
+   * reason the reject route's is, and the 409 says which: `lifecycleRecorded` is `null` when no
+   * trail is kept and `false` when one is kept and this transition is not in it.
+   */
+  readonly lifecycleEvents?: TenantLifecycleTrail["lifecycleEvents"];
+  readonly newEventId?: TenantLifecycleTrail["newEventId"];
+  readonly onLifecycleError?: TenantLifecycleTrail["onLifecycleError"];
 }
 
 /** The id shape `newRequestId` mints, which `deletion-request-routes.ts` checks the same way. */
@@ -624,15 +639,32 @@ function buildDeleteHandler(ctx: TenantDeletionRoutesContext): Handler {
 
     // `null` when nothing was asked (no mover wired, or the request did not reach `rejected`), so a
     // response never claims a restore that was not attempted (ADR-0331).
-    const restoreAfterRefusal = async (requestStatus: string): Promise<boolean | null> => {
-      if (requestStatus !== "rejected" || ctx.tenantState === undefined) return null;
+    const restoreAfterRefusal = async (
+      requestStatus: string,
+    ): Promise<{ readonly tenantRestored: boolean | null; readonly lifecycleRecorded: boolean | null }> => {
+      if (requestStatus !== "rejected" || ctx.tenantState === undefined) {
+        return { tenantRestored: null, lifecycleRecorded: null };
+      }
+      let fromState: TenantMoveOutcome["fromState"];
       try {
-        await ctx.tenantState.restore(tenantId);
-        return true;
+        // A no-match is `true` for the reject route's reason: the request no longer holds the
+        // tenant. It is also `fromState: null`, so nothing is put in the trail for a move that
+        // did not happen.
+        fromState = (await ctx.tenantState.restore(tenantId)).fromState;
       } catch (err) {
         ctx.onRestoreError?.(err, tenantId);
-        return false;
+        return { tenantRestored: false, lifecycleRecorded: ctx.lifecycleEvents === undefined ? null : false };
       }
+      const lifecycleRecorded = await recordTenantLifecycle(ctx, {
+        tenantId,
+        action: "restore",
+        fromState,
+        occurredAt: at,
+        reason: `deletion request ${requestId} refused`,
+        actorUserId: executedBy,
+        source: "tenant-deletion",
+      });
+      return { tenantRestored: true, lifecycleRecorded };
     };
 
     let outcome: DeletionOutcomeLike;
@@ -654,7 +686,7 @@ function buildDeleteHandler(ctx: TenantDeletionRoutesContext): Handler {
       const requestStatus = proven
         ? await settle("rejected", { rejectedReason: `rolled back: ${refusalReasons(err).join("; ")}`.slice(0, 500) })
         : "in_progress";
-      const tenantRestored = await restoreAfterRefusal(requestStatus);
+      const { tenantRestored, lifecycleRecorded } = await restoreAfterRefusal(requestStatus);
       await record(ctx, {
         tenantId,
         principalId: executedBy,
@@ -682,13 +714,14 @@ function buildDeleteHandler(ctx: TenantDeletionRoutesContext): Handler {
         refusals: refusalReasons(err),
         requestStatus,
         tenantRestored,
+        lifecycleRecorded,
       });
     }
 
     if (!outcome.ok) {
       const detail = outcome.refusals.map((r) => `${r.stage}/${r.reason}`).join("; ");
       const requestStatus = await settle("rejected", { rejectedReason: detail.slice(0, 500) });
-      const tenantRestored = await restoreAfterRefusal(requestStatus);
+      const { tenantRestored, lifecycleRecorded } = await restoreAfterRefusal(requestStatus);
       await record(ctx, {
         tenantId,
         principalId: executedBy,
@@ -706,6 +739,7 @@ function buildDeleteHandler(ctx: TenantDeletionRoutesContext): Handler {
         refusals: outcome.refusals,
         requestStatus,
         tenantRestored,
+        lifecycleRecorded,
       });
     }
     const requestStatus = await settle("completed", {

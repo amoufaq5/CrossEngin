@@ -644,7 +644,7 @@ function buildVerifyHandler(ctx: DeletionRequestRoutesContext): Handler {
     // and the runner's commit the tenant is serving data that is about to be destroyed.
     const readOnly = await moveTenant(ctx, "markPendingDeletion", moved.tenantId);
     // Last, because it is the record of the two acts above and not one of them.
-    const lifecycleRecorded = await recordLifecycle(ctx, {
+    const lifecycleRecorded = await recordTenantLifecycle(ctx, {
       tenantId: moved.tenantId,
       action: "schedule_deletion",
       fromState: readOnly.fromState,
@@ -689,6 +689,15 @@ async function moveTenant(
 }
 
 /**
+ * The three fields `recordTenantLifecycle` reads, so the synchronous deletion route — which restores a
+ * tenant after a refused deletion — writes its trail through this one spelling rather than a second.
+ */
+export type TenantLifecycleTrail = Pick<
+  DeletionRequestRoutesContext,
+  "lifecycleEvents" | "newEventId" | "onLifecycleError"
+>;
+
+/**
  * Appends one lifecycle event for a tenant move that actually happened, and never fails the request.
  *
  * Three answers rather than two, following `moveTenant`'s own precedent in this file: `null` is "this
@@ -704,8 +713,8 @@ async function moveTenant(
  * them — are in `PROTECTED_TRIGGERS`, which the contract requires a `relatedIncidentId` for. These
  * routes hold no incident and must not name a trigger they cannot substantiate.
  */
-async function recordLifecycle(
-  ctx: DeletionRequestRoutesContext,
+export async function recordTenantLifecycle(
+  ctx: TenantLifecycleTrail,
   input: {
     readonly tenantId: string;
     readonly action: LifecycleAction;
@@ -713,6 +722,8 @@ async function recordLifecycle(
     readonly occurredAt: string;
     readonly reason: string;
     readonly actorUserId: string;
+    /** The log line's tag, so a failure names the surface that moved the tenant. */
+    readonly source?: string;
   },
 ): Promise<boolean | null> {
   const store = ctx.lifecycleEvents;
@@ -735,7 +746,7 @@ async function recordLifecycle(
   } catch (err) {
     ctx.onLifecycleError?.(err, input.action);
     console.error(
-      `[deletion-request] lifecycle ${input.action} for ${input.tenantId} not recorded: ${messageOf(err)}`,
+      `[${input.source ?? "deletion-request"}] lifecycle ${input.action} for ${input.tenantId} not recorded: ${messageOf(err)}`,
     );
     return false;
   }
@@ -798,7 +809,7 @@ function buildRejectHandler(ctx: DeletionRequestRoutesContext): Handler {
     // would cost a tenant their write access for somebody else's mistake. So the action that *means*
     // "the deletion was cancelled" cannot express what this route does, and `cancel_deletion` is
     // declared to have no producer rather than being bent to fit.
-    const lifecycleRecorded = await recordLifecycle(ctx, {
+    const lifecycleRecorded = await recordTenantLifecycle(ctx, {
       tenantId: moved.tenantId,
       action: "restore",
       fromState: restored.fromState,

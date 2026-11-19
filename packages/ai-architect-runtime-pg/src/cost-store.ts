@@ -47,9 +47,12 @@ export class PostgresTenantCostStore {
   }
 
   /**
-   * Atomically adds `dollars` to the tenant's monthly total and returns the new
-   * total. `INSERT … ON CONFLICT DO UPDATE SET dollars_used = existing + delta`,
-   * so concurrent nodes accumulate correctly without a read-modify-write race.
+   * Atomically adds the signed delta `dollars` to the tenant's monthly total and returns the new
+   * total. A non-negative delta is `INSERT … ON CONFLICT DO UPDATE SET dollars_used = existing +
+   * delta`, so concurrent nodes accumulate without a read-modify-write race. A negative delta — a
+   * settlement refunding part of a reservation — updates an existing row only, floored at zero,
+   * and answers 0 when no row exists: a refund to a month with no charge is dropped rather than
+   * recorded as a negative month.
    */
   async addMonthly(tenantId: string, periodKey: string, dollars: number): Promise<number> {
     if (!Number.isFinite(dollars)) {

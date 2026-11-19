@@ -69,7 +69,7 @@ const route: RouteDefinition = {
 interface Rig {
   readonly runtime: GatewayRuntime;
   readonly calls: { count: number };
-  readonly internal: Array<{ err: unknown; requestId: string; stage: string }>;
+  readonly internal: Array<{ err: unknown; requestId: string; stage: string; answered: string }>;
   readonly clock: { at: Date };
   readonly bearer: string;
 }
@@ -123,7 +123,8 @@ function rig(opts: {
     jwtAudience: AUDIENCE,
     clock: { now: () => clock.at },
     ...(opts.maxStoredBodyBytes !== undefined ? { idempotencyMaxStoredBodyBytes: opts.maxStoredBodyBytes } : {}),
-    onInternalError: (err, at) => internal.push({ err, requestId: at.requestId, stage: at.stage }),
+    onInternalError: (err, at) =>
+      internal.push({ err, requestId: at.requestId, stage: at.stage, answered: at.answered }),
   });
   return { runtime, calls, internal, clock, bearer: token(kp, kid) };
 }
@@ -217,6 +218,7 @@ describe("a refusal or a fault is not cached", () => {
     expect(first.response.headers["x-request-id"]).toBe("req_first00000001");
     expect(r.internal).toHaveLength(1);
     expect(r.internal[0]!.stage).toBe("dispatch_handler");
+    expect(r.internal[0]!.answered).toBe("500");
     expect(String(r.internal[0]!.err)).toContain("secret_table");
     fail = false;
     const second = await r.runtime.handleRequest(request(r, "req_secnd00000002"));
@@ -374,7 +376,7 @@ describe("a stage that throws", () => {
     expect(body).not.toContain("ECONNREFUSED");
     expect(body).not.toContain(TENANT);
     expect(result.response.headers["x-request-id"]).toBe("req_first00000001");
-    expect(r.internal.map((i) => i.stage)).toEqual(["resolve_principal"]);
+    expect(r.internal.map((i) => [i.stage, i.answered])).toEqual([["resolve_principal", "500"]]);
     expect(result.execution.finalOutcome).toBe("error");
     expect(result.execution.finalStage).toBe("resolve_principal");
   });
@@ -399,6 +401,9 @@ describe("a stage that throws", () => {
     const result = await r.runtime.handleRequest(request(r, "req_first00000001"));
     expect(result.response.status).toBe(201);
     expect(r.internal).toHaveLength(1);
+    // The caller got its 201, so the report must not say it got a 500: a reporter keyed on this tag
+    // files the failure as a missing replay record rather than as a failed handler.
+    expect(r.internal[0]!.answered).toBe("success");
     const left: IdempotencyLookup | null = await inner.get({ tenantId: TENANT, key: KEY });
     expect(left?.status).toBe("in_progress");
   });
