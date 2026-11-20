@@ -97,6 +97,27 @@ export interface TenantSchemaEraserLike {
   erase(tenantId: string, authority: ErasureAuthorityLike): Promise<SchemaErasureLike>;
 }
 
+/**
+ * Thrown by an eraser whose database role cannot `DROP SCHEMA` the tenant's per-tenant schema — the
+ * dedicated eraser role owns nothing, so it cannot drop a schema another role created (ADR-0458).
+ * Answered by name rather than folded into `survey_unavailable` / `erasure_failed`, because the remedy
+ * is a deployment setting an operator can act on and neither generic answer says so.
+ */
+export class SchemaNotDroppableByDeletionRole extends Error {
+  constructor(tenantId: string) {
+    super(`the deletion role cannot drop tenant ${tenantId}'s per-tenant schema`);
+    this.name = "SchemaNotDroppableByDeletionRole";
+  }
+}
+
+const SCHEMA_NOT_DROPPABLE_BODY = Object.freeze({
+  error: "schema_not_droppable",
+  detail:
+    "the role the deletion pipeline connects as cannot drop this tenant's per-tenant schema, which " +
+    "another role owns; nothing was surveyed or changed. Set DELETION_PGUSER to the schema's owner or " +
+    "a superuser (deploy/README.md, \"The database roles\")",
+});
+
 export const TENANT_SCHEMA_SURVEY_OPERATION = "platform.tenant_schema_surveyed";
 export const TENANT_SCHEMA_ERASED_OPERATION = "platform.tenant_schema_erased";
 export const TENANT_SCHEMA_ERASE_REFUSED_OPERATION = "platform.tenant_schema_erase_refused";
@@ -253,7 +274,8 @@ function buildSurveyHandler(ctx: TenantErasureRoutesContext): Handler {
     let survey: SchemaSurveyLike;
     try {
       survey = await ctx.eraser.survey(tenantId);
-    } catch {
+    } catch (err) {
+      if (err instanceof SchemaNotDroppableByDeletionRole) return json(503, SCHEMA_NOT_DROPPABLE_BODY);
       return json(503, { error: "survey_unavailable", detail: "the tenant's schema could not be surveyed" });
     }
     const at = (ctx.clock ?? ((): Date => new Date()))().toISOString();
@@ -342,6 +364,7 @@ function buildEraseHandler(ctx: TenantErasureRoutesContext): Handler {
     try {
       erasure = await ctx.eraser.erase(tenantId, { executedBy, approvedBy });
     } catch (err) {
+      if (err instanceof SchemaNotDroppableByDeletionRole) return json(503, SCHEMA_NOT_DROPPABLE_BODY);
       // Includes the "dropped but still present" guard, which rolls back rather than reporting
       // success. No detail: the message can name the schema's internals.
       ctx.onRecordError?.(err, TENANT_SCHEMA_ERASED_OPERATION);

@@ -12,7 +12,13 @@ import {
 } from "@crossengin/marketplace";
 
 import { FixedClock } from "./clock.js";
-import { PackSubmissionEngine, PackSubmissionError, type SubmitVersionInput } from "./submission.js";
+import {
+  PackSubmissionBodySchema,
+  PackSubmissionEngine,
+  PackSubmissionError,
+  STORED_VERSION_REFUSALS,
+  type SubmitVersionInput,
+} from "./submission.js";
 
 const SHA = "a".repeat(64);
 const keypair = generateEd25519Keypair();
@@ -268,5 +274,141 @@ describe("PackSubmissionEngine — retire", () => {
     const e = engine();
     const draft = e.submit(submitInput(manifest()));
     expect(e.withdraw(draft, { reason: "abandoned" }).status).toBe("withdrawn");
+  });
+});
+
+describe("PackSubmissionEngine — a stored row re-verified against the registry (ADR-0459)", () => {
+  function refusalOf(fn: () => unknown): PackSubmissionError | null {
+    try {
+      fn();
+      return null;
+    } catch (err) {
+      if (err instanceof PackSubmissionError) return err;
+      throw err;
+    }
+  }
+
+  /** The edit ADR-0454 measured live: the version column and `signature.release.version` both rewritten. */
+  function rewrittenToNineNineNine(e: PackSubmissionEngine) {
+    const draft = e.submit(submitInput(manifest()));
+    return { ...draft, version: "9.9.9", signature: { ...draft.signature, release: { ...draft.signature.release!, version: "9.9.9" } } };
+  }
+
+  it("verifies a row as submitted", () => {
+    const e = engine();
+    expect(e.verifyStored(e.submit(submitInput(manifest()))).ok).toBe(true);
+  });
+
+  it("refuses to move the two-column rewrite into review, naming why", () => {
+    const e = engine();
+    const err = refusalOf(() => e.submitForReview(rewrittenToNineNineNine(e)));
+    expect(err?.reason).toBe("stored_release_unverified");
+    expect(err?.storedRefusal).toBe("signature_invalid");
+    expect(err?.message).toContain("com.acme.loyalty@9.9.9");
+  });
+
+  it("refuses to record a review on, or publish, a rewritten row already in review", () => {
+    const e = engine("crossengin_official");
+    const official = manifest({
+      author: { kind: "crossengin_official", name: "CrossEngin", verifiedAt: "2026-01-01T00:00:00.000Z" },
+    });
+    const inReview = e.submitForReview(e.submit(submitInput(official)));
+    const tampered = {
+      ...inReview,
+      version: "9.9.9",
+      signature: { ...inReview.signature, release: { ...inReview.signature.release!, version: "9.9.9" } },
+    };
+    expect(refusalOf(() => e.publish(tampered, { publishedBy: "bot" }))?.reason).toBe("stored_release_unverified");
+    expect(refusalOf(() => e.recordReview(tampered, { status: "passed", reviewer: "r" }))?.reason).toBe(
+      "stored_release_unverified",
+    );
+    // Control: the untampered row publishes.
+    expect(e.publish(inReview, { publishedBy: "bot" }).status).toBe("published");
+  });
+
+  it("checks the row before the transition, so a tampered row is not reported as merely illegal", () => {
+    const e = engine();
+    // publish from draft is illegal; the stored-release finding outranks it.
+    expect(refusalOf(() => e.publish(rewrittenToNineNineNine(e), { publishedBy: "bot" }))?.reason).toBe(
+      "stored_release_unverified",
+    );
+  });
+
+  it("refuses a row whose signer is no longer registered", () => {
+    const draft = engine().submit(submitInput(manifest()));
+    const rotated = engine("community", generateEd25519Keypair().publicKeyBase64);
+    const err = refusalOf(() => rotated.submitForReview(draft));
+    expect(err?.storedRefusal).toBe("publisher_unregistered");
+  });
+
+  it("still lets an unverifiable row be withdrawn, which is the remedy", () => {
+    const e = engine();
+    const withdrawn = e.withdraw(rewrittenToNineNineNine(e), { reason: "tampered row" });
+    expect(withdrawn.status).toBe("withdrawn");
+  });
+
+  it("lets a reviewer fail an unverifiable row in review, while still refusing to pass it", () => {
+    const e = engine();
+    const inReview = e.submitForReview(e.submit(submitInput(manifest(), { channel: "beta" })));
+    const tampered = {
+      ...inReview,
+      version: "9.9.9",
+      signature: { ...inReview.signature, release: { ...inReview.signature.release!, version: "9.9.9" } },
+    };
+    expect(refusalOf(() => e.recordReview(tampered, { status: "passed", reviewer: "r" }))?.reason).toBe(
+      "stored_release_unverified",
+    );
+    const failed = e.recordReview(tampered, { status: "failed", reviewer: "r" });
+    expect(failed.securityReviewStatus).toBe("failed");
+    // A failed row cannot be published on any channel, which is what failing it buys.
+    expect(refusalOf(() => e.publish(failed, { publishedBy: "bot" }))?.reason).toBe("stored_release_unverified");
+  });
+
+  /**
+   * A single unsigned-column edit: `security_review_status = 'exempt'` on a community publisher's row.
+   * The signature still verifies (nothing it covers moved), so only the coherence check sees it.
+   */
+  it("refuses an 'exempt' review on a row whose publisher is registered as an untrusted kind", () => {
+    const e = engine("community");
+    const inReview = e.submitForReview(e.submit(submitInput(manifest())));
+    expect(inReview.securityReviewStatus).toBe("in_progress");
+    const exempted = { ...inReview, securityReviewStatus: "exempt" as const };
+    expect(e.verifyStored(exempted)).toMatchObject({ ok: false, refusal: "review_exemption_unsupported" });
+    const err = refusalOf(() => e.publish(exempted, { publishedBy: "bot" }));
+    expect(err?.reason).toBe("stored_release_unverified");
+    expect(err?.storedRefusal).toBe("review_exemption_unsupported");
+    // Control: the unedited row is not published either (review open), but for the honest reason.
+    expect(refusalOf(() => e.publish(inReview, { publishedBy: "bot" }))?.reason).toBe("review_not_cleared");
+  });
+
+  it("accepts an 'exempt' review for a trusted publisher, which is what the engine writes", () => {
+    const e = engine("certified_partner");
+    const partner = manifest({
+      author: { kind: "certified_partner", name: "Partner", verifiedAt: "2026-01-01T00:00:00.000Z" },
+    });
+    const draft = e.submit(submitInput(partner));
+    expect(draft.securityReviewStatus).toBe("exempt");
+    expect(e.verifyStored(draft).ok).toBe(true);
+  });
+
+  it("re-asks the exemption against the registry now: a namespace re-registered as community refuses it", () => {
+    const partner = manifest({
+      author: { kind: "certified_partner", name: "Partner", verifiedAt: "2026-01-01T00:00:00.000Z" },
+    });
+    const draft = engine("certified_partner").submit(submitInput(partner));
+    expect(engine("community").verifyStored(draft)).toMatchObject({ ok: false, refusal: "review_exemption_unsupported" });
+  });
+
+  it("names every stored refusal a release can answer, plus the one coherence check", () => {
+    expect(STORED_VERSION_REFUSALS).toContain("signature_invalid");
+    expect(STORED_VERSION_REFUSALS.at(-1)).toBe("review_exemption_unsupported");
+  });
+});
+
+describe("PackSubmissionBodySchema", () => {
+  it("parses exactly what submit takes, and refuses an extra key", () => {
+    const body = submitInput(manifest());
+    expect(PackSubmissionBodySchema.safeParse(body).success).toBe(true);
+    expect(PackSubmissionBodySchema.safeParse({ ...body, extra: 1 }).success).toBe(false);
   });
 });

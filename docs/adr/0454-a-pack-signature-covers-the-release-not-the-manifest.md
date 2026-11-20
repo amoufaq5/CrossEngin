@@ -184,3 +184,22 @@ stores; "rows" is `meta.pack_versions` read as the owner and through
 | Catalog entry with no `bundleSha256` | boot exits 1, zod `invalid_type` at `packs[0].bundleSha256` | — |
 
 The confined role inserted `meta.pack_versions` and `meta.pack_installations` with no `42501`.
+
+## Addendum — ADR-0459
+
+Two of the open questions above are closed by ADR-0459:
+
+- **A stored row checked against its own claim, not its signer.** `verifyStoredRelease` re-verifies a
+  `meta.pack_versions` row's signature against the publisher registry; `submit-for-review`, `review`
+  and `publish` refuse a row that fails it as **409 `stored_release_unverified`**, and the authoring
+  read routes list it marked `releaseVerification: { verified: false, … }` with one log line, rather
+  than hiding it. This ADR's question said "on read (or before install)"; measured, the stored row is
+  never an install source — install reads the `--pack-catalog` file and already re-verifies that entry
+  at every admission — so the gate for a stored row is the lifecycle (`publish` above all), and install
+  is fenced by a test against the same two-column edit instead. That gate covers the routes and not
+  the table: `status` and the review columns are outside the signature (ADR-0459 §2a).
+- **No signing tool.** `crossengin pack keygen` and `crossengin pack sign <manifest.json> --version
+  <semver> (--bundle <file> | --bundle-sha256 <hex>)` sign the release envelope with
+  `signPackRelease`, the seed from `PACK_SIGNING_KEY` only.
+
+`channel` outside the envelope and key rotation remain open, as product decisions.

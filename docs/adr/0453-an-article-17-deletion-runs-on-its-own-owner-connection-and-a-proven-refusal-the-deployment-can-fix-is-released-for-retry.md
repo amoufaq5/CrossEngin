@@ -291,14 +291,20 @@ PG 16 on a throwaway cluster in compose order (migrate as owner: 990 executed, 0
    survey (and the assembler's static checks) moved ahead of the shared erasure's `DELETE`s.
 2. **Released requests rotate behind fresh ones.** A steady stream of fresh requests can keep a
    released one waiting even after its cause is fixed; its Article 12(3) deadline still runs, and the
-   deadline sweep is what reports it.
+   deadline sweep is what reports it. *Closed by ADR-0458:* a released request backs off
+   (`retry_not_before`, one minute doubling to an hour) and is then claimed in deadline order.
 3. **The recommended credential is a superuser in the `api` process.** The boot line names it and the
    documents state the cost; a dedicated `NOSUPERUSER BYPASSRLS` role is narrower and is not
    provisioned (see Alternatives). A separate deletion worker process would confine it further.
+   *Closed by ADR-0458:* the `eraser-role` step provisions `crossengin_eraser`, `NOSUPERUSER
+   BYPASSRLS`, owning nothing, with the grant set derived from the catalog. The worker process stays
+   open there.
 4. **An unreachable owner connection at boot warns and keeps the connection.** A deletion that then
    cannot connect throws before `BEGIN`, which is unproven, so the request stays `in_progress` for the
    reconciler rather than being released.
 5. **`last_attempt_refusal` persists after the request later completes.** This is deliberate (it is
-   the history of the attempt), but no route surfaces it yet.
+   the history of the attempt), but no route surfaces it yet. *Closed by ADR-0458:* the handle
+   carries `lastAttemptRefusal`, `releaseCount` and `retryNotBefore`, and the store refuses any value
+   that is not reason codes.
 6. **`SCHEMA_ERASER_REFUSAL_REASONS` is a mirror.** It is fenced against the original in
    `operate-server`'s test only, because `tenant-lifecycle-pg` cannot import `operate-runtime-pg`.

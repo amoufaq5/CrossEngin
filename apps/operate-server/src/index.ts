@@ -109,4 +109,5 @@ export * from "./ai-model-source.js";
 export * from "./credential-routes.js";
 export * from "./credential-store.js";
 export * from "./set-credential.js";
+export * from "./ai-pseudonym-lookup.js";
 export * from "./token-mint.js";

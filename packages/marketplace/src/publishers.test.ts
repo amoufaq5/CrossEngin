@@ -6,9 +6,14 @@ import {
   PackPublisherRegistry,
   PackPublisherRegistryError,
   namespaceCovers,
+  STORED_RELEASE_REFUSALS,
+  PUBLISHER_REFUSALS,
   parsePackPublisherSpec,
   verifyPackPublisher,
+  verifyStoredRelease,
+  type StoredRelease,
 } from "./publishers.js";
+import { packManifestDigest } from "./signing.js";
 import { signPackRelease } from "./signing.js";
 
 function manifest(id: string, kind: PackAuthorKind): PackManifest {
@@ -199,4 +204,100 @@ describe("verifyPackPublisher", () => {
     expect(v).toMatchObject({ ok: false, refusal: "legacy_signature_form" });
   });
 
+});
+
+describe("verifyStoredRelease", () => {
+  function storedRow(): { stored: StoredRelease; registry: PackPublisherRegistry } {
+    const m = manifest("com.acme.loyalty", "community");
+    const { kp, signature } = signed(m);
+    return {
+      stored: {
+        packId: m.id,
+        version: SUBMITTED.version,
+        manifestSha256: packManifestDigest(m),
+        bundleSha256: BUNDLE,
+        signature,
+      },
+      registry: new PackPublisherRegistry([parsePackPublisherSpec(`com.acme:community:${kp.publicKeyBase64}`)]),
+    };
+  }
+
+  it("verifies a row exactly as it was submitted", () => {
+    const { stored, registry } = storedRow();
+    const v = verifyStoredRelease({ stored, registry });
+    expect(v.ok).toBe(true);
+  });
+
+  it("refuses the two-column rewrite ADR-0454 measured: the column and the claim both say 9.9.9", () => {
+    const { stored, registry } = storedRow();
+    const rewritten: StoredRelease = {
+      ...stored,
+      version: "9.9.9",
+      signature: { ...stored.signature, release: { ...stored.signature.release!, version: "9.9.9" } },
+    };
+    const v = verifyStoredRelease({ stored: rewritten, registry });
+    expect(v).toMatchObject({ ok: false, refusal: "signature_invalid" });
+  });
+
+  it("refuses a rewritten bundle digest carried into the claim too", () => {
+    const { stored, registry } = storedRow();
+    const other = "b".repeat(64);
+    const v = verifyStoredRelease({
+      stored: { ...stored, bundleSha256: other, signature: { ...stored.signature, release: { ...stored.signature.release!, bundleSha256: other } } },
+      registry,
+    });
+    expect(v).toMatchObject({ ok: false, refusal: "signature_invalid" });
+  });
+
+  it("names a column-only edit after the signature verifies", () => {
+    const { stored, registry } = storedRow();
+    expect(verifyStoredRelease({ stored: { ...stored, version: "9.9.9" }, registry })).toMatchObject({
+      ok: false,
+      refusal: "release_version_mismatch",
+    });
+  });
+
+  it("refuses a legacy row, which can never be re-verified", () => {
+    const { stored, registry } = storedRow();
+    const { release: _release, ...legacy } = stored.signature;
+    expect(verifyStoredRelease({ stored: { ...stored, signature: legacy }, registry })).toMatchObject({
+      ok: false,
+      refusal: "legacy_signature_form",
+    });
+  });
+
+  it("refuses a row whose key is no longer registered (the registry is asked now)", () => {
+    const { stored } = storedRow();
+    const other = generateEd25519Keypair();
+    const registry = new PackPublisherRegistry([parsePackPublisherSpec(`com.acme:community:${other.publicKeyBase64}`)]);
+    expect(verifyStoredRelease({ stored, registry })).toMatchObject({ ok: false, refusal: "publisher_unregistered" });
+  });
+
+  it("refuses a row whose pack id moved outside the signer's namespace", () => {
+    const { stored, registry } = storedRow();
+    const moved: StoredRelease = {
+      ...stored,
+      packId: "org.other.loyalty",
+      signature: { ...stored.signature, release: { ...stored.signature.release!, packId: "org.other.loyalty" } },
+    };
+    expect(verifyStoredRelease({ stored: moved, registry })).toMatchObject({
+      ok: false,
+      refusal: "pack_outside_publisher_namespace",
+    });
+  });
+
+  it("never echoes a digest or key material in a refusal", () => {
+    const { stored, registry } = storedRow();
+    const v = verifyStoredRelease({ stored: { ...stored, bundleSha256: "c".repeat(64) }, registry });
+    expect(v.ok).toBe(false);
+    if (!v.ok) {
+      expect(v.detail).not.toContain("c".repeat(64));
+      expect(v.detail).not.toContain(stored.signature.signature);
+    }
+  });
+
+  it("answers only publisher refusals that need no manifest", () => {
+    for (const r of STORED_RELEASE_REFUSALS) expect(PUBLISHER_REFUSALS).toContain(r);
+    expect(STORED_RELEASE_REFUSALS).not.toContain("author_kind_not_registered");
+  });
 });

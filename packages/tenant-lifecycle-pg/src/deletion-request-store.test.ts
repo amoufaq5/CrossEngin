@@ -48,6 +48,8 @@ function rowOf(over: Record<string, unknown> = {}): Record<string, unknown> {
     retained_data_categories: JSON.stringify([]),
     notes: null,
     last_attempt_refusal: null,
+    release_count: null,
+    retry_not_before: null,
     tombstone_id: null,
     ...over,
   };
@@ -173,7 +175,10 @@ describe("the column list", () => {
     expect(REQUEST_COLUMNS).toContain("tombstone_id");
     // ADR-0453's release reason, read back with every other column.
     expect(REQUEST_COLUMNS).toContain("last_attempt_refusal");
-    expect(REQUEST_COLUMNS).toHaveLength(25);
+    // ADR-0458's backoff pair.
+    expect(REQUEST_COLUMNS).toContain("release_count");
+    expect(REQUEST_COLUMNS).toContain("retry_not_before");
+    expect(REQUEST_COLUMNS).toHaveLength(27);
   });
 });
 
@@ -392,18 +397,25 @@ describe("read and dueForExecution", () => {
     expect(sql().some((s) => s.includes("set_config('app.platform_audit', 'on', true)"))).toBe(true);
   });
 
-  it("orders never-attempted requests by deadline, not submission, ahead of released ones", async () => {
+  it("orders by deadline alone, fresh and released alike, past any backoff (ADR-0458)", async () => {
     const { conn, calls } = fakePg();
-    await new PostgresDeletionRequestStore(conn).dueForExecution(collector().report);
+    await new PostgresDeletionRequestStore(conn, {
+      clock: () => new Date("2026-10-03T13:00:00.000Z"),
+    }).dueForExecution(collector().report);
     const select = calls.find((c) => c.sql.includes("ORDER BY"));
     // Article 12(3) is what the platform is late against, and a request submitted later can be due
-    // sooner if it was verified sooner. A released request (ADR-0453) keeps its early deadline, so by
-    // deadline alone `limit` stuck requests would hold every batch slot for ever: released rows sort
-    // after fresh ones, and among themselves least recently attempted first, so they rotate.
+    // sooner if it was verified sooner. ADR-0453 sorted released requests after fresh ones, which let
+    // a stream of fresh requests starve a released one past its deadline; the backoff now keeps a
+    // stuck request out of the claim between attempts, so an older deadline simply wins.
     expect(select?.sql).toContain("status = 'verified'");
-    expect(select?.sql).toContain(
-      "ORDER BY (last_attempt_refusal IS NOT NULL), in_progress_at ASC NULLS FIRST, deadline_at, request_id",
-    );
+    // Against the store's clock and never the database's `now()`: the release computed
+    // `retry_not_before` from the caller's clock, so comparing it with another host's would stretch
+    // or shrink every backoff by the skew between the two.
+    expect(select?.sql).toContain("(retry_not_before IS NULL OR retry_not_before <= $2::timestamptz)");
+    expect(select?.sql).not.toContain("now()");
+    expect(select?.params).toEqual([10, "2026-10-03T13:00:00.000Z"]);
+    expect(select?.sql).toContain("ORDER BY deadline_at, request_id LIMIT");
+    expect(select?.sql).not.toContain("last_attempt_refusal IS NOT NULL");
   });
 
   it("with a grace gate, holds a verified request until its grace ends or its deadline nears", async () => {
@@ -412,8 +424,10 @@ describe("read and dueForExecution", () => {
       now: "2026-10-03T13:00:00.000Z",
       graceMs: 7 * 86_400_000,
     });
-    const select = calls.find((c) => c.sql.includes("ORDER BY (last_attempt_refusal IS NOT NULL)"));
+    const select = calls.find((c) => c.sql.includes("ORDER BY deadline_at, request_id"));
     expect(select?.sql).toContain("verified_at + $2 * interval '1 millisecond'");
+    // The backoff reads the same instant as the grace, the runner's clock.
+    expect(select?.sql).toContain("(retry_not_before IS NULL OR retry_not_before <= $4::timestamptz)");
     expect(select?.sql).toContain("deadline_at - $3 * interval '1 millisecond'");
     expect(select?.sql).toContain("<= $4::timestamptz");
     expect(select?.params).toEqual([5, 7 * 86_400_000, 86_400_000, "2026-10-03T13:00:00.000Z"]);
@@ -795,8 +809,14 @@ describe("transition", () => {
 describe("the release: in_progress -> verified (ADR-0453)", () => {
   const ATTEMPT = "2026-10-03T00:00:00.000Z";
   const inProgress = (): Record<string, unknown> => rowOf({ status: "in_progress", in_progress_at: ATTEMPT });
-  const released = (): Record<string, unknown> =>
-    rowOf({ in_progress_at: ATTEMPT, last_attempt_refusal: "erase/rls_would_confine_this_session" });
+  const released = (over: Record<string, unknown> = {}): Record<string, unknown> =>
+    rowOf({
+      in_progress_at: ATTEMPT,
+      last_attempt_refusal: "erase/rls_would_confine_this_session",
+      release_count: 1,
+      retry_not_before: "2026-10-03T00:06:00.000Z",
+      ...over,
+    });
 
   it("records the refused attempt and leaves the verification and the deadline alone", async () => {
     const { conn, calls } = fakePg([inProgress()], [released()]);
@@ -815,10 +835,106 @@ describe("the release: in_progress -> verified (ADR-0453)", () => {
     expect(update?.sql).not.toContain("verified_by =");
     // The SET clause only: the RETURNING list names every column, deadline_at included.
     const setClause = (update?.sql.split("WHERE")[0] ?? "").trim();
-    expect(setClause).toBe("UPDATE meta.gdpr_deletion_requests SET status = $2, last_attempt_refusal = $3");
+    expect(setClause).toBe(
+      "UPDATE meta.gdpr_deletion_requests SET status = $2, last_attempt_refusal = $3, " +
+        "release_count = $4, retry_not_before = $5::timestamptz",
+    );
     expect(setClause).not.toContain("deadline_at");
-    // Guarded like every transition: the row must still read in_progress.
+    // The first release backs off one base interval from the release instant (ADR-0458).
+    expect(update?.params.slice(3, 5)).toEqual([1, "2026-10-03T00:06:00.000Z"]);
+    // Guarded like every transition: the row must still read in_progress — and on the count read.
     expect(update?.params[update.params.length - 1]).toBe("in_progress");
+    expect(update?.sql).toContain("AND release_count IS NOT DISTINCT FROM $6::integer");
+    expect(update?.params[5]).toBeNull();
+    expect(out?.releaseCount).toBe(1);
+    expect(out?.retryNotBefore).toBe("2026-10-03T00:06:00.000Z");
+  });
+
+  it("doubles the backoff on each further release, from the count the row holds (ADR-0458)", async () => {
+    const third = rowOf({
+      status: "in_progress",
+      in_progress_at: ATTEMPT,
+      last_attempt_refusal: "erase/rls_would_confine_this_session",
+      release_count: 2,
+      retry_not_before: "2026-10-02T23:00:00.000Z",
+    });
+    const { conn, calls } = fakePg(
+      [third],
+      [released({ release_count: 3, retry_not_before: "2026-10-03T00:09:00.000Z" })],
+    );
+    await new PostgresDeletionRequestStore(conn).transition(REQ, "verified", {
+      at: "2026-10-03T00:05:00.000Z",
+      lastAttemptRefusal: "erase/table_missing",
+    });
+    const update = calls.find((c) => c.sql.startsWith("UPDATE"));
+    // Third release: 4 × the one-minute base.
+    expect(update?.params.slice(3, 6)).toEqual([3, "2026-10-03T00:09:00.000Z", 2]);
+  });
+
+  it("caps the backoff, and takes the deployment's own policy", async () => {
+    const stuck = rowOf({
+      status: "in_progress",
+      in_progress_at: ATTEMPT,
+      last_attempt_refusal: "erase/table_missing",
+      release_count: 40,
+      retry_not_before: "2026-10-02T23:00:00.000Z",
+    });
+    const { conn, calls } = fakePg([stuck], [released({ release_count: 41, retry_not_before: "2026-10-03T00:15:00.000Z" })]);
+    await new PostgresDeletionRequestStore(conn, {
+      retryBackoff: { baseMs: 1_000, capMs: 600_000 },
+    }).transition(REQ, "verified", { at: "2026-10-03T00:05:00.000Z", lastAttemptRefusal: "erase/table_missing" });
+    const update = calls.find((c) => c.sql.startsWith("UPDATE"));
+    expect(update?.params.slice(3, 5)).toEqual([41, "2026-10-03T00:15:00.000Z"]);
+  });
+
+  it("never backs off past the point the grace gate yields to the Article 12(3) deadline (ADR-0458)", async () => {
+    // Released seven times, so the backoff is at the one-hour cap, with the deadline one day and
+    // twenty minutes away: the yield point is twenty minutes out, so the wait is capped there.
+    const at = "2026-10-03T00:05:00.000Z";
+    const near = rowOf({
+      status: "in_progress",
+      in_progress_at: ATTEMPT,
+      deadline_at: "2026-10-04T00:25:00.000Z",
+      last_attempt_refusal: "erase/table_missing",
+      release_count: 7,
+      retry_not_before: "2026-10-02T23:00:00.000Z",
+    });
+    const nearRun = fakePg([near], [released({ release_count: 8 })]);
+    await new PostgresDeletionRequestStore(nearRun.conn).transition(REQ, "verified", {
+      at,
+      lastAttemptRefusal: "erase/table_missing",
+    });
+    const capped = nearRun.calls.find((c) => c.sql.startsWith("UPDATE"));
+    expect(capped?.params.slice(3, 5)).toEqual([8, "2026-10-03T00:25:00.000Z"]);
+    // Inside the yield window already: no wait at all, so the next tick claims it.
+    const inside = rowOf({ ...near, deadline_at: "2026-10-03T12:00:00.000Z" });
+    const insideRun = fakePg([inside], [released({ release_count: 8 })]);
+    await new PostgresDeletionRequestStore(insideRun.conn).transition(REQ, "verified", {
+      at,
+      lastAttemptRefusal: "erase/table_missing",
+    });
+    const immediate = insideRun.calls.find((c) => c.sql.startsWith("UPDATE"));
+    expect(immediate?.params.slice(3, 5)).toEqual([8, at]);
+  });
+
+  it("refuses an inverted backoff policy at construction", () => {
+    const { conn } = fakePg();
+    expect(
+      () => new PostgresDeletionRequestStore(conn, { retryBackoff: { baseMs: 10, capMs: 1 } }),
+    ).toThrow(/baseMs <= capMs/);
+  });
+
+  it("refuses a release whose reasons are not vocabulary codes, before any UPDATE (ADR-0458)", async () => {
+    // The read routes surface `lastAttemptRefusal` on the strength of this: a release line is
+    // stage/reason codes and nothing else, so it cannot carry a tenant id or a table name.
+    for (const bad of ["erase/table_missing: meta.orders", "tenant 0f8e3c2a", "erase/"]) {
+      const { conn, sql } = fakePg([inProgress()], [released()]);
+      const err = await new PostgresDeletionRequestStore(conn)
+        .transition(REQ, "verified", { at: ATTEMPT, lastAttemptRefusal: bad })
+        .catch((e: unknown) => e);
+      expect((err as DeletionRequestRefused).refusal, bad).toBe("contract_violated");
+      expect(sql().some((s) => s.startsWith("UPDATE"))).toBe(false);
+    }
   });
 
   it("refuses a release that does not say why, before any UPDATE", async () => {

@@ -18,6 +18,12 @@ import {
   type GdprLegalBasis,
   type RetentionObligation,
 } from "@crossengin/tenant-lifecycle";
+import {
+  DEFAULT_DELETION_RETRY_BACKOFF,
+  RELEASE_REASONS_RE,
+  deletionRetryBackoffMs,
+  type DeletionRetryBackoff,
+} from "./deletion-retry.js";
 import { SET_TENANT_CONTEXT_SQL } from "./tenant-context.js";
 
 /**
@@ -81,11 +87,22 @@ export const REQUEST_COLUMNS = [
   "retained_data_categories",
   "notes",
   "last_attempt_refusal",
+  "release_count",
+  "retry_not_before",
   "tombstone_id",
 ] as const;
 
 export interface DeletionRequestStoreOptions {
   readonly schema?: string;
+  /** The wait a release imposes before the next claim (ADR-0458). Defaults to one minute doubling to an hour. */
+  readonly retryBackoff?: DeletionRetryBackoff;
+  /**
+   * The clock `dueForExecution` compares a backoff against when no grace gate supplies one. A release
+   * computes `retry_not_before` from the caller's clock (`fields.at`), so the claim must read the
+   * same kind of instant: comparing it with the database's `now()` would lengthen or shorten every
+   * backoff by the skew between the two hosts (ADR-0458).
+   */
+  readonly clock?: () => Date;
 }
 
 export const REQUEST_REFUSALS = [
@@ -395,6 +412,10 @@ export function rowToDeletionRequest(row: Record<string, unknown>): GdprDeletion
   if (notes !== null) candidate["notes"] = notes;
   const lastAttempt = textOrNull(row["last_attempt_refusal"]);
   if (lastAttempt !== null) candidate["lastAttemptRefusal"] = lastAttempt;
+  const releases = row["release_count"];
+  if (releases !== null && releases !== undefined) candidate["releaseCount"] = Number(releases);
+  const notBefore = isoOrNull(row["retry_not_before"]);
+  if (notBefore !== null) candidate["retryNotBefore"] = notBefore;
   return GdprDeletionRequestSchema.parse(candidate);
 }
 
@@ -420,15 +441,20 @@ export interface SubmitDeletionRequestInput {
 }
 
 /**
- * The claim order `dueForExecution` uses, one spelling for both of its queries: never-attempted
- * requests by deadline, then released ones least recently attempted first (ADR-0453).
+ * The claim order `dueForExecution` uses, one spelling for both of its queries: the nearest Article
+ * 12(3) deadline first, fresh and released alike (ADR-0458). ADR-0453 sorted released requests after
+ * fresh ones so `limit` stuck ones could not hold every batch slot every tick — and a steady stream of
+ * fresh requests could then keep a released one waiting past its deadline after its cause was fixed.
+ * The backoff below is what removes a stuck request from the claim between attempts, so the order can
+ * be the deadline's alone, which is also the order `idx_gdpr_deletion_due` holds.
  */
-const DUE_ORDER =
-  "(last_attempt_refusal IS NOT NULL), in_progress_at ASC NULLS FIRST, deadline_at, request_id";
+const DUE_ORDER = "deadline_at, request_id";
 
 export class PostgresDeletionRequestStore {
   private readonly conn: PgConnection;
   private readonly schema: string;
+  private readonly retryBackoff: DeletionRetryBackoff;
+  private readonly clock: () => Date;
 
   constructor(conn: PgConnection, opts: DeletionRequestStoreOptions = {}) {
     const schema = opts.schema ?? "meta";
@@ -437,6 +463,10 @@ export class PostgresDeletionRequestStore {
     }
     this.conn = conn;
     this.schema = schema;
+    this.retryBackoff = opts.retryBackoff ?? DEFAULT_DELETION_RETRY_BACKOFF;
+    this.clock = opts.clock ?? ((): Date => new Date());
+    // Validated at construction rather than at the first release, which would be mid-run.
+    deletionRetryBackoffMs(1, this.retryBackoff);
   }
 
   private get table(): string {
@@ -580,19 +610,17 @@ export class PostgresDeletionRequestStore {
   }
 
   /**
-   * The next `verified` requests — the scheduler's claim. Never-attempted requests come first,
-   * nearest deadline first; requests a refused attempt **released** (ADR-0453) come after them,
-   * least recently attempted first.
+   * The next `verified` requests — the scheduler's claim — nearest Article 12(3) deadline first,
+   * excluding a released request whose retry backoff has not elapsed (ADR-0458).
    *
    * Ordered by deadline rather than submission because Article 12(3) is what the platform is late
-   * against, and a request submitted later can be due sooner if it was verified sooner. The release
-   * is what moves a request out of that order, and the reason is starvation: a released request
-   * keeps its `deadline_at` (Article 12(3) runs from the original submission), so by deadline alone
-   * it stays at the head of the queue — and `limit` requests stuck on a cause the deployment has not
-   * fixed would be claimed, refused and released every tick while a later-deadline request that
-   * would succeed was never selected. `last_attempt_refusal` is written only by the release, so it
-   * marks exactly the released rows; `in_progress_at` is re-stamped by every claim, so ordering the
-   * released ones by it rotates through them rather than retrying the same `limit` for ever.
+   * against, and a request submitted later can be due sooner if it was verified sooner. A released
+   * request keeps its `deadline_at` (Article 12(3) runs from the original submission), so once its
+   * backoff has elapsed it competes on that deadline with fresh ones and an older deadline wins.
+   * ADR-0453 instead sorted released requests after fresh ones, to stop `limit` requests stuck on an
+   * unfixed cause from holding every batch slot every tick; that let a steady stream of fresh
+   * requests starve a released one past its deadline. The backoff removes a stuck request from the
+   * claim between attempts, which is what the rotation was standing in for.
    *
    * `onUnreadable` precedes `limit` because it is required and `limit` keeps its default — a
    * required parameter cannot follow an optional one, and the order is what the requirement costs.
@@ -608,8 +636,9 @@ export class PostgresDeletionRequestStore {
       if (grace === undefined) {
         const result = await tx.query<Record<string, unknown>>(
           `SELECT ${REQUEST_COLUMNS.join(", ")} FROM ${this.table}
-            WHERE status = 'verified' ORDER BY ${DUE_ORDER} LIMIT $1`,
-          [bounded],
+            WHERE status = 'verified' AND (retry_not_before IS NULL OR retry_not_before <= $2::timestamptz)
+            ORDER BY ${DUE_ORDER} LIMIT $1`,
+          [bounded, this.clock().toISOString()],
         );
         return readRequestRows(result.rows, onUnreadable);
       }
@@ -625,6 +654,7 @@ export class PostgresDeletionRequestStore {
             AND GREATEST(verified_at, LEAST(verified_at + $2 * interval '1 millisecond',
                                             deadline_at - $3 * interval '1 millisecond'))
                 <= $4::timestamptz
+            AND (retry_not_before IS NULL OR retry_not_before <= $4::timestamptz)
           ORDER BY ${DUE_ORDER} LIMIT $1`,
         [bounded, Math.trunc(grace.graceMs), GRACE_YIELDS_TO_DEADLINE_MS, grace.now],
       );
@@ -813,6 +843,13 @@ export class PostgresDeletionRequestStore {
           "a release does not re-verify the request: verifiedBy and verificationMethod are refused",
         );
       }
+      // Reason codes only, which is what the read routes surface it on the strength of (ADR-0458).
+      if (!RELEASE_REASONS_RE.test(fields.lastAttemptRefusal)) {
+        throw new DeletionRequestRefused(
+          "contract_violated",
+          "a release's reasons are stage/reason codes joined by '; ', and nothing else",
+        );
+      }
     } else if (fields.lastAttemptRefusal !== undefined) {
       throw new DeletionRequestRefused(
         "contract_violated",
@@ -825,8 +862,32 @@ export class PostgresDeletionRequestStore {
       params.push(value);
       sets.push(sql.replace("$N", `$${params.length.toString()}`));
     };
+    let releaseGuard = "";
     if (releasing) {
       push("last_attempt_refusal = $N", fields.lastAttemptRefusal);
+      // The backoff (ADR-0458): computed here, where every release passes, from the count the row
+      // already holds — so the runner and the synchronous route cannot back off differently.
+      const releaseCount = (current.releaseCount ?? 0) + 1;
+      // Capped where the grace gate yields (C-04): within GRACE_YIELDS_TO_DEADLINE_MS of the Article
+      // 12(3) deadline a backoff would only delay a request whose cause may already be fixed past the
+      // point the platform is late, so the wait shrinks to nothing there and the request is claimed on
+      // the next tick. Capped at write time rather than in the claim's predicate so the
+      // `retryNotBefore` the read routes surface is the instant the claim will honour.
+      const atMs = new Date(fields.at).getTime();
+      const yieldAtMs = new Date(current.deadlineAt).getTime() - GRACE_YIELDS_TO_DEADLINE_MS;
+      const notBefore = new Date(
+        Math.max(
+          atMs,
+          Math.min(atMs + deletionRetryBackoffMs(releaseCount, this.retryBackoff), yieldAtMs),
+        ),
+      ).toISOString();
+      push("release_count = $N", releaseCount);
+      push("retry_not_before = $N::timestamptz", notBefore);
+      // The count was read, so the write is guarded on it too: a second worker that released and
+      // re-claimed this row between the read and the write would otherwise have its count overwritten
+      // by one computed from the stale read.
+      params.push(current.releaseCount ?? null);
+      releaseGuard = ` AND release_count IS NOT DISTINCT FROM $${params.length.toString()}::integer`;
     } else if (to === "verified") {
       push("verified_at = $N::timestamptz", fields.at);
       if (fields.verifiedBy !== undefined) push("verified_by = $N", fields.verifiedBy);
@@ -862,7 +923,7 @@ export class PostgresDeletionRequestStore {
       await tx.query(SET_TENANT_CONTEXT_SQL, [current.tenantId]);
       return tx.query<Record<string, unknown>>(
         `UPDATE ${this.table} SET ${sets.join(", ")}
-        WHERE request_id = $1 AND status = $${params.length.toString()}
+        WHERE request_id = $1 AND status = $${params.length.toString()}${releaseGuard}
         RETURNING ${REQUEST_COLUMNS.join(", ")}`,
         params,
       );

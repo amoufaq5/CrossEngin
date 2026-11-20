@@ -162,6 +162,30 @@ services:
     logging: *logging
     restart: "no"
 
+  # The Article 17 deletion role (ADR-0458): NOSUPERUSER, BYPASSRLS, owning nothing, holding exactly
+  # what an erasure uses. Opt-in and a no-op until DELETION_PGUSER is set; a DELETION_PGUSER naming
+  # POSTGRES_USER (ADR-0453's configuration) is left alone and said. Re-run on every `up`, which is
+  # what re-grants a table `migrate` added since. After `app-role`, so the app role it must never be
+  # (or be reachable from) already exists to be compared against.
+  eraser-role:
+    build:
+      context: ./postgres
+    depends_on:
+      app-role:
+        condition: service_completed_successfully
+    environment:
+      <<: *pg-env
+      CROSSENGIN_ERASER_DB_USER: ${DELETION_PGUSER:-}
+      CROSSENGIN_ERASER_DB_PASSWORD: ${DELETION_PGPASSWORD:-}
+      CROSSENGIN_APP_DB_USER: ${POSTGRES_APP_USER:-${POSTGRES_USER}}
+      CROSSENGIN_APP_DB_PASSWORD: ${POSTGRES_APP_PASSWORD:-${POSTGRES_PASSWORD}}
+    volumes:
+      - ./postgres/roles:/roles:ro
+    entrypoint: ["psql"]
+    command: ["-v", "ON_ERROR_STOP=1", "-f", "/roles/eraser-role.sql"]
+    logging: *logging
+    restart: "no"
+
   # The unique indexes `--store pg` enforces a declared `unique` field with (ADR-0423). They are
   # expression indexes on the one shared document table, so only that table's OWNER can create them
   # -- Postgres refuses CREATE INDEX to anyone else, IF NOT EXISTS included -- and the API connects
@@ -191,6 +215,8 @@ services:
         condition: service_completed_successfully
       app-role:
         condition: service_completed_successfully
+      eraser-role:
+        condition: service_completed_successfully
       document-indexes:
         condition: service_completed_successfully
     environment:
@@ -202,7 +228,8 @@ services:
       PGPASSWORD: ${POSTGRES_APP_PASSWORD:-${POSTGRES_PASSWORD}}
       # The one exception to the confined role (ADR-0453): an Article 17 deletion must empty tables
       # the app role's policies confine, so the deletion pipeline — and nothing else — connects as
-      # the role named here, on its own connection. Opt-in: empty means deletions run on the app role
+      # the role named here, on its own connection. The `eraser-role` step above provisions it as a
+      # dedicated NOSUPERUSER BYPASSRLS role (ADR-0458). Opt-in: empty means deletions run on the app role
       # and are refused rls_would_confine_this_session; the `[deletion]` boot line says which. None of
       # the deletion flags is on the command below, so setting these alone changes nothing.
       DELETION_PGUSER: ${DELETION_PGUSER:-}

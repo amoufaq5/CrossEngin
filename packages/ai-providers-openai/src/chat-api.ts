@@ -19,10 +19,23 @@ export interface OpenAiChatRequest {
   readonly stream_options?: { readonly include_usage: true };
   /**
    * The OpenAI-compatible end-user identifier. Carries the tenant pseudonym and nothing else
-   * (ADR-0456); absent when the deployment configured none, never the raw tenant id.
+   * (ADR-0456); absent when the deployment configured none, never the raw tenant id. Sent to an
+   * OpenAI-compatible server and never to `api.openai.com`, which documents it as deprecated in
+   * favour of `safety_identifier` (ADR-0461). This interface admits both keys; that at most one is
+   * set is held by `endUserFieldOf`'s return type, which is the only producer of either.
    */
   readonly user?: string;
+  /** `api.openai.com`'s replacement for `user` on Chat Completions; the same value (ADR-0461). */
+  readonly safety_identifier?: string;
 }
+
+/**
+ * Which body field carries the tenant pseudonym. Chosen per endpoint by `openAiEndUserField` in
+ * `provider.ts` and passed in, rather than decided here, because the builder does not know where
+ * the body is going.
+ */
+export const OPENAI_END_USER_FIELDS = ["safety_identifier", "user"] as const;
+export type OpenAiEndUserField = (typeof OPENAI_END_USER_FIELDS)[number];
 
 export interface OpenAiToolCall {
   readonly id: string;
@@ -77,6 +90,12 @@ export interface BuildRequestOptions {
   readonly defaultModel: string;
   readonly defaultMaxTokens?: number;
   readonly stream?: boolean;
+  /**
+   * Required, not defaulted: either default is wrong for one of the two endpoint kinds, and an
+   * optional field defaulting to the old `user` would make a forgotten argument send the
+   * deprecated field to `api.openai.com` with nothing failing (ADR-0386's lesson).
+   */
+  readonly endUserField: OpenAiEndUserField;
 }
 
 export function buildOpenAiRequest(
@@ -100,8 +119,28 @@ export function buildOpenAiRequest(
       : opts.stream === false
         ? { stream: false }
         : {}),
-    ...(pseudonym !== undefined ? { user: pseudonym } : {}),
+    ...endUserFieldOf(opts.endUserField, pseudonym),
   };
+}
+
+/**
+ * At most one of the two keys, as a type. Each arm forbids the other key with `?: never`: a bare
+ * union of `{user}` and `{safety_identifier}` would not, because a literal carrying both is
+ * structurally assignable to either arm and TypeScript's excess-property check on a union accepts a
+ * key any member declares.
+ */
+export type OpenAiEndUserBody =
+  | { readonly user?: never; readonly safety_identifier?: never }
+  | { readonly user: string; readonly safety_identifier?: never }
+  | { readonly user?: never; readonly safety_identifier: string };
+
+/** The one place the field name is turned into a body key, shared by the chat and embedding bodies. */
+export function endUserFieldOf(
+  field: OpenAiEndUserField,
+  pseudonym: string | undefined,
+): OpenAiEndUserBody {
+  if (pseudonym === undefined) return {};
+  return field === "safety_identifier" ? { safety_identifier: pseudonym } : { user: pseudonym };
 }
 
 function toOpenAiMessage(m: LlmMessage): OpenAiMessage {

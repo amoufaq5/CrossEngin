@@ -165,6 +165,19 @@ describe("admitInstallation — gates", () => {
     expect(decision).toMatchObject({ outcome: "rejected", reason: "release_bundle_mismatch" });
   });
 
+  it("re-verifies its own input at every admission: the two-column rewrite is refused, not installed", () => {
+    // ADR-0459: the shape ADR-0454 measured on a stored row — the version *and* the signed claim both
+    // rewritten to 9.9.9 — applied to the install's input. Admission asks the registry, so the
+    // rewritten claim fails the Ed25519 check rather than agreeing with itself.
+    const s = signed();
+    const rewritten = { ...s.signature, release: { ...s.signature.release!, version: "9.9.9" } };
+    const decision = admitInstallation(
+      request({ pack: s.pack, signature: rewritten, publishers: s.publishers, version: "9.9.9" }),
+      ctx,
+    );
+    expect(decision).toMatchObject({ outcome: "rejected", reason: "signature_invalid" });
+  });
+
   it("rejects a manifest-only signature by name", () => {
     const s = signed();
     const { release: _release, ...legacy } = s.signature;

@@ -226,3 +226,26 @@ OpenAI-compatible server recorded every request body (16 bodies across the arms)
 - `apps/operate-server/src/ai-tenant-pseudonym.ts`, `ai-design.ts` (`buildDesignDesigner`), `node.ts`
 - RFC 5869 (HKDF); Anthropic Messages API `metadata.user_id`; OpenAI Chat Completions `user` / `safety_identifier`
 - ADR-0450 open questions
+
+## Addendum: three open questions closed by ADR-0461
+
+- **The OpenAI field.** Decision 3's placement is narrowed: chat to `api.openai.com` now carries
+  the pseudonym as `safety_identifier`, not `user`; a custom base URL and the local provider keep
+  `user`, and embeddings keep `user` on every endpoint, since the embeddings endpoint documents no
+  `safety_identifier`. One predicate decides it (`openAiEndUserField`), and the boot line names the
+  field read off the built provider (`… in the safety_identifier field`). The value sent and its
+  refusal are unchanged.
+- **One switch for two choices.** `--ai-tenant-pseudonym keyed|off` (default `keyed`) lets a
+  deployment send no pseudonym while `CURSOR_ENCRYPTION_SECRET` goes on sealing cursors. `off` does
+  not read the secret, is said at boot as `tenant pseudonym: off`, and is a separate source state
+  from `absent` because its remedy differs. The Consequences sentence "in practice it is not an
+  independent choice" is therefore no longer true.
+- **Reverse lookup.** `operate-server ai-pseudonym-lookup <ctp_…>` recomputes the pseudonym over
+  every `meta.tenants` row (every status), with the secret from the environment through this ADR's
+  own `resolveAiTenantPseudonymSource`, and refuses rather than answers a read that RLS would
+  confine. It runs as `crossengin_app`, because `meta.tenants` carries no RLS and that role holds
+  `SELECT` on every `meta` table.
+- **The derivation's salt is the canonical tenant id.** Decision 1's `salt = tenantId` now means a
+  uuid-shaped id lowercased first (ADR-0461's review corrections): a credential spelling its tenant
+  in uppercase otherwise carried a pseudonym the lookup could not reproduce from
+  `meta.tenants.id::text`. An uppercase-spelled tenant's pseudonym changes once, at this change.

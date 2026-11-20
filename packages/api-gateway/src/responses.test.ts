@@ -15,8 +15,22 @@ import {
 } from "./responses.js";
 
 describe("constants", () => {
-  it("PROBLEM_TYPES has 18 entries", () => {
-    expect(Object.keys(PROBLEM_TYPES)).toHaveLength(18);
+  it("PROBLEM_TYPES has 21 entries", () => {
+    expect(Object.keys(PROBLEM_TYPES)).toHaveLength(21);
+  });
+  it("gives the AI provider's residency refusals types of their own (ADR-0462)", () => {
+    // A different question from the region gate's, so no AI refusal may share a residency type.
+    const ai = [
+      PROBLEM_TYPES.ai_provider_residency_forbidden,
+      PROBLEM_TYPES.ai_provider_residency_undeclared,
+      PROBLEM_TYPES.ai_provider_residency_unresolved,
+    ];
+    const region = [
+      PROBLEM_TYPES.residency_misdirected,
+      PROBLEM_TYPES.residency_violation,
+      PROBLEM_TYPES.residency_unresolved,
+    ];
+    for (const t of ai) expect(region).not.toContain(t);
   });
   it("has 16 problem status codes", () => {
     expect(PROBLEM_STATUS_CODES).toHaveLength(16);

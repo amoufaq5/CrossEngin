@@ -230,3 +230,99 @@ export function verifyPackPublisher(input: {
   }
   return { ok: true, publisher };
 }
+
+/**
+ * A release as a stored version row holds it: the four facts the row asserts and the signature it
+ * was submitted with. The manifest itself is not stored — only its digest — which is why the stored
+ * check cannot repeat `author_kind_not_registered` (ADR-0459).
+ */
+export interface StoredRelease {
+  readonly packId: string;
+  readonly version: string;
+  readonly manifestSha256: string;
+  readonly bundleSha256: string;
+  readonly signature: PackSignature;
+}
+
+/** The refusals a stored release can answer: every `PublisherRefusal` that needs no manifest. */
+export const STORED_RELEASE_REFUSALS = [
+  "legacy_signature_form",
+  "publisher_unregistered",
+  "pack_outside_publisher_namespace",
+  "signature_invalid",
+  "release_pack_mismatch",
+  "release_manifest_mismatch",
+  "release_version_mismatch",
+  "release_bundle_mismatch",
+] as const satisfies readonly PublisherRefusal[];
+export type StoredReleaseRefusal = (typeof STORED_RELEASE_REFUSALS)[number];
+
+export type StoredReleaseVerification =
+  | { readonly ok: true; readonly publisher: PackPublisher }
+  | { readonly ok: false; readonly refusal: StoredReleaseRefusal; readonly detail: string };
+
+/**
+ * Re-verifies a stored release against the publisher registry: the signature over the claim it
+ * carries, by the registered key its fingerprint names, for a pack inside that key's namespace — and
+ * then that the row states the release the signature names.
+ *
+ * `PackVersionRecordSchema` already refuses a row whose columns disagree with `signature.release`,
+ * but that compares the row with itself: an `UPDATE` rewriting a column *and* the claim beside it
+ * passes the refinement and reads as a release the publisher never made (measured live, ADR-0454).
+ * Only the Ed25519 signature binds the claim to its signer, so only re-verifying it closes that
+ * edit. The row comparison is repeated after the signature for the same reason `verifyPackPublisher`
+ * orders it there: before it, the claim is whatever the row says.
+ *
+ * The answer is a statement about the registry **now**: a release whose key was later removed from
+ * `--pack-publisher-key` reads `publisher_unregistered`, which is ADR-0452's rotation question and
+ * not a defect of this check.
+ */
+export function verifyStoredRelease(input: {
+  readonly stored: StoredRelease;
+  readonly registry: PackPublisherRegistry;
+}): StoredReleaseVerification {
+  const { stored } = input;
+  const release = stored.signature.release;
+  if (release === undefined) {
+    return {
+      ok: false,
+      refusal: "legacy_signature_form",
+      detail: "the stored signature covers the manifest alone, which can never be re-verified as a release",
+    };
+  }
+  const publisher = input.registry.publisherFor(stored.signature.publicKeyFingerprint);
+  if (publisher === undefined) {
+    return {
+      ok: false,
+      refusal: "publisher_unregistered",
+      detail: `signing key ${stored.signature.publicKeyFingerprint.slice(0, 12)}… is not a registered publisher key`,
+    };
+  }
+  if (!namespaceCovers(publisher.namespace, stored.packId)) {
+    return {
+      ok: false,
+      refusal: "pack_outside_publisher_namespace",
+      detail: `pack '${stored.packId}' is outside the signing publisher's namespace '${publisher.namespace}'`,
+    };
+  }
+  if (!verifyPackReleaseSignature({ signature: stored.signature, publicKeyBase64: publisher.publicKeyBase64 })) {
+    return {
+      ok: false,
+      refusal: "signature_invalid",
+      detail: "the stored release signature failed verification against the registered key",
+    };
+  }
+  if (release.packId !== stored.packId) {
+    return { ok: false, refusal: "release_pack_mismatch", detail: "the stored row names a different pack than its signed release" };
+  }
+  if (release.manifestSha256 !== stored.manifestSha256) {
+    return { ok: false, refusal: "release_manifest_mismatch", detail: "the stored manifest digest is not the one the release was signed over" };
+  }
+  if (release.version !== stored.version) {
+    return { ok: false, refusal: "release_version_mismatch", detail: "the stored row names a different version than its signed release" };
+  }
+  if (release.bundleSha256 !== stored.bundleSha256) {
+    return { ok: false, refusal: "release_bundle_mismatch", detail: "the stored bundle digest is not the one the release was signed over" };
+  }
+  return { ok: true, publisher };
+}

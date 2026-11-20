@@ -30,6 +30,7 @@ import {
   OPENAI_PRICING_AS_OF,
   OpenAiProvider,
   hasKnownPricing,
+  isCustomOpenAiBaseUrl,
   isOpenAiChatModel,
 } from "@crossengin/ai-providers-openai";
 import {
@@ -1196,16 +1197,26 @@ export interface DeclaredModelPrice {
 
 /**
  * Where a design request goes, as far as this process can tell: `self_hosted` for the local arm,
- * `vendor` for Anthropic and `api.openai.com`, and `unknown` for an OpenAI custom base URL, which
+ * `vendor` for Anthropic and OpenAI's own API (`api.openai.com` and its regional hosts, ADR-0461),
+ * and `unknown` for any other OpenAI base URL, which
  * may be vLLM on the next box or a proxy to a vendor — the same ambiguity `unpriced` records.
  * Read by the tenant-pseudonym boot line, whose consequence clause is true of a vendor only.
  */
 export type AiProviderEndpoint = "self_hosted" | "vendor" | "unknown";
 
+/**
+ * The body field a provider carries the tenant pseudonym under (ADR-0456, ADR-0461): Anthropic's
+ * `metadata.user_id`, the OpenAI-compatible `user`, or `safety_identifier` on `api.openai.com`.
+ * Read off the built provider rather than re-derived from the environment, so the boot line names
+ * the field the requests really carry.
+ */
+export type AiTenantPseudonymField = "metadata.user_id" | "user" | "safety_identifier";
+
 export interface DesignProviderBuild {
   readonly provider: DesignCompletionProvider;
   readonly providerLabel: string;
   readonly endpoint: AiProviderEndpoint;
+  readonly pseudonymField: AiTenantPseudonymField;
   readonly model: string;
   readonly pricing: AiPricingProvenance;
   /** The date the catalogue price was last checked, when `pricing` is `catalogue`. */
@@ -1279,6 +1290,7 @@ export function buildDesignProviderFromEnv(
       provider,
       providerLabel: `local/${model}`,
       endpoint: "self_hosted",
+      pseudonymField: "user",
       model,
       pricing: declared !== undefined ? "declared" : "self_hosted_free",
       pricingAsOf: null,
@@ -1309,6 +1321,7 @@ export function buildDesignProviderFromEnv(
       provider,
       providerLabel: `anthropic/${model}`,
       endpoint: "vendor",
+      pseudonymField: "metadata.user_id",
       model,
       pricing: declared !== undefined ? "declared" : "catalogue",
       pricingAsOf: declared !== undefined ? null : ANTHROPIC_PRICING_AS_OF,
@@ -1317,10 +1330,13 @@ export function buildDesignProviderFromEnv(
   const openaiKey = env["OPENAI_API_KEY"];
   if (openaiKey !== undefined && openaiKey.length > 0) {
     const baseUrl = env["OPENAI_BASE_URL"];
-    const custom = baseUrl !== undefined && baseUrl.length > 0;
+    const baseUrlSet = baseUrl !== undefined && baseUrl.length > 0;
     // A custom base URL means a self-hosted or proxied endpoint, whose model ids have
     // nothing to do with OpenAI's catalogue — validating against it there would silently
-    // rewrite `qwen2.5:14b` to `gpt-4o` and ask Ollama for a model it does not have.
+    // rewrite `qwen2.5:14b` to `gpt-4o` and ask Ollama for a model it does not have. "Custom" is
+    // the provider's own predicate (ADR-0461), so `OPENAI_BASE_URL=https://api.openai.com/` or a
+    // regional OpenAI host is not custom here while the provider treats it as OpenAI.
+    const custom = baseUrlSet && isCustomOpenAiBaseUrl(baseUrl);
     const model: string =
       opts?.model !== undefined && (custom || isOpenAiChatModel(opts.model))
         ? opts.model
@@ -1328,7 +1344,7 @@ export function buildDesignProviderFromEnv(
     const provider = new OpenAiProvider({
       apiKey: openaiKey,
       defaultModel: model,
-      ...(custom ? { baseUrl } : {}),
+      ...(baseUrlSet ? { baseUrl } : {}),
       ...timeout,
       ...(declared !== undefined
         ? {
@@ -1348,7 +1364,10 @@ export function buildDesignProviderFromEnv(
     return {
       provider,
       providerLabel: `openai/${model}`,
-      endpoint: custom ? "unknown" : "vendor",
+      // Read off the built provider, the same predicate that chose the field below, so the line's
+      // endpoint class and the field it names cannot disagree (ADR-0461).
+      endpoint: provider.isCustomEndpoint ? "unknown" : "vendor",
+      pseudonymField: provider.endUserField,
       model,
       pricing,
       pricingAsOf: pricing === "catalogue" ? OPENAI_PRICING_AS_OF : null,

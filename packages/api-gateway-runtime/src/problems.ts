@@ -26,6 +26,9 @@ const PROBLEM_TITLES: Record<keyof typeof PROBLEM_TYPES, string> = {
   residency_misdirected: "Misdirected region",
   residency_violation: "Residency violation",
   residency_unresolved: "Residency unresolved",
+  ai_provider_residency_forbidden: "AI provider not permitted by residency",
+  ai_provider_residency_undeclared: "AI provider location undeclared",
+  ai_provider_residency_unresolved: "AI provider residency unresolved",
 };
 
 export interface ProblemEnvelope {
@@ -346,6 +349,66 @@ export function residencyRefusal(input: ResidencyRefusalInput): ProblemEnvelope 
       break;
     case "unresolved":
       detail = RESIDENCY_UNRESOLVED_DETAIL;
+      extensions["retryAfterSeconds"] = RESIDENCY_UNRESOLVED_RETRY_AFTER_SECONDS;
+      extraHeaders["retry-after"] = RESIDENCY_UNRESOLVED_RETRY_AFTER_SECONDS.toString();
+      break;
+  }
+  return buildEnvelope({ key: spec.key, status: spec.status, detail, extensions, extraHeaders });
+}
+
+/**
+ * The input to `aiProviderResidencyRefusal`: whether a tenant's residency profile admits the AI
+ * designer's provider. The two 403 arms carry their own sentence, because only the caller holds the
+ * profile name and the provider ref; the 503's is fixed here for `RESIDENCY_UNRESOLVED_DETAIL`'s
+ * reason — the directory's error can name a host or a tenant.
+ */
+export type AiProviderResidencyRefusalInput =
+  | { readonly decision: "forbidden"; readonly detail: string }
+  | { readonly decision: "undeclared"; readonly detail: string }
+  | { readonly decision: "unresolved" };
+export type AiProviderResidencyRefusalDecision = AiProviderResidencyRefusalInput["decision"];
+
+/**
+ * Status, problem type and stable code per decision, tied to the input union in both directions as
+ * `RESIDENCY_REFUSALS` is. The codes are the `error` strings these refusals carried as top-level
+ * `{error, detail}` bodies before ADR-0462, kept verbatim so a client keyed on one finds the same
+ * string, now at `extensions.error`.
+ */
+export const AI_PROVIDER_RESIDENCY_REFUSALS = {
+  forbidden: { key: "ai_provider_residency_forbidden", status: 403, error: "ai_provider_residency_forbidden" },
+  undeclared: { key: "ai_provider_residency_undeclared", status: 403, error: "ai_provider_residency_undeclared" },
+  unresolved: { key: "ai_provider_residency_unresolved", status: 503, error: "ai_residency_unresolved" },
+} as const satisfies Record<
+  AiProviderResidencyRefusalDecision,
+  { readonly key: keyof typeof PROBLEM_TYPES; readonly status: ProblemStatusCode; readonly error: string }
+>;
+
+export const AI_PROVIDER_RESIDENCY_UNRESOLVED_DETAIL =
+  "This tenant's residency profile could not be read, so whether it permits the AI designer's provider " +
+  "is unknown; nothing was sent to the provider.";
+
+/**
+ * The one builder for an AI-provider residency refusal (ADR-0462), through the same envelope every
+ * gateway problem uses. It answers a different question from `residencyRefusal` — where the
+ * provider runs, not which instance answers — so it shares the registry and the envelope and none
+ * of that function's types: a 421 would send a client to another region that would refuse it the
+ * same way, since the provider is a deployment-wide choice.
+ *
+ * The 503 carries `retry-after` with `residencyRefusal`'s figure, because it is the same directory
+ * read failing and so the same wait.
+ */
+export function aiProviderResidencyRefusal(input: AiProviderResidencyRefusalInput): ProblemEnvelope {
+  const spec = AI_PROVIDER_RESIDENCY_REFUSALS[input.decision];
+  const extensions: Record<string, unknown> = { error: spec.error };
+  const extraHeaders: Record<string, string> = {};
+  let detail: string;
+  switch (input.decision) {
+    case "forbidden":
+    case "undeclared":
+      detail = input.detail;
+      break;
+    case "unresolved":
+      detail = AI_PROVIDER_RESIDENCY_UNRESOLVED_DETAIL;
       extensions["retryAfterSeconds"] = RESIDENCY_UNRESOLVED_RETRY_AFTER_SECONDS;
       extraHeaders["retry-after"] = RESIDENCY_UNRESOLVED_RETRY_AFTER_SECONDS.toString();
       break;

@@ -92,4 +92,22 @@ describe("PersistentPackSubmissionEngine", () => {
     await engine.submit(submitInput(officialManifest()));
     await expect(engine.submit(submitInput(officialManifest()))).rejects.toThrow(/already exists/);
   });
+
+  it("advances no row whose stored release fails re-verification (ADR-0459)", async () => {
+    const { conn, calls } = fakeVersionPg();
+    const engine = buildPersistentPackSubmissionEngine(conn, { publishers });
+    const draft = await engine.submit(submitInput(officialManifest()));
+    // The two-column rewrite ADR-0454 measured: the version and the signed claim both say 9.9.9,
+    // which `PackVersionRecordSchema`'s refinement accepts because the row agrees with itself.
+    const rewritten = {
+      ...draft,
+      version: "9.9.9",
+      signature: { ...draft.signature, release: { ...draft.signature.release!, version: "9.9.9" } },
+    };
+    await expect(engine.submitForReview(rewritten)).rejects.toMatchObject({
+      reason: "stored_release_unverified",
+      storedRefusal: "signature_invalid",
+    });
+    expect(calls.filter((c) => c.sql.startsWith("UPDATE"))).toHaveLength(0);
+  });
 });

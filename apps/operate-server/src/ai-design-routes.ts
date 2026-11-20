@@ -1,5 +1,11 @@
 import type { PathSegment, ResolvedPrincipal, RouteDefinition } from "@crossengin/api-gateway";
-import type { Handler, HandlerOutput, PrincipalRoles } from "@crossengin/api-gateway-runtime";
+import {
+  aiProviderResidencyRefusal,
+  type AiProviderResidencyRefusalInput,
+  type Handler,
+  type HandlerOutput,
+  type PrincipalRoles,
+} from "@crossengin/api-gateway-runtime";
 import type { ExtraGatewayRoute } from "@crossengin/operate-runtime";
 import { z } from "zod";
 
@@ -99,11 +105,25 @@ export type ManifestDesignerLike = (input: {
 
 /**
  * Whether this deployment's AI provider may process a tenant's business description, by the
- * tenant's residency profile. `status` is the answer the routes give a refusal.
+ * tenant's residency profile. A refusal names its decision and the routes build the answer through
+ * `aiProviderResidencyRefusal`, so the status, the problem type and the code have one spelling
+ * (ADR-0462) rather than one per producer of an admission.
  */
 export type AiProviderAdmission =
   | { readonly allowed: true }
-  | { readonly allowed: false; readonly status: 403 | 503; readonly error: string; readonly detail: string };
+  | { readonly allowed: false; readonly refusal: AiProviderResidencyRefusalInput };
+
+/**
+ * The refusal on the wire: an RFC 9457 problem, the minority shape among these routes' refusals and
+ * deliberately so — it is a residency answer, and every residency answer is in the registry. The
+ * `content-type` header survives because the dispatcher fills it only when absent; the length is
+ * the dispatcher's to compute from the body it serializes, as in `residency-gate.ts`.
+ */
+function providerResidencyRefusal(input: AiProviderResidencyRefusalInput): HandlerOutput {
+  const env = aiProviderResidencyRefusal(input);
+  const { "content-length": _length, ...headers } = env.response.headers;
+  return { kind: "json", status: env.body.status, headers, body: env.body };
+}
 
 export interface AiDesignContext {
   readonly store: AiManifestStore;
@@ -207,9 +227,7 @@ function readListQuery(input: Parameters<Handler>[0]): AiManifestListQuery {
 async function admitDesign(ctx: AiDesignContext, tenant: string): Promise<HandlerOutput | null> {
   if (ctx.providerAdmission !== undefined) {
     const admission = await ctx.providerAdmission(tenant);
-    if (!admission.allowed) {
-      return json(admission.status, { error: admission.error, detail: admission.detail });
-    }
+    if (!admission.allowed) return providerResidencyRefusal(admission.refusal);
   }
   // Spend gate before the LLM call: an unbounded design loop is the one way a tenant admin
   // can run up real money on this endpoint. Fail-closed (a ledger read error denies).

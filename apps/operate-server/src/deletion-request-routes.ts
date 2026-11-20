@@ -7,7 +7,11 @@ import {
   type LifecycleAction,
   type TenantLifecycleState,
 } from "@crossengin/tenant-lifecycle";
-import { lifecycleEventFor, type PostgresLifecycleEventStore } from "@crossengin/tenant-lifecycle-pg";
+import {
+  RELEASE_REASONS_RE,
+  lifecycleEventFor,
+  type PostgresLifecycleEventStore,
+} from "@crossengin/tenant-lifecycle-pg";
 import { z } from "zod";
 
 /**
@@ -73,6 +77,14 @@ export interface DeletionRequestLike {
   readonly completionSha256: string | null;
   readonly rejectedAt: string | null;
   readonly tombstoneId: string | null;
+  /**
+   * Why the last attempt handed the request back to `verified` (ADR-0453), and when the runner may
+   * claim it again (ADR-0458). Optional because a store that predates either answers neither, and
+   * an absent field is rendered `null` — *never attempted*, which is what such a request is.
+   */
+  readonly lastAttemptRefusal?: string;
+  readonly releaseCount?: number;
+  readonly retryNotBefore?: string;
 }
 
 /**
@@ -455,6 +467,16 @@ export function newRequestId(uuid: string): string {
   return id;
 }
 
+function releaseReasonsView(value: string | undefined): {
+  readonly lastAttemptRefusal: string | null;
+  readonly lastAttemptRefusalWithheld: boolean;
+} {
+  if (value === undefined) return { lastAttemptRefusal: null, lastAttemptRefusalWithheld: false };
+  return RELEASE_REASONS_RE.test(value)
+    ? { lastAttemptRefusal: value, lastAttemptRefusalWithheld: false }
+    : { lastAttemptRefusal: null, lastAttemptRefusalWithheld: true };
+}
+
 /**
  * The handle. Everything a caller needs to know whether the deletion has happened and, once it has,
  * to find the receipt — which is the whole reason the flow became asynchronous (ADR-0320, ADR-0321).
@@ -481,6 +503,15 @@ export function requestHandle(
     tombstoneId: request.tombstoneId,
     completionSha256: request.completionSha256,
     terminal: request.status === "completed" || request.status === "rejected",
+    // The retry history (ADR-0458). `lastAttemptRefusal` is surfaced only when it is `stage/reason`
+    // codes joined by "; " (`RELEASE_REASONS_RE`). This binary's release refuses any other shape, but
+    // the column admits any non-empty text and other writers exist — a hand-run UPDATE, the app role's
+    // own UPDATE grant on the table, a row from an earlier binary — so the shape is checked again here,
+    // where the value leaves, and anything else is withheld rather than echoed: free text can name a
+    // tenant, a table or a figure. Withheld is said apart from absent, which means never released.
+    ...releaseReasonsView(request.lastAttemptRefusal),
+    releaseCount: request.releaseCount ?? null,
+    retryNotBefore: request.retryNotBefore ?? null,
     // When the runner may first execute a verified request, and until then `POST …/reject` cancels
     // it (C-04). `null` before verification, after the run, and where this deployment has no
     // grace-gated runner to say it for.

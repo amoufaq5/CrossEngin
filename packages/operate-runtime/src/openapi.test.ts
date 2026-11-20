@@ -21,6 +21,7 @@ import { buildErpRetailPack } from "@crossengin/pack-erp-retail";
 import { describe, expect, it } from "vitest";
 
 import { compileOperateServer } from "./compile.js";
+import { auditUnavailable } from "./entity-audit.js";
 import {
   OPENAPI_COVERAGE_KINDS,
   OPENAPI_MEDIA_TYPE,
@@ -59,6 +60,7 @@ const emitFor = (manifest: Manifest, role: string, coverage: readonly OpenApiCov
       version: "manifest-hash",
       coverage,
       writeSurfaces: compiled.writeSurfaces,
+      residency: null,
     }),
   };
 };
@@ -149,6 +151,7 @@ const fixtureInput = (routes: readonly RouteDefinition[]): OpenApiEmitInput => (
   version: "v",
   coverage: [],
   writeSurfaces: new Map(),
+  residency: null,
 });
 
 // ---------------------------------------------------------------------------
@@ -806,5 +809,156 @@ describe("buildOpenApiDocument — the document frame", () => {
     );
     expect(new Set(refs).size).toBeGreaterThan(40);
     expect([...new Set(refs)].filter((r) => COMPONENTS.schemas[r] === undefined)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Residency (ADR-0462): declared iff a region gate is configured, from what the gate wrapped.
+// ---------------------------------------------------------------------------
+
+describe("buildOpenApiDocument — the residency gate's responses", () => {
+  const compiled = compileOperateServer(CORE, {
+    store: new InMemoryEntityStore(),
+    principalRoles: () => ({ primaryRole: "erp_admin" }),
+  });
+  const routes = compiled.routes.list();
+  const allIds = routes.map((r) => r.operationId);
+  // One operation standing in for an exempt one: the gate's own exemption rule lives in
+  // operate-server, and the emitter must answer from the set it is handed, not re-derive it.
+  const EXEMPT = "meta.schema.read";
+  const gated = new Set(allIds.filter((id) => id !== EXEMPT));
+  const emit = (residency: OpenApiEmitInput["residency"]) =>
+    buildOpenApiDocument({
+      manifest: CORE,
+      routes,
+      routeSpecs: compiled.routeSpecs,
+      title: "CrossEngin",
+      version: "manifest-hash",
+      coverage: [],
+      writeSurfaces: compiled.writeSurfaces,
+      residency,
+    });
+  const gatedDoc = (() => {
+    const d = emit({ gatedOperationIds: gated, tenantHintHeader: "x-tenant-id" }).document;
+    if (d === null) throw new Error("refused");
+    return d;
+  })();
+  const ungatedDoc = (() => {
+    const d = emit(null).document;
+    if (d === null) throw new Error("refused");
+    return d;
+  })();
+  const opsOf = (d: Readonly<Record<string, unknown>>) =>
+    documentOperations(d["paths"] as Record<string, Record<string, unknown>>);
+  const responsesOf = (op: Record<string, unknown>) => op["responses"] as Record<string, unknown>;
+
+  it("declares no 421 and no 503 anywhere, and no residency component, without a gate", () => {
+    const ops = opsOf(ungatedDoc);
+    expect(ops.length).toBeGreaterThan(300);
+    for (const { operation } of ops) {
+      expect(responsesOf(operation)["421"]).toBeUndefined();
+      expect(responsesOf(operation)["503"]).toBeUndefined();
+    }
+    const components = ungatedDoc["components"] as Record<string, Record<string, unknown>>;
+    expect(components["responses"]).toBeUndefined();
+    expect(components["schemas"]!["ResidencyProblem"]).toBeUndefined();
+    expect(JSON.stringify(ungatedDoc)).not.toContain("residency-");
+  });
+
+  it("declares the 421 on every routed operation and the 503 exactly on the gated ones", () => {
+    const ops = opsOf(gatedDoc);
+    expect(ops).toHaveLength(opsOf(ungatedDoc).length);
+    let with503 = 0;
+    for (const { operation } of ops) {
+      const id = operation["operationId"] as string;
+      const r = responsesOf(operation);
+      expect(r["421"], id).toEqual({ $ref: "#/components/responses/ResidencyMisdirected" });
+      if (gated.has(id)) {
+        expect(r["503"], id).toEqual({ $ref: "#/components/responses/UnavailableOrResidencyUnresolved" });
+        with503 += 1;
+      } else {
+        expect(r["503"], id).toBeUndefined();
+      }
+    }
+    // Non-vacuity on both arms: the exempt operation is in the document and lost its 503.
+    expect(with503).toBe(ops.length - 1);
+    expect(ops.some((o) => o.operation["operationId"] === EXEMPT)).toBe(true);
+  });
+
+  it("references one shared problem component, whose enumerations are the builder's own", () => {
+    const components = gatedDoc["components"] as Record<string, Record<string, unknown>>;
+    const responses = components["responses"] as Record<string, Record<string, unknown>>;
+    const misdirected = responses["ResidencyMisdirected"]!;
+    expect(misdirected["content"]).toEqual({
+      "application/problem+json": { schema: { $ref: "#/components/schemas/ResidencyProblem" } },
+    });
+    expect((misdirected["headers"] as Record<string, unknown>)["x-crossengin-region"]).toMatchObject({
+      required: true,
+    });
+    expect(String(misdirected["description"])).toContain("x-tenant-id");
+    const schema = components["schemas"]!["ResidencyProblem"] as {
+      properties: Record<string, { enum?: unknown[]; properties?: Record<string, { enum?: unknown[] }> }>;
+    };
+    expect(schema.properties["type"]!.enum).toEqual([
+      "https://crossengin.io/errors/residency-misdirected",
+      "https://crossengin.io/errors/residency-violation",
+      "https://crossengin.io/errors/residency-unresolved",
+    ]);
+    expect(schema.properties["status"]!.enum).toEqual([421, 403, 503]);
+    expect(schema.properties["extensions"]!.properties!["reason"]!.enum).toEqual([
+      "residency_misdirected",
+      "residency_forbidden",
+      "residency_unresolved",
+    ]);
+  });
+
+  it("declares the gated 503 as one producer among several, so the audit refusal still parses", () => {
+    // A gated write can answer `auditUnavailable` (application/json {error, detail}), the
+    // tenant-status gate's problem, or the region gate's — the 403's treatment, not a residency-only one.
+    const op = opsOf(gatedDoc).find((o) => o.operation["operationId"] === "invoice.create")!.operation;
+    expect(responsesOf(op)["503"]).toEqual({ $ref: "#/components/responses/UnavailableOrResidencyUnresolved" });
+    const components = gatedDoc["components"] as Record<string, Record<string, unknown>>;
+    const unavailable = (components["responses"] as Record<string, unknown>)["UnavailableOrResidencyUnresolved"] as {
+      description: string;
+      headers: Record<string, { required: boolean }>;
+      content: Record<string, { schema: unknown }>;
+    };
+    expect(unavailable.content["application/problem+json"]!.schema).toEqual({
+      anyOf: [{ $ref: "#/components/schemas/Problem" }, { $ref: "#/components/schemas/ResidencyProblem" }],
+    });
+    expect(unavailable.content["application/json"]!.schema).toEqual({ $ref: "#/components/schemas/HandlerError" });
+    // The audit refusal's real body satisfies the declared application/json arm.
+    const handlerError = components["schemas"]!["HandlerError"] as { required: string[]; properties: Record<string, unknown> };
+    const out = auditUnavailable(false);
+    if (out.kind !== "json") throw new Error("auditUnavailable is a json output");
+    expect(out.status).toBe(503);
+    const body = out.body as Record<string, unknown>;
+    for (const key of handlerError.required) expect(body[key]).toBeTypeOf("string");
+    expect(Object.keys(body).every((k) => k in handlerError.properties)).toBe(true);
+    // The audit 503 sends no retry-after, and after a link it says the write WAS made.
+    expect(unavailable.headers["retry-after"]!.required).toBe(false);
+    expect(unavailable.description).not.toContain("Retryable: nothing was done");
+    expect(String(body["detail"])).toContain("the write was made");
+  });
+
+  it("folds the residency 403 into the declared 403 rather than adding a status", () => {
+    const op = opsOf(gatedDoc).find((o) => o.operation["operationId"] === "invoice.list")!.operation;
+    expect(responsesOf(op)["403"]).toEqual({ $ref: "#/components/responses/ForbiddenOrResidencyViolation" });
+    const components = gatedDoc["components"] as Record<string, Record<string, unknown>>;
+    const forbidden = (components["responses"] as Record<string, unknown>)["ForbiddenOrResidencyViolation"] as {
+      content: Record<string, { schema: unknown }>;
+    };
+    expect(forbidden.content["application/problem+json"]!.schema).toEqual({
+      anyOf: [{ $ref: "#/components/schemas/Problem" }, { $ref: "#/components/schemas/ResidencyProblem" }],
+    });
+    expect(forbidden.content["application/json"]!.schema).toEqual({ $ref: "#/components/schemas/HandlerError" });
+  });
+
+  it("resolves every component reference it adds", () => {
+    const text = JSON.stringify(gatedDoc);
+    const components = gatedDoc["components"] as Record<string, Record<string, unknown>>;
+    for (const [, kind, name] of text.matchAll(/#\/components\/(schemas|responses)\/([A-Za-z0-9_]+)/g)) {
+      expect(components[kind!]![name!], `${kind!}/${name!}`).toBeDefined();
+    }
   });
 });

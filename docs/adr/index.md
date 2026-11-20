@@ -1,10 +1,10 @@
 # ADR index
 
-451 records. Generated from the ADR files themselves — regenerate rather than
+456 records. Generated from the ADR files themselves — regenerate rather than
 hand-edit, so a title or status change in an ADR cannot silently drift from this table:
 `python3 docs/adr/generate-index.py`.
 
-- **Accepted:** 372  **Proposed:** 79
+- **Accepted:** 377  **Proposed:** 79
 - ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never written;
   those milestones landed under other numbers. The gap is permanent and intentional.
 - ADR-0046 is the Phase 2 plan; **ADR-0077 is the Phase 3 plan (P1–P8)**. Phase 4 has no
@@ -463,3 +463,8 @@ hand-edit, so a title or status change in an ADR cannot silently drift from this
 | [0455](0455-a-column-key-configuration-that-cannot-open-the-stored-keys-refuses-to-boot.md) | A column-key configuration that cannot open the stored keys refuses to boot | — | Accepted | 2026-11-20 |
 | [0456](0456-an-ai-provider-is-sent-a-keyed-per-tenant-pseudonym-and-never-the-tenant-id.md) | An AI provider is sent a keyed per-tenant pseudonym, and never the tenant id | — | Accepted | 2026-11-20 |
 | [0457](0457-a-residency-refusal-has-one-shape-whichever-check-answers-it.md) | A residency refusal has one shape, whichever check answers it | — | Accepted | 2026-11-20 |
+| [0458](0458-the-article-17-pipeline-runs-as-a-dedicated-eraser-role-and-a-released-request-backs-off-before-it-is-reclaimed.md) | The Article 17 pipeline runs as a dedicated eraser role, and a released request backs off before it is reclaimed | — | Accepted | 2026-11-20 |
+| [0459](0459-a-stored-pack-release-is-re-verified-against-its-signer-and-a-publisher-signs-with-a-tool.md) | A stored pack release is re-verified against its signer, and a publisher signs with a tool | — | Accepted | 2026-11-20 |
+| [0460](0460-a-rekey-asks-the-boots-column-key-question-first-and-the-boot-survey-ceiling-is-a-bounded-flag.md) | A rekey asks the boot's column-key question first, and the boot survey's ceiling is a bounded flag | — | Accepted | 2026-11-20 |
+| [0461](0461-the-pseudonym-field-follows-the-endpoint-has-its-own-switch-and-a-lookup-tool.md) | The tenant pseudonym's field follows the endpoint, it has its own switch, and a vendor report can be mapped back | — | Accepted | 2026-11-20 |
+| [0462](0462-the-api-description-declares-the-residency-gate-it-is-served-behind-and-the-ai-provider-refusal-is-a-registered-problem.md) | The API description declares the residency gate it is served behind, and the AI provider's residency refusal is a registered problem | — | Accepted | 2026-11-20 |

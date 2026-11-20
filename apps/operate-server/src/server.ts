@@ -11,6 +11,7 @@ import type {
   CursorSealer,
   EntityWriteAuditor,
   OpenApiCoverageGap,
+  OpenApiResidencyDeclaration,
   UiUserIdentityResolver,
 } from "@crossengin/operate-runtime";
 // A value import, not a type-only one: `decideCursorDisclosure` and `surveySortableClassifiedFields`
@@ -137,6 +138,9 @@ export interface WebhookRoute {
   readonly path: string;
   handle(body: Uint8Array | null, headers: RawHttpRequest["headers"]): Promise<RawHttpResponse>;
 }
+
+/** The pre-auth hint check's header when `RegionGuardConfig.tenantHeader` names none. */
+export const DEFAULT_TENANT_HINT_HEADER = "x-tenant-id";
 
 /**
  * Data-residency routing: this instance's `region` + a tenant→profile directory. Enforced on the
@@ -358,7 +362,7 @@ export class OperateHttpServer {
    */
   private async checkResidency(raw: RawHttpRequest, requestId: string): Promise<RawHttpResponse | null> {
     if (this.regionGuard === null) return null;
-    const header = this.regionGuard.tenantHeader ?? "x-tenant-id";
+    const header = this.regionGuard.tenantHeader ?? DEFAULT_TENANT_HINT_HEADER;
     const raw0 = raw.headers[header];
     const hint = Array.isArray(raw0) ? raw0[0] : raw0;
     if (hint === undefined || hint === "") return null;
@@ -826,8 +830,14 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
     options.sessionStanding !== undefined
       ? withSessionStandingCheck(principalResolver, options.sessionStanding)
       : principalResolver;
+  // What the region gate wrapped, filled below once it has run and read by the API description on
+  // its first request (ADR-0462). Passed unconditionally rather than in a conditional spread, so the
+  // forwarding cannot drop it: on a deployment with no gate it stays `null`, which is the claim the
+  // document then makes.
+  let residencyDeclaration: OpenApiResidencyDeclaration | null = null;
   const gateway = buildOperateGateway(options.manifest, {
     store: options.store,
+    openApiResidency: () => residencyDeclaration,
     principalRoles: wiring.principalRoles,
     principalResolver: standingChecked,
     opaqueTokenLookup: wiring.opaqueTokenLookup,
@@ -907,10 +917,14 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
   // pre-auth `checkResidency` below stays as advisory routing on the unverified hint; this is the
   // check on the tenant the auth stage verified.
   if (options.regionGuard !== undefined) {
-    applyResidencyGate(gateway.handlers, {
+    const gated = applyResidencyGate(gateway.handlers, {
       region: options.regionGuard.region,
       directory: options.regionGuard.directory,
     });
+    residencyDeclaration = {
+      gatedOperationIds: new Set(gated),
+      tenantHintHeader: options.regionGuard.tenantHeader ?? DEFAULT_TENANT_HINT_HEADER,
+    };
   }
   const httpServer = new OperateHttpServer({
     gateway,

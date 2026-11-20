@@ -271,20 +271,51 @@ RLS-bypassing role is one of its refusals above.
   The boot line `[deletion] Article 17 erasure runs as …` says which role, whether it is a superuser,
   and whether a deletion can complete there — by running the erasure's own probe, which also names a
   missing or unscoped target table, rather than trusting the variable.
-  **Which role to name is a trade-off, stated plainly.** The owner (`POSTGRES_USER` /
-  `POSTGRES_PASSWORD`) works for all three surfaces, and in the official image it is a **superuser**:
-  setting it puts a superuser credential in the internet-facing `api` process, so a compromise of
-  that process yields the whole database server (`COPY … TO PROGRAM` included), not only the ability
-  to bypass row-level security. A dedicated role created by hand as `NOSUPERUSER BYPASSRLS`, with
-  at least `SELECT`/`DELETE` on the erasure's targets and `INSERT` on `meta.tenant_tombstones`,
-  `meta.forensic_chain_entries` and `meta.tenant_lifecycle_events` (a grant set not verified live),
-  confines that to the database's rows — but it cannot `DROP SCHEMA` a tenant schema it does not own, so with per-tenant manifests a
-  deletion that reaches the schema eraser fails mid-transaction and is left `in_progress` for
-  reconciliation. `app-role` does not create such a role; ADR-0453 records it as open.
+  **Name the dedicated role, `crossengin_eraser`** (ADR-0458): set
+  `DELETION_PGUSER=crossengin_eraser` and a `DELETION_PGPASSWORD` of its own (`openssl rand -hex 24`),
+  and the one-shot `eraser-role` step provisions it on every `up` as `NOSUPERUSER BYPASSRLS`, owning
+  nothing, a member of no role, and holding exactly what the pipeline's statements use: `SELECT` and
+  `DELETE` on the tables an erasure empties (every tenant-scoped `meta` table the catalog does not
+  fence against a tenant delete, the six it fences against a tenant but the erasure still empties —
+  `meta.crypto_audit`, the three `dr_*` execution and readiness tables, `meta.notification_suppressions`
+  and `meta.slo_enforcement_actions` — plus the boot schema's entity tables); `SELECT` on the two statutory
+  tables it reads for its retention claim (`meta.invoices`, `meta.tenant_credits`), on `meta.tenants`
+  and on `meta.forensic_chain_entries`; and `INSERT` on `meta.tenant_tombstones`,
+  `meta.forensic_chain_entries` and `meta.tenant_lifecycle_events`. Nothing else: no `UPDATE`, no read
+  of `meta.users` or of any other table, and no default privilege, so a table `migrate` adds later is
+  ungranted until the step re-runs. `BYPASSRLS` takes the `DELETE` fences out of play for this role,
+  which is why the absence of a grant is the only thing protecting the retained tables from it. It
+  refuses, by name and before touching a role, a password that is empty, the placeholder, shorter
+  than 16 characters or equal to another role's; a name equal to the app role; **any** membership the
+  role holds (a member of a `SUPERUSER` role can `SET ROLE` to it, a member of the app role or of
+  `pg_write_all_data` inherits `UPDATE` or `DELETE`); and any role that is a member of it (which could
+  `SET ROLE` past row-level security). The grants are recomputed from the catalog on every `up`, so a
+  table `migrate` added since is granted and one fenced since loses its `DELETE`; until that re-run
+  the `[deletion]` boot line names the missing grant and a deletion is refused
+  `table_privilege_missing` before anything is destroyed and handed back for a retry. Its line reads
+  `a dedicated role` at info level, and a role holding more than this — a membership, an owned
+  table, an `UPDATE`, a `DELETE` on a table the erasure retains — reads `broader than the erasure needs` at warning level.
+  **What it cannot do is `DROP SCHEMA` a per-tenant `t_<hex>` schema**, because that needs the
+  schema's owner and membership is refused: on a deployment with `--per-tenant-manifests` (which
+  creates them, on `--store pg-columns`) or `--tenant-erasure-routes` the boot line says so, and the
+  schema-erasure routes answer `503 schema_not_droppable` for an existing schema rather than failing
+  partway. Such a deployment runs its deletions as the owner. The owner (`POSTGRES_USER`) still works
+  for all three surfaces and the step leaves it alone, but in the official image it is a
+  **superuser**, so a compromise of the internet-facing `api` process then yields the whole database
+  server (`COPY … TO PROGRAM` included); the boot line warns of it on every start.
+  **Unsetting or renaming `DELETION_PGUSER` retires the role the step provisioned** rather than
+  leaving a `LOGIN BYPASSRLS` credential behind: the step marks the role it creates, and on the next
+  `up` any marked role the variable no longer names is made `NOLOGIN NOBYPASSRLS` with every grant
+  revoked (not dropped, which is irreversible). Naming it again re-adopts it.
   Unset, a deletion refused for a cause the deployment can fix *before anything is destroyed* (a
   confined role, a missing table) releases its request back to `verified` — the refusal recorded in
   `last_attempt_refusal`, the deadline unchanged, the tenant still `pending_deletion` — so it is
-  retried once the cause is fixed, without the data subject resubmitting. A refusal raised after the
+  retried once the cause is fixed, without the data subject resubmitting — no sooner than the backoff
+  in `retry_not_before` (one minute, doubling per release up to an hour, ADR-0458, and never past the
+  point a day before the deadline), and ahead of any request with a later deadline once it has
+  elapsed. The read route shows `lastAttemptRefusal`, `releaseCount` and `retryNotBefore`;
+  `lastAttemptRefusal` is shown only when it is a list of refusal codes, and is otherwise withheld
+  with `lastAttemptRefusalWithheld: true`. A refusal raised after the
   erasure has begun deleting is rejected, as before, because retrying it would repeat a full erasure
   and rollback on every runner tick. None of the deletion flags is on the shipped command.
 - **The workflow engine and the job fleet** (`--workflow-workers`, `--workflow-cancel-role`) do
@@ -505,12 +536,18 @@ reading once after the first `up`:
   `CURSOR_ENCRYPTION_SECRET` is set, and names the field either way.
 - **`[ai-design] tenant pseudonym: …`** — whether the AI Architect's model provider can
   tell tenants apart (only with `--ai-design`). `CURSOR_ENCRYPTION_SECRET` has a second
-  purpose (ADR-0456): it keys the opaque per-tenant id sent as Anthropic `metadata.user_id`
-  or the OpenAI-compatible `user` field, so a vendor can attribute abuse to one tenant
+  purpose (ADR-0456): it keys the opaque per-tenant id sent as Anthropic `metadata.user_id`,
+  as `safety_identifier` on `api.openai.com`, or as the `user` field on an OpenAI-compatible
+  server (ADR-0461 — the line names which), so a vendor can attribute abuse to one tenant
   without learning the tenant id. `keyed` means it is sent; `absent` means the secret is
-  unset and no tenant identifier is sent at all — never the raw id. Rotating the secret
-  therefore also gives every tenant a new identity at the vendor, resetting its per-tenant
-  abuse history, which is a cost beside the cursor 400 to weigh before rotating.
+  unset and no tenant identifier is sent at all — never the raw id; `off` means
+  `--ai-tenant-pseudonym off` was passed, which sends none while the secret goes on sealing
+  cursors. Rotating the secret therefore also gives every tenant a new identity at the
+  vendor, resetting its per-tenant abuse history, which is a cost beside the cursor 400 to
+  weigh before rotating. When a vendor reports a flagged request by its `ctp_…` id,
+  `docker compose exec api node apps/operate-server/dist/bin/operate-server.js
+  ai-pseudonym-lookup <ctp_…>` names the tenant (it reads the secret from the container's
+  environment and prints it nowhere).
 - **`[read-state] per-viewer notification read state mounted for roles: …`** — who gets a
   real unread count. This is not an exposure line but a *silence* line, and it is here
   because the failure is invisible from the UI: the client catches a refusal and falls back

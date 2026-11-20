@@ -1946,6 +1946,16 @@ describe("table column shapes", () => {
     expect(released?.notNull).toBeUndefined();
     expect(released?.default).toBeUndefined();
     expect(released?.check).toBe("char_length(last_attempt_refusal) >= 1");
+    // ADR-0458: the release's backoff pair, nullable with no default for the same reason.
+    const count = col("release_count");
+    expect(count?.type).toBe("INTEGER");
+    expect(count?.notNull).toBeUndefined();
+    expect(count?.default).toBeUndefined();
+    expect(count?.check).toBe("release_count >= 1");
+    const notBefore = col("retry_not_before");
+    expect(notBefore?.type).toBe("TIMESTAMPTZ");
+    expect(notBefore?.notNull).toBeUndefined();
+    expect(notBefore?.default).toBeUndefined();
   });
 
   it("META_GDPR_DELETION_REQUESTS is readable after its tenant is gone, by SELECT only", () => {

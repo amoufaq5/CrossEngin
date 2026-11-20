@@ -14,6 +14,7 @@ import {
   type SchemaSurveyLike,
   type TenantErasureEvent,
   type TenantErasureRoutesContext,
+  SchemaNotDroppableByDeletionRole,
 } from "./tenant-erasure-routes.js";
 
 const TENANT = "3f2a1b4c-5d6e-4f70-8192-a3b4c5d6e7f8";
@@ -370,6 +371,27 @@ describe("the erase route", () => {
     expect(res.status).toBe(200);
     expect(res.body["alreadyAbsent"]).toBe(true);
     expect(res.body["scope"]).toEqual({ schemas: [], tables: [], rowCount: 0, storageBytes: 0 });
+  });
+
+  it("names a deletion role that cannot drop the tenant's schema, on both routes, and records nothing (ADR-0458)", async () => {
+    const refuse = (): never => {
+      throw new SchemaNotDroppableByDeletionRole(TENANT);
+    };
+    const { ctx, events, eraseCalls } = harness({}, { survey: refuse, erasure: refuse });
+    for (const [op, input] of [
+      [SURVEY, {}],
+      [ERASE, { parsedBody: BODY }],
+    ] as const) {
+      const res = await call(ctx, op, input);
+      expect(res.status, op).toBe(503);
+      expect(res.body["error"], op).toBe("schema_not_droppable");
+      expect(String(res.body["detail"])).toContain("DELETION_PGUSER");
+      // Names the remedy and nothing of the schema or the tenant.
+      expect(JSON.stringify(res.body)).not.toContain(SCHEMA);
+      expect(JSON.stringify(res.body)).not.toContain(TENANT);
+    }
+    expect(events).toEqual([]);
+    expect(eraseCalls).toHaveLength(1);
   });
 
   it("503s an eraser throw as 'nothing was changed', since the guard rolls back", async () => {

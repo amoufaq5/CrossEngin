@@ -57,6 +57,8 @@ services:
         condition: service_completed_successfully
       app-role:
         condition: service_completed_successfully
+      eraser-role:
+        condition: service_completed_successfully
       document-indexes:
         condition: service_completed_successfully
       ai-pull:

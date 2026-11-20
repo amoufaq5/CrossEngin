@@ -19,9 +19,11 @@ import type {
 
 import {
   buildOpenAiRequest,
+  endUserFieldOf,
   extractText,
   extractToolCalls,
   normalizeUsage,
+  type OpenAiEndUserField,
   type OpenAiResponse,
 } from "./chat-api.js";
 import { OpenAiError, fromHttpResponse, fromNetworkError } from "./errors.js";
@@ -53,16 +55,65 @@ const UNKNOWN_MODEL_PRICING: OpenAiModelPricing = {
   outputUsdPerMillion: 0,
 };
 
-function normalizeBaseUrl(baseUrl: string): string {
-  return baseUrl.trim().replace(/\/+$/, "").toLowerCase();
+/**
+ * INVARIANT: OpenAI's model catalogue describes OpenAI's own API. Point the client anywhere else —
+ * a different engine (Ollama serving `qwen2.5:14b`) or a proxy in front of OpenAI (OpenRouter
+ * serving `anthropic/claude-3.5-sonnet`) — and that catalogue is no longer authoritative, so it must
+ * not gate model ids.
+ *
+ * "OpenAI's own API" is an `https` URL on port 443, with no path, whose host is `api.openai.com` or
+ * one of its subdomains — the regional data-residency hosts (`eu.api.openai.com`) serve the same
+ * models and the same request fields, and the domain is OpenAI's, so nothing else can sit there.
+ * Decided from the parsed URL rather than a string compare, so case and a trailing slash cannot move
+ * it (ADR-0461). Anything unparseable is custom: the direction that keeps `user`, which every
+ * OpenAI-compatible server knows. Exported because the server classifies the endpoint for its boot
+ * line with this same predicate rather than a second spelling of it.
+ */
+export function isCustomOpenAiBaseUrl(baseUrl: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(baseUrl.trim());
+  } catch {
+    return true;
+  }
+  const host = parsed.hostname;
+  const openAiHost = host === "api.openai.com" || host.endsWith(".api.openai.com");
+  const bare = parsed.pathname === "/" && parsed.search === "" && parsed.hash === "";
+  return !(
+    parsed.protocol === "https:" &&
+    parsed.port === "" &&
+    parsed.username === "" &&
+    parsed.password === "" &&
+    openAiHost &&
+    bare
+  );
 }
 
-/** INVARIANT: OpenAI's model catalogue describes `api.openai.com`. Point the
- * client anywhere else — a different engine (Ollama serving `qwen2.5:14b`) or a
- * proxy in front of OpenAI (OpenRouter serving `anthropic/claude-3.5-sonnet`) —
- * and that catalogue is no longer authoritative, so it must not gate model ids. */
-function isCustomBaseUrl(baseUrl: string): boolean {
-  return normalizeBaseUrl(baseUrl) !== normalizeBaseUrl(OPENAI_API_BASE_URL);
+/** The two request bodies the pseudonym rides on, which do not share one field (ADR-0461). */
+export type OpenAiEndUserApi = "chat" | "embeddings";
+
+/**
+ * Which body field carries the tenant pseudonym (ADR-0456) for a request to `baseUrl`'s `api` —
+ * the one predicate; the provider and the server's boot line both read it.
+ *
+ * Chat on `api.openai.com` sends `safety_identifier`, which OpenAI documents as the replacement for
+ * the deprecated `user` on Chat Completions. Everywhere else sends `user`:
+ *
+ * - **A custom base URL** is an OpenAI-*compatible* server (vLLM, Ollama, LM Studio) or a gateway,
+ *   and `user` is the field that ecosystem knows. `safety_identifier` there is at best ignored and
+ *   at worst refused as an unknown argument, and which it is cannot be told from the URL — so the
+ *   arm keyed on "custom" is the one that cannot be wrong about a server it does not know.
+ * - **Embeddings, on any endpoint.** The deprecation is documented for Chat Completions and
+ *   Responses; the embeddings endpoint documents `user` and not `safety_identifier`, and OpenAI
+ *   answers an argument it does not recognise with a 400. Sending the newer name there would turn a
+ *   working embedding call into a refusal to gain nothing.
+ *
+ * Neither choice changes what is sent — the same `ctp_<32 hex>`, refused by the same
+ * `tenantPseudonymForWire` — only the key it is sent under. Not verified against a live vendor.
+ */
+export function openAiEndUserField(baseUrl: string, api: OpenAiEndUserApi): OpenAiEndUserField {
+  if (api === "embeddings") return "user";
+  return isCustomOpenAiBaseUrl(baseUrl) ? "user" : "safety_identifier";
 }
 
 export type FetchLike = (
@@ -130,7 +181,7 @@ export class OpenAiProvider implements LlmProvider {
       throw new Error("OpenAiProvider: apiKey is required");
     }
     this.baseUrl = opts.baseUrl ?? OPENAI_API_BASE_URL;
-    this.customBaseUrl = isCustomBaseUrl(this.baseUrl);
+    this.customBaseUrl = isCustomOpenAiBaseUrl(this.baseUrl);
     if (
       opts.defaultModel.length === 0 ||
       (!this.customBaseUrl && !isOpenAiChatModel(opts.defaultModel))
@@ -167,12 +218,27 @@ export class OpenAiProvider implements LlmProvider {
     return this.baseUrl;
   }
 
+  /**
+   * Whether this provider targets something other than OpenAI's own API — the same predicate that
+   * chooses the end-user field, so the server's boot line cannot class an endpoint one way while the
+   * requests are built the other (ADR-0461).
+   */
+  get isCustomEndpoint(): boolean {
+    return this.customBaseUrl;
+  }
+
+  /** The field a chat request carries the tenant pseudonym under; the boot line names it. */
+  get endUserField(): OpenAiEndUserField {
+    return openAiEndUserField(this.baseUrl, "chat");
+  }
+
   async *complete(req: CompletionRequest): AsyncIterable<CompletionChunk> {
     const model = this.resolveModel(req.model);
     const built = buildOpenAiRequest(req, {
       defaultModel: this.defaultModel,
       defaultMaxTokens: this.defaultMaxTokens,
       stream: true,
+      endUserField: this.endUserField,
     });
     const watchdog = startInactivityWatchdog(this.inactivityTimeoutMs);
     try {
@@ -196,12 +262,13 @@ export class OpenAiProvider implements LlmProvider {
 
   async embed(req: EmbeddingRequest): Promise<EmbeddingResponse> {
     const model = this.resolveEmbeddingModel(req.model);
-    // The embedding body carries the pseudonym under the same rule as the chat one (ADR-0456).
+    // The embedding body carries the pseudonym under the same refusal as the chat one (ADR-0456),
+    // and under `user` on every endpoint (ADR-0461; see `openAiEndUserField`).
     const pseudonym = tenantPseudonymForWire(req);
     const { response, text } = await this.sendForText("/v1/embeddings", {
       model,
       input: req.texts,
-      ...(pseudonym !== undefined ? { user: pseudonym } : {}),
+      ...endUserFieldOf(openAiEndUserField(this.baseUrl, "embeddings"), pseudonym),
     });
     let parsed: OpenAiEmbeddingApiResponse;
     try {
@@ -234,6 +301,7 @@ export class OpenAiProvider implements LlmProvider {
       defaultModel: this.defaultModel,
       defaultMaxTokens: this.defaultMaxTokens,
       stream: false,
+      endUserField: this.endUserField,
     });
     const { response, text } = await this.sendForText("/v1/chat/completions", built);
     try {

@@ -4087,6 +4087,18 @@ export const META_GDPR_DELETION_REQUESTS: TableDefinition = {
       check: "char_length(last_attempt_refusal) >= 1",
     },
     /**
+     * The retry backoff a release writes (ADR-0458): how many attempts have been released, and the
+     * earliest instant the scheduler may claim the request again. Both nullable with no default, for
+     * `last_attempt_refusal`'s reason — every stored row predates them, and a default would claim a
+     * release nobody made. The pair is written together; the contract refuses either alone.
+     */
+    {
+      name: "release_count",
+      type: "INTEGER",
+      check: "release_count >= 1",
+    },
+    { name: "retry_not_before", type: "TIMESTAMPTZ" },
+    /**
      * The tombstone that completed this request. Without it a `completed` request names no proof:
      * `completion_sha256` commits to one but a digest is not a lookup key, so the record of the
      * deletion and the record of the request for it could not be joined (ADR-0321).

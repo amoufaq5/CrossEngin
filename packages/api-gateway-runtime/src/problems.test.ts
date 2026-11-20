@@ -2,6 +2,9 @@ import { PROBLEM_TYPES, ProblemDetailsResponseSchema } from "@crossengin/api-gat
 import { describe, expect, it } from "vitest";
 
 import {
+  AI_PROVIDER_RESIDENCY_REFUSALS,
+  AI_PROVIDER_RESIDENCY_UNRESOLVED_DETAIL,
+  aiProviderResidencyRefusal,
   authenticationRequired,
   forbidden,
   gatewayTimeout,
@@ -258,5 +261,46 @@ describe("residencyRefusal", () => {
     expect(new Set(specs.map((s) => s.status)).size).toBe(specs.length);
     expect(new Set(specs.map((s) => s.key)).size).toBe(specs.length);
     expect(new Set(specs.map((s) => s.reason)).size).toBe(specs.length);
+  });
+});
+
+describe("aiProviderResidencyRefusal", () => {
+  it("answers 403 under its own type, with the old error code as an extension", () => {
+    const env = aiProviderResidencyRefusal({ decision: "forbidden", detail: "profile 'eu-only' does not permit it" });
+    expect(env.response.status).toBe(403);
+    expect(env.body.type).toBe(PROBLEM_TYPES.ai_provider_residency_forbidden);
+    expect(env.body.extensions).toEqual({ error: "ai_provider_residency_forbidden" });
+    expect(env.response.headers["content-type"]).toBe("application/problem+json");
+    expect(env.response.headers["x-crossengin-region"]).toBeUndefined();
+    expect(ProblemDetailsResponseSchema.parse(env.body)).toEqual(env.body);
+  });
+
+  it("separates an undeclared provider from a forbidden one by type, not only by code", () => {
+    const env = aiProviderResidencyRefusal({ decision: "undeclared", detail: "no --ai-provider-ref" });
+    expect(env.response.status).toBe(403);
+    expect(env.body.type).toBe(PROBLEM_TYPES.ai_provider_residency_undeclared);
+    expect(env.body.extensions).toEqual({ error: "ai_provider_residency_undeclared" });
+  });
+
+  it("answers 503 with a fixed sentence and the gate's retry-after", () => {
+    const env = aiProviderResidencyRefusal({ decision: "unresolved" });
+    expect(env.response.status).toBe(503);
+    expect(env.body.type).toBe(PROBLEM_TYPES.ai_provider_residency_unresolved);
+    expect(env.body.detail).toBe(AI_PROVIDER_RESIDENCY_UNRESOLVED_DETAIL);
+    expect(env.body.extensions).toEqual({ error: "ai_residency_unresolved", retryAfterSeconds: 5 });
+    expect(env.response.headers["retry-after"]).toBe("5");
+    expect(ProblemDetailsResponseSchema.parse(env.body)).toEqual(env.body);
+  });
+
+  it("never answers with a region-routing type or status", () => {
+    // The provider is a deployment-wide choice, so a 421 would send a client to a region that
+    // refuses it the same way; and a region type would name the wrong question.
+    const regionTypes = new Set<string>(Object.values(RESIDENCY_REFUSALS).map((s) => PROBLEM_TYPES[s.key]));
+    for (const spec of Object.values(AI_PROVIDER_RESIDENCY_REFUSALS)) {
+      expect(spec.status).not.toBe(421);
+      expect(regionTypes.has(PROBLEM_TYPES[spec.key])).toBe(false);
+    }
+    const keys = Object.values(AI_PROVIDER_RESIDENCY_REFUSALS).map((s) => s.key);
+    expect(new Set(keys).size).toBe(keys.length);
   });
 });

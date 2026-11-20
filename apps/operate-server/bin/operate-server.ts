@@ -42,8 +42,14 @@ import { installProcessLifecycle } from "../src/process-lifecycle.js";
 
 /** The time a shutdown may spend past the listener's grace on the drains and the pool's close. */
 const SHUTDOWN_DRAIN_ALLOWANCE_MS = 2_000;
-import { formatRekeyResult, formatRekeySurvey, formatRewrapKek } from "../src/rekey.js";
+import { formatRekeyColumnKeys, formatRekeyResult, formatRekeySurvey, formatRewrapKek } from "../src/rekey.js";
 import { formatSetCredentialReport, runSetCredential } from "../src/set-credential.js";
+import {
+  aiPseudonymLookupHelpText,
+  formatAiPseudonymLookupReport,
+  parseAiPseudonymLookupArgs,
+  runAiPseudonymLookup,
+} from "../src/ai-pseudonym-lookup.js";
 
 const CLI_VERSION = "0.0.0";
 
@@ -269,6 +275,8 @@ async function runRekeyCommand(argv: readonly string[]): Promise<number> {
   if (options.format === "json") {
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   } else {
+    // The column-key pre-flight first (ADR-0460): on a refusal it is the only thing that ran.
+    process.stdout.write(`${formatRekeyColumnKeys(report.keyConsistency)}\n`);
     // The survey either way, including after a completed rekey: it is what names the columns and
     // the row counts, and a result printed alone would not say what was examined.
     if (report.rewrap !== null) {
@@ -309,6 +317,31 @@ async function runSetCredentialCommand(argv: readonly string[]): Promise<number>
   return report.ok ? 0 : 1;
 }
 
+/** `ai-pseudonym-lookup`: a vendor report's `ctp_` pseudonym back to the tenant (ADR-0461). */
+async function runAiPseudonymLookupCommand(argv: readonly string[]): Promise<number> {
+  let options;
+  try {
+    options = parseAiPseudonymLookupArgs(argv);
+  } catch (err) {
+    if (err instanceof CliUsageError) {
+      process.stderr.write(`error: ${err.message}\n\n${aiPseudonymLookupHelpText}`);
+      return 2;
+    }
+    throw err;
+  }
+  if (options.help) {
+    process.stdout.write(aiPseudonymLookupHelpText);
+    return 0;
+  }
+  const report = await runAiPseudonymLookup(options);
+  process.stdout.write(
+    options.format === "json"
+      ? `${JSON.stringify(report, null, 2)}\n`
+      : `${formatAiPseudonymLookupReport(report)}\n`,
+  );
+  return report.ok ? 0 : 1;
+}
+
 async function main(): Promise<number> {
 
   const argv = process.argv.slice(2);
@@ -332,6 +365,9 @@ async function main(): Promise<number> {
   }
   if (argv[0] === "set-credential") {
     return runSetCredentialCommand(argv.slice(1));
+  }
+  if (argv[0] === "ai-pseudonym-lookup") {
+    return runAiPseudonymLookupCommand(argv.slice(1));
   }
 
   let options;

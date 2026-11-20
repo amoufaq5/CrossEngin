@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 23,849 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 24,075 tests**, all green, no
 type errors — and since ADR-0382 that is **checked by CI and a pre-commit hook** rather than only
 when someone runs the sweep by hand. The test figure moves every increment, so re-derive it from a
 sweep rather than quoting this line: `pnpm -r test` and sum the `Tests N passed` lines (88 packages
@@ -15918,6 +15918,52 @@ verified live on PG 16 in compose order with the API as `crossengin_app`:
   unreachable from any stored profile (the profile schema forbids it) and is covered by unit tests
   only.
 
+**The engineering follow-ups of that batch: five slices (ADR-0458 – ADR-0462)**, same method —
+implemented, adversarially reviewed and fixed, one full build, then verified live on PG 16 in compose
+order with the API as `crossengin_app`:
+
+- **ADR-0458, the deletion credential is a dedicated role.** `crossengin_eraser` (`NOSUPERUSER
+  BYPASSRLS`, owning nothing, a member of no role) is provisioned by a one-shot `eraser-role` compose
+  step on every `up` from `deploy/postgres/roles/eraser-role.sql`, and `DELETION_PGUSER` names it.
+  Its grants are recomputed from the catalog in one transaction: `SELECT`+`DELETE` on the erasure's
+  targets, `INSERT` on the three append tables, no `UPDATE` anywhere, no `DELETE` on a retained table.
+  **The live run found the grant set wrong in a way the review could not**: it assumed *fenced =
+  retained*, but six tables are fenced against a *tenant* delete (`tenantUndeletableRecord`) and still
+  emptied by the erasure, so every deletion was refused `table_privilege_missing` — fixed, with a fence
+  test keeping the script's named list equal to `TENANT_UNDELETABLE_TABLES`. A deletion as the eraser
+  then completed on both stores with `verify-chain` exit 0. The `[deletion]` line now names four
+  postures (dedicated, superuser, superuser-by-membership, broader), and a missing grant is a named
+  refusal before the first `DELETE`, so it is released rather than stranded. A released request backs
+  off (`release_count`, `retry_not_before`, 60 s doubling to 1 h, capped by the Article 12(3)
+  deadline) and is claimed in deadline order; the request routes carry `lastAttemptRefusal`,
+  `releaseCount` and `retryNotBefore`. Found after the workflow and fixed: a **refused** run of the role
+  step retired the provisioned eraser before refusing, so a mistyped variable stopped every deletion;
+  the refusals now run first. Open: the eraser cannot `DROP SCHEMA` a per-tenant `t_<hex>` schema,
+  the grant clause covers the `public` boot schema only, and granting `BYPASSRLS` needs a superuser
+  runner (a managed provider refuses the step).
+- **ADR-0459, a stored release is re-verified against its signer.** Versions are listed with
+  `releaseVerification {verified, refusal}` and a row that fails is refused at submit-for-review, review
+  and publish (`stored_release_unverified`) and at install; the two-column rewrite ADR-0454 measured is
+  now `signature_invalid`, logged once with no key material. `crossengin pack sign` builds the release
+  envelope with the server's own signer, the seed from `PACK_SIGNING_KEY` only. **Found live, not
+  fixed**: a review by a principal-less api-key is an unclassified **500**, because
+  `meta.pack_versions.security_reviewer`/`published_by` reference `meta.users ON DELETE RESTRICT` —
+  ADR-0335's actor-column class, latent behind `--pack-catalog`.
+- **ADR-0460, a rekey asks the boot's key question first.** `operate-server rekey` (and `--plan`,
+  `--rewrap-kek`, `--format json`) runs the same column-key consistency survey for the named tenant and
+  refuses before any write when the configured ring cannot open its key; `--column-key-survey-ceiling`
+  (1000..100000, default 10000) bounds the boot survey, and an incomplete survey names the flag.
+- **ADR-0461, the pseudonym follows the endpoint.** `api.openai.com` gets `safety_identifier`; a custom
+  base URL and the local provider keep `user`. `--ai-tenant-pseudonym keyed|off` decouples it from
+  cursor sealing, and `operate-server ai-pseudonym-lookup <ctp_…>` maps a vendor-reported pseudonym back
+  to a tenant (a confined read answers `read_confined`, never `no_match`). The `safety_identifier` arm
+  is verified at boot only, against no real vendor.
+- **ADR-0462, the API description declares the residency gate.** Under `--region` the OpenAPI document
+  declares the 421 (with `x-crossengin-region`), the 403 and the 503 as shared problem components on
+  exactly the operations the gate covers, and none of them without a gate; the AI-provider residency
+  refusal is a registered problem keeping its code in `extensions.error`. Open: the tenant-status gate's
+  403/503 are still undeclared, same class.
+
 ### Demoted, with the measurement that demoted them
 
 Kept so nobody re-raises them. A **relaxed `cascade` undercount** is vacuous — all seven packs relax
@@ -15941,7 +15987,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 451 records; 372 Accepted, 79 Proposed (the
+title or status change cannot drift. 456 records; 377 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

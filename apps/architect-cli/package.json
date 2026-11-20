@@ -40,11 +40,13 @@
     "@crossengin/crypto": "workspace:*",
     "@crossengin/kernel": "workspace:*",
     "@crossengin/kernel-pg": "workspace:*",
+    "@crossengin/marketplace": "workspace:*",
     "@crossengin/operate-runtime": "workspace:*",
     "zod": "^3.23.0"
   },
   "devDependencies": {
     "@crossengin/config": "workspace:*",
+    "@crossengin/marketplace-runtime": "workspace:*",
     "@crossengin/testing": "workspace:*",
     "@types/node": "^22.0.0",
     "typescript": "^5.6.0",

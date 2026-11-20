@@ -436,6 +436,93 @@ describe("OperateHttpServer — data-residency edge routing", () => {
   });
 });
 
+describe("the API description declares the residency gate it is served behind (ADR-0462)", () => {
+  // A tenant with no profile, so the gate serves the document request itself.
+  const OTHER = "00000000-0000-4000-8000-000000000002";
+  const keys = [parseApiKeySpec(`key-other:store_manager:${OTHER}`)];
+  const PLATFORM_ROUTE = {
+    id: "rt_platform_ping",
+    operationId: "platform.ping",
+    method: "GET" as const,
+    pathSegments: [
+      { kind: "literal" as const, value: "v1" },
+      { kind: "literal" as const, value: "platform" },
+      { kind: "literal" as const, value: "ping" },
+    ],
+    apiVersion: "v1" as const,
+    isDeprecated: false,
+    deprecatedSince: null,
+    sunsetAt: null,
+    successorOperationId: null,
+    requiredScopes: [],
+    rateLimitPolicyId: null,
+    idempotencyRequired: false,
+    requestSchemaSha256: null,
+    responseSchemaSha256: null,
+  };
+
+  async function documentOf(withGate: boolean): Promise<Record<string, unknown>> {
+    const { httpServer } = buildOperateHttpServer({
+      edgeTrust: "untrusted",
+      manifest,
+      store: new InMemoryEntityStore(),
+      apiKeys: keys,
+      extraRoutes: [{ route: PLATFORM_ROUTE, handler: async () => ({ kind: "json", status: 200, body: {} }) }],
+      ...(withGate
+        ? {
+            regionGuard: {
+              region: "us-east" as never,
+              directory: new InMemoryTenantResidencyDirectory(),
+              tenantHeader: "x-hint",
+            },
+          }
+        : {}),
+    });
+    const res = await httpServer.dispatch(req("GET", "/v1/meta/openapi", "key-other"), null);
+    expect(res.status).toBe(200);
+    return parse(res.body);
+  }
+
+  function responsesByOperation(doc: Record<string, unknown>): Map<string, Record<string, unknown>> {
+    const out = new Map<string, Record<string, unknown>>();
+    for (const item of Object.values(doc["paths"] as Record<string, Record<string, Record<string, unknown>>>)) {
+      for (const op of Object.values(item)) {
+        out.set(op["operationId"] as string, op["responses"] as Record<string, unknown>);
+      }
+    }
+    return out;
+  }
+
+  it("declares the 421 everywhere and the 503 on every operation but the exempt platform one", async () => {
+    const ops = responsesByOperation(await documentOf(true));
+    expect(ops.size).toBeGreaterThan(100);
+    const exempt = ops.get("platform.ping");
+    expect(exempt?.["421"]).toEqual({ $ref: "#/components/responses/ResidencyMisdirected" });
+    expect(exempt?.["503"]).toBeUndefined();
+    for (const [id, responses] of ops) {
+      expect(responses["421"], id).toBeDefined();
+      if (id !== "platform.ping") {
+        expect(responses["503"], id).toEqual({ $ref: "#/components/responses/UnavailableOrResidencyUnresolved" });
+      }
+    }
+  });
+
+  it("names the configured hint header, not the default", async () => {
+    const doc = await documentOf(true);
+    const responses = (doc["components"] as Record<string, Record<string, Record<string, unknown>>>)["responses"]!;
+    expect(String(responses["ResidencyMisdirected"]!["description"])).toContain("`x-hint`");
+  });
+
+  it("declares none of it on the same server without a region gate", async () => {
+    const doc = await documentOf(false);
+    for (const [id, responses] of responsesByOperation(doc)) {
+      expect(responses["421"], id).toBeUndefined();
+      expect(responses["503"], id).toBeUndefined();
+    }
+    expect((doc["components"] as Record<string, unknown>)["responses"]).toBeUndefined();
+  });
+});
+
 /**
  * The sibling of `compile.test.ts`' option-forwarding fence, one hop out.
  *

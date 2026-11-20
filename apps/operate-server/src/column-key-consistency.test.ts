@@ -16,6 +16,8 @@ import { describe, expect, it } from "vitest";
 import {
   COLUMN_KEY_CONDITIONS,
   COLUMN_KEY_CONDITION_EFFECT,
+  COLUMN_KEY_SURVEY_CEILING_BOUNDS,
+  COLUMN_KEY_SURVEY_CEILING_FLAG,
   ColumnKeyConfigurationRefused,
   PER_TENANT_SURVEY_CEILING,
   SAMPLES_PER_GROUP,
@@ -23,7 +25,9 @@ import {
   checkKeylessCiphertext,
   formatColumnKeyConsistency,
   keylessCiphertextSecret,
+  surveyColumnKeyConsistency,
   surveyDataKeyRows,
+  type ColumnKeySurveyScope,
   type DataKeyRowGroup,
   type DataKeyRowSample,
   type DataKeyRowSurvey,
@@ -106,12 +110,15 @@ const NO_CIPHERTEXT: KeylessCiphertextCheck = {
   unexaminedTenants: 0,
 };
 
+const DEPLOYMENT: ColumnKeySurveyScope = { kind: "deployment", ceiling: PER_TENANT_SURVEY_CEILING };
+
 function assess(
-  input: Omit<Parameters<typeof assessColumnKeyConsistency>[0], "ciphertext"> & {
+  input: Omit<Parameters<typeof assessColumnKeyConsistency>[0], "ciphertext" | "scope"> & {
     readonly ciphertext?: KeylessCiphertextCheck;
+    readonly scope?: ColumnKeySurveyScope;
   },
 ): ReturnType<typeof assessColumnKeyConsistency> {
-  return assessColumnKeyConsistency({ ciphertext: NO_CIPHERTEXT, ...input });
+  return assessColumnKeyConsistency({ ciphertext: NO_CIPHERTEXT, scope: DEPLOYMENT, ...input });
 }
 
 describe("COLUMN_KEY_CONDITION_EFFECT", () => {
@@ -928,12 +935,228 @@ describe("checkKeylessCiphertext", () => {
   });
 });
 
+// ---------------------------------------------------------------------------------------------
+// ADR-0460: one tenant's scope (the rekey's pre-flight) and the boot survey's ceiling.
+
+/**
+ * Both fakes behind one connection, routed by statement. The ciphertext statements are recognised
+ * first because the keyless sample's per-column branch also reads `WHERE tenant_id = $1`, which the
+ * key fake would otherwise answer with key rows.
+ */
+function fakeBoth(keys: FakeOptions, cipher: CipherFakeOptions): { conn: PgConnection; captured: Captured[] } {
+  const k = fakeDb(keys);
+  const c = fakeCipherDb(cipher);
+  const captured: Captured[] = [];
+  const isCipher = (sql: string): boolean =>
+    sql.startsWith("SELECT ciphertext FROM (") ||
+    sql.includes("crossengin.encrypt=at_rest") ||
+    sql.includes("pgp_sym_decrypt_bytea") ||
+    sql.includes("SAVEPOINT") ||
+    (sql.includes("to_regclass") && !sql.includes("has_table_privilege"));
+  const run = async (sql: string, params: readonly unknown[] = []) => {
+    captured.push({ sql, params });
+    if (sql.includes("set_config")) {
+      await c.conn.query(sql, [...params]);
+      return k.conn.query(sql, [...params]);
+    }
+    return isCipher(sql) ? c.conn.query(sql, [...params]) : k.conn.query(sql, [...params]);
+  };
+  const conn: PgConnection = {
+    query: run as PgConnection["query"],
+    transaction: async <T>(fn: (tx: PgConnection) => Promise<T>): Promise<T> => fn(conn),
+    withAdvisoryLock: async <T>(_k: bigint, fn: () => Promise<T>): Promise<T> => fn(),
+    close: async (): Promise<void> => undefined,
+  };
+  return { conn, captured };
+}
+
+describe("a tenant scope (ADR-0460)", () => {
+  it("reads only the named tenant, under its own context, even when the session is not confined", async () => {
+    const rows = [sample(T(1), { wrapSecret: S1 }), sample(T(2), { wrapSecret: S2 })];
+    const { conn, captured } = fakeDb({ rows, tenants: [T(1), T(2)] });
+    const s = await surveyDataKeyRows(conn, { tenantId: T(1) });
+    if (!s.readable) throw new Error(s.reason);
+    expect(s.route).toBe("per_tenant");
+    expect(s.groups.map((g) => g.tenants)).toEqual([1]);
+    expect(s.groups[0]?.samples.map((x) => x.tenantId)).toEqual([T(1)]);
+    expect(captured.filter((c) => c.sql.includes("set_config")).map((c) => c.params[0])).toEqual([T(1)]);
+    // Neither the tenant list nor the confinement probe is asked: the read is the same either way.
+    expect(captured.some((c) => c.sql.includes("FROM meta.tenants"))).toBe(false);
+    expect(captured.some((c) => c.sql.includes("row_security_active"))).toBe(false);
+  });
+
+  it("asks one tenant's keyless ciphertext under its own context, confined or not", async () => {
+    const { conn, captured } = fakeCipherDb({
+      ciphertext: [
+        { tenantId: T(1), openedBy: keyOf(S1, T(1)) },
+        { tenantId: T(2), openedBy: keyOf(S2, T(2)) },
+      ],
+    });
+    const c = await checkKeylessCiphertext(conn, { bootSchema: "public", secret: S1, tenantId: T(1) });
+    expect(c).toMatchObject({ checked: true, found: 1, opened: 1, unexaminedTenants: 0 });
+    expect(captured.filter((x) => x.sql.includes("set_config")).map((x) => x.params[0])).toEqual([T(1)]);
+    expect(captured.some((x) => x.sql.includes("t.tenant_id::text"))).toBe(false);
+    expect(captured.some((x) => x.sql.includes("FROM meta.tenants"))).toBe(false);
+  });
+
+  it("refuses the named tenant's key under the wrong ring, saying nothing of booting", async () => {
+    const { conn } = fakeBoth({ rows: [sample(T(1), { wrapSecret: S1 })] }, { columns: [] });
+    const c = await surveyColumnKeyConsistency(conn, {
+      mode: "envelope",
+      ring: ring(S2),
+      keySchema: "meta",
+      dataSchema: "public",
+      scope: { kind: "tenant", tenantId: T(1) },
+    });
+    expect(c.verdict).toBe("refuse");
+    expect(c.findings.map((f) => f.condition)).toEqual(["kek_secret_mismatch"]);
+    const lines = formatColumnKeyConsistency(c);
+    expect(lines.every((l) => l.text.startsWith(`column keys (tenant ${T(1)}):`))).toBe(true);
+    const closing = lines.at(-1)?.text ?? "";
+    expect(closing).toContain("REFUSED");
+    expect(closing).not.toContain("booting");
+    expect(closing).toContain("nothing is done for it");
+    // The remedy is the boot's own sentence, not a second spelling of it.
+    expect(lines[0]?.text).toContain("Remedy: if a new secret was meant as a rotation");
+  });
+
+  it("refuses for the named tenant only — another tenant's unopenable row is not its business", async () => {
+    const rows = [sample(T(1), { wrapSecret: S1 }), sample(T(2), { wrapSecret: S2 })];
+    const { conn } = fakeBoth({ rows }, { columns: [] });
+    const scoped = (tenantId: string) =>
+      surveyColumnKeyConsistency(conn, {
+        mode: "envelope",
+        ring: ring(S1),
+        keySchema: "meta",
+        dataSchema: "public",
+        scope: { kind: "tenant", tenantId },
+      });
+    const clean = await scoped(T(1));
+    expect(clean.verdict).toBe("consistent");
+    expect(formatColumnKeyConsistency(clean)).toEqual([
+      {
+        level: "info",
+        text:
+          `column keys (tenant ${T(1)}): consistent — this tenant's stored data key opened under this ` +
+          "secret ring; public (per-tenant manifest schemas are not asked) has no at-rest-encrypted column",
+      },
+    ]);
+    expect((await scoped(T(2))).verdict).toBe("refuse");
+  });
+
+  it("refuses a keyless tenant whose ciphertext the ring would mis-seed (control: the right ring opens it)", async () => {
+    const both = (secret: Uint8Array) =>
+      surveyColumnKeyConsistency(
+        fakeBoth({ rows: [] }, { ciphertext: [{ tenantId: T(3), openedBy: keyOf(S1, T(3)) }] }).conn,
+        {
+          mode: "envelope",
+          ring: ring(secret),
+          keySchema: "meta",
+          dataSchema: "public",
+          scope: { kind: "tenant", tenantId: T(3) },
+        },
+      );
+    const wrong = await both(S2);
+    expect(wrong.verdict).toBe("refuse");
+    expect(wrong.findings.map((f) => f.condition)).toEqual(["ciphertext_key_mismatch"]);
+    const right = await both(S1);
+    expect(right.verdict).toBe("consistent");
+    expect(formatColumnKeyConsistency(right)[0]?.text).toContain(
+      "this tenant holds no stored data key row; its ciphertext without a key row opened",
+    );
+  });
+
+  // ADR-0460 kept the deployment scope's consistent and refusal lines unchanged; these pin both in
+  // full, so a rewrite of either arm of the per-scope sentences fails here rather than shipping.
+  it("keeps the deployment's consistent line exactly as the boot printed it (control)", () => {
+    const c = assess({ mode: "derived", ring: ring(S1), survey: read([]) });
+    expect(formatColumnKeyConsistency(c)).toEqual([
+      {
+        level: "info",
+        text:
+          "column keys: consistent — no stored data key rows, so --column-key-mode derived has none it " +
+          "could fail to open; public (per-tenant manifest schemas are not asked) has no at-rest-encrypted " +
+          "column, so no tenant without a key row holds ciphertext",
+      },
+    ]);
+  });
+
+  it("keeps the deployment's refusal sentence exactly as the boot printed it", () => {
+    const c = assess({
+      mode: "derived",
+      ring: ring(S1),
+      survey: read([group([sample(T(1), { wrapSecret: S1 })], 1)]),
+    });
+    expect(c.verdict).toBe("refuse");
+    expect(formatColumnKeyConsistency(c).at(-1)).toEqual({
+      level: "error",
+      text:
+        "column keys: REFUSED — this configuration cannot open data keys or ciphertext the database already " +
+        "holds; booting would answer those tenants' PHI requests with a 500 (no escape hatch: every remedy " +
+        "above is a configuration change)",
+    });
+  });
+});
+
+describe("the survey ceiling (ADR-0460)", () => {
+  it("bounds the flag on both sides around today's default", () => {
+    expect(COLUMN_KEY_SURVEY_CEILING_FLAG).toBe("--column-key-survey-ceiling");
+    expect(COLUMN_KEY_SURVEY_CEILING_BOUNDS.min).toBeGreaterThan(SAMPLES_PER_GROUP);
+    expect(COLUMN_KEY_SURVEY_CEILING_BOUNDS.min).toBeLessThan(PER_TENANT_SURVEY_CEILING);
+    expect(COLUMN_KEY_SURVEY_CEILING_BOUNDS.max).toBeGreaterThan(PER_TENANT_SURVEY_CEILING);
+  });
+
+  it("names the ceiling and the flag on the key survey's incomplete line", async () => {
+    const tenants = [1, 2, 3, 4, 5].map(T);
+    const rows = tenants.map((t) => sample(t, { wrapSecret: S1 }));
+    const { conn } = fakeBoth({ confined: true, rows, tenants }, { columns: [] });
+    const c = await surveyColumnKeyConsistency(conn, {
+      mode: "envelope",
+      ring: ring(S1),
+      keySchema: "meta",
+      dataSchema: "public",
+      scope: { kind: "deployment", ceiling: 3 },
+    });
+    expect(c.verdict).toBe("unknown");
+    const line = formatColumnKeyConsistency(c).find((l) => l.text.includes("SURVEY_INCOMPLETE"));
+    expect(line?.level).toBe("warn");
+    expect(line?.text).toContain("2 tenant(s) were not examined");
+    expect(line?.text).toContain(`the survey stops at 3 tenants (${COLUMN_KEY_SURVEY_CEILING_FLAG}, 1000..100000)`);
+  });
+
+  it("names the ceiling and the flag on the keyless scan's incomplete line", () => {
+    const c = assess({
+      mode: "derived",
+      ring: ring(S1),
+      survey: read([]),
+      scope: { kind: "deployment", ceiling: 4_321 },
+      ciphertext: { ...NO_CIPHERTEXT, columns: 2, unexaminedTenants: 9 } as KeylessCiphertextCheck,
+    });
+    const detail = c.findings.find((f) => f.condition === "survey_incomplete")?.detail ?? "";
+    expect(detail).toContain(`the survey stops at 4321 tenants (${COLUMN_KEY_SURVEY_CEILING_FLAG}`);
+  });
+
+  it("states no ceiling when it was not reached (control)", async () => {
+    const tenants = [1, 2].map(T);
+    const { conn } = fakeBoth({ confined: true, rows: tenants.map((t) => sample(t, { wrapSecret: S1 })), tenants }, { columns: [] });
+    const c = await surveyColumnKeyConsistency(conn, {
+      mode: "envelope",
+      ring: ring(S1),
+      keySchema: "meta",
+      dataSchema: "public",
+      scope: { kind: "deployment", ceiling: 3 },
+    });
+    expect(c.verdict).toBe("consistent");
+    expect(formatColumnKeyConsistency(c).map((l) => l.text).join("\n")).not.toContain(COLUMN_KEY_SURVEY_CEILING_FLAG);
+  });
+});
+
 describe("the boot wiring", () => {
   // As text, because no type can say that a refusal runs before the key source is built.
   const src = readFileSync(resolve(import.meta.dirname, "./node.ts"), "utf8");
 
   it("surveys the stored keys and throws the refusal in both modes, before any key source exists", () => {
-    const survey = src.indexOf("survey: await surveyDataKeyRows(conn");
+    const survey = src.indexOf("const keyConsistency = await surveyColumnKeyConsistency(conn, {");
     const refusal = src.indexOf("throw new ColumnKeyConfigurationRefused(keyConsistency)");
     const keySource = src.indexOf("return buildEnvelopeKeySource({");
     expect(survey).toBeGreaterThan(0);
@@ -943,9 +1166,23 @@ describe("the boot wiring", () => {
     const gate = src.lastIndexOf("if (secretRing !== undefined) {", survey);
     expect(gate).toBeGreaterThan(0);
     expect(src.slice(gate, survey)).not.toContain("columnKeyMode ===");
-    // The keyless-ciphertext half feeds the same assessment, so it too precedes the refusal.
-    const keyless = src.indexOf("ciphertext: await checkKeylessCiphertext(conn");
-    expect(keyless).toBeGreaterThan(gate);
-    expect(refusal).toBeGreaterThan(keyless);
+    // The whole deployment, at the ceiling the operator chose: the composed function is what runs
+    // the keyless-ciphertext half too, so there is no second call to fence.
+    expect(src.slice(survey, refusal)).toContain(
+      'scope: { kind: "deployment", ceiling: options.columnKeySurveyCeiling }',
+    );
+  });
+
+  it("asks the rekey's tenant before the write-status probe, the store and the rekey survey", () => {
+    const start = src.indexOf("export async function runRekey(");
+    const body = src.slice(start, src.indexOf("\n}\n", start));
+    const survey = body.indexOf("await surveyColumnKeyConsistency(conn, {");
+    expect(survey).toBeGreaterThan(0);
+    expect(body.slice(survey, body.indexOf("if (keyConsistency.verdict === \"refuse\")"))).toContain(
+      'scope: { kind: "tenant", tenantId: options.tenantId }',
+    );
+    for (const later of ["new PostgresDataKeyStore(", "probeTenantWriteStatus(", "surveyTenantRekey(", "rekeyTenant("]) {
+      expect(body.indexOf(later)).toBeGreaterThan(survey);
+    }
   });
 });

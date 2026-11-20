@@ -500,6 +500,19 @@ export const SHARED_TABLE_ERASURE_REFUSAL_REASONS = [
    * session may really delete.
    */
   "rls_would_confine_this_session",
+  /**
+   * The session may not read or delete a target it is about to empty (ADR-0458).
+   *
+   * Reachable since the erasure has its own narrower role: a dedicated `BYPASSRLS` role holds
+   * `SELECT` and `DELETE` only on the tables it was granted, and a table `migrate` adds after the
+   * grant ran is one it was not. Unasked, the first such `DELETE` raises `42501` mid-transaction
+   * after earlier targets were emptied — the rollback saves the data and the request is stranded
+   * `in_progress` as an unknown failure. Asked here, it is a named refusal before anything is
+   * destroyed, so the request is released and retried once the grant is made. Every erasable target
+   * needs both privileges (the `DELETE` scopes by `tenant_id` and returns `pg_column_size`); a
+   * statutory one needs only `SELECT`, since the census reads it and nothing deletes from it.
+   */
+  "table_privilege_missing",
 ] as const;
 export type SharedTableErasureRefusalReason =
   (typeof SHARED_TABLE_ERASURE_REFUSAL_REASONS)[number];
@@ -630,6 +643,69 @@ export interface SharedTableErasureOptions {
   /** Injected so a test can pin the catalog rather than assert against the live catalog's size. */
   readonly catalog?: readonly TableDefinition[];
   readonly clock?: () => Date;
+  /**
+   * The privileges the rest of the deletion pipeline needs in this transaction, beyond the
+   * erasure's own targets — asked in the same pre-`DELETE` probe, so a missing grant on a table the
+   * pipeline only reads or appends to is refused `table_privilege_missing` before anything is
+   * destroyed, rather than raising `42501` at the tombstone `INSERT` after every `DELETE` has run
+   * (ADR-0458). Absent means none: a caller that is not the pipeline appends nothing.
+   */
+  readonly pipelinePrivileges?: readonly PipelinePrivilege[];
+}
+
+/** A privilege the deletion pipeline needs on a table in the catalogued schema (ADR-0458). */
+export interface PipelinePrivilege {
+  readonly table: string;
+  readonly privilege: "SELECT" | "INSERT";
+}
+
+/**
+ * Every statement the deletion pipeline issues outside the erasure's own targets, by table and
+ * privilege. Measured from the code rather than assumed: the tenant's source state is read from
+ * `tenants` (`readTenantState`), the chain's tail is read and its entry inserted
+ * (`appendWithin` → `tailWithin`, `insertWithin`), the tombstone is inserted (`insertWithin`) and
+ * the lifecycle event appended (`appendWithin`). None of the three `INSERT`s has `RETURNING` or
+ * `ON CONFLICT`, and no column defaults from a sequence, so `INSERT` alone is what each needs. The
+ * dedicated eraser role's grants are this list plus the targets, which is why a drift here is a test
+ * failure against `deploy/postgres/roles/eraser-role.sql` and not a discovery.
+ */
+export const DELETION_PIPELINE_PRIVILEGES: readonly PipelinePrivilege[] = Object.freeze([
+  Object.freeze({ table: "tenants", privilege: "SELECT" as const }),
+  Object.freeze({ table: "forensic_chain_entries", privilege: "SELECT" as const }),
+  Object.freeze({ table: "forensic_chain_entries", privilege: "INSERT" as const }),
+  Object.freeze({ table: "tenant_tombstones", privilege: "INSERT" as const }),
+  Object.freeze({ table: "tenant_lifecycle_events", privilege: "INSERT" as const }),
+]);
+
+/**
+ * Whether this session holds each of `privileges` on `schema`'s tables: the absent tables, and the
+ * present ones whose privilege is missing as `schema.table (PRIVILEGE)` — the spelling
+ * `missingErasurePrivileges` uses, so the two lists merge into one refusal.
+ */
+export async function probePipelinePrivileges(
+  tx: PgConnection,
+  schema: string,
+  privileges: readonly PipelinePrivilege[],
+): Promise<{ readonly missing: readonly string[]; readonly ungranted: readonly string[] }> {
+  if (privileges.length === 0) return { missing: [], ungranted: [] };
+  if (!IDENT_RE.test(schema)) throw new Error(`invalid schema identifier: ${JSON.stringify(schema)}`);
+  const result = await tx.query<{ table_name: unknown; privilege: unknown; present: unknown; granted: unknown }>(
+    `SELECT q.table_name, q.privilege, c.oid IS NOT NULL AS present,
+            CASE WHEN c.oid IS NULL THEN false ELSE has_table_privilege(c.oid, q.privilege) END AS granted
+       FROM unnest($2::text[], $3::text[]) AS q(table_name, privilege)
+       LEFT JOIN pg_namespace n ON n.nspname = $1
+       LEFT JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = q.table_name
+                           AND c.relkind IN ('r', 'p')`,
+    [schema, privileges.map((p) => p.table), privileges.map((p) => p.privilege)],
+  );
+  const missing = new Set<string>();
+  const ungranted = new Set<string>();
+  for (const row of result.rows) {
+    const name = `${schema}.${String(row.table_name)}`;
+    if (!truthy(row.present)) missing.add(name);
+    else if (!truthy(row.granted)) ungranted.add(`${name} (${String(row.privilege)})`);
+  }
+  return { missing: [...missing].sort(), ungranted: [...ungranted].sort() };
 }
 
 /**
@@ -661,6 +737,10 @@ export async function probeSharedTableErasability(
   readonly missing: readonly string[];
   readonly confined: readonly string[];
   readonly unscoped: readonly string[];
+  /** Present tables this session may not `SELECT`. */
+  readonly unreadable: readonly string[];
+  /** Present tables this session may not `DELETE` from. Which of them matter is the caller's call. */
+  readonly undeletable: readonly string[];
 }> {
   const bySchema = new Map<string, string[]>();
   for (const target of targets) {
@@ -671,16 +751,22 @@ export async function probeSharedTableErasability(
   const missing: string[] = [];
   const confined: string[] = [];
   const unscoped: string[] = [];
+  const unreadable: string[] = [];
+  const undeletable: string[] = [];
   for (const [schema, names] of bySchema) {
     const result = await tx.query<{
       readonly table_name: unknown;
       readonly confined: unknown;
       readonly scoped: unknown;
+      readonly may_select?: unknown;
+      readonly may_delete?: unknown;
     }>(
       `SELECT c.relname AS table_name, row_security_active(c.oid) AS confined,
               EXISTS (SELECT 1 FROM pg_attribute a
                        WHERE a.attrelid = c.oid AND a.attname = '${TENANT_SCOPE_COLUMN}'
-                         AND a.attnum > 0 AND NOT a.attisdropped) AS scoped
+                         AND a.attnum > 0 AND NOT a.attisdropped) AS scoped,
+              has_table_privilege(c.oid, 'SELECT') AS may_select,
+              has_table_privilege(c.oid, 'DELETE') AS may_delete
        FROM pg_class c
        JOIN pg_namespace n ON n.oid = c.relnamespace
       WHERE n.nspname = $1 AND c.relkind IN ('r', 'p') AND c.relname = ANY($2::text[])
@@ -701,12 +787,38 @@ export async function probeSharedTableErasability(
       if (!(row.scoped === true || row.scoped === "t" || row.scoped === "true")) {
         unscoped.push(`${schema}.${name}`);
       }
+      // An explicit no is the finding, `confined`'s convention rather than `scoped`'s: Postgres
+      // answers `has_table_privilege` true or false for every relation this statement returns, so an
+      // unanswered column can only be a statement that predates the column — and what a missed grant
+      // costs is a `42501` that rolls the transaction back, not data destroyed or a false proof.
+      if (row.may_select === false || row.may_select === "f" || row.may_select === "false") {
+        unreadable.push(`${schema}.${name}`);
+      }
+      if (row.may_delete === false || row.may_delete === "f" || row.may_delete === "false") {
+        undeletable.push(`${schema}.${name}`);
+      }
     }
     for (const name of names) {
       if (!present.has(name)) missing.push(`${schema}.${name}`);
     }
   }
-  return { missing, confined, unscoped };
+  return { missing, confined, unscoped, unreadable, undeletable };
+}
+
+/**
+ * The targets a session lacks a privilege on, as the erasure needs them: `SELECT` on every target,
+ * and `DELETE` on the ones it empties — never on a statutory table, which it only reads. One
+ * spelling for the erasure's refusal and the boot probe, so the two cannot disagree about which
+ * missing grant matters.
+ */
+export function missingErasurePrivileges(
+  probe: { readonly unreadable: readonly string[]; readonly undeletable: readonly string[] },
+  erasable: ReadonlySet<string>,
+): readonly string[] {
+  const out = new Set<string>();
+  for (const name of probe.unreadable) out.add(`${name} (SELECT)`);
+  for (const name of probe.undeletable) if (erasable.has(name)) out.add(`${name} (DELETE)`);
+  return [...out].sort();
 }
 
 /** What a connection would meet if an Article 17 erasure ran on it now (ADR-0453). */
@@ -717,6 +829,11 @@ export interface ErasureConfinementProbe {
   readonly confined: readonly string[];
   readonly missing: readonly string[];
   readonly unscoped: readonly string[];
+  /**
+   * Targets this session lacks a privilege the erasure needs on, as `schema.table (PRIVILEGE)` —
+   * `table_privilege_missing` (ADR-0458).
+   */
+  readonly unprivileged: readonly string[];
 }
 
 /**
@@ -735,6 +852,8 @@ export async function probeErasureConfinement(
     readonly schema?: string;
     readonly bootTargets?: readonly BootSchemaErasureTarget[];
     readonly catalog?: readonly TableDefinition[];
+    /** Defaults to every statement the pipeline issues, since boot cannot know which run will append. */
+    readonly pipelinePrivileges?: readonly PipelinePrivilege[];
   } = {},
 ): Promise<ErasureConfinementProbe> {
   const schema = opts.schema ?? "meta";
@@ -744,8 +863,19 @@ export async function probeErasureConfinement(
     .filter((t) => IDENT_RE.test(t.schema) && IDENT_RE.test(t.table))
     .map((t) => ({ schema: t.schema, table: t.table, qualified: `${t.schema}.${t.table}` }));
   const targets = [...boot, ...partition.erasable, ...partition.statutory];
-  const probe = await conn.transaction(async (tx) => probeSharedTableErasability(tx, targets));
-  return { probed: targets.length, ...probe };
+  const pipelinePrivileges = opts.pipelinePrivileges ?? DELETION_PIPELINE_PRIVILEGES;
+  const [probe, pipeline] = await conn.transaction(async (tx) => [
+    await probeSharedTableErasability(tx, targets),
+    await probePipelinePrivileges(tx, schema, pipelinePrivileges),
+  ] as const);
+  const erasable = new Set([...boot, ...partition.erasable].map((t) => t.qualified));
+  return {
+    probed: targets.length,
+    missing: [...probe.missing, ...pipeline.missing],
+    confined: probe.confined,
+    unscoped: probe.unscoped,
+    unprivileged: [...missingErasurePrivileges(probe, erasable), ...pipeline.ungranted].sort(),
+  };
 }
 
 /**
@@ -789,6 +919,11 @@ export async function censusBootSchemaTables(
     if (name.length > 0) out.push(name);
   }
   return out;
+}
+
+/** A catalog boolean as node-postgres hands it back (`true`, or `'t'`/`'true'` through a text cast). */
+function truthy(value: unknown): boolean {
+  return value === true || value === "t" || value === "true";
 }
 
 function toInt(value: unknown): number {
@@ -1022,10 +1157,15 @@ export async function eraseSharedTablesWithin(
   // the census below *reads* them to decide whether a retention is claimed, and a confined session
   // would read 0 and report no retention while the rows were still there — `erased` instead of
   // `erased_and_retained`, which is a proof silent about data it did not destroy.
-  const probe = await probeSharedTableErasability(tx, [
+  const targetProbe = await probeSharedTableErasability(tx, [
     ...erasableTargets,
     ...partition.statutory,
   ]);
+  // The rest of the pipeline's statements, asked here because this is the last point before the
+  // first DELETE: a grant missing on the tombstone or the chain is otherwise a 42501 after every
+  // target was emptied, and an unproven abort (ADR-0458).
+  const pipeline = await probePipelinePrivileges(tx, schema, opts.pipelinePrivileges ?? []);
+  const probe = { ...targetProbe, missing: [...targetProbe.missing, ...pipeline.missing] };
   const probed: SharedTableErasureRefusal[] = [];
   if (probe.missing.length > 0) {
     probed.push({
@@ -1047,6 +1187,20 @@ export async function eraseSharedTablesWithin(
       detail:
         `row-level security is active for this session on ${probe.confined.length.toString()} table(s):` +
         ` ${probe.confined.join(", ")}; the DELETE would match no rows and report none`,
+    });
+  }
+  const unprivileged = [
+    ...missingErasurePrivileges(probe, new Set(erasableTargets.map((t) => t.qualified))),
+    ...pipeline.ungranted,
+  ].sort();
+  if (unprivileged.length > 0) {
+    probed.push({
+      reason: "table_privilege_missing",
+      detail:
+        `this session lacks ${unprivileged.length.toString()} privilege(s) the erasure needs:` +
+        ` ${unprivileged.join(", ")}; the first such statement would raise 42501 partway through and` +
+        " strand this request. Grant them to the deletion role (the compose stack's eraser-role step" +
+        " re-grants on every up)",
     });
   }
   if (probe.unscoped.length > 0) {

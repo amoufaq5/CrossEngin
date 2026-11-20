@@ -389,6 +389,43 @@ describe("requestHandle", () => {
     expect(handle["terminal"]).toBe(true);
   });
 
+  it("renders the retry history as null on a request that was never handed back (ADR-0458)", () => {
+    const handle = requestHandle(requestOf({ status: "verified" }));
+    expect(handle["lastAttemptRefusal"]).toBeNull();
+    expect(handle["lastAttemptRefusalWithheld"]).toBe(false);
+    expect(handle["releaseCount"]).toBeNull();
+    expect(handle["retryNotBefore"]).toBeNull();
+  });
+
+  it("carries the retry history of a released request, which is reason codes alone", () => {
+    const handle = requestHandle(
+      requestOf({
+        status: "verified",
+        lastAttemptRefusal: "erase/table_privilege_missing",
+        releaseCount: 2,
+        retryNotBefore: "2026-11-20T12:02:00.000Z",
+      }),
+    );
+    expect(handle["lastAttemptRefusal"]).toBe("erase/table_privilege_missing");
+    expect(handle["releaseCount"]).toBe(2);
+    expect(handle["retryNotBefore"]).toBe("2026-11-20T12:02:00.000Z");
+  });
+
+  it("withholds a stored refusal line that is not reason codes, whoever wrote it (ADR-0458)", () => {
+    // The column admits any non-empty text: a hand-run UPDATE or another writer can put a tenant id
+    // or a table name there, and this body is the route where it would leave.
+    for (const stored of [
+      "erase/table_missing: meta.orders",
+      "tenant 0f8e3c2a-0000-4000-8000-000000000000 refused",
+      "unclassified refusal",
+    ]) {
+      const handle = requestHandle(requestOf({ status: "verified", lastAttemptRefusal: stored }));
+      expect(handle["lastAttemptRefusal"], stored).toBeNull();
+      expect(handle["lastAttemptRefusalWithheld"], stored).toBe(true);
+      expect(JSON.stringify(handle)).not.toContain(stored);
+    }
+  });
+
   it("is not terminal while the deletion is still in flight", () => {
     expect(requestHandle(requestOf({ status: "in_progress", inProgressAt: AT }))["terminal"]).toBe(
       false,
@@ -674,6 +711,25 @@ describe("read", () => {
     expect(res.body["tombstoneId"]).toBe(TOMB);
     expect(h.events[0]?.operation).toBe(DELETION_REQUEST_READ_OPERATION);
     expect(h.events[0]?.tombstoneId).toBe(TOMB);
+  });
+
+  it("shows the reader why the last attempt was handed back and when it is retried", async () => {
+    const h = harness(
+      {},
+      {
+        stored: requestOf({
+          status: "verified",
+          lastAttemptRefusal: "erase/rls_would_confine_this_session",
+          releaseCount: 1,
+          retryNotBefore: "2026-11-20T12:01:00.000Z",
+        }),
+      },
+    );
+    const res = await call(h.ctx, READ);
+    expect(res.status).toBe(200);
+    expect(res.body["lastAttemptRefusal"]).toBe("erase/rls_would_confine_this_session");
+    expect(res.body["releaseCount"]).toBe(1);
+    expect(res.body["retryNotBefore"]).toBe("2026-11-20T12:01:00.000Z");
   });
 
   it("503s an unreadable row rather than 404ing it", async () => {

@@ -3,10 +3,16 @@ import {
   AUTH_SCHEMES,
   AUTH_SCHEME_SECURITY_DOC,
   OPENAPI_PATH_ITEM_FIELD,
+  PROBLEM_TYPES,
+  RESIDENCY_REGION_HEADER,
   pathParameterSchemaPattern,
   pathTemplateCollisions,
   renderPathTemplate,
 } from "@crossengin/api-gateway";
+import {
+  RESIDENCY_REFUSALS,
+  RESIDENCY_UNRESOLVED_RETRY_AFTER_SECONDS,
+} from "@crossengin/api-gateway-runtime";
 import type { Manifest } from "@crossengin/kernel/manifest";
 import type { Entity, Trait } from "@crossengin/types/meta-schema";
 
@@ -98,6 +104,36 @@ export interface OpenApiEmitInput {
    * not say, and a request schema built without them would publish a stamped field as writable.
    */
   readonly writeSurfaces: ReadonlyMap<string, WriteSurface>;
+  /**
+   * The region gate this server applies, or `null` for none. Required, so a caller states which:
+   * an optional field here would make "no gate" what silence buys, and the gate-configured
+   * deployment is exactly the one that would then publish no residency response.
+   */
+  readonly residency: OpenApiResidencyDeclaration | null;
+}
+
+/**
+ * What this deployment's residency gate covers, as the gate itself reported it (ADR-0462).
+ *
+ * `null` on `OpenApiEmitInput.residency` is a **claim**: no region gate is configured, so no
+ * operation can answer a residency refusal and the document declares none. Declaring one anyway
+ * would be the falsely-complete direction in reverse — a status a generated client is made to
+ * handle, and an operator reading the document is told can happen, on a deployment whose code has
+ * no path to it.
+ *
+ * Present, it is not re-derived from flags: `gatedOperationIds` is what `applyResidencyGate`
+ * returned, the operations it actually wrapped, so the document and the gate are one fact rather
+ * than two spellings of the exempt-prefix rule.
+ */
+export interface OpenApiResidencyDeclaration {
+  /** The operations the post-auth gate wraps. Only these can answer its 503. */
+  readonly gatedOperationIds: ReadonlySet<string>;
+  /**
+   * The header the advisory pre-auth check reads a tenant hint from. That check runs ahead of route
+   * matching on every routed request, so it can answer 421 or 403 even on an operation the gate
+   * exempts — when, and only when, the caller sends this header.
+   */
+  readonly tenantHintHeader: string;
 }
 
 export type OpenApiEmit =
@@ -213,6 +249,134 @@ const errorResponses = (): Readonly<Record<string, unknown>> => ({
     "The principal's roles do not grant this operation on this entity.",
   ),
 });
+
+/**
+ * The residency refusal's body, one component every residency response references (ADR-0457's one
+ * builder, described once). Enumerations are read off `RESIDENCY_REFUSALS`, the builder's own map,
+ * so a fourth refusal or a renamed reason moves the document with it.
+ */
+const residencyProblemSchema = (): JsonSchema => {
+  const specs = Object.values(RESIDENCY_REFUSALS);
+  return {
+    type: "object",
+    description:
+      "A residency refusal (ADR-0457): an RFC 9457 problem from the region gate on the " +
+      "authenticated tenant, or from the advisory pre-auth check on the tenant hint header. Both " +
+      "produce the same bytes. `extensions.reason` is the stable code.",
+    properties: {
+      type: { type: "string", format: "uri", enum: specs.map((s) => PROBLEM_TYPES[s.key]) },
+      title: { type: "string" },
+      status: { type: "integer", enum: specs.map((s) => s.status) },
+      detail: { type: "string" },
+      extensions: {
+        type: "object",
+        properties: {
+          reason: { type: "string", enum: specs.map((s) => s.reason) },
+          correctRegion: {
+            type: "string",
+            description: `The tenant's home region; present on a 421, and also sent as \`${RESIDENCY_REGION_HEADER}\`.`,
+          },
+          retryAfterSeconds: { type: "integer", description: "Present on a 503." },
+        },
+        required: ["reason"],
+      },
+    },
+    required: ["type", "title", "status", "detail", "extensions"],
+  };
+};
+
+export const RESIDENCY_PROBLEM_COMPONENT = "ResidencyProblem";
+export const RESIDENCY_MISDIRECTED_RESPONSE = "ResidencyMisdirected";
+export const RESIDENCY_AWARE_UNAVAILABLE_RESPONSE = "UnavailableOrResidencyUnresolved";
+export const RESIDENCY_AWARE_FORBIDDEN_RESPONSE = "ForbiddenOrResidencyViolation";
+
+const responseRef = (name: string): Readonly<Record<string, unknown>> => ({
+  $ref: `#/components/responses/${name}`,
+});
+
+const residencyResponses = (decl: OpenApiResidencyDeclaration): Readonly<Record<string, unknown>> => ({
+  [RESIDENCY_MISDIRECTED_RESPONSE]: {
+    description:
+      "This instance's region may not serve the tenant; retry against the region named in " +
+      `\`${RESIDENCY_REGION_HEADER}\` and \`extensions.correctRegion\`. On an operation the region ` +
+      `gate exempts (the platform routes), only the advisory pre-auth check answers this, and only ` +
+      `when the request carries \`${decl.tenantHintHeader}\`.`,
+    headers: {
+      [RESIDENCY_REGION_HEADER]: {
+        description: "The tenant's home region.",
+        required: true,
+        schema: { type: "string" },
+      },
+    },
+    content: { "application/problem+json": { schema: ref(RESIDENCY_PROBLEM_COMPONENT) } },
+  },
+  // Not residency-only: the region gate is one of several 503 producers on a gated operation (the
+  // write audit's `audit_unavailable`, the tenant-status gate, the AI design routes), and their
+  // shapes differ — so this is the 403's treatment, both media types with the residency body as
+  // one admitted arm, and no sentence that is true of only one producer. `audit_unavailable` after
+  // a link or unlink says the write WAS made, which a blanket "nothing was done" would contradict.
+  [RESIDENCY_AWARE_UNAVAILABLE_RESPONSE]: {
+    description:
+      "Something this operation depends on could not be established, so the request was refused. " +
+      "One producer is the region gate (`residency-unresolved`: the tenant's residency profile " +
+      "could not be read, nothing was done); others answer `application/json` with an " +
+      "`{error, detail}` body whose `detail` says whether the write was made — read it rather " +
+      "than assuming either way.",
+    headers: {
+      "retry-after": {
+        description:
+          `Seconds to wait; sent with the residency refusal (` +
+          `${String(RESIDENCY_UNRESOLVED_RETRY_AFTER_SECONDS)}) and by some other producers, not by all.`,
+        required: false,
+        schema: { type: "integer" },
+      },
+    },
+    content: {
+      "application/problem+json": {
+        schema: { anyOf: [ref("Problem"), ref(RESIDENCY_PROBLEM_COMPONENT)] },
+      },
+      "application/json": { schema: ref("HandlerError") },
+    },
+  },
+  [RESIDENCY_AWARE_FORBIDDEN_RESPONSE]: {
+    description:
+      "The principal's roles do not grant this operation on this entity — or a residency profile " +
+      "allows no region at all (`residency-violation`), which no profile the shipped directories " +
+      "accept can express.",
+    content: {
+      "application/problem+json": {
+        schema: { anyOf: [ref("Problem"), ref(RESIDENCY_PROBLEM_COMPONENT)] },
+      },
+      "application/json": { schema: ref("HandlerError") },
+    },
+  },
+});
+
+/**
+ * The residency half of one operation's responses. The 421 and the 403 are declared on every
+ * routed operation, because the pre-auth hint check runs ahead of route matching for all of them;
+ * the 503 only where the gate wraps the handler, because the hint check passes an unreadable
+ * directory on (ADR-0457's addendum) and the gate is then the only *residency* producer of one —
+ * not the only 503 producer, which is why that status's component admits the other shapes too.
+ *
+ * The 403 replaces the role refusal's entry with one that also admits the residency body, rather
+ * than adding a status: 403 was already declared, and its residency arm (`decideRegionRouting`'s
+ * `deny`) is reachable only through a directory returning a profile that allows no region — which
+ * `ResidencyProfileSchema`'s refinement forbids, so neither shipped directory can hold one, while
+ * `RegionGuardConfig` takes any directory and the emitter cannot see which. All three are response
+ * components referenced per operation: inline, the 403 alone cost ~110 KB on `erp-core`.
+ */
+const addResidencyResponses = (
+  responses: Record<string, unknown>,
+  operationId: string,
+  decl: OpenApiResidencyDeclaration,
+): void => {
+  responses["421"] = responseRef(RESIDENCY_MISDIRECTED_RESPONSE);
+  responses["403"] = responseRef(RESIDENCY_AWARE_FORBIDDEN_RESPONSE);
+  if (decl.gatedOperationIds.has(operationId)) {
+    responses["503"] = responseRef(RESIDENCY_AWARE_UNAVAILABLE_RESPONSE);
+  }
+};
 
 /** `errorResponses` plus the 400 only a list query can produce. */
 const listErrorResponses = (): Readonly<Record<string, unknown>> => ({
@@ -347,6 +511,7 @@ export const buildOpenApiDocument = (input: OpenApiEmitInput): OpenApiEmit => {
   const schemas: Record<string, JsonSchema> = {
     Problem: problemSchema,
     HandlerError: handlerErrorSchema,
+    ...(input.residency !== null ? { [RESIDENCY_PROBLEM_COMPONENT]: residencyProblemSchema() } : {}),
   };
   const undescribableFields: { entity: string; field: string; reason: string }[] = [];
 
@@ -416,6 +581,14 @@ export const buildOpenApiDocument = (input: OpenApiEmitInput): OpenApiEmit => {
         : {}),
       responses: isList ? { ...listErrorResponses() } : { ...errorResponses() },
     };
+
+    if (input.residency !== null) {
+      addResidencyResponses(
+        operation["responses"] as Record<string, unknown>,
+        route.operationId,
+        input.residency,
+      );
+    }
 
     if (route.operationId === OPENAPI_OPERATION_ID) {
       // The one route with no `RouteSpec` whose response this module owns and can therefore
@@ -538,7 +711,11 @@ export const buildOpenApiDocument = (input: OpenApiEmitInput): OpenApiEmit => {
         "Derived from this deployment's own route registry and manifest. `info.version` is the " +
         "manifest hash, so it moves exactly when the described contract does.",
     },
-    components: { schemas, securitySchemes: security.schemes },
+    components: {
+      schemas,
+      ...(input.residency !== null ? { responses: residencyResponses(input.residency) } : {}),
+      securitySchemes: security.schemes,
+    },
     // Every gateway route needs a credential — measured, an anonymous request is 401 — and either
     // scheme satisfies it. What is NOT expressible is which ROLE, which `undeclared_authorization`
     // names: a `security` requirement carries scopes, and `requiredScopes` is empty on every route.

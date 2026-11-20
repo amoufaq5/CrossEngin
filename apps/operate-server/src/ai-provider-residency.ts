@@ -13,6 +13,11 @@
  * for a profile we could not compare against is the defect restated. A tenant with no profile is
  * unconstrained, as it is for request routing. A directory that cannot answer is a 503: not knowing
  * whether the profile forbids this provider must not send the description to it.
+ *
+ * A refusal is an RFC 9457 problem under a type of its own (ADR-0462), built by
+ * `aiProviderResidencyRefusal` beside the region gate's builder. It answers a different question —
+ * where the provider runs, not which instance answers — so it shares the registry and none of the
+ * region gate's types; the code it carried as a top-level `error` is `extensions.error` now.
  */
 
 import { isLlmProviderAllowed, type ResidencyProfile } from "@crossengin/residency";
@@ -52,36 +57,31 @@ export function buildAiProviderResidencyGate(
     try {
       profile = await directory.resolve(tenantId);
     } catch {
-      return {
-        allowed: false,
-        status: 503,
-        error: "ai_residency_unresolved",
-        detail:
-          "this tenant's residency profile could not be read, so whether it permits the AI designer's provider " +
-          "is unknown; nothing was sent to the provider",
-      };
+      return { allowed: false, refusal: { decision: "unresolved" } };
     }
     if (profile === null) return { allowed: true };
     if (input.providerRef === null) {
       return {
         allowed: false,
-        status: 403,
-        error: "ai_provider_residency_undeclared",
-        detail:
-          `this tenant's residency profile '${profile.profile}' restricts which AI providers may receive its data, ` +
-          `and this deployment has not declared where ${input.providerLabel} runs (${AI_PROVIDER_REF_FLAG}), so it ` +
-          `cannot be compared; nothing was sent to the provider`,
+        refusal: {
+          decision: "undeclared",
+          detail:
+            `this tenant's residency profile '${profile.profile}' restricts which AI providers may receive its data, ` +
+            `and this deployment has not declared where ${input.providerLabel} runs (${AI_PROVIDER_REF_FLAG}), so it ` +
+            `cannot be compared; nothing was sent to the provider`,
+        },
       };
     }
     const verdict = isLlmProviderAllowed(profile, input.providerRef);
     if (verdict.compatible) return { allowed: true };
     return {
       allowed: false,
-      status: 403,
-      error: "ai_provider_residency_forbidden",
-      detail:
-        `this tenant's residency profile '${profile.profile}' does not permit the AI provider '${input.providerRef}' ` +
-        `(it permits ${profile.allowedLlmProviders.join(", ")}); nothing was sent to the provider`,
+      refusal: {
+        decision: "forbidden",
+        detail:
+          `this tenant's residency profile '${profile.profile}' does not permit the AI provider '${input.providerRef}' ` +
+          `(it permits ${profile.allowedLlmProviders.join(", ")}); nothing was sent to the provider`,
+      },
     };
   };
 }

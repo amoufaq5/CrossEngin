@@ -22,6 +22,7 @@ import {
   transitionWasLegal,
 } from "./lifecycle-event-store.js";
 import {
+  DELETION_PIPELINE_PRIVILEGES,
   eraseSharedTablesWithin,
   sharedTableErasureAttestation,
   sharedTableErasureScope,
@@ -578,6 +579,14 @@ export async function deleteTenantAtomically(
         blockingCycle: input.bootSchema.blockingCycle,
       },
       clock,
+      // What this pipeline goes on to read and append, so a missing grant is refused before the
+      // first DELETE (ADR-0458). The state read and the lifecycle append happen only with a
+      // lifecycle block, so they are asked only then.
+      pipelinePrivileges: DELETION_PIPELINE_PRIVILEGES.filter(
+        (p) =>
+          input.lifecycle !== undefined ||
+          (p.table !== "tenants" && p.table !== "tenant_lifecycle_events"),
+      ),
     });
     if (shared.refusals.length > 0) {
       return { ok: false, refusals: eraseRefusals(shared.refusals) };

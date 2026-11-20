@@ -7,6 +7,7 @@ import {
   PackDependencySchema,
   PackManifestSchema,
   compareSemver,
+  packAuthorKindTrusted,
   packAuthorTrusted,
   requiresElevatedReview,
   type PackAuthor,
@@ -250,6 +251,13 @@ describe("helpers", () => {
       }),
     ).toBe(true);
     expect(packAuthorTrusted({ kind: "community", name: "x", verifiedAt: null })).toBe(false);
+  });
+
+  it("packAuthorKindTrusted agrees with packAuthorTrusted for every kind", () => {
+    for (const kind of PACK_AUTHOR_KINDS) {
+      expect(packAuthorKindTrusted(kind)).toBe(packAuthorTrusted({ kind, name: "x", verifiedAt: null }));
+    }
+    expect(PACK_AUTHOR_KINDS.filter(packAuthorKindTrusted)).toEqual(["crossengin_official", "certified_partner"]);
   });
 
   it("requiresElevatedReview flags PHI access", () => {

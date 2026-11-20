@@ -94,6 +94,9 @@ export const DELETION_REFUSAL_RETRYABILITY: {
     // The case this map exists for: the connection's role is confined (ADR-0424). Fixed by giving
     // the pipeline an unconfined owner connection, never by the data subject.
     rls_would_confine_this_session: "retry",
+    // The connection's role lacks SELECT or DELETE on a target (ADR-0458): a grant the deployment
+    // makes, asked before the first DELETE, so the same remedy shape as the confinement above.
+    table_privilege_missing: "retry",
     // The schema eraser's four, raised after the shared erasure's `DELETE`s: a retry would repeat
     // that erasure and its rollback, so all four are final whatever their cause.
     not_a_tenant_schema: "final",
@@ -158,13 +161,76 @@ export function deletionRefusalDisposition(
 }
 
 /**
- * The refusals as one line, `stage/reason; …`, bounded to what the column and the contract hold.
- * One spelling for the runner and the synchronous route, so a reader of `last_attempt_refusal`
- * cannot meet two formats for one fact.
+ * The shape every `last_attempt_refusal` a release writes has: `stage/reason` codes joined by `; `.
+ *
+ * A release is written only when `deletionRefusalDisposition` answered `retry`, which it does only
+ * when **every** refusal's stage and reason is a member of the map above — so the line is made of
+ * vocabulary codes and nothing else, and carries no tenant id, table name or count. The store refuses
+ * a release whose reasons do not match, so that property is enforced where the value is written
+ * rather than inferred from who calls it (ADR-0458), and the read routes surface it on that basis.
+ */
+export const RELEASE_REASONS_RE = /^[a-z_]+\/[a-z_]+(?:; [a-z_]+\/[a-z_]+)*$/;
+
+/**
+ * How long a released request waits before the scheduler may claim it again (ADR-0458).
+ *
+ * Exponential from `baseMs` and capped at `capMs`, over the number of releases so far — the first
+ * release waits `baseMs`, each later one twice the last. Without it a released request was
+ * re-claimed on every runner tick: a still-unfixed cause (a confined role, a missing grant) cost a
+ * claim, a probe and a release write per tick per request for as long as it stayed unfixed.
+ *
+ * The cap is small against an Article 12(3) deadline measured in days, and that is the trade: a
+ * fixed cause is picked up within one cap of the fix, and a stuck one costs one attempt per cap.
+ */
+export interface DeletionRetryBackoff {
+  readonly baseMs: number;
+  readonly capMs: number;
+}
+
+export const DEFAULT_DELETION_RETRY_BACKOFF: DeletionRetryBackoff = Object.freeze({
+  baseMs: 60_000,
+  capMs: 3_600_000,
+});
+
+/** The wait after the `releaseCount`-th release: `min(cap, base × 2^(releaseCount − 1))`. */
+export function deletionRetryBackoffMs(
+  releaseCount: number,
+  policy: DeletionRetryBackoff = DEFAULT_DELETION_RETRY_BACKOFF,
+): number {
+  if (!Number.isInteger(releaseCount) || releaseCount < 1) {
+    throw new Error(`a release count is a positive integer, got ${String(releaseCount)}`);
+  }
+  if (
+    !Number.isFinite(policy.baseMs) ||
+    !Number.isFinite(policy.capMs) ||
+    policy.baseMs < 0 ||
+    policy.capMs < policy.baseMs
+  ) {
+    throw new Error(
+      `a retry backoff needs 0 <= baseMs <= capMs, got ${String(policy.baseMs)} and ${String(policy.capMs)}`,
+    );
+  }
+  // Exponent bounded before it is raised, so a long-stuck request cannot overflow to Infinity.
+  const exponent = Math.min(releaseCount - 1, 52);
+  return Math.min(policy.capMs, policy.baseMs * 2 ** exponent);
+}
+
+/**
+ * The refusals as one line, `stage/reason; …`, bounded to the column's 500 characters on a whole-code
+ * boundary and de-duplicated. One spelling for the runner and the synchronous route, so a reader of
+ * `last_attempt_refusal` cannot meet two formats for one fact.
  */
 export function formatRefusalReasons(
   refusals: readonly { readonly stage: string; readonly reason: string }[],
 ): string {
-  const line = refusals.map((r) => `${r.stage}/${r.reason}`).join("; ");
-  return (line.length === 0 ? "unclassified refusal" : line).slice(0, 500);
+  // De-duplicated, and bounded on a whole `stage/reason` boundary: a code cut in half is neither
+  // a code nor something `RELEASE_REASONS_RE` admits, so a slice would make a long release refuse.
+  const codes = [...new Set(refusals.map((r) => `${r.stage}/${r.reason}`))];
+  let line = "";
+  for (const code of codes) {
+    const next = line.length === 0 ? code : `${line}; ${code}`;
+    if (next.length > 500) break;
+    line = next;
+  }
+  return line.length === 0 ? "unclassified refusal" : line;
 }

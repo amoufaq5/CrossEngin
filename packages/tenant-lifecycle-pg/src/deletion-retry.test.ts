@@ -9,7 +9,10 @@ import {
   DELETION_REFUSAL_DISPOSITIONS,
   DELETION_REFUSAL_RETRYABILITY,
   DELETION_REFUSAL_VOCABULARY,
+  DEFAULT_DELETION_RETRY_BACKOFF,
+  RELEASE_REASONS_RE,
   deletionRefusalDisposition,
+  deletionRetryBackoffMs,
   formatRefusalReasons,
 } from "./deletion-retry.js";
 import { SHARED_TABLE_ERASURE_REFUSAL_REASONS } from "./shared-table-erasure.js";
@@ -133,13 +136,56 @@ describe("formatRefusalReasons", () => {
         { stage: "erase", reason: "table_missing" },
       ]),
     ).toBe("erase/rls_would_confine_this_session; erase/table_missing");
+    // Duplicates collapse, and a long list is cut on a whole code, never mid-code.
+    expect(
+      formatRefusalReasons(
+        Array.from({ length: 100 }, () => ({ stage: "erase", reason: "rls_would_confine_this_session" })),
+      ),
+    ).toBe("erase/rls_would_confine_this_session");
     const long = formatRefusalReasons(
-      Array.from({ length: 100 }, () => ({ stage: "erase", reason: "rls_would_confine_this_session" })),
+      Array.from({ length: 100 }, (_, i) => ({ stage: "erase", reason: `reason_${"x".repeat(i % 26)}` })),
     );
-    expect(long.length).toBe(500);
+    expect(long.length).toBeLessThanOrEqual(500);
+    expect(long).toMatch(RELEASE_REASONS_RE);
+  });
+
+  it("writes only vocabulary codes for every release it can produce (ADR-0458)", () => {
+    // A release happens only when every refusal is `retry`, so these are exactly the lines a
+    // `last_attempt_refusal` can hold — and the read routes surface it because they carry no tenant
+    // id, table name or count. All of them at once is the longest such line.
+    const retry = Object.entries(DELETION_REFUSAL_RETRYABILITY).flatMap(([stage, map]) =>
+      Object.entries(map as Record<string, string>)
+        .filter(([, d]) => d === "retry")
+        .map(([reason]) => ({ stage, reason })),
+    );
+    expect(retry.length).toBeGreaterThan(10);
+    for (const one of retry) expect(formatRefusalReasons([one])).toMatch(RELEASE_REASONS_RE);
+    expect(formatRefusalReasons(retry)).toMatch(RELEASE_REASONS_RE);
+    expect("erase/table_missing; meta.orders").not.toMatch(RELEASE_REASONS_RE);
+    expect("erase/rls 0f8e3c2a-…").not.toMatch(RELEASE_REASONS_RE);
   });
 
   it("never answers the empty string, which the column's CHECK refuses", () => {
     expect(formatRefusalReasons([])).toBe("unclassified refusal");
+  });
+});
+
+describe("deletionRetryBackoffMs (ADR-0458)", () => {
+  it("doubles from the base and stops at the cap", () => {
+    const at = [1, 2, 3, 4, 6, 7, 8, 50].map((n) => deletionRetryBackoffMs(n));
+    expect(at).toEqual([60_000, 120_000, 240_000, 480_000, 1_920_000, 3_600_000, 3_600_000, 3_600_000]);
+    expect(DEFAULT_DELETION_RETRY_BACKOFF).toEqual({ baseMs: 60_000, capMs: 3_600_000 });
+  });
+
+  it("does not overflow however long a request stays stuck", () => {
+    expect(deletionRetryBackoffMs(10_000, { baseMs: 1, capMs: 5 })).toBe(5);
+    expect(Number.isFinite(deletionRetryBackoffMs(1_000_000))).toBe(true);
+  });
+
+  it("refuses a count that is not a positive integer, and an inverted policy", () => {
+    expect(() => deletionRetryBackoffMs(0)).toThrow(/positive integer/);
+    expect(() => deletionRetryBackoffMs(1.5)).toThrow(/positive integer/);
+    expect(() => deletionRetryBackoffMs(1, { baseMs: 10, capMs: 5 })).toThrow(/baseMs <= capMs/);
+    expect(() => deletionRetryBackoffMs(1, { baseMs: -1, capMs: 5 })).toThrow(/baseMs <= capMs/);
   });
 });

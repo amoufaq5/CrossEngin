@@ -7,6 +7,7 @@ import {
 import { describe, expect, it } from "vitest";
 
 import {
+  DELETION_PIPELINE_PRIVILEGES,
   DELIBERATELY_ERASED_BILLING_TABLES,
   PLATFORM_RECORD_TABLES,
   RETAINED_SHARED_TABLES,
@@ -23,6 +24,7 @@ import {
   sharedTableRetention,
   type BootSchemaErasureInput,
   type BootSchemaErasureTarget,
+  type PipelinePrivilege,
   type SharedTableErasure,
   type SharedTableErasureRefusalReason,
 } from "./shared-table-erasure.js";
@@ -135,6 +137,10 @@ interface FakeOptions {
    * `false` would leave the "absence is the finding" branch unexercised.
    */
   readonly scopeUnanswered?: readonly string[];
+  /** Qualified names the probe should report this session may not `SELECT` (ADR-0458). */
+  readonly unreadable?: readonly string[];
+  /** Qualified names the probe should report this session may not `DELETE` from (ADR-0458). */
+  readonly undeletable?: readonly string[];
   /**
    * Qualified names the boot-schema census reports: relations in the schemas it was asked about that
    * carry a `<relname>_tenant_isolation` policy.
@@ -145,6 +151,10 @@ interface FakeOptions {
   readonly census?: readonly string[];
   /** Qualified table → rows the confirm pass still sees. */
   readonly survivors?: Readonly<Record<string, number>>;
+  /** `schema.table (PRIVILEGE)` the pipeline-privilege probe should report ungranted (ADR-0458). */
+  readonly pipelineUngranted?: readonly string[];
+  /** Qualified tables the pipeline-privilege probe should report absent. */
+  readonly pipelineMissing?: readonly string[];
 }
 
 const RELATION_RE = /"([a-z_]+)"\."([a-z_]+)"/;
@@ -171,13 +181,34 @@ function fake(opts: FakeOptions = {}): { readonly conn: PgConnection; readonly c
           .filter((name) => !(opts.missing ?? []).includes(`${probed}.${name}`))
           .map((name) => {
             const qualified = `${probed}.${name}`;
-            const row = {
+            const row: Record<string, unknown> = {
               table_name: name,
               confined: (opts.confined ?? []).includes(qualified),
             };
+            // Answered only when a test asks, so every older scenario still reads the columns as
+            // unanswered — which is how a statement predating them reads, and grants nothing away.
+            if ((opts.unreadable ?? []).includes(qualified)) row["may_select"] = false;
+            if ((opts.undeletable ?? []).includes(qualified)) row["may_delete"] = false;
             if ((opts.scopeUnanswered ?? []).includes(qualified)) return row;
             return { ...row, scoped: !(opts.unscoped ?? []).includes(qualified) };
           });
+        return { rows, rowCount: rows.length };
+      }
+      if (sql.includes("FROM unnest($2::text[], $3::text[]) AS q(table_name, privilege)")) {
+        const schema = String(params?.[0] ?? "");
+        const tables = (params?.[1] ?? []) as readonly string[];
+        const privileges = (params?.[2] ?? []) as readonly string[];
+        const rows = tables.map((table, i) => {
+          const present = !(opts.pipelineMissing ?? []).includes(`${schema}.${table}`);
+          return {
+            table_name: table,
+            privilege: privileges[i],
+            present,
+            granted:
+              present &&
+              !(opts.pipelineUngranted ?? []).includes(`${schema}.${table} (${privileges[i] ?? ""})`),
+          };
+        });
         return { rows, rowCount: rows.length };
       }
       if (sql.includes("pg_policy")) {
@@ -232,6 +263,7 @@ function erase(
     // helper letting a test supply targets without a cycle verdict is a helper that would not have
     // caught this change.
     readonly bootSchema?: BootSchemaErasureInput;
+    readonly pipelinePrivileges?: readonly PipelinePrivilege[];
   } = {},
 ): Promise<{ readonly out: SharedTableErasure; readonly calls: Call[] }> {
   // Empty by default, so every pre-ADR-0350 assertion below still pins what it pinned: an empty
@@ -250,6 +282,7 @@ function erase(
       clock: () => new Date(AT),
       bootSchema,
       ...(over.schema !== undefined ? { schema: over.schema } : {}),
+      ...(over.pipelinePrivileges !== undefined ? { pipelinePrivileges: over.pipelinePrivileges } : {}),
     },
   ).then((out) => ({ out, calls: h.calls }));
 }
@@ -535,6 +568,7 @@ describe("eraseSharedTablesWithin", () => {
       "target_lacks_tenant_scope",
       "boot_schema_table_undeclared",
       "rls_would_confine_this_session",
+      "table_privilege_missing",
     ]);
   });
 
@@ -616,6 +650,42 @@ describe("a refusal erases nothing", () => {
     expect(out.refusals[0]?.detail).toContain("meta.operate_entity_records");
     expect(calls.some((c) => c.sql.startsWith("WITH deleted AS"))).toBe(false);
     expect(calls.some((c) => c.sql.startsWith("SELECT count(*) AS n FROM"))).toBe(false);
+  });
+
+  it("refuses a missing DELETE grant on an erasable table, after deleting nothing (ADR-0458)", async () => {
+    const { out, calls } = await erase({ undeletable: ["meta.operate_entity_records"] });
+    expect(out.refusals.map((r) => r.reason)).toEqual(["table_privilege_missing"]);
+    expect(out.refusals[0]?.detail).toContain("meta.operate_entity_records (DELETE)");
+    expect(calls.some((c) => c.sql.startsWith("WITH deleted AS"))).toBe(false);
+  });
+
+  it("refuses a missing INSERT on a table the pipeline appends to, before the first DELETE (ADR-0458)", async () => {
+    // Unasked, this is a 42501 at the tombstone INSERT after every DELETE has run: a rollback and
+    // a request stranded in_progress, which is exactly what table_privilege_missing exists to stop.
+    const { out, calls } = await erase(
+      { pipelineUngranted: ["meta.tenant_tombstones (INSERT)"] },
+      { pipelinePrivileges: DELETION_PIPELINE_PRIVILEGES },
+    );
+    expect(out.refusals.map((r) => r.reason)).toEqual(["table_privilege_missing"]);
+    expect(out.refusals[0]?.detail).toContain("meta.tenant_tombstones (INSERT)");
+    expect(calls.some((c) => c.sql.startsWith("WITH deleted AS"))).toBe(false);
+    // And an absent append table is table_missing rather than a grant nobody can make.
+    const absent = await erase(
+      { pipelineMissing: ["meta.forensic_chain_entries"] },
+      { pipelinePrivileges: DELETION_PIPELINE_PRIVILEGES },
+    );
+    expect(absent.out.refusals.map((r) => r.reason)).toEqual(["table_missing"]);
+    // Asks nothing of the pipeline's tables when no caller declared any.
+    const plain = await erase();
+    expect(plain.calls.some((c) => c.sql.includes("q(table_name, privilege)"))).toBe(false);
+  });
+
+  it("does not need DELETE on a statutory table, which it only reads (ADR-0458)", async () => {
+    const lacking = await erase({ undeletable: ["meta.invoices"] });
+    expect(lacking.out.refusals).toEqual([]);
+    const unreadable = await erase({ unreadable: ["meta.invoices"] });
+    expect(unreadable.out.refusals.map((r) => r.reason)).toEqual(["table_privilege_missing"]);
+    expect(unreadable.out.refusals[0]?.detail).toContain("meta.invoices (SELECT)");
   });
 
   it("reports both probe refusals together", async () => {
@@ -1237,6 +1307,8 @@ describe("probeSharedTableErasability", () => {
       missing: [],
       confined: [],
       unscoped: [],
+      unreadable: [],
+      undeletable: [],
     });
     expect(h.calls).toEqual([]);
   });
@@ -1260,26 +1332,66 @@ describe("probeErasureConfinement (ADR-0453)", () => {
     expect(transactions).toBe(1);
     // Boot targets first, then the catalog in deletion order (the reverse of declaration order),
     // grouped per schema — exactly the list `eraseSharedTablesWithin` hands the same probe.
-    expect(h.calls.map((c) => c.params)).toEqual([
+    expect(
+      h.calls.filter((c) => c.sql.includes("row_security_active")).map((c) => c.params),
+    ).toEqual([
       ["public", ["patient_tag", "patient"]],
       ["meta", ["lines", "orders"]],
+    ]);
+    // And, in the same transaction, every statement the rest of the pipeline issues (ADR-0458).
+    const pipeline = h.calls.filter((c) => c.sql.includes("has_table_privilege(c.oid, q.privilege)"));
+    expect(pipeline.map((c) => c.params)).toEqual([
+      [
+        "meta",
+        DELETION_PIPELINE_PRIVILEGES.map((p) => p.table),
+        DELETION_PIPELINE_PRIVILEGES.map((p) => p.privilege),
+      ],
     ]);
     expect(probe).toEqual({
       probed: 4,
       confined: ["public.patient", "meta.orders"],
       missing: [],
       unscoped: [],
+      unprivileged: [],
     });
+  });
+
+  it("names a missing SELECT on any target and a missing DELETE only where it deletes (ADR-0458)", async () => {
+    const probe = await probeErasureConfinement(
+      fake({ undeletable: ["meta.invoices"], unreadable: ["public.patient"] }).conn,
+      { catalog: META_TABLES, bootTargets: BOOT_TARGETS },
+    );
+    // `meta.invoices` is statutory: read for the retention claim, never deleted from, so lacking
+    // DELETE on it is the narrowing a dedicated role is granted and not a finding.
+    expect(probe.unprivileged).toEqual(["public.patient (SELECT)"]);
+    const withOrders = await probeErasureConfinement(fake({ undeletable: ["meta.orders"] }).conn, {
+      catalog: [tenantTable("orders")],
+    });
+    expect(withOrders.unprivileged).toEqual(["meta.orders (DELETE)"]);
   });
 
   it("probes the statutory tables too, because the erasure reads them for its retention claim", async () => {
     const h = fake();
     const probe = await probeErasureConfinement(h.conn, { catalog: META_TABLES });
-    const asked = h.calls.flatMap((c) => (c.params[1] ?? []) as readonly string[]);
+    const asked = h.calls
+      .filter((c) => c.sql.includes("row_security_active"))
+      .flatMap((c) => (c.params[1] ?? []) as readonly string[]);
     for (const s of STATUTORY_RETENTION_TABLES) expect(asked).toContain(s.table);
     for (const table of PLATFORM_RECORD_TABLES) expect(asked).not.toContain(table);
     expect(probe.probed).toBe(asked.length);
     expect(probe.probed).toBeGreaterThan(50);
+  });
+
+  it("names a missing INSERT on an append table, so 'granted' covers every statement the pipeline issues (ADR-0458)", async () => {
+    const probe = await probeErasureConfinement(
+      fake({
+        pipelineUngranted: ["meta.tenant_tombstones (INSERT)", "meta.tenants (SELECT)"],
+        pipelineMissing: ["meta.tenant_lifecycle_events"],
+      }).conn,
+      { catalog: [tenantTable("orders")] },
+    );
+    expect(probe.unprivileged).toEqual(["meta.tenant_tombstones (INSERT)", "meta.tenants (SELECT)"]);
+    expect(probe.missing).toEqual(["meta.tenant_lifecycle_events"]);
   });
 
   it("refuses a schema that is not an identifier before asking anything", async () => {
@@ -1783,6 +1895,10 @@ describe("the refusal reasons are all reachable, or declared unreachable with th
     {
       reason: "rls_would_confine_this_session",
       run: () => refusalsOf({ confined: ["meta.operate_entity_records"] }),
+    },
+    {
+      reason: "table_privilege_missing",
+      run: () => refusalsOf({ undeletable: ["meta.operate_entity_records"] }),
     },
   ];
 

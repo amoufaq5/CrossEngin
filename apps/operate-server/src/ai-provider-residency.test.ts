@@ -44,8 +44,9 @@ describe("buildAiProviderResidencyGate", () => {
     const gate = buildAiProviderResidencyGate({ directory: directory(), providerRef: "anthropic:us", providerLabel: "anthropic/x" });
     expect(await gate?.(US_TENANT)).toEqual({ allowed: true });
     const eu = await gate?.(EU_TENANT);
-    expect(eu).toMatchObject({ allowed: false, status: 403, error: "ai_provider_residency_forbidden" });
-    expect(eu?.allowed === false ? eu.detail : "").toContain("anthropic:eu");
+    expect(eu).toMatchObject({ allowed: false, refusal: { decision: "forbidden" } });
+    const refusal = eu?.allowed === false ? eu.refusal : null;
+    expect(refusal !== null && refusal.decision === "forbidden" ? refusal.detail : "").toContain("anthropic:eu");
   });
 
   it("admits an unprofiled tenant", async () => {
@@ -55,7 +56,7 @@ describe("buildAiProviderResidencyGate", () => {
 
   it("refuses a profiled tenant when the provider's location is undeclared, and serves an unprofiled one", async () => {
     const gate = buildAiProviderResidencyGate({ directory: directory(), providerRef: null, providerLabel: "local/qwen" });
-    expect(await gate?.(EU_TENANT)).toMatchObject({ allowed: false, status: 403, error: "ai_provider_residency_undeclared" });
+    expect(await gate?.(EU_TENANT)).toMatchObject({ allowed: false, refusal: { decision: "undeclared" } });
     expect(await gate?.(FREE_TENANT)).toEqual({ allowed: true });
   });
 
@@ -65,7 +66,9 @@ describe("buildAiProviderResidencyGate", () => {
       providerRef: "anthropic:us",
       providerLabel: "anthropic/x",
     });
-    expect(await gate?.(US_TENANT)).toMatchObject({ allowed: false, status: 503, error: "ai_residency_unresolved" });
+    // No detail travels from here: the directory's error can name a host, so the builder's fixed
+    // sentence is the only one sent.
+    expect(await gate?.(US_TENANT)).toEqual({ allowed: false, refusal: { decision: "unresolved" } });
   });
 });
 

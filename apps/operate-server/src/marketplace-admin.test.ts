@@ -217,6 +217,32 @@ describe("buildPackInstallHandler — the signed release", () => {
     expect(out.status).toBe(409);
     expect(bodyOf(out)["reason"]).toBe("release_version_mismatch");
   });
+
+  it("refuses at boot and at install a catalog line whose version and signed claim were both rewritten (ADR-0459)", async () => {
+    // ADR-0454 measured that a stored row edited in both places reads as a valid release. Install's
+    // input is re-verified against the registry at every admission, so the same edit on a catalog
+    // line fails the Ed25519 check — named at boot and refused at install, with nothing recorded.
+    const entry = catalogEntry();
+    const rewritten: PackCatalogEntry = {
+      ...entry,
+      version: "9.9.9",
+      signature: { ...entry.signature, release: { ...entry.signature.release!, version: "9.9.9" } },
+    };
+    const catalog = new InMemoryPackCatalog([entry, rewritten]);
+    const findings = surveyPackCatalog(catalog, PUBLISHERS);
+    expect(findings).toMatchObject([{ version: "9.9.9", refusal: "signature_invalid" }]);
+    expect(formatPackCatalogSurvey(catalog.list().length, findings)).toContain("1 installable as catalogued, 1 refused at install");
+
+    const ctx = makeCtx([entry, rewritten]);
+    const out = await buildPackInstallHandler(ctx)(input("erp_admin", { packId: "com.crossengin.example", version: "9.9.9" }));
+    expect(out.status).toBe(409);
+    expect(bodyOf(out)["reason"]).toBe("signature_invalid");
+    expect((await ctx.store.listForTenant(TENANT)).records).toHaveLength(0);
+    // Control: the untouched 1.0.0 installs, so the zero above is a refusal and not a broken read.
+    const ok = await buildPackInstallHandler(ctx)(input("erp_admin", { packId: "com.crossengin.example", version: "1.0.0" }));
+    expect(ok.status).toBe(201);
+    expect((await ctx.store.listForTenant(TENANT)).records).toHaveLength(1);
+  });
 });
 
 describe("buildPackInstallHandler", () => {

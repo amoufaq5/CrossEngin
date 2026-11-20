@@ -28,6 +28,16 @@ export const PROBLEM_TYPES = {
   residency_misdirected: "https://crossengin.io/errors/residency-misdirected",
   residency_violation: "https://crossengin.io/errors/residency-violation",
   residency_unresolved: "https://crossengin.io/errors/residency-unresolved",
+  // Whether a tenant's residency profile admits the AI designer's provider (ADR-0462). A different
+  // question from the three above — where the provider runs, not which instance answers — so it has
+  // its own types: a client keyed on `residency-unresolved` reads "whether this region may serve it
+  // is unknown", which is false of a request this region did serve.
+  ai_provider_residency_forbidden:
+    "https://crossengin.io/errors/ai-provider-residency-forbidden",
+  ai_provider_residency_undeclared:
+    "https://crossengin.io/errors/ai-provider-residency-undeclared",
+  ai_provider_residency_unresolved:
+    "https://crossengin.io/errors/ai-provider-residency-unresolved",
 } as const;
 export type ProblemType = (typeof PROBLEM_TYPES)[keyof typeof PROBLEM_TYPES];
 

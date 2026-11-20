@@ -303,3 +303,24 @@ PG 16 in compose order (extensions, migrate, `app-role.sql`, `column-schema --pa
 - `rows_unopenable` (and its keyless-ciphertext sibling) said the affected tenant's requests "are
   refused (DataKeyUnwrapFailed)"; the client sees an opaque 500, not a refusal. Both now say the
   requests fail and that the answer is a 500.
+
+## Addendum: two open questions closed by ADR-0460
+
+- **`operate-server rekey` runs this survey now**, through `surveyColumnKeyConsistency`, the same
+  composition the boot calls, scoped to the named tenant (`scope: {kind: "tenant"}`) and run before
+  the write-status probe, the store and the re-wrap — `--plan` and `--rewrap-kek` included. A ring
+  that cannot open that tenant's stored key is a report naming the condition and this ADR's remedy
+  (exit 1) instead of a `DataKeyUnwrapFailed` from inside `store.load`. Scoped rather than
+  deployment-wide, because a per-tenant operation — and a rotation moved forward one `--rewrap-kek`
+  at a time — must not be refused over another tenant's row.
+- **The ceiling is `--column-key-survey-ceiling`** (1,000..100,000, default 10,000, refused rather
+  than clamped), and both `survey_incomplete` lines now say where the survey stopped and name the
+  flag; the keyless-ciphertext half previously named no number. The floor is a sampling bound
+  against corrupting rows *within* a generation: a small ceiling would shrink the head-of-id
+  population the random 32 are drawn from, reopening the defect this ADR's review closed. It does
+  not bound a tenant moving its own row into a generation of its own, which this ADR's grouping
+  refuses at any ceiling as `kek_generation_unheld` — ADR-0460's first open question.
+- Unchanged and still open here: that singleton-group refusal, the single-sample limit, which is the
+  normal case for a one-tenant survey (ADR-0460's second open question), and the rest of the table
+  above.
+

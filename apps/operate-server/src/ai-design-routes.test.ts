@@ -1,4 +1,4 @@
-import type { ResolvedPrincipal } from "@crossengin/api-gateway";
+import { ProblemDetailsResponseSchema, type ResolvedPrincipal } from "@crossengin/api-gateway";
 import type { Handler, HandlerInput, HandlerOutput } from "@crossengin/api-gateway-runtime";
 import { describe, expect, it } from "vitest";
 
@@ -860,14 +860,20 @@ describe("ai-design routes — provider residency", () => {
   it("refuses a tenant whose profile forbids the provider before any call, on both routes", async () => {
     const refusal: AiProviderAdmission = {
       allowed: false,
-      status: 403,
-      error: "ai_provider_residency_forbidden",
-      detail: "provider 'anthropic:us' not in allowedLlmProviders for profile 'eu-only'",
+      refusal: {
+        decision: "forbidden",
+        detail: "provider 'anthropic:us' not in allowedLlmProviders for profile 'eu-only'",
+      },
     };
     const { ctx, calls } = gated(refusal);
     const out = await design(ctx, { description: "a coffee shop" });
     expect(out.status).toBe(403);
-    expect(out.body["error"]).toBe("ai_provider_residency_forbidden");
+    // ADR-0462: the refusal is an RFC 9457 problem under its own registered type, and the code it
+    // carried at the top level is an extension now.
+    expect(out.body["type"]).toBe("https://crossengin.io/errors/ai-provider-residency-forbidden");
+    expect(out.body["extensions"]).toEqual({ error: "ai_provider_residency_forbidden" });
+    expect(out.body["error"]).toBeUndefined();
+    expect(ProblemDetailsResponseSchema.parse(out.body)).toEqual(out.body);
     expect(calls()).toBe(0);
     const { ctx: jobCtx, jobs, started } = makeJobCtx();
     const job = await createJob({ ...jobCtx, providerAdmission: async () => refusal }, { description: "x" });
@@ -877,12 +883,16 @@ describe("ai-design routes — provider residency", () => {
   });
 
   it("asks residency before the month, so the remedy named is the one that applies", async () => {
-    const { ctx } = gated({ allowed: false, status: 503, error: "ai_residency_unresolved", detail: "x" });
+    const { ctx } = gated({ allowed: false, refusal: { decision: "unresolved" } });
     const out = await design(
       { ...ctx, budget: { check: async () => ({ allowed: false, spentUsd: 30, limitUsd: 25 }) } },
       { description: "a coffee shop" },
     );
     expect(out.status).toBe(503);
+    expect(out.body["type"]).toBe("https://crossengin.io/errors/ai-provider-residency-unresolved");
+    expect(out.body["extensions"]).toEqual({ error: "ai_residency_unresolved", retryAfterSeconds: 5 });
+    expect(out.headers?.["retry-after"]).toBe("5");
+    expect(out.headers?.["content-type"]).toBe("application/problem+json");
   });
 
   it("admits an allowed tenant", async () => {

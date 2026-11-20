@@ -25,7 +25,7 @@ function req(overrides: Partial<CompletionRequest> = {}): CompletionRequest {
 
 describe("buildOpenAiRequest", () => {
   it("keeps system messages as system role (no flattening)", () => {
-    const built = buildOpenAiRequest(req(), { defaultModel: "gpt-4o" });
+    const built = buildOpenAiRequest(req(), { defaultModel: "gpt-4o", endUserField: "user" });
     expect(built.model).toBe("gpt-4o");
     expect(built.messages[0]).toEqual({ role: "system", content: "You are helpful." });
     expect(built.messages[1]).toEqual({ role: "user", content: "Hi" });
@@ -34,6 +34,7 @@ describe("buildOpenAiRequest", () => {
   it("honours an explicit model + maxTokens + temperature", () => {
     const built = buildOpenAiRequest(req({ model: "gpt-4.1-mini", maxTokens: 256, temperature: 0.2 }), {
       defaultModel: "gpt-4o",
+      endUserField: "user",
     });
     expect(built.model).toBe("gpt-4.1-mini");
     expect(built.max_completion_tokens).toBe(256);
@@ -41,12 +42,12 @@ describe("buildOpenAiRequest", () => {
   });
 
   it("sets response_format on jsonMode", () => {
-    const built = buildOpenAiRequest(req({ jsonMode: true }), { defaultModel: "gpt-4o" });
+    const built = buildOpenAiRequest(req({ jsonMode: true }), { defaultModel: "gpt-4o", endUserField: "user" });
     expect(built.response_format).toEqual({ type: "json_object" });
   });
 
   it("requests usage in the stream when streaming", () => {
-    const built = buildOpenAiRequest(req(), { defaultModel: "gpt-4o", stream: true });
+    const built = buildOpenAiRequest(req(), { defaultModel: "gpt-4o", stream: true, endUserField: "user" });
     expect(built.stream).toBe(true);
     expect(built.stream_options).toEqual({ include_usage: true });
   });
@@ -54,7 +55,7 @@ describe("buildOpenAiRequest", () => {
   it("encodes tools as function tools", () => {
     const built = buildOpenAiRequest(
       req({ tools: [{ name: "lookup", description: "look up", inputSchema: { type: "object" } }] }),
-      { defaultModel: "gpt-4o" },
+      { defaultModel: "gpt-4o", endUserField: "user" },
     );
     expect(built.tools?.[0]).toEqual({
       type: "function",
@@ -75,7 +76,7 @@ describe("buildOpenAiRequest", () => {
           { role: "tool", content: "result", toolCallId: "call_1" },
         ],
       }),
-      { defaultModel: "gpt-4o" },
+      { defaultModel: "gpt-4o", endUserField: "user" },
     );
     const assistant = built.messages[1];
     expect(assistant?.role).toBe("assistant");

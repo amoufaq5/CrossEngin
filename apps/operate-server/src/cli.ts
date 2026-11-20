@@ -35,6 +35,13 @@ import { ALLOW_CURSOR_DISCLOSURE_FLAG } from "./cursor-encryption.js";
 import { ALLOW_UNCOVERED_SETTLEMENT_FLAG } from "./settlement-coverage-survey.js";
 import type { DeclaredModelPrice } from "./ai-design.js";
 import { AiModelPriceInvalid, parseDeclaredModelPrice } from "./ai-design-pricing.js";
+import {
+  AI_TENANT_PSEUDONYM_FLAG,
+  AI_TENANT_PSEUDONYM_MODES,
+  DEFAULT_AI_TENANT_PSEUDONYM_MODE,
+  isAiTenantPseudonymMode,
+  type AiTenantPseudonymMode,
+} from "./ai-tenant-pseudonym.js";
 import { parseAiProviderRef } from "./ai-provider-residency.js";
 import {
   COLUMN_KEY_MODES,
@@ -44,6 +51,11 @@ import {
   DEFAULT_COLUMN_KEY_TTL_MS,
   type ColumnKeyMode,
 } from "./data-key-envelope.js";
+import {
+  COLUMN_KEY_SURVEY_CEILING_BOUNDS,
+  COLUMN_KEY_SURVEY_CEILING_FLAG,
+  PER_TENANT_SURVEY_CEILING,
+} from "./column-key-consistency.js";
 import { ABAC_POLICY_FLAG } from "./abac-policy.js";
 import {
   SENSITIVE_FIELD_CLASS_FLAG,
@@ -179,6 +191,12 @@ export interface ServeOptions {
    * TTL bounds the window and does not close it.
    */
   readonly columnKeyTtlMs: number | null;
+  /**
+   * How many tenants the boot column-key survey reads one by one on a confined session before it
+   * reports the rest as unexamined (ADR-0455, ADR-0460). Defaulted at parse to
+   * `PER_TENANT_SURVEY_CEILING`, so it is always a number here and the boot line can state it.
+   */
+  readonly columnKeySurveyCeiling: number;
   readonly schema: string | null;
   readonly apiKeys: readonly string[];
   /**
@@ -556,6 +574,8 @@ export interface ServeOptions {
   readonly allowUnpricedModel: boolean;
   /** Where the AI provider runs, as a residency profile's allowedLlmProviders names it. */
   readonly aiProviderRef: string | null;
+  /** Whether AI design requests carry the keyed per-tenant pseudonym (ADR-0456) or none (ADR-0461). */
+  readonly aiTenantPseudonym: AiTenantPseudonymMode;
   /** Expose the notification-template authoring routes under /v1/notification-templates (draft/review/approve/retire over meta.notification_templates; needs --store pg). */
   readonly notificationTemplateRoutes: boolean;
   /** Roles permitted to draft and submit a template (repeatable; default erp_admin). */
@@ -813,6 +833,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let segregationOfDuties = false;
   let columnKeyMode: ColumnKeyMode = "derived";
   let columnKeyTtlMs: number | null = null;
+  let columnKeySurveyCeiling = PER_TENANT_SURVEY_CEILING;
   let schema: string | null = null;
   let defaultScheme: "http" | "https" = "http";
   const apiKeys: string[] = [];
@@ -922,6 +943,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let aiModelPrice: DeclaredModelPrice | null = null;
   let allowUnpricedModel = false;
   let aiProviderRef: string | null = null;
+  let aiTenantPseudonym: AiTenantPseudonymMode = DEFAULT_AI_TENANT_PSEUDONYM_MODE;
+  let aiTenantPseudonymGiven = false;
   let notificationTemplateRoutes = false;
   const notificationTemplateAuthorRoles: string[] = [];
   const notificationTemplateApproverRoles: string[] = [];
@@ -1263,6 +1286,31 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       }
       columnKeyTtlMs = n;
       i += consumed();
+    } else if (
+      arg === COLUMN_KEY_SURVEY_CEILING_FLAG ||
+      arg.startsWith(`${COLUMN_KEY_SURVEY_CEILING_FLAG}=`)
+    ) {
+      const raw = takeValue(arg, next, COLUMN_KEY_SURVEY_CEILING_FLAG);
+      // `Number("")` is 0 and `Number("1e4")` is 10000, so the digits are required before the
+      // number is read: a ceiling is a count an operator types, and a spelling that merely parses
+      // is not one. Refused rather than clamped, either way out of band (ADR-0460): below the floor
+      // a handful of tenants at the head of the id order decide a whole-deployment refusal, above
+      // the ceiling the confined boot outlasts the healthcheck, and moving the value silently would
+      // make the boot line state a ceiling the operator did not choose.
+      const n = /^[0-9]+$/.test(raw) ? Number(raw) : Number.NaN;
+      if (
+        !Number.isSafeInteger(n) ||
+        n < COLUMN_KEY_SURVEY_CEILING_BOUNDS.min ||
+        n > COLUMN_KEY_SURVEY_CEILING_BOUNDS.max
+      ) {
+        throw new CliUsageError(
+          `${COLUMN_KEY_SURVEY_CEILING_FLAG} must be an integer between ` +
+            `${COLUMN_KEY_SURVEY_CEILING_BOUNDS.min.toString()} and ` +
+            `${COLUMN_KEY_SURVEY_CEILING_BOUNDS.max.toString()} tenants, got '${raw}'`,
+        );
+      }
+      columnKeySurveyCeiling = n;
+      i += consumed();
     } else if (arg === "--classified-write-mask") {
       classifiedWriteMask = true;
     } else if (
@@ -1570,6 +1618,16 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       i += consumed();
     } else if (arg === "--ai-allow-unpriced-model") {
       allowUnpricedModel = true;
+    } else if (arg === AI_TENANT_PSEUDONYM_FLAG || arg.startsWith(`${AI_TENANT_PSEUDONYM_FLAG}=`)) {
+      const raw = takeValue(arg, next, AI_TENANT_PSEUDONYM_FLAG);
+      if (!isAiTenantPseudonymMode(raw)) {
+        throw new CliUsageError(
+          `invalid ${AI_TENANT_PSEUDONYM_FLAG}: ${raw} (${AI_TENANT_PSEUDONYM_MODES.join("|")})`,
+        );
+      }
+      aiTenantPseudonym = raw;
+      aiTenantPseudonymGiven = true;
+      i += consumed();
     } else if (arg === "--ai-provider-ref" || arg.startsWith("--ai-provider-ref=")) {
       const raw = takeValue(arg, next, "--ai-provider-ref");
       try {
@@ -2026,6 +2084,14 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   // declares `manual` and nothing writes it — so a reviewer without `--ai-design` is handed a
   // console over a queue that can never be non-empty, and "nothing pending" is indistinguishable
   // from "nothing to approve".
+  // Nothing reads the mode without the Architect, so naming it there is a declaration that changes
+  // nothing — and `off` would read as a privacy decision the deployment had taken.
+  if (aiTenantPseudonymGiven && !aiDesign) {
+    throw new CliUsageError(
+      `${AI_TENANT_PSEUDONYM_FLAG} requires --ai-design: it decides what an AI design request ` +
+        "carries, and without --ai-design no request is made",
+    );
+  }
   if (designReview && !aiDesign) {
     throw new CliUsageError(
       "--design-review / --require-design-review require --ai-design: the only producer of a" +
@@ -2704,6 +2770,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     segregationOfDuties,
     columnKeyMode,
     columnKeyTtlMs,
+    columnKeySurveyCeiling,
     sensitiveFieldRoles,
     abacPolicies,
     sensitiveFieldClasses,
@@ -2776,6 +2843,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     aiModelPrice,
     allowUnpricedModel,
     aiProviderRef,
+    aiTenantPseudonym,
     notificationTemplateRoutes,
     notificationTemplateAuthorRoles:
       notificationTemplateAuthorRoles.length > 0 ? notificationTemplateAuthorRoles : ["erp_admin"],
@@ -3244,6 +3312,7 @@ Subcommands (each takes --help):
   replay               Re-derive each subsystem's projections from its log and report drift
   rekey                Move one tenant's at-rest column key to a fresh random data key
   set-credential       Set a user's login password (the bootstrap path; no mail channel)
+  ai-pseudonym-lookup  Name the tenant an AI provider's report means by its ctp_ pseudonym
 
 Manifest source (exactly one):
   --pack <name>        Built-in vertical pack: ${BUILTIN_PACK_NAMES.join(", ")}
@@ -3320,6 +3389,15 @@ Options:
                        'Wrong key or corrupt data' and its WRITES would store
                        new values under the old key. Lower it before a rekey,
                        or quiesce the tenant for the window.
+  ${COLUMN_KEY_SURVEY_CEILING_FLAG} <n>
+                       How many tenants the boot column-key survey reads one at
+                       a time when this role is confined by row-level security
+                       (${COLUMN_KEY_SURVEY_CEILING_BOUNDS.min.toString()}..${COLUMN_KEY_SURVEY_CEILING_BOUNDS.max.toString()}, default ${PER_TENANT_SURVEY_CEILING.toString()}). Past it the rest are
+                       reported as unexamined, never as consistent, and the line
+                       says where it stopped. Each tenant costs up to four round
+                       trips (two for the key survey, two for the ciphertext
+                       scan; ~3.5 s per 10,000 tenants on loopback), so raising
+                       it lengthens every pg-columns boot.
   --schema <name>      Postgres schema for the entity store (default meta;
                        public for pg-columns)
   --scheme <proto>     Default request scheme: http | https (default http)
@@ -3617,6 +3695,11 @@ Options:
                        profile's allowedLlmProviders names it (e.g. anthropic:us). A tenant whose
                        profile does not list it is refused AI design; undeclared, every profiled
                        tenant is refused
+  --ai-tenant-pseudonym keyed|off  What an AI design request carries to identify its tenant
+                       (default keyed): an opaque per-tenant id derived from
+                       CURSOR_ENCRYPTION_SECRET, or nothing. off keeps sealed cursors and lets the
+                       provider see no per-tenant identifier; the raw tenant id is never sent
+                       either way. Needs --ai-design
   --notification-template-routes  Expose template authoring under /v1/notification-templates —
                        draft, submit, approve/reject, retire (needs --store pg)
   --notification-template-author-role <r>  Role permitted to draft and submit (repeatable;
@@ -4320,5 +4403,10 @@ and COLUMN_ENCRYPTION_SECRET_GENERATION during a rotation) and never from argv. 
 PG* env vars; run as a role row-level security does not confine, because a confined session's
 "0 rows re-encrypted" is indistinguishable from "this tenant holds no ciphertext".
 
-Exit: 0 on a completed rekey or a clean plan; 1 when the survey refuses; 2 on a usage error.
+Before anything else — on --plan and --rewrap-kek too — the boot's column-key check runs for this
+tenant: a secret ring that cannot open its stored data key (or the ciphertext its first key would be
+seeded from) is refused with the condition and its remedy, and nothing past it runs.
+
+Exit: 0 on a completed rekey or a clean plan; 1 when the column-key check or the survey refuses;
+2 on a usage error.
 `;

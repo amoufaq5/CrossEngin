@@ -14,11 +14,13 @@ import {
   PostgresPackVersionStore,
   buildPersistentPackSubmissionEngine,
 } from "@crossengin/marketplace-runtime-pg";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   buildMarketplaceAuthoringRoutes,
   buildSubmitHandler,
+  createUnverifiedReleaseReporter,
+  unverifiedReleaseLine,
   type MarketplaceAuthoringContext,
 } from "./marketplace-authoring.js";
 
@@ -28,8 +30,7 @@ const SHA = "a".repeat(64);
 const keypair = generateEd25519Keypair();
 
 /** A fake PgConnection over the platform-wide pack_versions table (no tenant context). */
-function fakePg(): PgConnection {
-  const rows = new Map<string, Record<string, unknown>>();
+function fakePg(rows = new Map<string, Record<string, unknown>>()): PgConnection {
   const run = async (sql: string, params?: readonly unknown[]) => {
     const p = params ?? [];
     if (sql.includes("INSERT INTO")) {
@@ -75,8 +76,8 @@ function fakePg(): PgConnection {
 
 const PUBLISHERS = new PackPublisherRegistry([parsePackPublisherSpec(`com.acme:community:${keypair.publicKeyBase64}`)]);
 
-function makeCtx(): MarketplaceAuthoringContext {
-  const conn = fakePg();
+function makeCtx(rows?: Map<string, Record<string, unknown>>): MarketplaceAuthoringContext {
+  const conn = fakePg(rows);
   return {
     engine: buildPersistentPackSubmissionEngine(conn, { publishers: PUBLISHERS }),
     store: new PostgresPackVersionStore(conn),
@@ -289,5 +290,178 @@ describe("authoring — a caller's malformed input is a refusal, never a 500", (
     };
     expect(out.status).toBe(409);
     expect(out.body.reason).toBe("review_not_cleared");
+  });
+});
+
+describe("authoring — a stored row is re-verified against the publisher registry (ADR-0459)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * The owner's two-column rewrite ADR-0454 measured live: `version` and
+   * `signature.release.version` both moved to 9.9.9, which `PackVersionRecordSchema` accepts
+   * because the row agrees with itself.
+   */
+  function rewriteToNineNineNine(rows: Map<string, Record<string, unknown>>): void {
+    const row = rows.get("com.acme.loyalty|1.0.0")!;
+    const sig = JSON.parse(String(row["signature"])) as { release: Record<string, unknown> };
+    rows.delete("com.acme.loyalty|1.0.0");
+    rows.set("com.acme.loyalty|9.9.9", {
+      ...row,
+      version: "9.9.9",
+      signature: JSON.stringify({ ...sig, release: { ...sig.release, version: "9.9.9" } }),
+    });
+  }
+
+  const nine = { packId: "com.acme.loyalty", version: "9.9.9" };
+
+  it("lists the rewritten row marked unverified rather than hiding it, and logs it once without key material", async () => {
+    const rows = new Map<string, Record<string, unknown>>();
+    const ctx = makeCtx(rows);
+    await findHandler(ctx, "authoring.packs.submit")(input("pack_author", submitBody(manifest())));
+    rewriteToNineNineNine(rows);
+    const logged: string[] = [];
+    vi.spyOn(console, "error").mockImplementation((m: unknown) => {
+      logged.push(String(m));
+    });
+    const list = (await findHandler(ctx, "authoring.packs.list")(
+      input("pack_author", undefined, { packId: "com.acme.loyalty" }),
+    )) as HandlerOutput & { body: { data: { version: string; releaseVerification: { verified: boolean; refusal?: string } }[] } };
+    expect(list.body.data).toHaveLength(1);
+    expect(list.body.data[0]).toMatchObject({
+      version: "9.9.9",
+      releaseVerification: { verified: false, refusal: "signature_invalid" },
+    });
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toContain("pack=com.acme.loyalty version=9.9.9 status=draft reason=signature_invalid");
+    expect(logged[0]).not.toContain(keypair.publicKeyBase64);
+    expect(logged[0]).not.toContain(PUBLISHERS.list()[0]!.fingerprint.slice(0, 12));
+  });
+
+  it("marks an untouched row verified (control)", async () => {
+    const ctx = makeCtx();
+    await findHandler(ctx, "authoring.packs.submit")(input("pack_author", submitBody(manifest())));
+    const get = (await findHandler(ctx, "authoring.packs.get")(input("pack_author", undefined, params))) as HandlerOutput & {
+      body: { version: { releaseVerification: { verified: boolean } } };
+    };
+    expect(get.body.version.releaseVerification).toEqual({ verified: true });
+  });
+
+  it("409s submitting the rewritten row for review, names the reason, and advances nothing", async () => {
+    const rows = new Map<string, Record<string, unknown>>();
+    const ctx = makeCtx(rows);
+    await findHandler(ctx, "authoring.packs.submit")(input("pack_author", submitBody(manifest())));
+    rewriteToNineNineNine(rows);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const out = (await findHandler(ctx, "authoring.packs.submitForReview")(input("pack_author", undefined, nine))) as HandlerOutput & {
+      body: { reason: string; releaseRefusal: string };
+    };
+    expect(out.status).toBe(409);
+    expect(out.body).toMatchObject({ reason: "stored_release_unverified", releaseRefusal: "signature_invalid" });
+    expect(rows.get("com.acme.loyalty|9.9.9")?.["status"]).toBe("draft");
+  });
+
+  it("409s publishing a rewritten row that was already in review, and leaves it unpublished", async () => {
+    const rows = new Map<string, Record<string, unknown>>();
+    const ctx = makeCtx(rows);
+    await findHandler(ctx, "authoring.packs.submit")(input("pack_author", submitBody(manifest(), "beta")));
+    await findHandler(ctx, "authoring.packs.submitForReview")(input("pack_author", undefined, params));
+    rewriteToNineNineNine(rows);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const out = (await findHandler(ctx, "authoring.packs.publish")(input("marketplace_reviewer", undefined, nine))) as HandlerOutput & {
+      body: { reason: string };
+    };
+    expect(out.status).toBe(409);
+    expect(out.body.reason).toBe("stored_release_unverified");
+    expect(rows.get("com.acme.loyalty|9.9.9")?.["status"]).toBe("in_review");
+  });
+
+  it("still withdraws the rewritten row, which is the remedy", async () => {
+    const rows = new Map<string, Record<string, unknown>>();
+    const ctx = makeCtx(rows);
+    await findHandler(ctx, "authoring.packs.submit")(input("pack_author", submitBody(manifest())));
+    rewriteToNineNineNine(rows);
+    const out = (await findHandler(ctx, "authoring.packs.withdraw")(
+      input("pack_author", { reason: "row edited outside the platform" }, nine),
+    )) as HandlerOutput;
+    expect(out.status).toBe(200);
+    expect(rows.get("com.acme.loyalty|9.9.9")?.["status"]).toBe("withdrawn");
+  });
+
+  it("lets a reviewer — who meets the 409 at review and publish — withdraw the row too", async () => {
+    const rows = new Map<string, Record<string, unknown>>();
+    const ctx = makeCtx(rows);
+    await findHandler(ctx, "authoring.packs.submit")(input("pack_author", submitBody(manifest(), "beta")));
+    await findHandler(ctx, "authoring.packs.submitForReview")(input("pack_author", undefined, params));
+    rewriteToNineNineNine(rows);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const out = (await findHandler(ctx, "authoring.packs.withdraw")(
+      input("marketplace_reviewer", { reason: "release no longer verifies" }, nine),
+    )) as HandlerOutput;
+    expect(out.status).toBe(200);
+    expect(rows.get("com.acme.loyalty|9.9.9")?.["status"]).toBe("withdrawn");
+    // A principal holding neither role still cannot.
+    const denied = (await findHandler(ctx, "authoring.packs.withdraw")(input("viewer", { reason: "x" }, nine))) as HandlerOutput;
+    expect(denied.status).toBe(403);
+  });
+
+  it("lets a reviewer record a failed review on the rewritten row, and still refuses a pass", async () => {
+    const rows = new Map<string, Record<string, unknown>>();
+    const ctx = makeCtx(rows);
+    await findHandler(ctx, "authoring.packs.submit")(input("pack_author", submitBody(manifest(), "beta")));
+    await findHandler(ctx, "authoring.packs.submitForReview")(input("pack_author", undefined, params));
+    rewriteToNineNineNine(rows);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const pass = (await findHandler(ctx, "authoring.packs.review")(input("marketplace_reviewer", { status: "passed" }, nine))) as HandlerOutput & {
+      body: { reason: string };
+    };
+    expect(pass.status).toBe(409);
+    expect(pass.body.reason).toBe("stored_release_unverified");
+    const fail = (await findHandler(ctx, "authoring.packs.review")(input("marketplace_reviewer", { status: "failed" }, nine))) as HandlerOutput;
+    expect(fail.status).toBe(200);
+    expect(rows.get("com.acme.loyalty|9.9.9")?.["security_review_status"]).toBe("failed");
+  });
+
+  it("409s publishing a row whose unsigned review column was edited to 'exempt' for a community publisher", async () => {
+    const rows = new Map<string, Record<string, unknown>>();
+    const ctx = makeCtx(rows);
+    await findHandler(ctx, "authoring.packs.submit")(input("pack_author", submitBody(manifest())));
+    await findHandler(ctx, "authoring.packs.submitForReview")(input("pack_author", undefined, params));
+    const row = rows.get("com.acme.loyalty|1.0.0")!;
+    expect(row["security_review_status"]).toBe("in_progress");
+    rows.set("com.acme.loyalty|1.0.0", { ...row, security_review_status: "exempt" });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const out = (await findHandler(ctx, "authoring.packs.publish")(input("marketplace_reviewer", undefined, params))) as HandlerOutput & {
+      body: { reason: string; releaseRefusal: string };
+    };
+    expect(out.status).toBe(409);
+    expect(out.body).toMatchObject({ reason: "stored_release_unverified", releaseRefusal: "review_exemption_unsupported" });
+    expect(rows.get("com.acme.loyalty|1.0.0")?.["status"]).toBe("in_review");
+  });
+
+  it("reports a row once per process across reads, and not at all once it is withdrawn", async () => {
+    const rows = new Map<string, Record<string, unknown>>();
+    const ctx = makeCtx(rows);
+    const logged: string[] = [];
+    const routes = buildMarketplaceAuthoringRoutes(ctx, createUnverifiedReleaseReporter((l) => logged.push(l)));
+    const handler = (op: string) => routes.find((r) => r.route.operationId === op)!.handler;
+    await handler("authoring.packs.submit")(input("pack_author", submitBody(manifest())));
+    rewriteToNineNineNine(rows);
+    const list = () => handler("authoring.packs.list")(input("pack_author", undefined, { packId: "com.acme.loyalty" }));
+    await list();
+    await list();
+    await handler("authoring.packs.get")(input("pack_author", undefined, nine));
+    expect(logged).toHaveLength(1);
+    await handler("authoring.packs.withdraw")(input("pack_author", { reason: "tampered" }, nine));
+    await list();
+    expect(logged).toHaveLength(1);
+  });
+
+  it("names a remedy matching the row's status, and none for a withdrawn row", () => {
+    expect(unverifiedReleaseLine("p", "1.0.0", "published", "publisher_unregistered")).toContain("in distribution");
+    expect(unverifiedReleaseLine("p", "1.0.0", "in_review", "signature_invalid")).toContain("record a failed review");
+    expect(unverifiedReleaseLine("p", "1.0.0", "draft", "signature_invalid")).not.toContain("published");
+    expect(unverifiedReleaseLine("p", "1.0.0", "withdrawn", "signature_invalid")).toBeNull();
   });
 });

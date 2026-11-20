@@ -1684,6 +1684,156 @@ describe("the API connects as a role the row-level-security policies confine", (
   });
 });
 
+describe("the Article 17 pipeline connects as a dedicated eraser role, not the superuser (ADR-0458)", () => {
+  const AI_COMPOSE = resolve(here, "../../../deploy/docker-compose.ai.yml");
+  const SCRIPT = resolve(here, "../../../deploy/postgres/roles/eraser-role.sql");
+  const api = liveLines(composeService(COMPOSE, "api"));
+  const eraser = liveLines(composeService(COMPOSE, "eraser-role"));
+  // Comment lines removed: the script's prose names every attribute and grant it discusses, so a
+  // bare `toContain` would pass with the statement deleted (the app-role fence's measured lesson).
+  const script = readFileSync(SCRIPT, "utf8")
+    .split("\n")
+    .filter((l) => !l.trim().startsWith("--"))
+    .join("\n");
+
+  it("runs the role script as the owner on every up, after app-role, with the password from the environment", () => {
+    expect(eraser).toContain("<<: *pg-env");
+    // Anchored at the key: `${DELETION_PGUSER:-}` contains the substring and is not an override.
+    expect(eraser).not.toMatch(/^\s*PGUSER:/m);
+    expect(eraser).toMatch(/ {6}app-role:\n {8}condition: service_completed_successfully/);
+    expect(eraser).toContain("CROSSENGIN_ERASER_DB_USER: ${DELETION_PGUSER:-}");
+    expect(eraser).toContain("CROSSENGIN_ERASER_DB_PASSWORD: ${DELETION_PGPASSWORD:-}");
+    expect(eraser).toContain('command: ["-v", "ON_ERROR_STOP=1", "-f", "/roles/eraser-role.sql"]');
+    expect(eraser).not.toMatch(/command:.*PASSWORD/);
+    expect(readdirSync(resolve(here, "../../../deploy/postgres/init"))).not.toContain("eraser-role.sql");
+  });
+
+  it("does not start the API until the eraser role has been provisioned, in both compose files", () => {
+    expect(api).toMatch(/ {6}eraser-role:\n {8}condition: service_completed_successfully/);
+    const overlay = liveLines(composeService(AI_COMPOSE, "api"));
+    expect(overlay).toMatch(/ {6}eraser-role:\n {8}condition: service_completed_successfully/);
+    // The API still passes the deletion credential through the environment and nowhere else.
+    expect(api).toContain("DELETION_PGUSER: ${DELETION_PGUSER:-}");
+    expect(api).not.toMatch(/command:.*DELETION_PG/);
+  });
+
+  it("names the dedicated role in .env.example, opt-in, with a placeholder the script refuses", () => {
+    const env = readFileSync(resolve(here, "../../../deploy/.env.example"), "utf8");
+    expect(env).toMatch(/^#DELETION_PGUSER=crossengin_eraser$/m);
+    expect(env).toMatch(/^#DELETION_PGPASSWORD=REPLACE_WITH_\S+$/m);
+    // Opt-in: no deletion flag is on the shipped command, so an uncommented line would provision a
+    // BYPASSRLS role nothing uses.
+    expect(env).not.toMatch(/^DELETION_PGUSER=/m);
+    expect(script).toContain("starts_with(:'eraser_password', 'REPLACE_WITH_')");
+  });
+
+  it("makes the role NOSUPERUSER and BYPASSRLS, and refuses the routes back to a superuser", () => {
+    expect(script).toContain("'ALTER ROLE %I WITH LOGIN NOCREATEDB NOCREATEROLE%s%s%s PASSWORD %L'");
+    expect(script).toContain("CASE WHEN r.rolsuper THEN ' NOSUPERUSER' ELSE '' END");
+    expect(script).toContain("CASE WHEN r.rolbypassrls THEN '' ELSE ' BYPASSRLS' END");
+    // Any membership, in either direction, read from pg_auth_members rather than pg_has_role: a
+    // superuser answers pg_has_role true for every role, and a member of pg_write_all_data or of the
+    // app role inherits DELETE or UPDATE that BYPASSRLS stops the fences refusing.
+    expect(script).toContain("JOIN pg_roles e ON e.oid = m.member");
+    expect(script).toContain("WHERE e.rolname = :'eraser_user') THEN");
+    expect(script).toContain("JOIN pg_roles e ON e.oid = m.roleid");
+    // Refused before the role is created or altered, so a refusal touches nothing.
+    expect(script.indexOf("JOIN pg_roles e ON e.oid = m.member")).toBeLessThan(
+      script.indexOf("'CREATE ROLE %I LOGIN'"),
+    );
+    expect(script).not.toContain("pg_has_role(");
+    expect(script).toContain("WHEN :'eraser_user' = :'app_user' THEN");
+  });
+
+  it("grants exactly what the pipeline issues, recomputed from the catalog, and nothing by default", () => {
+    // Recomputed, not accumulated, so a table fenced since the last run loses its DELETE.
+    const begin = script.indexOf("BEGIN;");
+    const commit = script.indexOf("COMMIT;");
+    expect(begin).toBeGreaterThan(0);
+    // lastIndexOf: the retirement block revokes the same way, for a different role, before it.
+    expect(script.lastIndexOf("REVOKE ALL ON ALL TABLES IN SCHEMA meta FROM %I")).toBeGreaterThan(begin);
+    expect(script.lastIndexOf("GRANT SELECT, DELETE ON %I.%I TO %I")).toBeLessThan(commit);
+    expect(script).toContain("a.attname = 'tenant_id'");
+    expect(script).toContain("AND pg_get_expr(p.polqual, p.polrelid) = 'false')");
+    expect(script).not.toMatch(/GRANT[^;]*UPDATE/);
+    // No blanket read: an earlier version granted SELECT on every meta table, meta.users included,
+    // and on every future one by default. Nothing is granted by default now, and the old default is
+    // revoked on every run.
+    expect(script).not.toMatch(/ON ALL TABLES IN SCHEMA meta TO/);
+    expect(script).not.toMatch(/IN SCHEMA meta\s+GRANT/);
+    expect(script).toContain("IN SCHEMA meta REVOKE ALL ON TABLES FROM %I");
+    expect(script).toContain("REVOKE ALL ON ALL SEQUENCES IN SCHEMA meta FROM %I");
+    expect(script).not.toMatch(/GRANT [A-Z, ]*ON ALL SEQUENCES/);
+  });
+
+  it("keeps the named grants in step with the erasure's statutory set and the pipeline's own list", () => {
+    const named = (prefix: string): string[] => {
+      const at = script.indexOf(prefix);
+      expect(at, prefix).toBeGreaterThan(0);
+      const array = /ARRAY\[([^\]]*)\]/.exec(script.slice(at))?.[1] ?? "";
+      return [...array.matchAll(/'meta\.([a-z_]+)'/g)].map((m) => m[1] ?? "").sort();
+    };
+    const lifecycle = readFileSync(
+      resolve(here, "../../../packages/tenant-lifecycle-pg/src/shared-table-erasure.ts"),
+      "utf8",
+    );
+    const body = (constant: string): string => {
+      const start = lifecycle.indexOf(`export const ${constant}`);
+      expect(start, constant).toBeGreaterThan(0);
+      return lifecycle.slice(start, lifecycle.indexOf("]);", start));
+    };
+    const statutory = [...body("STATUTORY_RETENTION_TABLES").matchAll(/\{ table: "([a-z_]+)", obligation:/g)].map(
+      (m) => m[1] ?? "",
+    );
+    expect(statutory.length).toBeGreaterThanOrEqual(2);
+    const pipeline = [
+      ...body("DELETION_PIPELINE_PRIVILEGES").matchAll(/\{ table: "([a-z_]+)", privilege: "(SELECT|INSERT)"/g),
+    ];
+    expect(pipeline.length).toBeGreaterThanOrEqual(5);
+    const selects = pipeline.filter((m) => m[2] === "SELECT").map((m) => m[1] ?? "");
+    const inserts = pipeline.filter((m) => m[2] === "INSERT").map((m) => m[1] ?? "");
+    expect(named("SELECT format('GRANT SELECT ON %s TO %I'")).toEqual([...statutory, ...selects].sort());
+    expect(named("SELECT format('GRANT INSERT ON %s TO %I'")).toEqual([...inserts].sort());
+    // The erasure targets the catalog fences against a tenant delete (`tenantUndeletableRecord`) are
+    // still the tenant's to erase, so they are granted by name. Without them every deletion was
+    // refused table_privilege_missing on the six, measured live (ADR-0458). Kept in step with
+    // TENANT_UNDELETABLE_TABLES in both directions, and with the readback's exclusion list.
+    const retention = readFileSync(
+      resolve(here, "../../../packages/testing/src/strategy/pg-record-retention.ts"),
+      "utf8",
+    );
+    const at = retention.indexOf("export const TENANT_UNDELETABLE_TABLES");
+    expect(at).toBeGreaterThan(0);
+    const undeletable = [
+      ...retention.slice(at, retention.indexOf("]);", at)).matchAll(/table: "([a-z_]+)"/g),
+    ].map((m) => m[1] ?? "");
+    expect(undeletable.length).toBeGreaterThanOrEqual(6);
+    expect(named("SELECT format('GRANT SELECT, DELETE ON %s TO %I'")).toEqual([...undeletable].sort());
+    const readback = /c\.relname <> ALL \(ARRAY\[([^\]]*)\]\)/.exec(script)?.[1] ?? "";
+    expect([...readback.matchAll(/'([a-z_]+)'/g)].map((m) => m[1] ?? "").sort()).toEqual(
+      [...undeletable].sort(),
+    );
+  });
+
+  it("retires a role it provisioned once DELETION_PGUSER stops naming it", () => {
+    expect(script).toContain("\\set marker 'crossengin:eraser-role'");
+    expect(script).toContain("SELECT format('COMMENT ON ROLE %I IS %L', :'eraser_user', :'marker') \\gexec");
+    const retire = script.indexOf("WHERE shobj_description(r.oid, 'pg_authid') = :'marker'");
+    expect(retire).toBeGreaterThan(0);
+    // Before both early exits, so unsetting the variable and pointing it at the owner each retire.
+    expect(retire).toBeLessThan(script.indexOf("AS eraser_unset \\gset"));
+    expect(retire).toBeLessThan(script.indexOf("AS eraser_is_owner \\gset"));
+    expect(script).toContain("'ALTER ROLE %I WITH NOLOGIN%s'");
+    expect(script).toContain("' NOBYPASSRLS'");
+    expect(script).toContain(":'marker' || ':retired'");
+  });
+
+  it("leaves ADR-0453's owner configuration working and says so, rather than refusing an upgrade", () => {
+    expect(script).toContain("SELECT (:'eraser_user' = current_user) AS eraser_is_owner \\gset");
+    expect(script).toContain("SELECT (:'eraser_user' = '') AS eraser_unset \\gset");
+  });
+});
+
 describe("the owner builds --store pg's unique indexes before the confined API starts (ADR-0423)", () => {
   const AI_COMPOSE = resolve(here, "../../../deploy/docker-compose.ai.yml");
   const api = liveLines(composeService(COMPOSE, "api"));

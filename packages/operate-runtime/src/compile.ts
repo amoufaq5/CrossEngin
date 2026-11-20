@@ -102,7 +102,7 @@ import {
   OPENAPI_OPERATION_ID,
   OPENAPI_PATH_SEGMENTS,
 } from "./openapi-handler.js";
-import type { OpenApiCoverageGap } from "./openapi.js";
+import type { OpenApiCoverageGap, OpenApiResidencyDeclaration } from "./openapi.js";
 import { buildAgingHandler, type AgingSpec } from "./aging-handler.js";
 import { buildEntitlementHandler } from "./entitlement-handler.js";
 import { buildUsageHandler } from "./usage-handler.js";
@@ -218,6 +218,14 @@ export interface OperateRuntimeOptions {
    * dropped from, both times silently — so the field is designed so that the drop cannot lie.
    */
   readonly openApiCoverage?: () => readonly OpenApiCoverageGap[];
+  /**
+   * What the region gate wrapping this server's handlers covers, or `null` when there is none
+   * (ADR-0462). A thunk for `openApiCoverage`'s reason: the gate is applied to the handler registry
+   * *after* this function returns, so the answer exists only once it has run, and the document reads
+   * it on its first request. Absent reads as `null` — no gate — which is correct for every caller
+   * that applies none; `buildOperateHttpServer`, the one that may apply one, always supplies it.
+   */
+  readonly openApiResidency?: () => OpenApiResidencyDeclaration | null;
   /** Backs the admin settings endpoints + runtime numbering overrides. */
   readonly settingsStore?: SettingsStore;
   /**
@@ -1501,6 +1509,7 @@ export function compileOperateServer(
         version: manifestHash(manifest),
         coverage: options.openApiCoverage?.() ?? [],
         writeSurfaces,
+        residency: options.openApiResidency?.() ?? null,
       }),
     }),
   );

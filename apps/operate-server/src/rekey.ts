@@ -48,6 +48,7 @@ import {
   type TenantLifecycleState,
 } from "@crossengin/tenant-lifecycle";
 
+import { formatColumnKeyConsistency, type ColumnKeyConsistency } from "./column-key-consistency.js";
 import {
   COLUMN_KEY_MODE_FLAG,
   COLUMN_KEY_TTL_FLAG,
@@ -91,6 +92,20 @@ export interface RekeyOptions {
   readonly rewrapKek: boolean;
   readonly format: "human" | "json";
   readonly help: boolean;
+}
+
+/**
+ * The column-key pre-flight's lines, printed first on every run including `--plan` (ADR-0460).
+ *
+ * The boot's own sentences, scoped to this tenant, rather than a rekey-local spelling of them: the
+ * remedies (which variable holds which generation, when to set the previous secret) are the ones an
+ * operator already reads at boot, and a second wording here is a second place for one to go stale.
+ * A level word leads each line because this output has no logger to carry it.
+ */
+export function formatRekeyColumnKeys(consistency: ColumnKeyConsistency): string {
+  return formatColumnKeyConsistency(consistency)
+    .map((line) => `${line.level === "info" ? "ok" : line.level}: ${line.text}`)
+    .join("\n");
 }
 
 /** One line for a `--rewrap-kek` run. Never carries a key. */

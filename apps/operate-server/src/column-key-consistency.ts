@@ -116,10 +116,45 @@ export const SAMPLES_PER_GROUP = 32;
 export const KEYLESS_CIPHERTEXT_SAMPLES = 32;
 
 /**
- * How many tenants the confined route reads, one transaction and two statements each. Past it the
- * remainder is reported as unexamined rather than read: a boot that takes minutes is its own outage.
+ * How many tenants the confined route reads by default, one transaction and two statements each.
+ * Past it the remainder is reported as unexamined rather than read: a boot that takes minutes is its
+ * own outage. `COLUMN_KEY_SURVEY_CEILING_FLAG` moves it within `COLUMN_KEY_SURVEY_CEILING_BOUNDS`.
  */
 export const PER_TENANT_SURVEY_CEILING = 10_000;
+
+export const COLUMN_KEY_SURVEY_CEILING_FLAG = "--column-key-survey-ceiling";
+
+/**
+ * The flag's bounds, refused rather than clamped (ADR-0460).
+ *
+ * The floor is a sampling bound and not a cost bound, and it bounds one attack only: corrupting rows
+ * *within* an existing key-encryption-key generation. The confined key route reads the first N
+ * tenants **by id** and samples 32 per generation at random from them, so a small N would let a
+ * handful of tenants corrupting their own `wrapped_key` bytes (the table's one policy lets a
+ * tenant-context session `UPDATE` them) fail every sample and decide every boot. It does **not**
+ * bound a tenant moving its own row into a generation of its own (`kek_generation` carries only
+ * `>= 1`): a one-row group at an unheld generation is `kek_generation_unheld` and refuses at any
+ * ceiling, which predates this flag (ADR-0455) and is ADR-0460's open question.
+ *
+ * The ceiling is a cost bound: the confined route is ~0.35 ms per tenant on loopback (ADR-0455's
+ * measurement, 3.45 s per 10,000) and ~4 ms at a 1 ms round trip, so 100,000 is ~35 s on loopback —
+ * the compose healthcheck's `start_period` — and minutes across a network. Past it the honest answer
+ * is an unconfined survey session, not a longer boot.
+ */
+export const COLUMN_KEY_SURVEY_CEILING_BOUNDS = { min: 1_000, max: 100_000 } as const;
+
+/**
+ * What a survey was asked about.
+ *
+ * `deployment` is the boot survey over every tenant, carrying the confined route's ceiling so the
+ * line that reports an incomplete survey can say where it stopped. `tenant` is a per-tenant
+ * operation's pre-flight (`operate-server rekey`): one tenant, read under its own context whatever
+ * the session's confinement, so a refusal is about the tenant the operator named and never about
+ * another tenant's row.
+ */
+export type ColumnKeySurveyScope =
+  | { readonly kind: "deployment"; readonly ceiling: number }
+  | { readonly kind: "tenant"; readonly tenantId: string };
 
 export const COLUMN_KEY_CONDITIONS = [
   /** Ciphertext held by tenants with no key row does not open under the secret that would read it. */
@@ -225,6 +260,7 @@ export interface ColumnKeyFinding {
 export interface ColumnKeyConsistency {
   readonly verdict: "consistent" | "refuse" | "unknown";
   readonly mode: ColumnKeyMode;
+  readonly scope: ColumnKeySurveyScope;
   /** Tenants holding a data key row, among those examined. */
   readonly tenantsWithKeys: number;
   readonly findings: readonly ColumnKeyFinding[];
@@ -316,6 +352,12 @@ export async function surveyDataKeyRows(
     readonly ceiling?: number;
     /** Draws the confined route's samples; injected so a test can pin them. */
     readonly random?: () => number;
+    /**
+     * Survey this one tenant only (a `tenant` scope). Read under its own context whatever the
+     * session's confinement — an owner's read is filtered by the same predicate — so there is one
+     * route and no ceiling.
+     */
+    readonly tenantId?: string;
   } = {},
 ): Promise<DataKeyRowSurvey> {
   const schema = opts.schema ?? "meta";
@@ -323,6 +365,7 @@ export async function surveyDataKeyRows(
     return { readable: false, reason: `invalid schema identifier ${JSON.stringify(schema)}` };
   }
   const ceiling = opts.ceiling ?? PER_TENANT_SURVEY_CEILING;
+  const random = opts.random ?? Math.random;
   const table = `${schema}.tenant_data_keys`;
   try {
     const catalog = await conn.query<CatalogRow>(
@@ -346,12 +389,15 @@ export async function surveyDataKeyRows(
     if (row.can_select !== true) {
       return { readable: false, reason: `this role may not SELECT ${table}` };
     }
+    if (opts.tenantId !== undefined) {
+      return await surveyPerTenant(conn, schema, { kind: "listed", tenants: [opts.tenantId] }, random);
+    }
     const visibility = await probeSessionPolicyVisibility(conn, schema, "tenant_data_keys");
     if (visibility === null) {
       return { readable: false, reason: `${table} vanished between two catalog reads` };
     }
     return sessionWouldBeConfined(visibility)
-      ? await surveyPerTenant(conn, schema, ceiling, opts.random ?? Math.random)
+      ? await surveyPerTenant(conn, schema, { kind: "every", ceiling }, random)
       : await surveyUnconfined(conn, schema);
   } catch (err) {
     return { readable: false, reason: message(err) };
@@ -417,28 +463,47 @@ async function surveyUnconfined(conn: PgConnection, schema: string): Promise<Dat
   };
 }
 
+/** Which tenants the per-tenant route reads: every tenant up to a ceiling, or exactly the listed ones. */
+type PerTenantSource =
+  | { readonly kind: "every"; readonly ceiling: number }
+  | { readonly kind: "listed"; readonly tenants: readonly string[] };
+
+/** The sentence an incomplete survey's line ends on: where it stopped, and how to move that. */
+function ceilingClause(ceiling: number): string {
+  return (
+    `the survey stops at ${ceiling.toString()} tenants (${COLUMN_KEY_SURVEY_CEILING_FLAG}, ` +
+    `${COLUMN_KEY_SURVEY_CEILING_BOUNDS.min.toString()}..${COLUMN_KEY_SURVEY_CEILING_BOUNDS.max.toString()})`
+  );
+}
+
 async function surveyPerTenant(
   conn: PgConnection,
   schema: string,
-  ceiling: number,
+  source: PerTenantSource,
   random: () => number,
 ): Promise<DataKeyRowSurvey> {
-  // One past the ceiling, so "exactly at the ceiling" and "more than it" are told apart without a
-  // second count.
-  const tenantRows = await conn.query<{ id: unknown }>(
-    `SELECT id FROM ${schema}.tenants ORDER BY id LIMIT $1`,
-    [ceiling + 1],
-  );
-  const ids = tenantRows.rows.map((r) => String(r.id));
-  const examined = ids.slice(0, ceiling);
+  let examined: readonly string[];
   let unexaminedTenants = 0;
   let incompleteReason: string | null = null;
-  if (ids.length > ceiling) {
-    const total = await conn.query<{ n: unknown }>(`SELECT count(*) AS n FROM ${schema}.tenants`, []);
-    unexaminedTenants = asInt(total.rows[0]?.n ?? 0, "count") - ceiling;
-    incompleteReason =
-      `this role is confined by ${schema}.tenant_data_keys' isolation policy, so each tenant is read ` +
-      `under its own context, and the survey stops at ${ceiling.toString()} tenants`;
+  if (source.kind === "listed") {
+    examined = source.tenants;
+  } else {
+    const { ceiling } = source;
+    // One past the ceiling, so "exactly at the ceiling" and "more than it" are told apart without a
+    // second count.
+    const tenantRows = await conn.query<{ id: unknown }>(
+      `SELECT id FROM ${schema}.tenants ORDER BY id LIMIT $1`,
+      [ceiling + 1],
+    );
+    const ids = tenantRows.rows.map((r) => String(r.id));
+    examined = ids.slice(0, ceiling);
+    if (ids.length > ceiling) {
+      const total = await conn.query<{ n: unknown }>(`SELECT count(*) AS n FROM ${schema}.tenants`, []);
+      unexaminedTenants = asInt(total.rows[0]?.n ?? 0, "count") - ceiling;
+      incompleteReason =
+        `this role is confined by ${schema}.tenant_data_keys' isolation policy, so each tenant is read ` +
+        `under its own context, and ${ceilingClause(ceiling)}`;
+    }
   }
   const groups = new Map<string, { group: Omit<DataKeyRowGroup, "samples">; samples: DataKeyRowSample[] }>();
   const unreadable: UnreadableRow[] = [];
@@ -551,6 +616,8 @@ export async function checkKeylessCiphertext(
     readonly secret: Uint8Array | null;
     readonly ceiling?: number;
     readonly samples?: number;
+    /** Ask about this one tenant only, under its own context (`surveyDataKeyRows`' `tenantId`). */
+    readonly tenantId?: string;
   },
 ): Promise<KeylessCiphertextCheck> {
   const keySchema = opts.keySchema ?? "meta";
@@ -575,14 +642,20 @@ export async function checkKeylessCiphertext(
       [`${keySchema}.tenant_data_keys`],
     );
     const keyTablePresent = keyTable.rows[0]?.present === true;
+    const scan: KeylessScan = { keySchema, bootSchema, columns, keyTablePresent, keyFor, keyHeld: base.keyHeld, wanted };
+    if (opts.tenantId !== undefined) {
+      // The per-tenant read is right whatever the confinement: its own `tenant_id = $1` filters an
+      // owner's read exactly as the policy filters a confined one, so the probe would decide nothing.
+      return { ...base, ...(await keylessPerTenant(conn, { ...scan, source: { kind: "listed", tenants: [opts.tenantId] } })) };
+    }
     let confined = false;
     for (const table of new Set(columns.map((c) => c.table))) {
       const v = await probeSessionPolicyVisibility(conn, bootSchema, table);
       if (v === null || sessionWouldBeConfined(v)) confined = true;
     }
     return confined
-      ? { ...base, ...(await keylessPerTenant(conn, { keySchema, bootSchema, columns, keyTablePresent, keyFor, keyHeld: base.keyHeld, wanted, ceiling })) }
-      : { ...base, ...(await keylessUnconfined(conn, { keySchema, bootSchema, columns, keyTablePresent, keyFor, keyHeld: base.keyHeld, wanted })), unexaminedTenants: 0 };
+      ? { ...base, ...(await keylessPerTenant(conn, { ...scan, source: { kind: "every", ceiling } })) }
+      : { ...base, ...(await keylessUnconfined(conn, scan)), unexaminedTenants: 0 };
   } catch (err) {
     return { checked: false, reason: message(err) };
   }
@@ -646,14 +719,21 @@ async function keylessUnconfined(
 
 async function keylessPerTenant(
   conn: PgConnection,
-  scan: KeylessScan & { readonly ceiling: number },
+  scan: KeylessScan & { readonly source: PerTenantSource },
 ): Promise<{ readonly found: number; readonly opened: number; readonly unexaminedTenants: number }> {
-  const tenantRows = await conn.query<{ id: unknown }>(
-    `SELECT id FROM ${scan.keySchema}.tenants ORDER BY random() LIMIT $1`,
-    [scan.ceiling + 1],
-  );
-  const ids = tenantRows.rows.map((r) => String(r.id));
-  const examined = ids.slice(0, scan.ceiling);
+  let ids: readonly string[];
+  let examined: readonly string[];
+  if (scan.source.kind === "listed") {
+    ids = scan.source.tenants;
+    examined = ids;
+  } else {
+    const tenantRows = await conn.query<{ id: unknown }>(
+      `SELECT id FROM ${scan.keySchema}.tenants ORDER BY random() LIMIT $1`,
+      [scan.source.ceiling + 1],
+    );
+    ids = tenantRows.rows.map((r) => String(r.id));
+    examined = ids.slice(0, scan.source.ceiling);
+  }
   // One statement per tenant: the first non-NULL value across the at-rest columns, only when the
   // tenant has no key row. `$1` is the tenant; the key-row test reads under that tenant's context.
   const branches = scan.columns.map(
@@ -695,9 +775,9 @@ async function keylessPerTenant(
   let unexaminedTenants = 0;
   if (!decided) {
     unexaminedTenants = examined.length - reached;
-    if (ids.length > scan.ceiling) {
+    if (scan.source.kind === "every" && ids.length > scan.source.ceiling) {
       const total = await conn.query<{ n: unknown }>(`SELECT count(*) AS n FROM ${scan.keySchema}.tenants`, []);
-      unexaminedTenants += asInt(total.rows[0]?.n ?? 0, "count") - scan.ceiling;
+      unexaminedTenants += asInt(total.rows[0]?.n ?? 0, "count") - scan.source.ceiling;
     }
   }
   return { found, opened, unexaminedTenants };
@@ -919,6 +999,7 @@ function assessKeylessCiphertext(
   mode: ColumnKeyMode,
   ring: ColumnSecretRing,
   check: KeylessCiphertextCheck,
+  scope: ColumnKeySurveyScope,
 ): ColumnKeyFinding[] {
   if (!check.checked) {
     return [
@@ -976,13 +1057,19 @@ function assessKeylessCiphertext(
     });
   }
   if (check.unexaminedTenants > 0) {
+    // Only the `every` route can leave tenants unasked, so a `tenant` scope never reaches here; the
+    // ceiling is named when the scope carries it rather than claimed when it does not.
+    const where =
+      scope.kind === "deployment"
+        ? `the per-tenant scan stopped with nothing decided, because ${ceilingClause(scope.ceiling)}`
+        : "the per-tenant scan stopped with nothing decided";
     findings.push({
       condition: "survey_incomplete",
       tenants: check.unexaminedTenants,
       kekGeneration: null,
       detail:
         `${check.unexaminedTenants.toString()} tenant(s) were not asked whether they hold ciphertext with no ` +
-        "data key row (the per-tenant scan stopped at its ceiling with nothing decided). Nothing is claimed of them",
+        `data key row (${where}). Nothing is claimed of them`,
     });
   }
   return findings;
@@ -994,8 +1081,10 @@ export function assessColumnKeyConsistency(input: {
   readonly survey: DataKeyRowSurvey;
   /** Required: a deployment holding no key row is exactly where this is the only evidence. */
   readonly ciphertext: KeylessCiphertextCheck;
+  /** What was surveyed, which the lines have to say: a deployment at boot, or one named tenant. */
+  readonly scope: ColumnKeySurveyScope;
 }): ColumnKeyConsistency {
-  const { mode, ring, survey, ciphertext } = input;
+  const { mode, ring, survey, ciphertext, scope } = input;
   const findings: ColumnKeyFinding[] = [];
   if (!survey.readable) {
     findings.push({
@@ -1034,12 +1123,13 @@ export function assessColumnKeyConsistency(input: {
       });
     }
   }
-  findings.push(...assessKeylessCiphertext(mode, ring, ciphertext));
+  findings.push(...assessKeylessCiphertext(mode, ring, ciphertext, scope));
   const effects = findings.map((f) => COLUMN_KEY_CONDITION_EFFECT[f.condition]);
   const verdict = effects.includes("refuse") ? "refuse" : effects.includes("unknown") ? "unknown" : "consistent";
   return {
     verdict,
     mode,
+    scope,
     tenantsWithKeys: survey.readable ? tenantsIn(survey.groups) : 0,
     findings,
     ciphertext,
@@ -1062,41 +1152,121 @@ const EFFECT_LEVEL: Readonly<Record<"refuse" | "warn" | "unknown", ColumnKeyCons
  * operator can tell "checked, and fine" from "not checked" — the second is always a `warn`.
  */
 /** What the consistent line says about tenants with no key row. Only reached when `checked`. */
-function keylessClause(check: KeylessCiphertextCheck): string {
+function keylessClause(check: KeylessCiphertextCheck, scope: ColumnKeySurveyScope): string {
   if (!check.checked) return "tenants with no key row were not checked";
   const where = `${check.schema} (per-tenant manifest schemas are not asked)`;
+  if (scope.kind === "tenant") {
+    // One tenant: "a tenant without a key row" would read as a census of others, which was not taken.
+    if (check.columns === 0) return `${where} has no at-rest-encrypted column`;
+    if (check.found === 0) return `it holds no ciphertext without a key row in ${where}`;
+    if (!check.keyHeld) return `it holds ciphertext without a key row in ${where} that this ring cannot read (reported above)`;
+    return `its ciphertext without a key row opened under the key this configuration reads it with, in ${where}`;
+  }
   if (check.columns === 0) return `${where} has no at-rest-encrypted column, so no tenant without a key row holds ciphertext`;
   if (check.found === 0) return `no tenant without a key row holds ciphertext in ${where}`;
   if (!check.keyHeld) return `tenants without a key row hold ciphertext in ${where} that this ring cannot read (reported above)`;
   return `ciphertext held by a tenant without a key row opened under the key this configuration reads it with, in ${where}`;
 }
 
+/** The consistent line's statement about stored keys, which depends on what was surveyed. */
+function keysClause(c: ColumnKeyConsistency): string {
+  if (c.scope.kind === "tenant") {
+    if (c.tenantsWithKeys === 0) return "this tenant holds no stored data key row";
+    return c.mode === "envelope"
+      ? "this tenant's stored data key opened under this secret ring"
+      : "this tenant's stored data key is a seeded key this secret derives";
+  }
+  // Qualified when some sampled rows did not open: "every one" would contradict the warn above it.
+  const someCorrupt = c.findings.some((f) => f.condition === "rows_unopenable");
+  return c.tenantsWithKeys === 0
+    ? `no stored data key rows, so ${COLUMN_KEY_MODE_FLAG} ${c.mode} has none it could fail to open`
+    : `${c.tenantsWithKeys.toString()} tenant(s) hold a stored data key, and ` +
+        (c.mode === "envelope"
+          ? "a sample at every key-encryption-key generation opened under this deployment's secret ring"
+          : someCorrupt
+            ? "every sampled seeded key that opened is a key this secret derives (the rows reported above did not open)"
+            : "every one is a seeded key this secret derives, so derived mode reads their columns");
+}
+
+/**
+ * The closing sentence of a refusal, per scope. At boot the refusal stops the process; for a
+ * per-tenant operation it stops the operation before it opens the tenant's key for use, and the
+ * sentence must not say "booting" to an operator who is running a rekey.
+ */
+function refusalSentence(scope: ColumnKeySurveyScope): string {
+  switch (scope.kind) {
+    case "deployment":
+      return (
+        "this configuration cannot open data keys or ciphertext the database already holds; " +
+        "booting would answer those tenants' PHI requests with a 500 (no escape hatch: every remedy above " +
+        "is a configuration change)"
+      );
+    case "tenant":
+      return (
+        "this secret ring cannot open this tenant's stored data key or ciphertext, so nothing is done for " +
+        "it — no key is opened for use and nothing is written — until a remedy above is applied (each is a " +
+        "configuration change)"
+      );
+  }
+}
+
+/** `column keys:` at boot; a per-tenant survey names its tenant, which the operator typed. */
+function linePrefix(scope: ColumnKeySurveyScope): string {
+  return scope.kind === "tenant" ? `column keys (tenant ${scope.tenantId}):` : "column keys:";
+}
+
 export function formatColumnKeyConsistency(c: ColumnKeyConsistency): ColumnKeyConsistencyLine[] {
+  const prefix = linePrefix(c.scope);
   const lines: ColumnKeyConsistencyLine[] = c.findings.map((f) => ({
     level: EFFECT_LEVEL[COLUMN_KEY_CONDITION_EFFECT[f.condition]],
-    text: `column keys: ${f.condition.toUpperCase()} — ${f.detail}`,
+    text: `${prefix} ${f.condition.toUpperCase()} — ${f.detail}`,
   }));
   if (c.verdict === "consistent") {
-    // Qualified when some sampled rows did not open: "every one" would contradict the warn above it.
-    const someCorrupt = c.findings.some((f) => f.condition === "rows_unopenable");
-    const keys =
-      c.tenantsWithKeys === 0
-        ? `no stored data key rows, so ${COLUMN_KEY_MODE_FLAG} ${c.mode} has none it could fail to open`
-        : `${c.tenantsWithKeys.toString()} tenant(s) hold a stored data key, and ` +
-          (c.mode === "envelope"
-            ? "a sample at every key-encryption-key generation opened under this deployment's secret ring"
-            : someCorrupt
-              ? "every sampled seeded key that opened is a key this secret derives (the rows reported above did not open)"
-              : "every one is a seeded key this secret derives, so derived mode reads their columns");
-    lines.push({ level: "info", text: `column keys: consistent — ${keys}; ${keylessClause(c.ciphertext)}` });
-  } else if (c.verdict === "refuse") {
     lines.push({
-      level: "error",
-      text:
-        "column keys: REFUSED — this configuration cannot open data keys or ciphertext the database already holds; " +
-        "booting would answer those tenants' PHI requests with a 500 (no escape hatch: every remedy above " +
-        "is a configuration change)",
+      level: "info",
+      text: `${prefix} consistent — ${keysClause(c)}; ${keylessClause(c.ciphertext, c.scope)}`,
     });
+  } else if (c.verdict === "refuse") {
+    lines.push({ level: "error", text: `${prefix} REFUSED — ${refusalSentence(c.scope)}` });
   }
   return lines;
+}
+
+/**
+ * The whole check — the key-row survey, the keyless-ciphertext check and the assessment — as one
+ * function with two callers: the boot (`scope: deployment`) and `operate-server rekey`
+ * (`scope: tenant`). One composition, so the rekey's pre-flight cannot come to ask a different
+ * question than the boot does, or read keyless ciphertext under a different secret.
+ *
+ * Never throws: each half answers `unknown` for what it could not read. The caller decides what a
+ * `refuse` verdict stops.
+ */
+export async function surveyColumnKeyConsistency(
+  conn: PgConnection,
+  input: {
+    readonly mode: ColumnKeyMode;
+    readonly ring: ColumnSecretRing;
+    /** Schema holding `tenant_data_keys` and `tenants`. */
+    readonly keySchema: string;
+    /** Schema the column store writes ciphertext to, whose at-rest columns the keyless check asks. */
+    readonly dataSchema: string;
+    readonly scope: ColumnKeySurveyScope;
+  },
+): Promise<ColumnKeyConsistency> {
+  const { mode, ring, keySchema, dataSchema, scope } = input;
+  const narrowing = scope.kind === "tenant" ? { tenantId: scope.tenantId } : { ceiling: scope.ceiling };
+  return assessColumnKeyConsistency({
+    mode,
+    ring,
+    scope,
+    survey: await surveyDataKeyRows(conn, { schema: keySchema, ...narrowing }),
+    // Tenants with no key row are the case the key rows cannot answer: their ciphertext is read
+    // under a key this secret derives, and a replaced generation-1 secret leaves the table empty.
+    ciphertext: await checkKeylessCiphertext(conn, {
+      keySchema,
+      bootSchema: dataSchema,
+      secret: keylessCiphertextSecret(mode, ring),
+      ...narrowing,
+    }),
+  });
 }

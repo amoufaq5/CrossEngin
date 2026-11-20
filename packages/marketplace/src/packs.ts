@@ -200,10 +200,17 @@ function compareSemver(a: string, b: string): number {
   return 0;
 }
 
+/**
+ * Whether an author kind is trusted to skip the elevated security review. A function of the kind
+ * alone, so a stored row — which keeps the publisher's registered kind and not the manifest — can ask
+ * it too (ADR-0459).
+ */
+export function packAuthorKindTrusted(kind: PackAuthorKind): boolean {
+  return kind === "crossengin_official" || kind === "certified_partner";
+}
+
 export function packAuthorTrusted(author: PackAuthor): boolean {
-  return (
-    author.kind === "crossengin_official" || author.kind === "certified_partner"
-  );
+  return packAuthorKindTrusted(author.kind);
 }
 
 export function requiresElevatedReview(pack: PackManifest): boolean {

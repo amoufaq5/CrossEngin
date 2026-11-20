@@ -123,16 +123,24 @@ export function withResidency(
  * Wraps every registered handler, over `registry.operationIds()` for the reason
  * `applyTenantStatusGate` does: a refusal covering only the routes somebody remembered is not a
  * refusal. Called once per compiled gateway, after every registration.
+ *
+ * Returns the operations it wrapped, which is what the API description declares the gate's 503 on
+ * (ADR-0462): the set comes from the gate's own decision rather than from a second reading of
+ * `exemptOperationPrefixes`, so the document and the gate cannot come to disagree about which
+ * operations it covers.
  */
-export function applyResidencyGate(registry: HandlerRegistry, opts: ResidencyGateOptions): number {
-  let wrapped = 0;
+export function applyResidencyGate(
+  registry: HandlerRegistry,
+  opts: ResidencyGateOptions,
+): readonly string[] {
+  const wrapped: string[] = [];
   for (const operationId of registry.operationIds()) {
     const handler = registry.resolve(operationId);
     if (handler === null) continue;
     const gated = withResidency(handler, operationId, opts);
     if (gated === handler) continue;
     registry.register(operationId, gated);
-    wrapped += 1;
+    wrapped.push(operationId);
   }
   return wrapped;
 }

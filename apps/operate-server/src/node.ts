@@ -171,11 +171,9 @@ import {
 import { fenceColumnKeyGeneration } from "./column-key-fence.js";
 import {
   ColumnKeyConfigurationRefused,
-  assessColumnKeyConsistency,
-  checkKeylessCiphertext,
   formatColumnKeyConsistency,
-  keylessCiphertextSecret,
-  surveyDataKeyRows,
+  surveyColumnKeyConsistency,
+  type ColumnKeyConsistency,
 } from "./column-key-consistency.js";
 import {
   formatColumnSecretRing,
@@ -401,6 +399,7 @@ import {
   formatDeletionConnectionLine,
   probeDeletionConnection,
   resolveDeletionOwnerConfig,
+  tenantSchemaDroppable,
 } from "./deletion-owner-connection.js";
 import {
   DeletionCapabilitiesSchema,
@@ -483,7 +482,10 @@ import { PostgresDesignReviewStore } from "./design-review-store.js";
 import { buildDesignReviewRoutes, formatFourEyesLine } from "./design-review-routes.js";
 import { buildIntegrityVerdictRoutes } from "./integrity-verdict-routes.js";
 import { buildJobCancelRoutes } from "./job-cancel-routes.js";
-import { buildTenantErasureRoutes } from "./tenant-erasure-routes.js";
+import {
+  buildTenantErasureRoutes,
+  SchemaNotDroppableByDeletionRole,
+} from "./tenant-erasure-routes.js";
 import {
   TENANT_DELETED_OPERATION,
   buildTenantDeletionRoutes,
@@ -1021,18 +1023,14 @@ async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<
   // ADR-0455: a mode or a ring that cannot open the data keys the database already holds is refused
   // here, naming the condition, rather than booting clean and answering those tenants with a 500.
   if (secretRing !== undefined) {
-    const keyConsistency = assessColumnKeyConsistency({
+    // One composition shared with `operate-server rekey` (ADR-0460). The data schema is the same
+    // boot schema as the seed probe below, which is where the column store writes.
+    const keyConsistency = await surveyColumnKeyConsistency(conn, {
       mode: options.columnKeyMode,
       ring: secretRing,
-      survey: await surveyDataKeyRows(conn, { schema: schema ?? "meta" }),
-      // Tenants with no key row are the case the key rows cannot answer: their ciphertext is read
-      // under a key this secret derives, and a replaced generation-1 secret leaves the table empty.
-      // Same boot schema as the seed probe below, which is where the column store writes.
-      ciphertext: await checkKeylessCiphertext(conn, {
-        keySchema: schema ?? "meta",
-        bootSchema: schema ?? COLUMN_STORE_DEFAULT_SCHEMA,
-        secret: keylessCiphertextSecret(options.columnKeyMode, secretRing),
-      }),
+      keySchema: schema ?? "meta",
+      dataSchema: schema ?? COLUMN_STORE_DEFAULT_SCHEMA,
+      scope: { kind: "deployment", ceiling: options.columnKeySurveyCeiling },
     });
     for (const line of formatColumnKeyConsistency(keyConsistency)) {
       if (line.level === "info") console.info(`[phi] ${line.text}`);
@@ -1860,6 +1858,11 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       // `meta`, and a probe of `--schema` would answer for a schema no deletion touches.
       await probeDeletionConnection(deletionPipelineConn ?? conn, {
         bootTargets: deletionBootSchema.targets,
+        // Per-tenant schemas are created after boot by the serving role, so whether the deletion
+        // role can drop one is a structural question about that role, not a snapshot (ADR-0458).
+        ...(options.perTenantManifests || options.tenantErasureRoutes
+          ? { futureSchemaCreator: conn }
+          : {}),
       }),
     );
     if (said.level === "info") console.info(`[deletion] ${said.line}`);
@@ -2679,6 +2682,9 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           graceMs: options.deletionGraceDays * 86_400_000,
           eraser: {
             survey: async (tenantId) => {
+              if (!(await tenantSchemaDroppable(schemaEraseConn, tenantId))) {
+                throw new SchemaNotDroppableByDeletionRole(tenantId);
+              }
               const { survey, collateral } = await surveyTenantSchemaWithCollateral(
                 schemaEraseConn,
                 tenantId,
@@ -2686,6 +2692,9 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
               return { ...survey, collateral };
             },
             erase: async (tenantId, authority) => {
+              if (!(await tenantSchemaDroppable(schemaEraseConn, tenantId))) {
+                throw new SchemaNotDroppableByDeletionRole(tenantId);
+              }
               const erasure = await eraseTenantSchema(schemaEraseConn, tenantId, authority);
               // Forget before reporting: `storeFor` is synchronous and would otherwise keep handing
               // out a store bound to a schema that no longer exists, so the next request for this
@@ -4025,8 +4034,9 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           })
         : undefined;
     // The opaque per-tenant id the provider is sent instead of the tenant id (ADR-0456), keyed by
-    // CURSOR_ENCRYPTION_SECRET through its own HKDF label; absent secret → nothing is sent.
-    const aiTenantPseudonym = resolveAiTenantPseudonymSource(process.env);
+    // CURSOR_ENCRYPTION_SECRET through its own HKDF label; absent secret → nothing is sent, and
+    // `--ai-tenant-pseudonym off` sends nothing while the secret goes on sealing cursors (ADR-0461).
+    const aiTenantPseudonym = resolveAiTenantPseudonymSource(process.env, options.aiTenantPseudonym);
     const designer =
       providerBuild !== null
         ? buildDesignDesigner({
@@ -7098,6 +7108,11 @@ export interface RekeyReport {
   readonly staleKeyWindowMs: number;
   /** Whether `staleKeyWindowMs` is the operator's stated fleet value or this process's default. */
   readonly staleKeyWindowStated: boolean;
+  /**
+   * The boot survey's own check, asked of this tenant before anything else (ADR-0460). On `refuse`
+   * every field above is `null` or empty, because nothing past it ran. Never carries key material.
+   */
+  readonly keyConsistency: ColumnKeyConsistency;
   readonly ok: boolean;
 }
 
@@ -7118,7 +7133,10 @@ export interface RekeyReport {
  * exactly that), so refusing on absence would block the subcommand precisely where it is most
  * needed and teach an operator to pass the hatch by reflex.
  */
-export async function runRekey(options: RekeyOptions): Promise<RekeyReport> {
+export async function runRekey(
+  options: RekeyOptions,
+  connect: () => PgConnection = () => createNodePgConnection(parsePgEnvConfig()),
+): Promise<RekeyReport> {
   const rawSecret = process.env[COLUMN_ENCRYPTION_SECRET_VAR] ?? "";
   if (rawSecret.trim().length === 0) {
     throw new Error(
@@ -7134,8 +7152,34 @@ export async function runRekey(options: RekeyOptions): Promise<RekeyReport> {
   const ring = resolveColumnSecretRing(process.env, "envelope");
   const metaSchema = options.schema ?? undefined;
   const dataSchema = options.dataSchema ?? "public";
-  const conn = createNodePgConnection(parsePgEnvConfig());
+  const conn = connect();
   try {
+    // ADR-0460: the boot survey's own check, asked of this one tenant before anything else — the
+    // write-status probe, the rekey survey, a re-wrap's read. A ring that cannot open this tenant's
+    // stored key (or the ciphertext its first key would be seeded from) used to fail inside
+    // `store.load` with a bare DataKeyUnwrapFailed; it is refused here with the condition and the
+    // remedy, `--plan` included, and nothing past this line runs.
+    const keyConsistency = await surveyColumnKeyConsistency(conn, {
+      mode: "envelope",
+      ring,
+      keySchema: metaSchema ?? "meta",
+      dataSchema,
+      scope: { kind: "tenant", tenantId: options.tenantId },
+    });
+    if (keyConsistency.verdict === "refuse") {
+      return {
+        tenantId: options.tenantId,
+        dataSchema,
+        writeStatus: null,
+        survey: null,
+        result: null,
+        rewrap: null,
+        staleKeyWindowMs: 0,
+        staleKeyWindowStated: false,
+        keyConsistency,
+        ok: false,
+      };
+    }
     const store = new PostgresDataKeyStore(conn, kekResolverFor(ring), {
       ...(metaSchema !== undefined ? { schema: metaSchema } : {}),
       kekGeneration: ring.currentGeneration,
@@ -7171,6 +7215,7 @@ export async function runRekey(options: RekeyOptions): Promise<RekeyReport> {
         rewrap,
         staleKeyWindowMs: 0,
         staleKeyWindowStated: false,
+        keyConsistency,
         ok: rewrap.outcome !== "no_data_key_row",
       };
     }
@@ -7201,6 +7246,7 @@ export async function runRekey(options: RekeyOptions): Promise<RekeyReport> {
         rewrap: null,
         staleKeyWindowMs,
         staleKeyWindowStated: options.columnKeyTtlMs !== null,
+        keyConsistency,
         ok: survey.refusals.length === 0,
       };
     }
@@ -7222,6 +7268,7 @@ export async function runRekey(options: RekeyOptions): Promise<RekeyReport> {
       rewrap: null,
       staleKeyWindowMs,
       staleKeyWindowStated: options.columnKeyTtlMs !== null,
+      keyConsistency,
       ok: true,
     };
   } finally {

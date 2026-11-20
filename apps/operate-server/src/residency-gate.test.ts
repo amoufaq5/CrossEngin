@@ -150,7 +150,7 @@ describe("residency-gate — the decision on the authenticated tenant", () => {
     registry.register("products.list", counting());
     registry.register("products.read", counting());
     const wrapped = applyResidencyGate(registry, { region: "us-east", directory });
-    expect(wrapped).toBe(2);
+    expect([...wrapped].sort()).toEqual(["products.list", "products.read"]);
     expect(registry.resolve("platform.tenants.list")).toBe(platform);
     expect((await registry.resolve("products.read")!(input(EU))).status).toBe(421);
   });

@@ -173,6 +173,18 @@ export const GdprDeletionRequestSchema = z
      * before one that succeeded is history rather than state.
      */
     lastAttemptRefusal: z.string().min(1).optional(),
+    /**
+     * How many attempts have been released back to `verified` (ADR-0458). Written by the release
+     * alone, beside `retryNotBefore`; absent on a request no 0458-era release has touched, which
+     * includes one ADR-0453 released before the backoff existed.
+     */
+    releaseCount: z.number().int().min(1).optional(),
+    /**
+     * The earliest instant the scheduler may claim this request again (ADR-0458): the release
+     * instant plus a capped exponential backoff over `releaseCount`. Absent means no backoff holds
+     * it, which is every never-released request and every pre-0458 release.
+     */
+    retryNotBefore: Iso8601.optional(),
     retentionObligations: z.array(z.enum(RETENTION_OBLIGATIONS)).default(["none"]),
     retainedDataCategories: z.array(z.string().min(1)).default([]),
     notes: z.string().min(1).optional(),
@@ -286,6 +298,26 @@ export const GdprDeletionRequestSchema = z
         message: "a refused attempt requires inProgressAt, the instant the attempt began",
       });
     }
+    // The backoff's two halves are written together by the one release, so either alone is a row
+    // something other than the release wrote — and both describe a refused attempt, so neither may
+    // stand without the refusal they back off from.
+    if ((v.releaseCount === undefined) !== (v.retryNotBefore === undefined)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [v.releaseCount === undefined ? "releaseCount" : "retryNotBefore"],
+        message: "releaseCount and retryNotBefore are written together by the release",
+      });
+    }
+    if (v.retryNotBefore !== undefined && v.lastAttemptRefusal === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["retryNotBefore"],
+        message: "a retry backoff requires lastAttemptRefusal, the refusal it backs off from",
+      });
+    }
+    // Deliberately no ordering against `inProgressAt`: the next claim re-stamps that column while
+    // `retryNotBefore` keeps the previous release's value, so on every re-claimed row it precedes the
+    // attempt — and a refinement would make each such row unreadable mid-run.
     if (v.status === "in_progress" && v.inProgressAt === null) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,

@@ -3,6 +3,11 @@ import { DEFAULT_DELETION_GRACE_DAYS } from "@crossengin/tenant-lifecycle";
 import { describe, expect, it } from "vitest";
 
 import { COLUMN_KEY_TTL_BOUNDS, DEFAULT_COLUMN_KEY_TTL_MS } from "./data-key-envelope.js";
+import {
+  COLUMN_KEY_SURVEY_CEILING_BOUNDS,
+  COLUMN_KEY_SURVEY_CEILING_FLAG,
+  PER_TENANT_SURVEY_CEILING,
+} from "./column-key-consistency.js";
 import { ALLOW_UNCOVERED_SETTLEMENT_FLAG } from "./settlement-coverage-survey.js";
 import {
   CliUsageError,
@@ -3052,5 +3057,51 @@ describe("parseServeArgs — AI provider timeout, price and residency (M-16, M-1
     for (const flag of ["--ai-provider-timeout-ms", "--ai-model-price", "--ai-allow-unpriced-model", "--ai-provider-ref"]) {
       expect(help).toContain(flag);
     }
+  });
+});
+
+describe("parseServeArgs — --column-key-survey-ceiling (ADR-0460)", () => {
+  const BASE = ["--pack", "erp-core", "--store", "pg-columns"];
+  const { min, max } = COLUMN_KEY_SURVEY_CEILING_BOUNDS;
+
+  it("defaults to today's constant, so an unchanged deployment boots exactly as before", () => {
+    expect(parseServeArgs(BASE).columnKeySurveyCeiling).toBe(PER_TENANT_SURVEY_CEILING);
+  });
+
+  it("parses both flag forms and accepts both bounds", () => {
+    expect(parseServeArgs([...BASE, COLUMN_KEY_SURVEY_CEILING_FLAG, "50000"]).columnKeySurveyCeiling).toBe(50_000);
+    expect(parseServeArgs([...BASE, `${COLUMN_KEY_SURVEY_CEILING_FLAG}=2500`]).columnKeySurveyCeiling).toBe(2_500);
+    expect(parseServeArgs([...BASE, COLUMN_KEY_SURVEY_CEILING_FLAG, String(min)]).columnKeySurveyCeiling).toBe(min);
+    expect(parseServeArgs([...BASE, COLUMN_KEY_SURVEY_CEILING_FLAG, String(max)]).columnKeySurveyCeiling).toBe(max);
+  });
+
+  it("refuses a value outside the bounds rather than clamping it, naming them", () => {
+    for (const bad of [String(min - 1), String(max + 1), "0"]) {
+      const thrown = (): unknown => parseServeArgs([...BASE, COLUMN_KEY_SURVEY_CEILING_FLAG, bad]);
+      expect(thrown).toThrow(CliUsageError);
+      expect(thrown).toThrow(new RegExp(`must be an integer between ${String(min)} and ${String(max)} tenants`));
+    }
+  });
+
+  it("refuses a spelling that merely parses as a number", () => {
+    // `Number()` would read every one of these as an in-range integer (or 0), so digits are required.
+    for (const bad of ["1e4", "10000.0", "0x2710", " 5000", "5000 ", "+5000", "abc", ""]) {
+      expect(() => parseServeArgs([...BASE, `${COLUMN_KEY_SURVEY_CEILING_FLAG}=${bad}`])).toThrow(
+        /must be an integer between/,
+      );
+    }
+  });
+
+  it("is in --help with its bounds and default", () => {
+    expect(helpText).toContain(COLUMN_KEY_SURVEY_CEILING_FLAG);
+    expect(helpText).toContain(`${String(min)}..${String(max)}, default ${String(PER_TENANT_SURVEY_CEILING)}`);
+  });
+});
+
+describe("rekeyHelpText — the column-key pre-flight (ADR-0460)", () => {
+  it("says the boot's check runs first, on --plan and --rewrap-kek too, and its exit code", () => {
+    expect(rekeyHelpText).toContain("the boot's column-key check runs for this");
+    expect(rekeyHelpText).toContain("on --plan and --rewrap-kek too");
+    expect(rekeyHelpText).toContain("1 when the column-key check or the survey refuses");
   });
 });

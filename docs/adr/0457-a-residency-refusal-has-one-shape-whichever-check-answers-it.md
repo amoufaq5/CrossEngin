@@ -194,3 +194,18 @@ Open question 1 is closed, and so is the one adjacent divergence the live run fo
   `PROBLEM_TYPES.internal_server_error` is `https://crossengin.io/errors/internal-server-error`, so a
   pre-gateway 500 and a gateway 500 differed in `type`. It reads the registry constant now, and the
   fault-logging test asserts the URI. This is the same one-shape rule on the 500 (ADR-0449's).
+
+## Addendum: both open questions are closed by ADR-0462
+
+- **The OpenAPI document now declares the residency answers, and only when a gate is configured.**
+  `applyResidencyGate` returns the operations it wrapped. `buildOperateHttpServer` hands that set to
+  the document through a thunk read on the first request. The 421 (with `x-crossengin-region`) and
+  the 403 shape are declared on **every** routed operation, because the pre-auth hint check has no
+  exemption. The 503 is declared only on the gated ones, because the hint check passes an unreadable
+  directory on to the gate (this ADR's first addendum). Like the 403, it admits the other producers'
+  shapes as well as this ADR's, because the region gate is not the only 503 a gated write can answer
+  (ADR-0462's addendum). A server with no gate declares none of them.
+- **The AI provider's residency refusal is a registered problem with types of its own.**
+  `aiProviderResidencyRefusal` builds it through the same envelope. It reuses none of this ADR's
+  three types, because it answers where the provider runs rather than which instance answers. Its
+  old `error` code is kept at `extensions.error`.

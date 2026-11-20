@@ -1,12 +1,12 @@
 import type { PathSegment, ResolvedPrincipal, RouteDefinition } from "@crossengin/api-gateway";
 import type { Handler, HandlerOutput, PrincipalRoles } from "@crossengin/api-gateway-runtime";
+import type { PackVersionRecord, PackVersionStatus } from "@crossengin/marketplace";
 import {
-  DISTRIBUTION_CHANNELS,
-  PackManifestSchema,
-  PackSignatureSchema,
-  PackVersionRecordSchema,
-} from "@crossengin/marketplace";
-import { PackSubmissionError, type PackSubmissionRefusal } from "@crossengin/marketplace-runtime";
+  PackSubmissionBodySchema,
+  PackSubmissionError,
+  type PackSubmissionRefusal,
+  type StoredVersionRefusal,
+} from "@crossengin/marketplace-runtime";
 import type {
   PersistentPackSubmissionEngine,
   PostgresPackVersionStore,
@@ -24,24 +24,6 @@ export interface MarketplaceAuthoringContext {
   /** Roles permitted to record reviews + publish. Fail-closed: empty ⇒ nobody. */
   readonly reviewerRoles: ReadonlySet<string>;
 }
-
-const SHA256 = /^[0-9a-f]{64}$/;
-
-const SubmitBodySchema = z
-  .object({
-    packId: z.string().min(1),
-    // The record's own field, so a version the store would refuse is a 400 here and not a ZodError
-    // thrown past the refusal map as a 500.
-    version: PackVersionRecordSchema.innerType().shape.version,
-    manifest: PackManifestSchema,
-    channel: z.enum(DISTRIBUTION_CHANNELS),
-    bundleSha256: z.string().regex(SHA256),
-    bundleSizeBytes: z.number().int().positive(),
-    manifestSha256: z.string().regex(SHA256),
-    signature: PackSignatureSchema,
-    changelog: z.string().min(1),
-  })
-  .strict();
 
 const ReviewBodySchema = z.object({ status: z.enum(["passed", "failed"]) }).strict();
 const RetireBodySchema = z.object({ reason: z.string().min(1) }).strict();
@@ -103,12 +85,111 @@ const SUBMISSION_REFUSAL_STATUS: Readonly<Record<PackSubmissionRefusal, number>>
   illegal_transition: 409,
   review_not_open: 409,
   review_not_cleared: 409,
+  // The request is well formed and the caller may make it; the stored row is what cannot be
+  // advanced, because it no longer verifies against the registry. A conflict with stored state, like
+  // `version_changed`, so neither 400 (nothing in the request is wrong) nor 403 (the caller holds the
+  // grant). The remedy is reachable by both roles that can meet this: withdraw is granted to authors
+  // and reviewers alike, and a reviewer may also record a failed review.
+  stored_release_unverified: 409,
 });
+
+/**
+ * How a stored version's release stands against the publisher registry now (ADR-0459). Carried on
+ * every version a read route returns rather than hiding a row that fails, because a hidden row reads
+ * exactly like a version nobody submitted — an absence of evidence presented as evidence (ADR-0372)
+ * — while the author reading this route is the one person who can tell a release they never made,
+ * and a resubmit of that number would answer `version_exists` about a row they cannot see.
+ */
+export type ReleaseVerificationView =
+  | { readonly verified: true }
+  | { readonly verified: false; readonly refusal: StoredVersionRefusal; readonly detail: string };
+
+/**
+ * What the log line tells an operator to do, by the row's status — a total map, because the honest
+ * remedy differs: a row still moving through review is held back by the lifecycle gate, a row
+ * already published passed that gate under a registry that admitted it (or was edited to
+ * `published` directly) and is in distribution, and a withdrawn row needs nothing, so it is silent.
+ */
+const UNVERIFIED_RELEASE_REMEDY: Readonly<Record<PackVersionStatus, string | null>> = Object.freeze({
+  draft: "it cannot be submitted for review; an author or reviewer role can withdraw it",
+  in_review: "it cannot be passed or published; a reviewer can record a failed review, or an author or reviewer role can withdraw it",
+  published: "it is published and in distribution; an author or reviewer role should withdraw it",
+  deprecated: "it is deprecated and still listed; an author or reviewer role should withdraw it",
+  withdrawn: null,
+});
+
+/**
+ * The one log line for a stored version that does not verify, or `null` when the row needs nothing.
+ * It names the pack, the version, the status and the reason, and deliberately not the refusal's
+ * detail: a reason is the contract and enough to act on, and nothing about the key — not even a
+ * fingerprint prefix — belongs in a line an operator's log aggregator keeps.
+ */
+export function unverifiedReleaseLine(
+  packId: string,
+  version: string,
+  status: PackVersionStatus,
+  refusal: StoredVersionRefusal,
+): string | null {
+  const remedy = UNVERIFIED_RELEASE_REMEDY[status];
+  if (remedy === null) return null;
+  return (
+    `[marketplace] stored release unverified pack=${packId} version=${version} status=${status} reason=${refusal} — ` +
+    `the row does not verify against the configured --pack-publisher-key set; ${remedy}`
+  );
+}
+
+/**
+ * Reports unverified rows. A read route reports a given (pack, version, status, reason) once per
+ * process: a list is read on every page view, and after a key rotation every row the key signed
+ * would otherwise log on every request, burying the finding. A refused lifecycle step is an act
+ * somebody attempted and is reported every time.
+ */
+export interface UnverifiedReleaseReporter {
+  onRead(record: PackVersionRecord, refusal: StoredVersionRefusal): void;
+  onRefusedStep(record: PackVersionRecord, refusal: StoredVersionRefusal): void;
+}
+
+export function createUnverifiedReleaseReporter(
+  log: (line: string) => void = (line) => console.error(line),
+): UnverifiedReleaseReporter {
+  const seen = new Set<string>();
+  return {
+    onRead(record, refusal) {
+      const line = unverifiedReleaseLine(record.packId, record.version, record.status, refusal);
+      if (line === null) return;
+      const key = `${record.packId}|${record.version}|${record.status}|${refusal}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      log(line);
+    },
+    onRefusedStep(record, refusal) {
+      const line = unverifiedReleaseLine(record.packId, record.version, record.status, refusal);
+      if (line !== null) log(line);
+    },
+  };
+}
+
+/** A stored version with its release verification, reporting a failure as it is read. */
+function withVerification(
+  ctx: MarketplaceAuthoringContext,
+  reporter: UnverifiedReleaseReporter,
+  record: PackVersionRecord,
+): PackVersionRecord & { readonly releaseVerification: ReleaseVerificationView } {
+  const v = ctx.engine.engine.verifyStored(record);
+  if (v.ok) return { ...record, releaseVerification: { verified: true } };
+  reporter.onRead(record, v.refusal);
+  return { ...record, releaseVerification: { verified: false, refusal: v.refusal, detail: v.detail } };
+}
 
 /** A refusal becomes its status; anything else is not a refusal and propagates as a 500. */
 function refusalOutput(err: unknown, error: string): HandlerOutput {
   if (!(err instanceof PackSubmissionError)) throw err;
-  return json(SUBMISSION_REFUSAL_STATUS[err.reason], { error, reason: err.reason, detail: err.message });
+  return json(SUBMISSION_REFUSAL_STATUS[err.reason], {
+    error,
+    reason: err.reason,
+    detail: err.message,
+    ...(err.storedRefusal !== undefined ? { releaseRefusal: err.storedRefusal } : {}),
+  });
 }
 
 /** `POST /v1/authoring/packs` — submit a new signed pack version (→ draft). */
@@ -116,7 +197,7 @@ export function buildSubmitHandler(ctx: MarketplaceAuthoringContext): Handler {
   return async ({ principal, parsedBody }) => {
     const g = guard(ctx, principal, ctx.authorRoles);
     if (isDenial(g)) return g;
-    const parsed = SubmitBodySchema.safeParse(parsedBody ?? {});
+    const parsed = PackSubmissionBodySchema.safeParse(parsedBody ?? {});
     if (!parsed.success) return json(400, { error: "invalid_request", detail: parsed.error.issues });
     try {
       const version = await ctx.engine.submit(parsed.data);
@@ -141,6 +222,7 @@ async function loadVersion(
 
 function step(
   ctx: MarketplaceAuthoringContext,
+  reporter: UnverifiedReleaseReporter,
   allowed: ReadonlySet<string>,
   parse: ((body: unknown) => HandlerOutput | Record<string, unknown>) | null,
   run: (
@@ -166,6 +248,9 @@ function step(
       const version = await run(loaded, g.principalId, body);
       return json(200, { version });
     } catch (err) {
+      if (err instanceof PackSubmissionError && err.storedRefusal !== undefined) {
+        reporter.onRefusedStep(loaded, err.storedRefusal);
+      }
       return refusalOutput(err, "transition_rejected");
     }
   };
@@ -180,7 +265,15 @@ function parseWith<T>(schema: z.ZodType<T>): (body: unknown) => HandlerOutput | 
 }
 
 /** The third-party authoring routes to inject via the gateway's `extraRoutes` hook. */
-export function buildMarketplaceAuthoringRoutes(ctx: MarketplaceAuthoringContext): readonly ExtraGatewayRoute[] {
+export function buildMarketplaceAuthoringRoutes(
+  ctx: MarketplaceAuthoringContext,
+  reporter: UnverifiedReleaseReporter = createUnverifiedReleaseReporter(),
+): readonly ExtraGatewayRoute[] {
+  // Withdraw is the remedy for a row that no longer verifies, and both roles that can meet the 409
+  // must hold it: an author at submit-for-review, a reviewer at review or publish. A reviewer
+  // withdrawing is the platform taking a version out of distribution, which a publish grant already
+  // implies; for a forged row the author is exactly the party who did not make it.
+  const retireRoles: ReadonlySet<string> = new Set([...ctx.authorRoles, ...ctx.reviewerRoles]);
   const v = (op: string, method: RouteDefinition["method"], segs: ReadonlyArray<string | { param: string }>, handler: Handler): ExtraGatewayRoute => ({
     route: route(op, method, segs),
     handler,
@@ -191,13 +284,13 @@ export function buildMarketplaceAuthoringRoutes(ctx: MarketplaceAuthoringContext
       "authoring.packs.submitForReview",
       "POST",
       ["v1", "authoring", "packs", { param: "packId" }, "versions", { param: "version" }, "submit-for-review"],
-      step(ctx, ctx.authorRoles, null, (version) => ctx.engine.submitForReview(version)),
+      step(ctx, reporter, ctx.authorRoles, null, (version) => ctx.engine.submitForReview(version)),
     ),
     v(
       "authoring.packs.review",
       "POST",
       ["v1", "authoring", "packs", { param: "packId" }, "versions", { param: "version" }, "review"],
-      step(ctx, ctx.reviewerRoles, parseWith(ReviewBodySchema), (version, reviewer, body) =>
+      step(ctx, reporter, ctx.reviewerRoles, parseWith(ReviewBodySchema), (version, reviewer, body) =>
         ctx.engine.recordReview(version, { status: body["status"] as "passed" | "failed", reviewer }),
       ),
     ),
@@ -205,13 +298,13 @@ export function buildMarketplaceAuthoringRoutes(ctx: MarketplaceAuthoringContext
       "authoring.packs.publish",
       "POST",
       ["v1", "authoring", "packs", { param: "packId" }, "versions", { param: "version" }, "publish"],
-      step(ctx, ctx.reviewerRoles, null, (version, publishedBy) => ctx.engine.publish(version, { publishedBy })),
+      step(ctx, reporter, ctx.reviewerRoles, null, (version, publishedBy) => ctx.engine.publish(version, { publishedBy })),
     ),
     v(
       "authoring.packs.withdraw",
       "POST",
       ["v1", "authoring", "packs", { param: "packId" }, "versions", { param: "version" }, "withdraw"],
-      step(ctx, ctx.authorRoles, parseWith(RetireBodySchema), (version, _by, body) =>
+      step(ctx, reporter, retireRoles, parseWith(RetireBodySchema), (version, _by, body) =>
         ctx.engine.withdraw(version, { reason: body["reason"] as string }),
       ),
     ),
@@ -219,23 +312,23 @@ export function buildMarketplaceAuthoringRoutes(ctx: MarketplaceAuthoringContext
       "authoring.packs.get",
       "GET",
       ["v1", "authoring", "packs", { param: "packId" }, "versions", { param: "version" }],
-      buildGetHandler(ctx),
+      buildGetHandler(ctx, reporter),
     ),
-    v("authoring.packs.list", "GET", ["v1", "authoring", "packs", { param: "packId" }, "versions"], buildListHandler(ctx)),
+    v("authoring.packs.list", "GET", ["v1", "authoring", "packs", { param: "packId" }, "versions"], buildListHandler(ctx, reporter)),
   ];
 }
 
-function buildGetHandler(ctx: MarketplaceAuthoringContext): Handler {
+function buildGetHandler(ctx: MarketplaceAuthoringContext, reporter: UnverifiedReleaseReporter): Handler {
   return async ({ principal, params }) => {
     const g = guard(ctx, principal, ctx.authorRoles);
     if (isDenial(g)) return g;
     const loaded = await loadVersion(ctx, params);
     if (loaded === null || (typeof loaded === "object" && "kind" in loaded)) return loaded as HandlerOutput;
-    return json(200, { version: loaded });
+    return json(200, { version: withVerification(ctx, reporter, loaded) });
   };
 }
 
-function buildListHandler(ctx: MarketplaceAuthoringContext): Handler {
+function buildListHandler(ctx: MarketplaceAuthoringContext, reporter: UnverifiedReleaseReporter): Handler {
   return async ({ principal, params }) => {
     const g = guard(ctx, principal, ctx.authorRoles);
     if (isDenial(g)) return g;
@@ -244,13 +337,12 @@ function buildListHandler(ctx: MarketplaceAuthoringContext): Handler {
     // from the page. It is a log line and not a body field: this is the author's view of their own
     // pack's versions and the remedy is the platform's, so the figure belongs where an operator
     // reads findings (ADR-0371's rule about where a diagnostic goes).
-    return json(200, {
-      data: await ctx.store.listByPack(packId, (row) =>
-        console.error(
-          `[marketplace] unreadable pack version pack=${packId} id=${row.identity ?? "<unidentified>"}: ${row.detail}`,
-        ),
+    const records = await ctx.store.listByPack(packId, (row) =>
+      console.error(
+        `[marketplace] unreadable pack version pack=${packId} id=${row.identity ?? "<unidentified>"}: ${row.detail}`,
       ),
-    });
+    );
+    return json(200, { data: records.map((r) => withVerification(ctx, reporter, r)) });
   };
 }
 

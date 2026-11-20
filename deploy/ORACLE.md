@@ -759,12 +759,15 @@ They are also not peers, and it is a three-way split rather than the two this se
       - caches=absent
   ```
 
-  **On this stack a declared deletion is refused until the API connects as a role that bypasses
-  RLS.** It connects as `POSTGRES_APP_USER`, which the policies confine, and the erasure refuses a
-  confined session by name (`rls_would_confine_this_session`) because a confined `DELETE` reports
-  zero rows while the rows remain — measured: the delete route answers `deletion_refused` and the
-  tenant's records and row are untouched. The API says so at boot. Which role to run the deletion
-  surfaces as is the trade README.md's "The database roles" lays out.
+  **On this stack a declared deletion is refused until the deletion pipeline has a role that
+  bypasses RLS.** The API connects as `POSTGRES_APP_USER`, which the policies confine, and the
+  erasure refuses a confined session by name (`rls_would_confine_this_session`) because a confined
+  `DELETE` reports zero rows while the rows remain. Set `DELETION_PGUSER=crossengin_eraser` and a
+  `DELETION_PGPASSWORD` of its own (`openssl rand -hex 24`) in `.env`: the `eraser-role` step then
+  provisions a dedicated `NOSUPERUSER BYPASSRLS` role holding only what an erasure uses, and the
+  pipeline alone connects as it (ADR-0458). The `[deletion]` boot line says `a dedicated role` and
+  whether a deletion can complete; README.md's "The database roles" has the grant set and the one
+  thing it cannot do (drop a per-tenant schema).
 
   All six or none: an incomplete set is **refused naming what is missing**, because silence may not
   answer the reach of an Article 17 proof. A repeated subsystem is refused rather than last-wins,

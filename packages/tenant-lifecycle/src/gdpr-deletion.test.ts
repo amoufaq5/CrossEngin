@@ -123,6 +123,40 @@ describe("GdprDeletionRequestSchema", () => {
     ).toBe(false);
   });
 
+  it("pairs the retry backoff's two halves and ties them to a refused attempt (ADR-0458)", () => {
+    const released = {
+      ...base,
+      status: "verified" as const,
+      completedAt: null,
+      completionSha256: null,
+      tombstoneId: null,
+      lastAttemptRefusal: "erase/rls_would_confine_this_session",
+      releaseCount: 2,
+      retryNotBefore: "2026-05-03T00:02:00Z",
+    };
+    expect(GdprDeletionRequestSchema.safeParse(released).success).toBe(true);
+    // A pre-0458 release carries the refusal and neither half, and still parses.
+    const { releaseCount: _c, retryNotBefore: _r, ...legacy } = released;
+    expect(GdprDeletionRequestSchema.safeParse(legacy).success).toBe(true);
+    for (const half of [
+      { ...released, releaseCount: undefined },
+      { ...released, retryNotBefore: undefined },
+    ]) {
+      expect(GdprDeletionRequestSchema.safeParse(half).success).toBe(false);
+    }
+    const { lastAttemptRefusal: _l, ...noRefusal } = released;
+    expect(GdprDeletionRequestSchema.safeParse(noRefusal).success).toBe(false);
+    expect(GdprDeletionRequestSchema.safeParse({ ...released, releaseCount: 0 }).success).toBe(false);
+    // A re-claimed row: the claim re-stamped inProgressAt past the previous release's backoff.
+    expect(
+      GdprDeletionRequestSchema.safeParse({
+        ...released,
+        status: "in_progress",
+        inProgressAt: "2026-05-04T00:00:00Z",
+      }).success,
+    ).toBe(true);
+  });
+
   it("accepts a valid completed request", () => {
     expect(() => GdprDeletionRequestSchema.parse(base)).not.toThrow();
   });

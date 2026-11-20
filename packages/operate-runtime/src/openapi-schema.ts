@@ -29,7 +29,7 @@ export interface JsonSchema {
   readonly type?: JsonSchemaType | readonly JsonSchemaType[];
   readonly format?: string;
   readonly pattern?: string;
-  readonly enum?: readonly string[];
+  readonly enum?: readonly (string | number)[];
   readonly items?: JsonSchema;
   readonly properties?: Readonly<Record<string, JsonSchema>>;
   readonly required?: readonly string[];

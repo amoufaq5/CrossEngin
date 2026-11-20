@@ -158,6 +158,9 @@ async function throwDesignError(res: Response): Promise<never> {
       try {
         const body = JSON.parse(text) as {
           error?: unknown;
+          type?: unknown;
+          reason?: unknown;
+          extensions?: unknown;
           issues?: unknown;
           attempts?: unknown;
           spentUsd?: unknown;
@@ -166,7 +169,31 @@ async function throwDesignError(res: Response): Promise<never> {
           title?: unknown;
           message?: unknown;
         };
-        if (typeof body.error === "string" && body.error.trim() !== "") code = body.error;
+        // A residency refusal is an RFC 9457 problem whose code is `extensions.error` (ADR-0462);
+        // every other refusal on these routes carries it at the top level.
+        const extensionCode =
+          typeof body.extensions === "object" && body.extensions !== null && "error" in body.extensions
+            ? body.extensions.error
+            : undefined;
+        const rawCode = typeof body.error === "string" ? body.error : extensionCode;
+        if (typeof rawCode === "string" && rawCode.trim() !== "") code = rawCode;
+        // A 503 is "no AI provider" only when the body says so. Three other producers answer 503
+        // on these routes ahead of or beside the AI gate — the region gate (a problem whose code is
+        // `extensions.reason`, with no `error` at all), the tenant-status gate (top-level `reason`)
+        // and the AI provider's residency check (`extensions.error`) — and reading any of them as a
+        // missing provider names a cause that is false and a remedy that cannot work. So a problem
+        // document, or any body carrying a reason, keeps the server's own sentence; only a body
+        // naming nothing at all falls back to the missing-provider reading, as before.
+        const extensions =
+          typeof body.extensions === "object" && body.extensions !== null
+            ? (body.extensions as { reason?: unknown })
+            : undefined;
+        const namesACause =
+          code !== null ||
+          typeof body.type === "string" ||
+          typeof body.reason === "string" ||
+          typeof extensions?.reason === "string";
+        if (kind === "ai_unavailable" && namesACause && code !== "ai_unavailable") kind = "http";
         if (res.status === 422 && body.error === "design_failed") {
           kind = "design_failed";
           if (Array.isArray(body.issues)) {

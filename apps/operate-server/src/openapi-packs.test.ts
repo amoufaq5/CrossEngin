@@ -64,6 +64,7 @@ async function emitFor(pack: string): Promise<PackEmit> {
     title: "t",
     version: manifestHash(manifest),
     coverage: [],
+    residency: null,
   });
   const doc = emit.document;
   return {
@@ -192,6 +193,7 @@ describe("the collision refusal is empty today and reachable from a manifest", (
       title: "t",
       version: "v",
       coverage: [],
+      residency: null,
     });
     expect(emit.document).toBeNull();
     expect(emit.refused?.kind).toBe("path_collision");
