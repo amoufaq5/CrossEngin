@@ -621,6 +621,7 @@ describe("buildDesignDesigner", () => {
     const designer = buildDesignDesigner({
       provider,
       parentPack: null,
+      tenantPseudonymFor: null,
       model: "claude-opus-4-7",
       maxTokens: 4096,
       providerLabel: "anthropic/claude-opus-4-7",
@@ -1054,7 +1055,7 @@ describe("designManifest — progress", () => {
 
   it("buildDesignDesigner accepts a per-call listener", async () => {
     const { provider } = scriptedProvider([textTurn(VALID_JSON)]);
-    const designer = buildDesignDesigner({ provider, parentPack: null });
+    const designer = buildDesignDesigner({ provider, parentPack: null, tenantPseudonymFor: null });
     const { events, listener } = collector();
     const result = await designer({ tenantId: DESIGN_TENANT, description: "desc", onProgress: listener });
     expect(result.ok).toBe(true);
@@ -1064,7 +1065,7 @@ describe("designManifest — progress", () => {
   it("buildDesignDesigner uses the builder listener, and a per-call listener wins", async () => {
     const { provider } = scriptedProvider([textTurn(VALID_JSON)]);
     const builderSink = collector();
-    const designer = buildDesignDesigner({ provider, parentPack: null, onProgress: builderSink.listener });
+    const designer = buildDesignDesigner({ provider, parentPack: null, tenantPseudonymFor: null, onProgress: builderSink.listener });
     await designer({ tenantId: DESIGN_TENANT, description: "desc" });
     expect(builderSink.events.length).toBeGreaterThan(0);
 
@@ -1694,6 +1695,7 @@ describe("buildDesignDesigner — the per-request ceiling and the budget are wir
     const designer = buildDesignDesigner({
       provider: { complete: scripted.provider.complete, pricing: PAID },
       parentPack: null,
+      tenantPseudonymFor: null,
       maxRequestDollars: 0.01,
     });
     const r = await designer({ tenantId: DESIGN_TENANT, description: "desc" });
@@ -1709,6 +1711,7 @@ describe("buildDesignDesigner — the per-request ceiling and the budget are wir
     const designer = buildDesignDesigner({
       provider: { complete: scripted.provider.complete, pricing: PAID },
       parentPack: null,
+      tenantPseudonymFor: null,
       maxRequestDollars: 10,
       budget: {
         reserve: async (tenantId, dollars) => {

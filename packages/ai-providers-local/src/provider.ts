@@ -2,6 +2,7 @@ import {
   ProviderInactivityTimeout,
   resolveInactivityTimeoutMs,
   startInactivityWatchdog,
+  tenantPseudonymForWire,
   type InactivityWatchdog,
 } from "@crossengin/ai-providers";
 import type {
@@ -156,7 +157,13 @@ export class LocalLlmProvider implements LlmProvider {
 
   async embed(req: EmbeddingRequest): Promise<EmbeddingResponse> {
     const model = req.model ?? this.defaultEmbeddingModel;
-    const { response, text } = await this.sendForText("/embeddings", { model, input: req.texts });
+    // The embedding body carries the pseudonym under the same rule as the chat one (ADR-0456).
+    const pseudonym = tenantPseudonymForWire(req);
+    const { response, text } = await this.sendForText("/embeddings", {
+      model,
+      input: req.texts,
+      ...(pseudonym !== undefined ? { user: pseudonym } : {}),
+    });
     let parsed: LocalEmbeddingApiResponse;
     try {
       parsed = JSON.parse(text) as LocalEmbeddingApiResponse;

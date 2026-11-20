@@ -636,6 +636,12 @@ export async function designManifest(opts: {
    */
   tenantId: string;
   /**
+   * The opaque identifier the provider is sent in place of `tenantId` (ADR-0456), stamped onto
+   * every attempt's request. Optional here because this function is also driven directly by tests;
+   * `buildDesignDesigner`, the one production caller, requires its source and says `null` out loud.
+   */
+  tenantPseudonym?: string;
+  /**
    * Charges each attempt against the tenant's month **before** the call, at the estimate, and
    * settles it with the actual cost after. Absent leaves the month to the caller, which is the
    * behaviour this replaced: a read of the month before the run and a write after it, between
@@ -804,6 +810,7 @@ export async function designManifest(opts: {
       maxTokens,
       jsonMode: true,
       tenantId: opts.tenantId,
+      ...(opts.tenantPseudonym !== undefined ? { tenantPseudonym: opts.tenantPseudonym } : {}),
       sessionId,
       ...(opts.model !== undefined ? { model: opts.model } : {}),
     };
@@ -1109,6 +1116,15 @@ export function buildDesignDesigner(opts: {
   provider: DesignCompletionProvider;
   /** The pack every design from this designer extends, or `null`. See `designManifest`. */
   parentPack: DesignParentPack | null;
+  /**
+   * Maps a tenant to the opaque pseudonym its provider requests carry (ADR-0456), or `null` when
+   * the deployment has no source for one — in which case no tenant identifier is sent at all.
+   *
+   * Required and nullable, not optional: an optional source defaulting to "send none" would make
+   * forgetting it indistinguishable from a deployment that has no secret (ADR-0386's dropped
+   * field), and the boot line that reports the choice would then describe the wrong one.
+   */
+  tenantPseudonymFor: ((tenantId: string) => string) | null;
   model?: string;
   maxTokens?: number;
   providerLabel?: string | null;
@@ -1138,6 +1154,9 @@ export function buildDesignDesigner(opts: {
       description: input.description,
       tenantId: input.tenantId,
       parentPack: opts.parentPack,
+      ...(opts.tenantPseudonymFor !== null
+        ? { tenantPseudonym: opts.tenantPseudonymFor(input.tenantId) }
+        : {}),
       ...(budget !== undefined
         ? { spend: (dollars: number) => budget.reserve(input.tenantId, dollars) }
         : {}),
@@ -1175,9 +1194,18 @@ export interface DeclaredModelPrice {
   readonly cachedInputUsdPerMillion?: number;
 }
 
+/**
+ * Where a design request goes, as far as this process can tell: `self_hosted` for the local arm,
+ * `vendor` for Anthropic and `api.openai.com`, and `unknown` for an OpenAI custom base URL, which
+ * may be vLLM on the next box or a proxy to a vendor — the same ambiguity `unpriced` records.
+ * Read by the tenant-pseudonym boot line, whose consequence clause is true of a vendor only.
+ */
+export type AiProviderEndpoint = "self_hosted" | "vendor" | "unknown";
+
 export interface DesignProviderBuild {
   readonly provider: DesignCompletionProvider;
   readonly providerLabel: string;
+  readonly endpoint: AiProviderEndpoint;
   readonly model: string;
   readonly pricing: AiPricingProvenance;
   /** The date the catalogue price was last checked, when `pricing` is `catalogue`. */
@@ -1250,6 +1278,7 @@ export function buildDesignProviderFromEnv(
     return {
       provider,
       providerLabel: `local/${model}`,
+      endpoint: "self_hosted",
       model,
       pricing: declared !== undefined ? "declared" : "self_hosted_free",
       pricingAsOf: null,
@@ -1279,6 +1308,7 @@ export function buildDesignProviderFromEnv(
     return {
       provider,
       providerLabel: `anthropic/${model}`,
+      endpoint: "vendor",
       model,
       pricing: declared !== undefined ? "declared" : "catalogue",
       pricingAsOf: declared !== undefined ? null : ANTHROPIC_PRICING_AS_OF,
@@ -1318,6 +1348,7 @@ export function buildDesignProviderFromEnv(
     return {
       provider,
       providerLabel: `openai/${model}`,
+      endpoint: custom ? "unknown" : "vendor",
       model,
       pricing,
       pricingAsOf: pricing === "catalogue" ? OPENAI_PRICING_AS_OF : null,

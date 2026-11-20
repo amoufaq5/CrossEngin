@@ -3,7 +3,7 @@ import {
   PackManifestSchema,
   PackPublisherRegistry,
   parsePackPublisherSpec,
-  signPackManifest,
+  signPackRelease,
   type PackCompatibility,
   type PackManifest,
   type TenantContext,
@@ -36,8 +36,10 @@ function persistentRequest(overrides: Partial<PackManifest> = {}): PersistentIns
     ...overrides,
   });
   const kp = generateEd25519Keypair();
-  const signature = signPackManifest({
+  const signature = signPackRelease({
     manifest: pack,
+    version: "1.0.0",
+    bundleSha256: "a".repeat(64),
     privateKeyBase64: kp.privateKeyBase64,
     publicKeyBase64: kp.publicKeyBase64,
     signedAt: "2026-05-16T12:00:00.000Z",
@@ -61,6 +63,7 @@ function persistentRequest(overrides: Partial<PackManifest> = {}): PersistentIns
     requestedBy: USER,
     pack,
     version: "1.0.0",
+    bundleSha256: "a".repeat(64),
     compatibility,
     signature,
     publishers: new PackPublisherRegistry([

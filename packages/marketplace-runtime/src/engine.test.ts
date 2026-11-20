@@ -3,7 +3,7 @@ import {
   PackManifestSchema,
   PackPublisherRegistry,
   parsePackPublisherSpec,
-  signPackManifest,
+  signPackRelease,
   type PackCompatibility,
   type PackManifest,
   type TenantContext,
@@ -14,6 +14,7 @@ import { CountingIdGenerator, FixedClock } from "./clock.js";
 import type { InstallRequest } from "./decisions.js";
 import { MarketplaceInstallEngine } from "./engine.js";
 
+const BUNDLE_SHA = "a".repeat(64);
 const TENANT = "00000000-0000-4000-8000-000000000001";
 
 function buildRequest(overrides: Partial<PackManifest> = {}): InstallRequest {
@@ -33,8 +34,10 @@ function buildRequest(overrides: Partial<PackManifest> = {}): InstallRequest {
     ...overrides,
   });
   const kp = generateEd25519Keypair();
-  const signature = signPackManifest({
+  const signature = signPackRelease({
     manifest: pack,
+    version: "1.0.0",
+    bundleSha256: BUNDLE_SHA,
     privateKeyBase64: kp.privateKeyBase64,
     publicKeyBase64: kp.publicKeyBase64,
     signedAt: "2026-05-16T12:00:00.000Z",
@@ -58,6 +61,7 @@ function buildRequest(overrides: Partial<PackManifest> = {}): InstallRequest {
     requestedBy: "user-admin",
     pack,
     version: "1.0.0",
+    bundleSha256: BUNDLE_SHA,
     compatibility,
     signature,
     publishers: new PackPublisherRegistry([

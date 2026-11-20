@@ -80,6 +80,7 @@ export const REQUEST_COLUMNS = [
   "retention_obligations",
   "retained_data_categories",
   "notes",
+  "last_attempt_refusal",
   "tombstone_id",
 ] as const;
 
@@ -392,6 +393,8 @@ export function rowToDeletionRequest(row: Record<string, unknown>): GdprDeletion
   if (extension !== null) candidate["deadlineExtensionReason"] = extension;
   const notes = textOrNull(row["notes"]);
   if (notes !== null) candidate["notes"] = notes;
+  const lastAttempt = textOrNull(row["last_attempt_refusal"]);
+  if (lastAttempt !== null) candidate["lastAttemptRefusal"] = lastAttempt;
   return GdprDeletionRequestSchema.parse(candidate);
 }
 
@@ -415,6 +418,13 @@ export interface SubmitDeletionRequestInput {
   readonly retentionObligations?: readonly RetentionObligation[];
   readonly notes?: string;
 }
+
+/**
+ * The claim order `dueForExecution` uses, one spelling for both of its queries: never-attempted
+ * requests by deadline, then released ones least recently attempted first (ADR-0453).
+ */
+const DUE_ORDER =
+  "(last_attempt_refusal IS NOT NULL), in_progress_at ASC NULLS FIRST, deadline_at, request_id";
 
 export class PostgresDeletionRequestStore {
   private readonly conn: PgConnection;
@@ -570,10 +580,19 @@ export class PostgresDeletionRequestStore {
   }
 
   /**
-   * The next `verified` requests, nearest deadline first — the scheduler's claim.
+   * The next `verified` requests — the scheduler's claim. Never-attempted requests come first,
+   * nearest deadline first; requests a refused attempt **released** (ADR-0453) come after them,
+   * least recently attempted first.
    *
    * Ordered by deadline rather than submission because Article 12(3) is what the platform is late
-   * against, and a request submitted later can be due sooner if it was verified sooner.
+   * against, and a request submitted later can be due sooner if it was verified sooner. The release
+   * is what moves a request out of that order, and the reason is starvation: a released request
+   * keeps its `deadline_at` (Article 12(3) runs from the original submission), so by deadline alone
+   * it stays at the head of the queue — and `limit` requests stuck on a cause the deployment has not
+   * fixed would be claimed, refused and released every tick while a later-deadline request that
+   * would succeed was never selected. `last_attempt_refusal` is written only by the release, so it
+   * marks exactly the released rows; `in_progress_at` is re-stamped by every claim, so ordering the
+   * released ones by it rotates through them rather than retrying the same `limit` for ever.
    *
    * `onUnreadable` precedes `limit` because it is required and `limit` keeps its default — a
    * required parameter cannot follow an optional one, and the order is what the requirement costs.
@@ -589,7 +608,7 @@ export class PostgresDeletionRequestStore {
       if (grace === undefined) {
         const result = await tx.query<Record<string, unknown>>(
           `SELECT ${REQUEST_COLUMNS.join(", ")} FROM ${this.table}
-            WHERE status = 'verified' ORDER BY deadline_at, request_id LIMIT $1`,
+            WHERE status = 'verified' ORDER BY ${DUE_ORDER} LIMIT $1`,
           [bounded],
         );
         return readRequestRows(result.rows, onUnreadable);
@@ -606,7 +625,7 @@ export class PostgresDeletionRequestStore {
             AND GREATEST(verified_at, LEAST(verified_at + $2 * interval '1 millisecond',
                                             deadline_at - $3 * interval '1 millisecond'))
                 <= $4::timestamptz
-          ORDER BY deadline_at, request_id LIMIT $1`,
+          ORDER BY ${DUE_ORDER} LIMIT $1`,
         [bounded, Math.trunc(grace.graceMs), GRACE_YIELDS_TO_DEADLINE_MS, grace.now],
       );
       return readRequestRows(result.rows, onUnreadable);
@@ -762,6 +781,8 @@ export class PostgresDeletionRequestStore {
       readonly rejectedReason?: string;
       readonly deferredUntil?: string;
       readonly deferralReason?: string;
+      /** Required on the release (`in_progress -> verified`) and refused anywhere else. */
+      readonly lastAttemptRefusal?: string;
     },
   ): Promise<GdprDeletionRequest | null> {
     const current = await this.read(requestId);
@@ -774,13 +795,39 @@ export class PostgresDeletionRequestStore {
         `${current.status} -> ${to} is not a legal deletion-request transition`,
       );
     }
+    const releasing = current.status === "in_progress" && to === "verified";
+    if (releasing) {
+      // A release must say why, and must not re-verify: the verification is a fact about a person
+      // who authenticated to make it, and re-stamping `verified_at` would also restart the grace
+      // the runner measures from it. `deadline_at` is in no SET clause here at all, so Article
+      // 12(3) keeps running from the original submission (ADR-0453).
+      if (fields.lastAttemptRefusal === undefined || fields.lastAttemptRefusal.length === 0) {
+        throw new DeletionRequestRefused(
+          "contract_violated",
+          "releasing a request back to verified must state the refused attempt's reasons",
+        );
+      }
+      if (fields.verifiedBy !== undefined || fields.verificationMethod !== undefined) {
+        throw new DeletionRequestRefused(
+          "contract_violated",
+          "a release does not re-verify the request: verifiedBy and verificationMethod are refused",
+        );
+      }
+    } else if (fields.lastAttemptRefusal !== undefined) {
+      throw new DeletionRequestRefused(
+        "contract_violated",
+        `lastAttemptRefusal is written only by the release, not by ${current.status} -> ${to}`,
+      );
+    }
     const sets = ["status = $2"];
     const params: unknown[] = [requestId, to];
     const push = (sql: string, value: unknown): void => {
       params.push(value);
       sets.push(sql.replace("$N", `$${params.length.toString()}`));
     };
-    if (to === "verified") {
+    if (releasing) {
+      push("last_attempt_refusal = $N", fields.lastAttemptRefusal);
+    } else if (to === "verified") {
       push("verified_at = $N::timestamptz", fields.at);
       if (fields.verifiedBy !== undefined) push("verified_by = $N", fields.verifiedBy);
       if (fields.verificationMethod !== undefined) {

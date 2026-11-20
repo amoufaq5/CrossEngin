@@ -6,7 +6,7 @@ import {
   PackManifestSchema,
   PackPublisherRegistry,
   parsePackPublisherSpec,
-  signPackManifest,
+  signPackRelease,
   type TenantContext,
 } from "@crossengin/marketplace";
 import { PersistentMarketplaceInstallEngine, PostgresInstallationStore } from "@crossengin/marketplace-runtime-pg";
@@ -18,6 +18,7 @@ import {
   buildPackInstallHandler,
   buildPackListHandler,
   buildPackUninstallHandler,
+  formatPackCatalogSurvey,
   loadPackCatalog,
   surveyPackCatalog,
   type MarketplaceAdminContext,
@@ -82,6 +83,8 @@ const KNOWN: TenantContext = {
   isDedicatedTenant: false,
 };
 
+const BUNDLE_SHA = "a".repeat(64);
+
 function catalogEntry(overrides: Record<string, unknown> = {}, kp = KEY): PackCatalogEntry {
   const pack = PackManifestSchema.parse({
     id: "com.crossengin.example",
@@ -93,10 +96,18 @@ function catalogEntry(overrides: Record<string, unknown> = {}, kp = KEY): PackCa
     minPlatformVersion: "1.0.0",
     ...overrides,
   });
-  const signature = signPackManifest({ manifest: pack, privateKeyBase64: kp.privateKeyBase64, publicKeyBase64: kp.publicKeyBase64, signedAt: "2026-05-16T12:00:00.000Z" });
+  const signature = signPackRelease({
+    manifest: pack,
+    version: "1.0.0",
+    bundleSha256: BUNDLE_SHA,
+    privateKeyBase64: kp.privateKeyBase64,
+    publicKeyBase64: kp.publicKeyBase64,
+    signedAt: "2026-05-16T12:00:00.000Z",
+  });
   return {
     pack,
     version: "1.0.0",
+    bundleSha256: BUNDLE_SHA,
     signature,
     compatibility: { minPlatformVersion: "1.0.0", allowedRegions: [], blockedRegions: [], requiredCompliancePacks: [], requiresDedicatedTenant: false },
     securityReviewStatus: "passed",
@@ -144,6 +155,10 @@ describe("loadPackCatalog", () => {
   it("rejects a malformed catalog", () => {
     expect(() => loadPackCatalog(JSON.stringify({ packs: [{ pack: {} }] }))).toThrow();
   });
+  it("rejects an entry with no bundle digest, which the signed release must name", () => {
+    const { bundleSha256: _bundle, ...noBundle } = catalogEntry();
+    expect(() => loadPackCatalog(JSON.stringify({ packs: [noBundle] }))).toThrow(/bundleSha256/);
+  });
   it("loads a catalog written before the registry when its stated key did produce the signature", () => {
     const legacy = { ...catalogEntry(), publisherPublicKeyBase64: KEY.publicKeyBase64 };
     expect(loadPackCatalog(JSON.stringify({ packs: [legacy] })).list()).toHaveLength(1);
@@ -159,6 +174,48 @@ describe("surveyPackCatalog", () => {
     const stranger = catalogEntry({ id: "com.crossengin.other" }, generateEd25519Keypair());
     const findings = surveyPackCatalog(new InMemoryPackCatalog([catalogEntry(), stranger]), PUBLISHERS);
     expect(findings.map((f) => [f.packId, f.refusal])).toEqual([["com.crossengin.other", "publisher_unregistered"]]);
+  });
+
+  it("names a catalog entry filed under a version or bundle its release does not name, and a manifest-only signature", () => {
+    const entry = catalogEntry();
+    const { release: _release, ...legacySignature } = entry.signature;
+    const findings = surveyPackCatalog(
+      new InMemoryPackCatalog([
+        { ...entry, version: "1.0.1" },
+        { ...entry, bundleSha256: "b".repeat(64) },
+        { ...entry, signature: legacySignature },
+      ]),
+      PUBLISHERS,
+    );
+    expect(findings.map((f) => f.refusal)).toEqual([
+      "release_version_mismatch",
+      "release_bundle_mismatch",
+      "legacy_signature_form",
+    ]);
+  });
+});
+
+describe("formatPackCatalogSurvey", () => {
+  it("counts a release-mismatched entry as refused, not as unsigned, and never says 'signed by'", () => {
+    // Entry 2 carries a signature that verifies against a registered key over 1.0.0 while filed as
+    // 2.0.0; it is refused at install, but calling it "not signed by a registered publisher" would
+    // be false — so the headline names what it measures.
+    const entry = catalogEntry();
+    const catalog = new InMemoryPackCatalog([entry, { ...entry, version: "2.0.0" }]);
+    const findings = surveyPackCatalog(catalog, PUBLISHERS);
+    expect(findings.map((f) => f.refusal)).toEqual(["release_version_mismatch"]);
+    const line = formatPackCatalogSurvey(catalog.list().length, findings);
+    expect(line).toBe("[marketplace] pack catalog: 2 version(s), 1 installable as catalogued, 1 refused at install");
+    expect(line).not.toMatch(/signed by/);
+  });
+});
+
+describe("buildPackInstallHandler — the signed release", () => {
+  it("409s installing a catalog version the publisher did not sign", async () => {
+    const ctx = makeCtx([{ ...catalogEntry(), version: "2.0.0" }]);
+    const out = await buildPackInstallHandler(ctx)(input("erp_admin", { packId: "com.crossengin.example", version: "2.0.0" }));
+    expect(out.status).toBe(409);
+    expect(bodyOf(out)["reason"]).toBe("release_version_mismatch");
   });
 });
 

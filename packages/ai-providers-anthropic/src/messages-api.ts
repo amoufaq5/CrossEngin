@@ -1,4 +1,10 @@
-import type { CompletionRequest, LlmMessage, LlmTool, Usage } from "@crossengin/ai-providers";
+import {
+  tenantPseudonymForWire,
+  type CompletionRequest,
+  type LlmMessage,
+  type LlmTool,
+  type Usage,
+} from "@crossengin/ai-providers";
 
 import { computeUsageCost, type AnthropicModel, type AnthropicModelPricing } from "./pricing.js";
 
@@ -10,6 +16,12 @@ export interface AnthropicMessagesRequest {
   readonly tools?: readonly AnthropicTool[];
   readonly temperature?: number;
   readonly stream?: boolean;
+  /**
+   * Anthropic's per-request end-user identifier, documented as an opaque id for abuse detection
+   * (max 256 characters, no names or contact details). Carries the tenant pseudonym and nothing
+   * else (ADR-0456); absent when the deployment configured none.
+   */
+  readonly metadata?: { readonly user_id: string };
 }
 
 export interface AnthropicSystemBlock {
@@ -76,6 +88,7 @@ export function buildAnthropicRequest(
   const maxTokens = req.maxTokens ?? opts.defaultMaxTokens ?? DEFAULT_MAX_TOKENS;
   const { systemBlocks, conversation } = splitSystem(req.messages, req.cacheControl?.systemPrompt);
   const tools = req.tools?.map(buildTool);
+  const pseudonym = tenantPseudonymForWire(req);
   return {
     model,
     max_tokens: maxTokens,
@@ -84,6 +97,7 @@ export function buildAnthropicRequest(
     ...(tools !== undefined && tools.length > 0 ? { tools } : {}),
     ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
     ...(opts.stream !== undefined ? { stream: opts.stream } : {}),
+    ...(pseudonym !== undefined ? { metadata: { user_id: pseudonym } } : {}),
   };
 }
 

@@ -6,7 +6,7 @@ import { buildProfileFromTemplate } from "@crossengin/residency";
 import { InMemoryTenantResidencyDirectory } from "@crossengin/residency-runtime";
 import { describe, expect, it, vi } from "vitest";
 
-import type { RawHttpRequest } from "./http.js";
+import type { RawHttpRequest, RawHttpResponse } from "./http.js";
 import { loadBuiltinPack } from "./manifest-source.js";
 import { parseApiKeySpec } from "./principals.js";
 import { OperateHttpServer, buildOperateHttpServer, logGatewayInternalError } from "./server.js";
@@ -285,6 +285,7 @@ describe("OperateHttpServer — data-residency edge routing", () => {
     expect(res.status).toBe(421);
     expect(res.headers["x-crossengin-region"]).toBe("eu-central");
     expect(parse(res.body).extensions).toMatchObject({ correctRegion: "eu-central" });
+    expect(parse(res.body).type).toBe("https://crossengin.io/errors/residency-misdirected");
   });
 
   it("serves the tenant in an allowed region (guard proceeds to the gateway)", async () => {
@@ -299,7 +300,10 @@ describe("OperateHttpServer — data-residency edge routing", () => {
     const res = await regionServer("us-east").dispatch(reqWithTenant("/v1/products", "key-manager"), null);
     expect(res.status).toBe(421);
     expect(res.headers["x-crossengin-region"]).toBe("eu-central");
-    expect(parse(res.body)).toMatchObject({ reason: "residency_misdirected", correctRegion: "eu-central" });
+    expect(parse(res.body).extensions).toMatchObject({
+      reason: "residency_misdirected",
+      correctRegion: "eu-central",
+    });
   });
 
   // A hint naming an unprofiled tenant passes the advisory pre-auth routing; what stops it buying a
@@ -315,7 +319,10 @@ describe("OperateHttpServer — data-residency edge routing", () => {
     expect(res.status).toBe(200);
   });
 
-  it("answers 503 rather than serving when the directory cannot be read after auth", async () => {
+  it.each([
+    ["without", undefined],
+    ["with", TENANT],
+  ])("answers 503 rather than serving when the directory cannot be read, %s the tenant hint", async (_label, hint) => {
     const { httpServer } = buildOperateHttpServer({
       edgeTrust: "untrusted",
       manifest,
@@ -331,10 +338,86 @@ describe("OperateHttpServer — data-residency edge routing", () => {
       },
       now: () => new Date("2026-06-03T12:00:00.000Z"),
     });
-    const res = await httpServer.dispatch(reqWithTenant("/v1/products", "key-manager"), null);
+    // The pre-auth hint check is advisory, so an unreadable directory there passes the request on to
+    // the gate rather than throwing a 500: one condition, one answer, whichever header was sent.
+    const res = await httpServer.dispatch(reqWithTenant("/v1/products", "key-manager", hint), null);
     expect(res.status).toBe(503);
-    expect(parse(res.body)).toMatchObject({ reason: "residency_unresolved" });
+    expect(parse(res.body).extensions).toMatchObject({ reason: "residency_unresolved" });
+    expect(res.headers["retry-after"]).toBe("5");
     expect(new TextDecoder().decode(res.body ?? new Uint8Array())).not.toContain("unreachable");
+  });
+
+  // ADR-0457: the pre-auth hint check and the post-auth gate answered one route's 421 in two shapes
+  // (two type hosts, the region in the extensions in one and at the top level in the other). One
+  // builder now produces both, so the two arms are compared as bytes, not as matching fields.
+  function residencyServer(profile: typeof euOnly, executions: { count: number }): OperateHttpServer {
+    const { httpServer } = buildOperateHttpServer({
+      edgeTrust: "untrusted",
+      manifest,
+      store: new InMemoryEntityStore(),
+      apiKeys: API_KEYS,
+      regionGuard: {
+        region: "us-east" as never,
+        directory: new InMemoryTenantResidencyDirectory([[TENANT, profile]]),
+      },
+      now: () => new Date("2026-06-03T12:00:00.000Z"),
+      onExecution: () => {
+        executions.count += 1;
+      },
+    });
+    return httpServer;
+  }
+
+  // Each arm must be provably the producer it is named for, or the byte comparison is vacuous: with
+  // a hint equal to a valid credential's tenant, a pre-auth check mutated to `return null` would be
+  // answered by the gate with the same bytes and both comparisons would stay green. So the `pre` arm
+  // carries a credential the gateway refuses (it could only answer 401) and must run no pipeline at
+  // all, while the `post` arm sends no hint and must run exactly one.
+  async function bothArms(
+    profile: typeof euOnly,
+  ): Promise<{ pre: RawHttpResponse; post: RawHttpResponse }> {
+    const executions = { count: 0 };
+    const server = residencyServer(profile, executions);
+    const pre = await server.dispatch(reqWithTenant("/v1/products", "not-a-registered-key", TENANT), null);
+    expect(executions.count).toBe(0);
+    const post = await server.dispatch(reqWithTenant("/v1/products", "key-manager"), null);
+    expect(executions.count).toBe(1);
+    return { pre, post };
+  }
+
+  function withoutRequestId(headers: Record<string, string | string[] | undefined>): Record<string, unknown> {
+    const { "x-request-id": id, ...rest } = headers;
+    expect(id).toMatch(/^req_/);
+    return rest;
+  }
+
+  it("answers a 421 from either producer with byte-identical bodies and the same headers", async () => {
+    const { pre, post } = await bothArms(euOnly);
+    expect(pre.status).toBe(421);
+    expect(post.status).toBe(421);
+    expect(Buffer.from(pre.body ?? new Uint8Array()).equals(Buffer.from(post.body ?? new Uint8Array()))).toBe(true);
+    expect(withoutRequestId(pre.headers)).toEqual(withoutRequestId(post.headers));
+    // Both carriers of the home region, on both arms, so a client keyed on either keeps working.
+    for (const res of [pre, post]) {
+      expect(res.headers["x-crossengin-region"]).toBe("eu-central");
+      expect(parse(res.body).extensions).toEqual({ reason: "residency_misdirected", correctRegion: "eu-central" });
+      expect(parse(res.body).type).toBe("https://crossengin.io/errors/residency-misdirected");
+      expect(res.headers["content-type"]).toBe("application/problem+json");
+    }
+  });
+
+  it("answers a 403 from either producer the same way, naming no region", async () => {
+    const strict = { ...euOnly, allowedRegions: euOnly.allowedRegions.filter((r) => r !== euOnly.primaryRegion) };
+    const { pre, post } = await bothArms(strict);
+    expect(pre.status).toBe(403);
+    expect(post.status).toBe(403);
+    expect(Buffer.from(pre.body ?? new Uint8Array()).equals(Buffer.from(post.body ?? new Uint8Array()))).toBe(true);
+    expect(withoutRequestId(pre.headers)).toEqual(withoutRequestId(post.headers));
+    for (const res of [pre, post]) {
+      expect(res.headers["x-crossengin-region"]).toBeUndefined();
+      expect(parse(res.body).type).toBe("https://crossengin.io/errors/residency-violation");
+      expect(parse(res.body).extensions).toEqual({ reason: "residency_forbidden" });
+    }
   });
 
   it("proceeds for a tenant with no residency profile (unconstrained)", async () => {
@@ -574,7 +657,9 @@ describe("buildOperateHttpServer's option forwarding", () => {
 });
 
 describe("OperateHttpServer — a fault is logged under an id and never echoed", () => {
-  function serverWith(directoryThrows: boolean, events: unknown[]): OperateHttpServer {
+  // The pre-gateway throw is a webhook handler's: a residency lookup no longer throws there (it is
+  // advisory and passes an unreadable directory on to the gate).
+  function serverWith(webhookThrows: boolean, events: unknown[]): OperateHttpServer {
     const { gateway } = buildOperateHttpServer({
       edgeTrust: "untrusted",
       manifest,
@@ -585,14 +670,13 @@ describe("OperateHttpServer — a fault is logged under an id and never echoed",
       gateway,
       edgeTrust: "untrusted",
       onServerError: (event) => events.push(event),
-      ...(directoryThrows
+      ...(webhookThrows
         ? {
-            regionGuard: {
-              region: "us-east" as never,
-              directory: {
-                resolve: async () => {
-                  throw new Error(`residency store unreachable for ${TENANT}`);
-                },
+            webhookRoute: {
+              method: "POST" as const,
+              path: "/v1/webhooks/stripe",
+              handle: async () => {
+                throw new Error(`signing secret store unreachable for ${TENANT}`);
               },
             },
           }
@@ -604,10 +688,11 @@ describe("OperateHttpServer — a fault is logged under an id and never echoed",
     const events: Array<{ requestId: string; reason: string | null; stage: string | null }> = [];
     const server = serverWith(true, events);
     const res = await server.dispatch(
-      { method: "GET", url: "/v1/products", headers: { "x-tenant-id": TENANT }, remoteAddress: "203.0.113.1" },
+      { method: "POST", url: "/v1/webhooks/stripe", headers: { "x-tenant-id": TENANT }, remoteAddress: "203.0.113.1" },
       null,
     );
     expect(res.status).toBe(500);
+    expect(parse(res.body).type).toBe("https://crossengin.io/errors/internal-server-error");
     const text = new TextDecoder().decode(res.body ?? new Uint8Array());
     expect(text).not.toContain("unreachable");
     expect(text).not.toContain(TENANT);

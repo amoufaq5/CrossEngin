@@ -4,7 +4,8 @@ import type {
   GdprDeletionRequest,
 } from "@crossengin/tenant-lifecycle";
 
-import { DeletionPipelineAborted, type DeleteTenantOutcome } from "./deletion-pipeline.js";
+import { DeletionPipelineAborted, type DeleteTenantOutcome, type PipelineRefusal } from "./deletion-pipeline.js";
+import { deletionRefusalDisposition, formatRefusalReasons } from "./deletion-retry.js";
 import {
   DeletionRequestCommittedUnreadable,
   type PostgresDeletionRequestStore,
@@ -36,16 +37,20 @@ import {
  * pipeline is atomic so it is actually either done or not — but *this* process cannot know which, and
  * re-running on the assumption that it failed would attempt a second deletion. A human reconciles it
  * by reading whether a tombstone exists for that tenant. `DELETION_REQUEST_TRANSITIONS` offers
- * `in_progress → completed | rejected` and nothing back to `verified`, which is the contract agreeing.
+ * `in_progress → verified` only as the release below, never for an unknown outcome.
  *
  * **A `DeletionPipelineAborted` is the exception to that, and the distinction is the point.** It is
  * raised by the pipeline *inside* `conn.transaction`, so receiving it proves the transaction rolled
- * back — the tenant is untouched, and the refusal that caused it (an unattested subsystem, an empty
- * scope) will refuse the same way on every retry. That is a terminal, knowable refusal, so the request
- * is marked `rejected` rather than left `in_progress`. Anything *else* thrown — a connection lost at
- * commit time — is genuinely unknown, and only that gets the open-ended `aborted`. Found live: a
- * tenant with no schema of its own refused `assemble/scope_empty` and left its request stuck
- * `in_progress`, which is precisely the state ADR-0320's caller could not learn anything from.
+ * back — the tenant is untouched. A returned refusal proves the same, earlier. What happens next is
+ * `deletionRefusalDisposition`'s answer (ADR-0453): a cause that is the **deployment's** and raised
+ * before anything is destroyed (a confined role, a missing table) releases the request back to
+ * `verified` with the refusal recorded, so it is retried without the data subject resubmitting; a
+ * cause that is the **request's** or the tenant's (an empty scope, a caller's body), or one raised
+ * after the erasure has begun deleting — every `DeletionPipelineAborted` — rejects it, as every
+ * refusal did before. Anything *else* thrown — a connection lost at commit time — is genuinely unknown, and only
+ * that gets the open-ended `aborted`. Found live twice: a tenant with no schema of its own refused
+ * `assemble/scope_empty` and stranded `in_progress`; and on the confined `crossengin_app` role every
+ * attempt refused `rls_would_confine_this_session` and **consumed the verified request** (ADR-0446).
  *
  * **`completed` is written after the pipeline commits, so a failure to write it leaves a real
  * deletion recorded as `in_progress`.** Visible and reconcilable, and the tombstone is the truth
@@ -94,7 +99,7 @@ import {
  * answering a question all four face, and the error carries `committedStatus` so the mapping has an
  * input. A sixth status must answer here instead of inheriting whichever branch a chain ended on.
  *
- * The three statuses this runner never writes — `submitted`, `verified`, `deferred` — answer
+ * The two statuses this runner never writes — `submitted`, `deferred` — answer
  * `aborted`, which is the honest value for a status it cannot explain having committed rather than a
  * hole left where a total map exists to prevent one (`ABAC_DENIAL_EFFECT`'s `entity_create` shape).
  *
@@ -112,7 +117,8 @@ import {
 const OUTCOME_OF_COMMITTED_STATUS: Readonly<Record<DeletionRequestStatus, RunOutcome>> =
   Object.freeze({
     submitted: "aborted",
-    verified: "aborted",
+    // The release (ADR-0453): a committed `verified` is a refused attempt handed back for retry.
+    verified: "refused_retryable",
     in_progress: "aborted",
     completed: "completed",
     rejected: "rejected",
@@ -128,10 +134,13 @@ export const RUN_OUTCOMES = [
    */
   "completed",
   /**
-   * Claimed and the pipeline refused; request marked `rejected` with the reason. Covers both an erase
-   * refusal (nothing was dropped) and a `DeletionPipelineAborted` (the drop ran inside the transaction
-   * and rolled back with it) — in both the tenant is provably untouched and a retry would refuse
-   * identically, which is what makes `rejected` the honest terminal state.
+   * Claimed and the pipeline refused for a cause that is the request's, its caller's or the
+   * tenant's (`deletionRefusalDisposition` answers `final`, ADR-0453); request marked `rejected` with
+   * the reason. Covers both a returned refusal (nothing was dropped) and a `DeletionPipelineAborted`
+   * (the drop ran inside the transaction and rolled back with it) — in both the tenant is provably
+   * untouched and no change to the deployment would make a retry succeed, which is what makes
+   * `rejected` the honest terminal state. A deployment's cause raised before anything was
+   * destroyed is `refused_retryable` instead.
    *
    * `detail` also carries the parse failure when the `rejected` write committed and its read-back
    * could not be represented, like the `completed` arm above. Reported **once**, and that is the one
@@ -143,6 +152,15 @@ export const RUN_OUTCOMES = [
    * anyway.
    */
   "rejected",
+  /**
+   * Claimed, and the pipeline refused for a cause that is the **deployment's** (ADR-0453), with the
+   * rollback proven: the request is released back to `verified` with `lastAttemptRefusal` recorded,
+   * its verification and Article 12(3) deadline unchanged, and the next tick tries again. The tenant
+   * stays `pending_deletion`, because the deletion is still scheduled. Needs a human — whoever fixes
+   * the deployment — which is why `needsReconciliation` answers `true`; nothing about the data is
+   * uncertain.
+   */
+  "refused_retryable",
   /** Another worker claimed it first. Not an error. */
   "not_claimed",
   /**
@@ -238,6 +256,19 @@ export interface DeletionRunnerOptions {
    * this whole surface is about.
    */
   readonly onUnreadableRequest: UnreadableRowReporter;
+  /**
+   * Called once a proven refusal has committed the request `rejected` — and only then — so the
+   * tenant the verify route moved to `pending_deletion` is restored exactly as the synchronous route
+   * and the reject route restore it (ADR-0453). A **released** request is not rejected: its deletion
+   * is still owed, so the tenant stays read-only and this is not called.
+   *
+   * Optional because a deployment that moves no tenant rows has nothing to restore; when supplied it
+   * owns its own trail and its own reporting, and a throw from it is folded into the run's `detail`
+   * rather than changing the outcome, since the request's terminal status has already committed.
+   */
+  readonly restoreTenantAfterRejection?: (
+    rejected: { readonly requestId: string; readonly tenantId: string },
+  ) => Promise<void>;
   readonly clock?: () => Date;
   readonly onRun?: (result: DeletionRunResult) => void;
 }
@@ -282,7 +313,13 @@ export class DeletionRunner {
   private async move(
     requestId: string,
     to: DeletionRequestStatus,
-    fields: { readonly at: string; readonly tombstoneId?: string; readonly completionSha256?: string; readonly rejectedReason?: string },
+    fields: {
+      readonly at: string;
+      readonly tombstoneId?: string;
+      readonly completionSha256?: string;
+      readonly rejectedReason?: string;
+      readonly lastAttemptRefusal?: string;
+    },
   ): Promise<
     | { readonly kind: "moved"; readonly request: GdprDeletionRequest | null }
     | { readonly kind: "unreadable"; readonly err: DeletionRequestCommittedUnreadable }
@@ -316,6 +353,54 @@ export class DeletionRunner {
       detail:
         `recorded '${err.committedStatus}'; the request row cannot be read back: ` +
         `${err.parseMessage}; ${consequence}`,
+    });
+  }
+
+  /**
+   * A refusal whose rollback is proven, settled by its cause (ADR-0453): `verified` again with the
+   * attempt recorded when every reason is the deployment's, `rejected` otherwise.
+   *
+   * `rejectedReason` keeps its old spelling (`rolled back: …` for a thrown refusal) so a reader of a
+   * rejected row sees what it always saw; `lastAttemptRefusal` is the one bounded `stage/reason`
+   * line both paths share with the synchronous route.
+   */
+  private async settleProvenRefusal(
+    base: { readonly requestId: string; readonly tenantId: string; readonly approvedBy: string | null },
+    requestId: string,
+    refusals: readonly PipelineRefusal[],
+    said: { readonly rejectedReason: string; readonly detail: string; readonly consequence: string },
+  ): Promise<DeletionRunResult> {
+    const { rejectedReason, detail, consequence } = said;
+    const retry = deletionRefusalDisposition(refusals) === "retry";
+    const moved = retry
+      ? await this.move(requestId, "verified", {
+          at: this.now(),
+          lastAttemptRefusal: formatRefusalReasons(refusals),
+        })
+      : await this.move(requestId, "rejected", {
+          at: this.now(),
+          rejectedReason: rejectedReason.slice(0, 500),
+        });
+    if (moved.kind === "unreadable") {
+      return this.reportCommittedUnreadable(base, moved.err, null, consequence);
+    }
+    // Restored only when *this* write committed `rejected`: a null read-back means another worker
+    // moved the request first, and the tenant is then that worker's to settle.
+    let restoreNote = "";
+    if (!retry && moved.request?.status === "rejected" && this.opts.restoreTenantAfterRejection) {
+      try {
+        await this.opts.restoreTenantAfterRejection({ requestId, tenantId: base.tenantId });
+      } catch (err) {
+        restoreNote = `; the tenant could not be restored from pending_deletion: ${
+          err instanceof Error ? err.message : String(err)
+        }`;
+      }
+    }
+    return this.report({
+      ...base,
+      outcome: retry ? "refused_retryable" : "rejected",
+      tombstoneId: null,
+      detail: `${detail}${restoreNote}`,
     });
   }
 
@@ -365,38 +450,27 @@ export class DeletionRunner {
       const detail = detailOf(err);
       if (err instanceof DeletionPipelineAborted) {
         // Raised inside the pipeline's own transaction, so this *proves* the rollback: the tenant is
-        // untouched and the refusal is deterministic. Terminal, therefore, and recorded as such —
-        // leaving it `in_progress` would strand a caller polling a handle that will never move.
-        const moved = await this.move(request.id, "rejected", {
-          at: this.now(),
-          rejectedReason: `rolled back: ${detail}`.slice(0, 500),
+        // untouched. Released or rejected by the cause, never left `in_progress` — that would strand
+        // a caller polling a handle that will never move.
+        return this.settleProvenRefusal(base, request.id, err.refusals, {
+          rejectedReason: `rolled back: ${detail}`,
+          detail,
+          consequence: `the pipeline rolled back (${detail})`,
         });
-        if (moved.kind === "unreadable") {
-          return this.reportCommittedUnreadable(
-            base,
-            moved.err,
-            null,
-            `the pipeline rolled back (${detail})`,
-          );
-        }
-        return this.report({ ...base, outcome: "rejected", tombstoneId: null, detail });
       }
       // Anything else: whether the deletion committed is unknown, and re-running on the assumption
       // that it failed is how a tenant gets deleted twice. Left `in_progress` on purpose — the
-      // contract offers no way back to `verified`, which is the contract agreeing.
+      // release back to `verified` is for a proven rollback only (ADR-0453).
       return this.report({ ...base, outcome: "aborted", tombstoneId: null, detail });
     }
 
     if (!outcome.ok) {
       const detail = outcome.refusals.map((r) => `${r.stage}/${r.reason}`).join("; ");
-      const moved = await this.move(request.id, "rejected", {
-        at: this.now(),
-        rejectedReason: detail.slice(0, 500),
+      return this.settleProvenRefusal(base, request.id, outcome.refusals, {
+        rejectedReason: detail,
+        detail,
+        consequence: `the pipeline refused (${detail})`,
       });
-      if (moved.kind === "unreadable") {
-        return this.reportCommittedUnreadable(base, moved.err, null, `the pipeline refused (${detail})`);
-      }
-      return this.report({ ...base, outcome: "rejected", tombstoneId: null, detail });
     }
 
     const stored = outcome.stored;
@@ -474,6 +548,9 @@ export class DeletionRunner {
 /** Whether a run left work a human has to look at. */
 export function needsReconciliation(outcome: RunOutcome): boolean {
   return (
-    outcome === "aborted" || outcome === "completed_unrecorded" || outcome === "refused_four_eyes"
+    outcome === "aborted" ||
+    outcome === "completed_unrecorded" ||
+    outcome === "refused_four_eyes" ||
+    outcome === "refused_retryable"
   );
 }

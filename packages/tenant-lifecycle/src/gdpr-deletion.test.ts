@@ -65,6 +65,18 @@ describe("canTransitionDeletionRequest", () => {
     expect(canTransitionDeletionRequest("completed", "in_progress")).toBe(false);
   });
 
+  it("in_progress -> verified is the release, and the only edge back (ADR-0453)", () => {
+    expect(canTransitionDeletionRequest("in_progress", "verified")).toBe(true);
+    // Only that edge: nothing else returns to verified, and nothing returns to submitted at all.
+    const back = DELETION_REQUEST_STATUSES.filter((from) =>
+      canTransitionDeletionRequest(from, "verified"),
+    );
+    expect(back).toEqual(["submitted", "in_progress"]);
+    expect(
+      DELETION_REQUEST_STATUSES.filter((from) => canTransitionDeletionRequest(from, "submitted")),
+    ).toEqual([]);
+  });
+
   it("deferred can resume", () => {
     expect(canTransitionDeletionRequest("deferred", "in_progress")).toBe(true);
   });
@@ -93,6 +105,23 @@ describe("GdprDeletionRequestSchema", () => {
     retainedDataCategories: [],
     tombstoneId: "tomb_aaaabbbbccccdddd",
   };
+
+  it("accepts a released request carrying its refused attempt, and refuses one with no attempt", () => {
+    const released = {
+      ...base,
+      status: "verified" as const,
+      completedAt: null,
+      completionSha256: null,
+      tombstoneId: null,
+      lastAttemptRefusal: "erase/rls_would_confine_this_session",
+    };
+    expect(GdprDeletionRequestSchema.safeParse(released).success).toBe(true);
+    const neverAttempted = GdprDeletionRequestSchema.safeParse({ ...released, inProgressAt: null });
+    expect(neverAttempted.success).toBe(false);
+    expect(
+      GdprDeletionRequestSchema.safeParse({ ...released, lastAttemptRefusal: "" }).success,
+    ).toBe(false);
+  });
 
   it("accepts a valid completed request", () => {
     expect(() => GdprDeletionRequestSchema.parse(base)).not.toThrow();

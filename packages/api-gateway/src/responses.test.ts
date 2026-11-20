@@ -6,6 +6,7 @@ import {
   PROBLEM_STATUS_CODES,
   PROBLEM_TYPES,
   ProblemDetailsResponseSchema,
+  RESIDENCY_REGION_HEADER,
   SECURITY_HEADER_NAMES,
   buildProblemDetails,
   evaluateCors,
@@ -14,11 +15,20 @@ import {
 } from "./responses.js";
 
 describe("constants", () => {
-  it("PROBLEM_TYPES has 15 entries", () => {
-    expect(Object.keys(PROBLEM_TYPES)).toHaveLength(15);
+  it("PROBLEM_TYPES has 18 entries", () => {
+    expect(Object.keys(PROBLEM_TYPES)).toHaveLength(18);
   });
-  it("has 15 problem status codes", () => {
-    expect(PROBLEM_STATUS_CODES).toHaveLength(15);
+  it("has 16 problem status codes", () => {
+    expect(PROBLEM_STATUS_CODES).toHaveLength(16);
+  });
+  it("puts every problem type under one namespace, residency included", () => {
+    // ADR-0457: the residency refusals used to spell crossengin.dev/problems and
+    // crossengin.io/problems, two hosts beside the registry's own base.
+    for (const value of Object.values(PROBLEM_TYPES)) {
+      expect(value.startsWith("https://crossengin.io/errors/")).toBe(true);
+    }
+    expect((PROBLEM_STATUS_CODES as readonly number[]).includes(421)).toBe(true);
+    expect(RESIDENCY_REGION_HEADER).toBe("x-crossengin-region");
   });
   it("carries a type for 500, which was in PROBLEM_STATUS_CODES with nothing to name it", () => {
     expect(PROBLEM_TYPES.internal_server_error).toBe(
@@ -56,6 +66,19 @@ describe("constants", () => {
 });
 
 describe("ProblemDetailsResponseSchema", () => {
+  it("refuses a 421 that names no home region and accepts one that does", () => {
+    const base = {
+      type: PROBLEM_TYPES.residency_misdirected,
+      title: "Misdirected region",
+      status: 421,
+      detail: "tenant's home region is eu-central",
+    };
+    expect(ProblemDetailsResponseSchema.safeParse(base).success).toBe(false);
+    expect(
+      ProblemDetailsResponseSchema.safeParse({ ...base, extensions: { correctRegion: "eu-central" } })
+        .success,
+    ).toBe(true);
+  });
   it("accepts a basic 404 problem", () => {
     expect(() =>
       ProblemDetailsResponseSchema.parse({

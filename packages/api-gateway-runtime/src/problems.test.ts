@@ -1,4 +1,4 @@
-import { ProblemDetailsResponseSchema } from "@crossengin/api-gateway";
+import { PROBLEM_TYPES, ProblemDetailsResponseSchema } from "@crossengin/api-gateway";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -9,6 +9,9 @@ import {
   internalServerError,
   methodNotAllowed,
   notFound,
+  RESIDENCY_REFUSALS,
+  RESIDENCY_UNRESOLVED_DETAIL,
+  residencyRefusal,
   serviceUnavailable,
   sunsetEndpoint,
   tooManyRequests,
@@ -210,5 +213,50 @@ describe("schema validation", () => {
     for (const env of envelopes) {
       expect(() => ProblemDetailsResponseSchema.parse(env.body)).not.toThrow();
     }
+  });
+});
+
+describe("residencyRefusal", () => {
+  it("answers 421 with the home region in the extension and the header, under the registry's type", () => {
+    const env = residencyRefusal({
+      decision: "misdirected",
+      detail: "tenant's home region is eu-central",
+      correctRegion: "eu-central",
+    });
+    expect(env.response.status).toBe(421);
+    expect(env.body.type).toBe(PROBLEM_TYPES.residency_misdirected);
+    expect(env.body.type.startsWith("https://crossengin.io/errors/")).toBe(true);
+    expect(env.body.extensions).toEqual({ reason: "residency_misdirected", correctRegion: "eu-central" });
+    expect(env.response.headers["x-crossengin-region"]).toBe("eu-central");
+    expect(env.response.headers["content-type"]).toBe("application/problem+json");
+    expect(ProblemDetailsResponseSchema.parse(env.body)).toEqual(env.body);
+    // The wire bytes are the body: a second serialization cannot drift from it.
+    expect(new TextDecoder().decode(env.response.bodyBytes ?? new Uint8Array())).toBe(JSON.stringify(env.body));
+  });
+
+  it("answers 403 naming no region, because the profile allows none it could name", () => {
+    const env = residencyRefusal({ decision: "forbidden", detail: "region not allowed" });
+    expect(env.response.status).toBe(403);
+    expect(env.body.type).toBe(PROBLEM_TYPES.residency_violation);
+    expect(env.body.extensions).toEqual({ reason: "residency_forbidden" });
+    expect(env.response.headers["x-crossengin-region"]).toBeUndefined();
+    expect(ProblemDetailsResponseSchema.parse(env.body)).toEqual(env.body);
+  });
+
+  it("answers 503 with a fixed sentence and a retry-after in both places", () => {
+    const env = residencyRefusal({ decision: "unresolved" });
+    expect(env.response.status).toBe(503);
+    expect(env.body.detail).toBe(RESIDENCY_UNRESOLVED_DETAIL);
+    expect(env.body.extensions).toEqual({ reason: "residency_unresolved", retryAfterSeconds: 5 });
+    expect(env.response.headers["retry-after"]).toBe("5");
+    expect(env.response.headers["x-crossengin-region"]).toBeUndefined();
+    expect(ProblemDetailsResponseSchema.parse(env.body)).toEqual(env.body);
+  });
+
+  it("declares one status, type and reason per decision, each distinct", () => {
+    const specs = Object.values(RESIDENCY_REFUSALS);
+    expect(new Set(specs.map((s) => s.status)).size).toBe(specs.length);
+    expect(new Set(specs.map((s) => s.key)).size).toBe(specs.length);
+    expect(new Set(specs.map((s) => s.reason)).size).toBe(specs.length);
   });
 });

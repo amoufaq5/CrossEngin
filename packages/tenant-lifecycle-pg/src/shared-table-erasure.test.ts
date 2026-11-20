@@ -16,6 +16,7 @@ import {
   censusBootSchemaTables,
   eraseSharedTablesWithin,
   partitionSharedTables,
+  probeErasureConfinement,
   probeSharedTableErasability,
   sharedTableErasureAttestation,
   sharedTableErasureScope,
@@ -1237,6 +1238,55 @@ describe("probeSharedTableErasability", () => {
       confined: [],
       unscoped: [],
     });
+    expect(h.calls).toEqual([]);
+  });
+});
+
+describe("probeErasureConfinement (ADR-0453)", () => {
+  it("asks the erasure's own question over the erasure's own targets, in one transaction", async () => {
+    const h = fake({ confined: ["meta.orders", "public.patient"] });
+    let transactions = 0;
+    const conn: PgConnection = {
+      ...h.conn,
+      transaction: (async <T>(fn: (tx: PgConnection) => Promise<T>) => {
+        transactions += 1;
+        return fn(h.conn);
+      }) as PgConnection["transaction"],
+    };
+    const probe = await probeErasureConfinement(conn, {
+      catalog: [tenantTable("orders"), tenantTable("lines")],
+      bootTargets: BOOT_TARGETS,
+    });
+    expect(transactions).toBe(1);
+    // Boot targets first, then the catalog in deletion order (the reverse of declaration order),
+    // grouped per schema — exactly the list `eraseSharedTablesWithin` hands the same probe.
+    expect(h.calls.map((c) => c.params)).toEqual([
+      ["public", ["patient_tag", "patient"]],
+      ["meta", ["lines", "orders"]],
+    ]);
+    expect(probe).toEqual({
+      probed: 4,
+      confined: ["public.patient", "meta.orders"],
+      missing: [],
+      unscoped: [],
+    });
+  });
+
+  it("probes the statutory tables too, because the erasure reads them for its retention claim", async () => {
+    const h = fake();
+    const probe = await probeErasureConfinement(h.conn, { catalog: META_TABLES });
+    const asked = h.calls.flatMap((c) => (c.params[1] ?? []) as readonly string[]);
+    for (const s of STATUTORY_RETENTION_TABLES) expect(asked).toContain(s.table);
+    for (const table of PLATFORM_RECORD_TABLES) expect(asked).not.toContain(table);
+    expect(probe.probed).toBe(asked.length);
+    expect(probe.probed).toBeGreaterThan(50);
+  });
+
+  it("refuses a schema that is not an identifier before asking anything", async () => {
+    const h = fake();
+    await expect(probeErasureConfinement(h.conn, { schema: "meta; drop" })).rejects.toThrow(
+      /invalid schema identifier/,
+    );
     expect(h.calls).toEqual([]);
   });
 });

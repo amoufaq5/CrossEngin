@@ -20,10 +20,15 @@ import { SystemClock, type Clock } from "./clock.js";
  * route maps the reason to a status, so a reason is part of the contract and a message is not.
  */
 export const PACK_SUBMISSION_REFUSALS = [
+  "legacy_signature_form",
   "publisher_unregistered",
   "pack_outside_publisher_namespace",
   "author_kind_not_registered",
   "signature_invalid",
+  "release_pack_mismatch",
+  "release_manifest_mismatch",
+  "release_version_mismatch",
+  "release_bundle_mismatch",
   "pack_id_mismatch",
   "manifest_digest_mismatch",
   "version_exists",
@@ -102,9 +107,9 @@ export class PackSubmissionEngine {
         `packId '${input.packId}' does not match the signed manifest's id '${input.manifest.id}'`,
       );
     }
-    // The signature covers the manifest and nothing else, so a digest of the caller's choosing beside
-    // it would be stored as though it described the signed manifest. The version and the bundle are
-    // not covered either; binding those needs a signed release envelope (ADR-0452's open questions).
+    // The caller's digest is compared against the derived one before the signature is asked about,
+    // so a row can never store a digest of the caller's choosing (ADR-0452). The signed release then
+    // binds the same derived digest, the version and the bundle digest (ADR-0454).
     const digest = packManifestDigest(input.manifest);
     if (input.manifestSha256 !== digest) {
       throw new PackSubmissionError(
@@ -116,6 +121,7 @@ export class PackSubmissionEngine {
       manifest: input.manifest,
       signature: input.signature,
       registry: this.publishers,
+      submitted: { version: input.version, bundleSha256: input.bundleSha256 },
     });
     if (!publisher.ok) {
       throw new PackSubmissionError(publisher.refusal, publisher.detail);

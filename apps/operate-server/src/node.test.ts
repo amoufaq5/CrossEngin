@@ -1152,3 +1152,33 @@ describe("serve()'s destructive routes without the request routes", () => {
     });
   }
 });
+
+/**
+ * ADR-0453: the owner connection runs the deletion pipeline's statements and nothing else, and the
+ * boot probe asks the question the pipeline will. Fenced as text, because which connection a store
+ * is built over and which schema a probe reads are invisible to every type.
+ */
+describe("serve()'s deletion connection", () => {
+  const src = stripComments(readFileSync(resolve(import.meta.dirname, "./node.ts"), "utf8"));
+
+  it("serves the tombstone read route from a store on the serving connection", () => {
+    expect(src).toMatch(/tombstonesFor:\s*async \(tenantId\) => tombstoneReads\.listForTenant\(tenantId\)/);
+    expect(src).toMatch(/const tombstoneReads = new PostgresTombstoneStore\(delConn,/);
+  });
+
+  it("probes the erasure without a schema, because neither pipeline call site passes one", () => {
+    const start = src.indexOf("await probeDeletionConnection(");
+    expect(start).toBeGreaterThan(-1);
+    const call = src.slice(start, src.indexOf("}),", start));
+    expect(call).not.toMatch(/schema:/);
+    for (const site of src.split("deleteTenantAtomically(").slice(1)) {
+      const input = site.slice(0, site.indexOf("relatedDeletionRequestId"));
+      expect(input).not.toMatch(/\n\s*schema:/);
+    }
+  });
+
+  it("restores the tenant when the runner rejects a request, through the same mover as the route", () => {
+    expect(src).toMatch(/restoreTenantAfterRejection:\s*async/);
+    expect(src).toMatch(/const runnerTenantState = buildTenantStateMover\(tenantStore,/);
+  });
+});

@@ -217,7 +217,7 @@ export function formatShreddability(s: DataKeyShreddability): string {
  * generation, and `ensure` ignores a seed for a tenant whose row exists — so a rekeyed tenant is
  * never seeded again.
  */
-function derivedSeed(secret: Uint8Array, tenantId: string): Uint8Array {
+export function derivedSeed(secret: Uint8Array, tenantId: string): Uint8Array {
   return new Uint8Array(Buffer.from(deriveTenantColumnKey(secret, tenantId), "base64"));
 }
 

@@ -486,3 +486,65 @@ export function deriveRequestSigningKey(secret: Uint8Array, keyId: string): Uint
     ),
   );
 }
+
+/**
+ * The info string for the opaque per-tenant pseudonym sent on an AI provider's wire (ADR-0456). A
+ * fifth label and not a reuse of any of the four, per the module header — and the one whose output
+ * is **disclosed by design**: the request-signing key is handed to a client the deployment trusts,
+ * while this value is handed to a third-party vendor so it can attribute abuse per tenant.
+ *
+ * It is derived from `CURSOR_ENCRYPTION_SECRET` (see `AI_TENANT_PSEUDONYM_SECRET_LABEL`) and that
+ * does not weaken the cursor key, for the reason the column key and the KEK already share a secret:
+ * HKDF-Expand is a PRF keyed by the extracted PRK, so publishing its output under one info string
+ * reveals nothing about the output under another, nor about the PRK or the secret. The two share a
+ * PRK here (same IKM, same tenant salt) and differ only in this label, which is exactly the
+ * separation the module header names as sufficient.
+ *
+ * No generation suffix, for `REQUEST_SIGNING_KEY_DERIVATION_INFO`'s reason inverted: the point of a
+ * pseudonym is that it stays the same, so a provider's abuse history for a tenant survives restarts
+ * and replicas. It changes only when the secret does.
+ */
+export const AI_TENANT_PSEUDONYM_DERIVATION_INFO = "crossengin.ai-tenant-pseudonym.v1";
+
+/**
+ * The fixed prefix of every pseudonym. Four characters, so the whole value is 36 — under every
+ * provider field limit this repo sends it in (Anthropic `metadata.user_id`, the OpenAI-compatible
+ * `user`, and the 64-character `safety_identifier` that field is being replaced by).
+ */
+export const AI_TENANT_PSEUDONYM_PREFIX = "ctp_";
+
+/** Bytes of HKDF output a pseudonym carries: 128 bits, rendered as 32 lowercase hex characters. */
+export const AI_TENANT_PSEUDONYM_BYTES = 16;
+
+// Names the variable as well as the role, for the KEK label's reason: the pseudonym has no variable
+// of its own, so a refusal saying only "AI tenant pseudonym secret" would send an operator looking
+// for one that does not exist.
+const AI_TENANT_PSEUDONYM_SECRET_LABEL = "AI tenant pseudonym secret (CURSOR_ENCRYPTION_SECRET)";
+
+/**
+ * `ctp_` + hex(HKDF-SHA256(ikm = secret, salt = tenantId utf8,
+ * info = `AI_TENANT_PSEUDONYM_DERIVATION_INFO`, 16 bytes)).
+ *
+ * **Keyed, never a bare digest of the tenant id.** A tenant id is a UUIDv7 — a millisecond
+ * timestamp plus 74 random bits, and the timestamp is roughly guessable from when the tenant was
+ * provisioned — and anyone holding a candidate id can hash it, so an unkeyed `sha256(tenantId)`
+ * would let a provider confirm a guess, or link the value to an id it learns elsewhere. Keyed by a
+ * deployment secret the provider never sees, the value is a PRF output: stable per tenant, distinct
+ * across tenants, and unlinkable to the id without the secret.
+ *
+ * The tenant id is the salt and the label is the info, for `deriveTenantColumnKey`'s reason; an
+ * empty tenant id is refused by the same check, since an empty salt would give every caller that
+ * had one the same pseudonym.
+ */
+export function deriveAiTenantPseudonym(secret: Uint8Array, tenantId: string): string {
+  refuseWeakSecret(secret, AI_TENANT_PSEUDONYM_SECRET_LABEL);
+  requireDerivationArguments(tenantId, DEFAULT_KEY_GENERATION);
+  const derived = hkdfSync(
+    "sha256",
+    secret,
+    new TextEncoder().encode(tenantId),
+    new TextEncoder().encode(AI_TENANT_PSEUDONYM_DERIVATION_INFO),
+    AI_TENANT_PSEUDONYM_BYTES,
+  );
+  return `${AI_TENANT_PSEUDONYM_PREFIX}${Buffer.from(derived).toString("hex")}`;
+}

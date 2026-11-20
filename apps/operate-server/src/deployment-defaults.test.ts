@@ -1953,3 +1953,25 @@ describe("the five flags that stay off, each with the clause it fails", () => {
     expect(launchers).toEqual([]);
   });
 });
+
+describe("CURSOR_ENCRYPTION_SECRET's second purpose is documented where an operator rotates it", () => {
+  // ADR-0456 keys the AI-provider tenant pseudonym on this secret, so rotating or unsetting it
+  // changes what a vendor sees. The only document an operator reads before rotating is the
+  // variable's own comment, which said rotation costs a cursor 400 and nothing else.
+  const envExample = readFileSync(resolve(here, "../../../deploy/.env.example"), "utf8");
+  const readme = readFileSync(resolve(here, "../../../deploy/README.md"), "utf8");
+
+  it(".env.example says the secret also keys the pseudonym, what rotation and unsetting cost", () => {
+    const start = envExample.indexOf("# --- ");
+    const at = envExample.indexOf("CURSOR_ENCRYPTION_SECRET=");
+    expect(at, "the variable line is gone").toBeGreaterThan(start);
+    const block = envExample.slice(envExample.lastIndexOf("# --- ", at), at);
+    expect(block).toContain("ADR-0456");
+    expect(block).toContain("NEW");
+    expect(block).toContain("never the raw id");
+  });
+
+  it("README's boot-line list names the pseudonym line", () => {
+    expect(readme).toContain("[ai-design] tenant pseudonym:");
+  });
+});

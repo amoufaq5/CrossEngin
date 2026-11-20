@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 22,615 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 23,849 tests**, all green, no
 type errors — and since ADR-0382 that is **checked by CI and a pre-commit hook** rather than only
 when someone runs the sweep by hand. The test figure moves every increment, so re-derive it from a
 sweep rather than quoting this line: `pnpm -r test` and sum the `Tests N passed` lines (88 packages
@@ -15856,12 +15856,67 @@ runs found that no review had is the useful part:
 - **ADR-0452, marketplace**: a pack is trusted by a registered publisher's key and admitted against
   the tenant's own region and plan. **Found live**: a publisher's signature replayed onto any version
   and bundle. Half fixed after the workflow — `manifestSha256` must be the digest of the signed
-  manifest (`manifest_digest_mismatch`) — and the version/bundle half needs a signed release envelope.
+  manifest (`manifest_digest_mismatch`) — and the version/bundle half needs a signed release envelope (ADR-0454).
 
-Still open from this batch, each recorded in its ADR: the Article 17 request consumption above; the
-release envelope; a key-generation mismatch after a rekey boots clean and 500s every PHI read (it
-could be a boot refusal); the provider wire carries no tenant id; two residency-421 shapes on one
-route; and the `[search]` and `[jobs]` boot lines each carry one inaccurate clause.
+Still open from this batch, each recorded in its ADR: the `[search]` and `[jobs]` boot lines each
+carry one inaccurate clause. The other five items it left were owner decisions, taken and shipped as
+ADR-0453 – ADR-0457 below.
+
+**The owner's decisions on that batch's residuals: five slices (ADR-0453 – ADR-0457)**, each
+implemented, adversarially reviewed (every reviewer found real defects; 28 fixed, one refuted) and
+verified live on PG 16 in compose order with the API as `crossengin_app`:
+
+- **ADR-0453, Article 17 can complete on the shipped role.** The deletion pipeline (both
+  `deleteTenantAtomically` sites, the tenant-erasure route's survey and `DROP SCHEMA`, and the
+  tombstone reads) runs on a **separate owner connection** from `DELETION_PGUSER` /
+  `DELETION_PGPASSWORD` (environment only, max 2 connections, `application_name`
+  `crossengin-deletion`); requests, tenant moves and audit rows stay on the confined role. Boot asks
+  Postgres rather than assuming: the `[deletion]` line runs the erasure's own `row_security_active`
+  probe over its own targets and says *can complete*, *will refuse* (confined / missing / unscoped,
+  each with its remedy) or *unreachable*, and names a SUPERUSER as one, because the official image's
+  `POSTGRES_USER` is a superuser and the credential then sits in the internet-facing process (open).
+  A proven refusal the deployment can fix is **released back to `verified`** — the only new edge,
+  `in_progress → verified` — keeping `verified_at` and `deadline_at`, recording
+  `last_attempt_refusal` (new nullable TEXT column, `char_length >= 1`), and leaving the tenant
+  `pending_deletion`. `DELETION_REFUSAL_RETRYABILITY` is a total map typed so that only refusals
+  raised **before the first destructive statement** can be retryable (the review found the first
+  draft retried after the shared-table `DELETE`s had run); a final refusal still rejects and now
+  restores the tenant on the runner path too. Released requests are claimed after fresh ones so they
+  cannot starve the queue. Live: unset → released with the refusal recorded; set → the same request
+  completed on the next tick with an anchored v4 tombstone and `verify-chain` exit 0.
+- **ADR-0454, a pack signature covers the release.** `crossengin.pack.release.v1` signs
+  `{form, packId, version, manifestSha256, bundleSha256}` plus the key fingerprint and `signedAt` as
+  one canonical object; the manifest-only signers are **deleted** and a legacy signature is refused
+  `legacy_signature_form` with no transition (`--pack-catalog` is on no shipped deployment). Every
+  replay arm — version, bundle, manifest, ADR-0452's shape, a rewritten claim, an unregistered key —
+  is refused live on both stores. Open: a row whose column **and** `signature.release` are both
+  rewritten still lists (the read path does not re-verify), `channel` is not in the envelope, and
+  there is no publisher signing tool.
+- **ADR-0455, a column-key configuration that cannot open the stored keys refuses to boot.** Twelve
+  conditions decided from **key rows** (32 random samples per KEK generation, never tenant data,
+  except one ciphertext sample per keyless tenant), read per tenant under that tenant's context so
+  RLS is honoured, with `unknown` lines rather than an all-clear where the survey could not read.
+  Measured cost on 10,000 tenants: 1.69 s + 1.76 s at boot over loopback. Each refusal names the
+  condition, the tenant count and the remedy, and no secret or tenant id appears in any log (grepped
+  over eleven live boot logs). Open: `seed_unverifiable` stays a warning, `rekey` does not run the
+  survey, and a single corrupt row at a one-tenant generation reads as a secret mismatch.
+- **ADR-0456, the AI provider gets a keyed tenant pseudonym.** `ctp_` + 32 hex from
+  HKDF(`CURSOR_ENCRYPTION_SECRET`, salt = tenant id, a fifth info label), as Anthropic
+  `metadata.user_id` and OpenAI-compatible `user`; absent secret → no field, said at boot (info for a
+  self-hosted provider, warn for a vendor). Live: 14 of 16 captured bodies carried it, stable per
+  tenant across a restart, and tenant and user ids appeared 0 times on the wire. The wire fence
+  checks the **shape**, so a stripped UUID passes it — stated rather than claimed. Open: one secret
+  now switches both the pseudonym and cursor sealing, and OpenAI documents `user` as deprecated for
+  `safety_identifier`.
+- **ADR-0457, a residency refusal has one shape.** `residencyRefusal` is the one builder for both
+  checks, on the registry's `https://crossengin.io/errors/` base with `x-crossengin-region` *and*
+  `extensions.correctRegion`; live, the pre-auth and post-auth 421s were byte-identical (242 bytes).
+  Two follow-ups landed after the workflow: the advisory hint check passes an unreadable directory on
+  to the gate (it answered 500 with the hint and 503 without), and a pre-gateway 500 now uses
+  `PROBLEM_TYPES.internal_server_error` instead of a `/problems/` spelling. The gate's top-level
+  `correctRegion`/`reason` moved into `extensions`, which is a client-visible change. The 403 arm is
+  unreachable from any stored profile (the profile schema forbids it) and is covered by unit tests
+  only.
 
 ### Demoted, with the measurement that demoted them
 
@@ -15886,7 +15941,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 446 records; 367 Accepted, 79 Proposed (the
+title or status change cannot drift. 451 records; 372 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

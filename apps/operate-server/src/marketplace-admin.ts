@@ -27,6 +27,8 @@ import { z } from "zod";
 export interface PackCatalogEntry {
   readonly pack: PackManifest;
   readonly version: string;
+  /** The version's bundle digest, which the signed release must name as it must the version. */
+  readonly bundleSha256: string;
   readonly signature: PackSignature;
   readonly compatibility: PackCompatibility;
   readonly securityReviewStatus: SecurityReviewStatus;
@@ -41,6 +43,7 @@ export interface PackCatalog {
 const CatalogEntrySchema = z.object({
   pack: PackManifestSchema,
   version: z.string().min(1),
+  bundleSha256: z.string().regex(/^[0-9a-f]{64}$/),
   signature: PackSignatureSchema,
   // Accepted so a catalog written before the registry still loads, and compared rather than
   // silently stripped: a stated key that disagrees with the signature it sits beside is a catalog
@@ -101,10 +104,25 @@ export interface PackCatalogFinding {
 export function surveyPackCatalog(catalog: PackCatalog, publishers: PackPublisherRegistry): readonly PackCatalogFinding[] {
   const out: PackCatalogFinding[] = [];
   for (const e of catalog.list()) {
-    const v = verifyPackPublisher({ manifest: e.pack, signature: e.signature, registry: publishers });
+    const v = verifyPackPublisher({
+      manifest: e.pack,
+      signature: e.signature,
+      registry: publishers,
+      submitted: { version: e.version, bundleSha256: e.bundleSha256 },
+    });
     if (!v.ok) out.push({ packId: e.pack.id, version: e.version, refusal: v.refusal, detail: v.detail });
   }
   return out;
+}
+
+/**
+ * The boot headline for the catalog. It counts entries the install path would admit as catalogued,
+ * and deliberately does not call them "signed by a registered publisher": a release-mismatch finding
+ * carries a signature that does verify against a registered key, so that label would undercount the
+ * signed entries and assert something false about exactly the ones the findings name.
+ */
+export function formatPackCatalogSurvey(total: number, findings: readonly PackCatalogFinding[]): string {
+  return `[marketplace] pack catalog: ${total.toString()} version(s), ${(total - findings.length).toString()} installable as catalogued, ${findings.length.toString()} refused at install`;
 }
 
 /**
@@ -172,6 +190,7 @@ export function buildPackInstallHandler(ctx: MarketplaceAdminContext): Handler {
       requestedBy,
       pack: entry.pack,
       version: entry.version,
+      bundleSha256: entry.bundleSha256,
       compatibility: entry.compatibility,
       signature: entry.signature,
       publishers: ctx.publishers,

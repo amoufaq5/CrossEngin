@@ -1,4 +1,10 @@
-import type { CompletionRequest, LlmMessage, LlmTool, Usage } from "@crossengin/ai-providers";
+import {
+  tenantPseudonymForWire,
+  type CompletionRequest,
+  type LlmMessage,
+  type LlmTool,
+  type Usage,
+} from "@crossengin/ai-providers";
 
 import { computeUsageCost, type OpenAiModel, type OpenAiModelPricing } from "./pricing.js";
 
@@ -11,6 +17,11 @@ export interface OpenAiChatRequest {
   readonly response_format?: { readonly type: "json_object" };
   readonly stream?: boolean;
   readonly stream_options?: { readonly include_usage: true };
+  /**
+   * The OpenAI-compatible end-user identifier. Carries the tenant pseudonym and nothing else
+   * (ADR-0456); absent when the deployment configured none, never the raw tenant id.
+   */
+  readonly user?: string;
 }
 
 export interface OpenAiToolCall {
@@ -76,6 +87,7 @@ export function buildOpenAiRequest(
   const maxTokens = req.maxTokens ?? opts.defaultMaxTokens ?? DEFAULT_MAX_TOKENS;
   const messages = req.messages.map(toOpenAiMessage);
   const tools = req.tools?.map(buildTool);
+  const pseudonym = tenantPseudonymForWire(req);
   return {
     model,
     messages,
@@ -88,6 +100,7 @@ export function buildOpenAiRequest(
       : opts.stream === false
         ? { stream: false }
         : {}),
+    ...(pseudonym !== undefined ? { user: pseudonym } : {}),
   };
 }
 

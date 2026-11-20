@@ -1,5 +1,6 @@
 import {
   PROBLEM_TYPES,
+  RESIDENCY_REGION_HEADER,
   type ProblemDetailsResponse,
   type ProblemStatusCode,
 } from "@crossengin/api-gateway";
@@ -22,6 +23,9 @@ const PROBLEM_TITLES: Record<keyof typeof PROBLEM_TYPES, string> = {
   gateway_timeout: "Gateway timeout",
   sunset_endpoint: "Endpoint sunset",
   weak_tls_rejected: "Weak TLS rejected",
+  residency_misdirected: "Misdirected region",
+  residency_violation: "Residency violation",
+  residency_unresolved: "Residency unresolved",
 };
 
 export interface ProblemEnvelope {
@@ -280,4 +284,71 @@ export function weakTlsRejected(input: {
     detail: `TLS version ${input.tlsVersion} is not allowed; use TLS 1.2 or 1.3`,
     correlationId: input.correlationId,
   });
+}
+
+/**
+ * The input to `residencyRefusal`: one arm per refusal, so a 421 cannot be built without a region.
+ * Declared before the map below because the map is keyed on this union's `decision` literals.
+ */
+export type ResidencyRefusalInput =
+  | { readonly decision: "misdirected"; readonly detail: string; readonly correctRegion: string }
+  | { readonly decision: "forbidden"; readonly detail: string }
+  | { readonly decision: "unresolved" };
+export type ResidencyRefusalDecision = ResidencyRefusalInput["decision"];
+
+/**
+ * The status, the problem type and the stable `reason` code for each refusal, declared once. The
+ * `satisfies Record<ResidencyRefusalDecision, …>` ties it to the input union in both directions: an
+ * input arm with no entry and an entry with no input arm are both compile errors. It is total over
+ * that union and nothing wider — mapping `decideRegionRouting`'s actions onto it is each caller's job.
+ */
+export const RESIDENCY_REFUSALS = {
+  misdirected: { key: "residency_misdirected", status: 421, reason: "residency_misdirected" },
+  forbidden: { key: "residency_violation", status: 403, reason: "residency_forbidden" },
+  unresolved: { key: "residency_unresolved", status: 503, reason: "residency_unresolved" },
+} as const satisfies Record<
+  ResidencyRefusalDecision,
+  { readonly key: keyof typeof PROBLEM_TYPES; readonly status: ProblemStatusCode; readonly reason: string }
+>;
+
+/** A fixed sentence: the directory's own error can name a host or a tenant, so none of it is sent. */
+export const RESIDENCY_UNRESOLVED_DETAIL =
+  "This tenant's residency profile could not be read, so whether this region may serve it is unknown.";
+export const RESIDENCY_UNRESOLVED_RETRY_AFTER_SECONDS = 5;
+
+/**
+ * The one builder for every residency refusal (ADR-0457). Two producers answer them — the advisory
+ * pre-auth check on the `x-tenant-id` hint and the post-auth gate on the verified tenant — and a
+ * client cannot tell which answered, so before this one route returned 421 under two problem type
+ * hosts with the home region in two places. Both now call this, so the bytes are the same by
+ * construction rather than by two spellings agreeing.
+ *
+ * A 421 carries the home region twice, as `extensions.correctRegion` and as the
+ * `x-crossengin-region` header. Both producers already sent the header; what they disagreed on was
+ * where the body put the region (`extensions.correctRegion` on the hint check, top-level on the
+ * gate). `extensions` is now the one body position and the header is kept on both, so a client keyed
+ * on either keeps working. Nothing that is not a function of the decision reaches the body: no
+ * request id and no correlation id, which the transport carries in headers.
+ */
+export function residencyRefusal(input: ResidencyRefusalInput): ProblemEnvelope {
+  const spec = RESIDENCY_REFUSALS[input.decision];
+  const extensions: Record<string, unknown> = { reason: spec.reason };
+  const extraHeaders: Record<string, string> = {};
+  let detail: string;
+  switch (input.decision) {
+    case "misdirected":
+      detail = input.detail;
+      extensions["correctRegion"] = input.correctRegion;
+      extraHeaders[RESIDENCY_REGION_HEADER] = input.correctRegion;
+      break;
+    case "forbidden":
+      detail = input.detail;
+      break;
+    case "unresolved":
+      detail = RESIDENCY_UNRESOLVED_DETAIL;
+      extensions["retryAfterSeconds"] = RESIDENCY_UNRESOLVED_RETRY_AFTER_SECONDS;
+      extraHeaders["retry-after"] = RESIDENCY_UNRESOLVED_RETRY_AFTER_SECONDS.toString();
+      break;
+  }
+  return buildEnvelope({ key: spec.key, status: spec.status, detail, extensions, extraHeaders });
 }

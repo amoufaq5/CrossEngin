@@ -304,18 +304,182 @@ describe("runOne", () => {
     expect(h.runs[0]?.["approvedBy"]).toBe("support-1");
   });
 
-  it("rejects the request when the pipeline refuses, recording the reason", async () => {
+  /*
+   * This test used `erase/external_dependents` and asserted `rejected`, pinning the decision that
+   * every proven refusal consumes the request. ADR-0453 reverses it for a cause that is the
+   * deployment's: an object elsewhere depending on the tenant's schema is collateral an operator
+   * drops, so the request is released rather than closed. The rejection arm is kept with a reason
+   * that is the request's own.
+   */
+  it("rejects the request when the pipeline refuses for a cause that is the request's", async () => {
     const h = harness({
       outcome: {
         ok: false,
-        refusals: [{ stage: "erase", reason: "external_dependents", detail: "view public.x" }],
+        refusals: [{ stage: "assemble", reason: "duplicate_attestation", detail: "backups twice" }],
       },
     });
     const result = await h.runner.runOne(requestOf());
     expect(result.outcome).toBe("rejected");
-    expect(result.detail).toBe("erase/external_dependents");
+    expect(result.detail).toBe("assemble/duplicate_attestation");
     expect(h.transitions.map((t) => t.to)).toEqual(["in_progress", "rejected"]);
-    expect(h.transitions[1]?.fields["rejectedReason"]).toContain("external_dependents");
+    expect(h.transitions[1]?.fields["rejectedReason"]).toContain("duplicate_attestation");
+    expect(h.transitions[1]?.fields["lastAttemptRefusal"]).toBeUndefined();
+  });
+
+  it("releases the request back to verified when the cause is the deployment's (ADR-0453)", async () => {
+    // The live case: on the confined `crossengin_app` role every attempt is refused
+    // `rls_would_confine_this_session`, and before this every one consumed the verified request,
+    // so the data subject had to resubmit for an operator's misconfiguration.
+    const h = harness({
+      outcome: {
+        ok: false,
+        refusals: [{ stage: "erase", reason: "rls_would_confine_this_session", detail: "meta.x" }],
+      },
+    });
+    const result = await h.runner.runOne(requestOf());
+    expect(result.outcome).toBe("refused_retryable");
+    expect(result.detail).toBe("erase/rls_would_confine_this_session");
+    expect(h.transitions.map((t) => t.to)).toEqual(["in_progress", "verified"]);
+    expect(h.transitions[1]?.fields).toEqual({
+      at: AT,
+      lastAttemptRefusal: "erase/rls_would_confine_this_session",
+    });
+    // A human fixes the deployment, so it is reported as work; nothing about the data is uncertain.
+    expect(needsReconciliation(result.outcome)).toBe(true);
+  });
+
+  it("rejects a proven rollback even when its cause is the deployment's, because it cost a full erasure", async () => {
+    // A `DeletionPipelineAborted` is thrown only after the shared-table erasure has deleted inside
+    // the transaction, so releasing one would repeat that erasure and its rollback every tick, for
+    // ever. `external_dependents` is an operator's collateral — and still final (ADR-0453).
+    const h = harness({
+      runThrows: new DeletionPipelineAborted([
+        { stage: "erase", reason: "external_dependents", detail: "view public.x" },
+      ]),
+    });
+    const result = await h.runner.runOne(requestOf());
+    expect(result.outcome).toBe("rejected");
+    expect(h.transitions.map((t) => t.to)).toEqual(["in_progress", "rejected"]);
+    expect(h.transitions[1]?.fields["lastAttemptRefusal"]).toBeUndefined();
+  });
+
+  it("rejects a runner whose capabilities leave a subsystem unattested, rather than looping on it", async () => {
+    // The runner always passes no attestations, so a non-performed subsystem declared `erases`
+    // refuses every attempt identically — after both erasures. Released, it would erase and roll
+    // back every tick; it is said at boot instead and rejected here.
+    const h = harness({
+      runThrows: new DeletionPipelineAborted([
+        { stage: "assemble", reason: "subsystem_unattested", detail: "backups" },
+      ]),
+    });
+    expect((await h.runner.runOne(requestOf())).outcome).toBe("rejected");
+  });
+
+  it("restores the tenant once a final refusal commits the request rejected", async () => {
+    const restored: Array<{ requestId: string; tenantId: string }> = [];
+    const h = harness(
+      {
+        outcome: {
+          ok: false,
+          refusals: [{ stage: "assemble", reason: "scope_empty", detail: "nothing" }],
+        },
+      },
+      {
+        restoreTenantAfterRejection: async (r) => {
+          restored.push({ ...r });
+        },
+      },
+    );
+    const request = requestOf();
+    const result = await h.runner.runOne(request);
+    expect(result.outcome).toBe("rejected");
+    expect(restored).toEqual([{ requestId: request.id, tenantId: request.tenantId }]);
+  });
+
+  it("does not restore the tenant when the request is released, since its deletion is still owed", async () => {
+    let called = 0;
+    const h = harness(
+      {
+        outcome: {
+          ok: false,
+          refusals: [{ stage: "erase", reason: "rls_would_confine_this_session", detail: "meta.x" }],
+        },
+      },
+      {
+        restoreTenantAfterRejection: async () => {
+          called += 1;
+        },
+      },
+    );
+    expect((await h.runner.runOne(requestOf())).outcome).toBe("refused_retryable");
+    expect(called).toBe(0);
+  });
+
+  it("keeps the rejected outcome and says so when the restore throws", async () => {
+    const h = harness(
+      {
+        outcome: {
+          ok: false,
+          refusals: [{ stage: "assemble", reason: "scope_empty", detail: "nothing" }],
+        },
+      },
+      {
+        restoreTenantAfterRejection: async () => {
+          throw new Error("tenant row locked");
+        },
+      },
+    );
+    const result = await h.runner.runOne(requestOf());
+    expect(result.outcome).toBe("rejected");
+    expect(result.detail).toContain("could not be restored from pending_deletion: tenant row locked");
+  });
+
+  it("does not restore when the rejected write's read-back cannot be represented", async () => {
+    let called = 0;
+    const h = harness(
+      {
+        outcome: {
+          ok: false,
+          refusals: [{ stage: "assemble", reason: "scope_empty", detail: "nothing" }],
+        },
+        unreadableOn: ["rejected"],
+      },
+      {
+        restoreTenantAfterRejection: async () => {
+          called += 1;
+        },
+      },
+    );
+    await h.runner.runOne(requestOf());
+    expect(called).toBe(0);
+  });
+
+  it("rejects when any one cause is final, since a retry would refuse again whatever is fixed", async () => {
+    const h = harness({
+      outcome: {
+        ok: false,
+        refusals: [
+          { stage: "erase", reason: "rls_would_confine_this_session", detail: "meta.x" },
+          { stage: "assemble", reason: "scope_empty", detail: "nothing" },
+        ],
+      },
+    });
+    const result = await h.runner.runOne(requestOf());
+    expect(result.outcome).toBe("rejected");
+    expect(h.transitions.map((t) => t.to)).toEqual(["in_progress", "rejected"]);
+  });
+
+  it("reports refused_retryable when the release committed and the row cannot be read back", async () => {
+    const h = harness({
+      outcome: {
+        ok: false,
+        refusals: [{ stage: "erase", reason: "table_missing", detail: "meta.x" }],
+      },
+      unreadableOn: ["verified"],
+    });
+    const result = await h.runner.runOne(requestOf());
+    expect(result.outcome).toBe("refused_retryable");
+    expect(result.detail).toContain("recorded 'verified'");
   });
 
   it("rejects a request the pipeline rolled back, because the rollback is provable", async () => {
@@ -326,8 +490,9 @@ describe("runOne", () => {
     });
     const result = await h.runner.runOne(requestOf());
     // `DeletionPipelineAborted` is raised inside the pipeline's transaction, so receiving it proves
-    // the tenant is untouched — and the refusal would recur identically. Terminal, so `rejected`:
-    // leaving it `in_progress` would strand a caller polling a handle that never moves. Found live.
+    // the tenant is untouched — and `scope_empty` is the tenant's own fact, which no deployment change
+    // alters. Final, so `rejected`: leaving it `in_progress` would strand a caller polling a handle
+    // that never moves. Found live.
     expect(result.outcome).toBe("rejected");
     expect(result.detail).toBe("assemble/scope_empty");
     expect(h.transitions.map((t) => t.to)).toEqual(["in_progress", "rejected"]);
@@ -338,7 +503,8 @@ describe("runOne", () => {
     const h = harness({ runThrows: new Error("connection terminated at commit") });
     const result = await h.runner.runOne(requestOf());
     // Not the pipeline's own refusal, so whether it committed is unknown. The contract offers no way
-    // back to `verified`, and re-running on an assumption is how a tenant gets deleted twice.
+    // back to `verified` for an unproven outcome (the release is for a proven rollback only), and
+    // re-running on an assumption is how a tenant gets deleted twice.
     expect(result.outcome).toBe("aborted");
     expect(result.detail).toBe("connection terminated at commit");
     expect(h.transitions.map((t) => t.to)).toEqual(["in_progress"]);
@@ -543,8 +709,9 @@ describe("runDue", () => {
 });
 
 describe("needsReconciliation", () => {
-  it("flags only the three outcomes a human must look at", () => {
+  it("flags only the four outcomes a human must look at", () => {
     expect(RUN_OUTCOMES.filter((o) => needsReconciliation(o))).toEqual([
+      "refused_retryable",
       "refused_four_eyes",
       "completed_unrecorded",
       "aborted",

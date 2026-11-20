@@ -14,6 +14,7 @@ import {
   deletionExecuteNotBefore,
   type DeletionAttestation,
 } from "@crossengin/tenant-lifecycle";
+import { deletionRefusalDisposition, formatRefusalReasons } from "@crossengin/tenant-lifecycle-pg";
 
 /**
  * `POST /v1/platform/tenants/{id}/delete` and `GET /v1/platform/tenants/{id}/tombstones` — the route
@@ -292,12 +293,14 @@ export interface ApprovingRequestStoreLike {
   read(requestId: string): Promise<ApprovingRequestLike | null>;
   transition(
     requestId: string,
-    to: "in_progress" | "completed" | "rejected",
+    to: "in_progress" | "completed" | "rejected" | "verified",
     fields: {
       readonly at: string;
       readonly tombstoneId?: string;
       readonly completionSha256?: string;
       readonly rejectedReason?: string;
+      /** Set only on the release `in_progress -> verified` (ADR-0453). */
+      readonly lastAttemptRefusal?: string;
     },
   ): Promise<ApprovingRequestLike | null>;
 }
@@ -327,10 +330,12 @@ export interface TenantDeletionRoutesContext {
   readonly onRetireError?: (err: unknown, tenantId: string) => void;
   /**
    * Restores the tenant when a refused deletion settles its request `rejected`. The verify route
-   * moved the tenant to `pending_deletion`, and a refusal here closes the request for good, so
-   * without this the tenant sat read-only with no live request holding it — found live on the
-   * confined role, where every attempt is refused `rls_would_confine_this_session`. The reject
-   * route restores through the same mover; absent, nothing is restored and the response says so.
+   * moved the tenant to `pending_deletion`, and a final refusal closes the request for good, so
+   * without this the tenant sat read-only with no live request holding it. A **retryable** refusal
+   * (ADR-0453 — `rls_would_confine_this_session` is the measured case) releases the request back to
+   * `verified` instead, and the tenant stays `pending_deletion`: the deletion is still owed, and
+   * restoring would reopen writes into data a retry is about to destroy. The reject route restores
+   * through the same mover; absent, nothing is restored and the response says so.
    */
   readonly tenantState?: TenantStateMover;
   readonly onRestoreError?: (err: unknown, tenantId: string) => void;
@@ -626,8 +631,13 @@ function buildDeleteHandler(ctx: TenantDeletionRoutesContext): Handler {
       });
     }
     const settle = async (
-      to: "completed" | "rejected",
-      fields: { readonly tombstoneId?: string; readonly completionSha256?: string; readonly rejectedReason?: string },
+      to: "completed" | "rejected" | "verified",
+      fields: {
+        readonly tombstoneId?: string;
+        readonly completionSha256?: string;
+        readonly rejectedReason?: string;
+        readonly lastAttemptRefusal?: string;
+      },
     ): Promise<string> => {
       try {
         const moved = await ctx.requests.transition(requestId, to, { at, ...fields });
@@ -635,6 +645,24 @@ function buildDeleteHandler(ctx: TenantDeletionRoutesContext): Handler {
       } catch {
         return "in_progress";
       }
+    };
+
+    // A proven refusal — nothing was destroyed — either releases the request for another attempt or
+    // closes it, by `deletionRefusalDisposition` (ADR-0453). Released, the request keeps its
+    // verification and its deadline and the tenant stays `pending_deletion`, because the deletion is
+    // still owed; only a final refusal rejects it, and only then is the tenant restored below.
+    const settleProvenRefusal = async (
+      refusals: readonly { readonly stage: string; readonly reason: string }[],
+      rejectedReason: string,
+    ): Promise<{ readonly requestStatus: string; readonly retryable: boolean }> => {
+      const release = deletionRefusalDisposition(refusals) === "retry";
+      const requestStatus = release
+        ? await settle("verified", { lastAttemptRefusal: formatRefusalReasons(refusals) })
+        : await settle("rejected", { rejectedReason: rejectedReason.slice(0, 500) });
+      // `retryable` is a claim to the caller that calling again can work, so it is true only when
+      // the release actually committed: a release that failed leaves the request `in_progress`,
+      // where a retry is refused `deletion_request_not_verified`.
+      return { requestStatus, retryable: release && requestStatus === "verified" };
     };
 
     // `null` when nothing was asked (no mover wired, or the request did not reach `rejected`), so a
@@ -683,9 +711,9 @@ function buildDeleteHandler(ctx: TenantDeletionRoutesContext): Handler {
       // that one closes the request: anything else is unknown, so the request stays `in_progress`
       // for the reconciler rather than being declared refused (the runner's rule, ADR-0321).
       const proven = (err as { readonly name?: unknown } | null)?.name === "DeletionPipelineAborted";
-      const requestStatus = proven
-        ? await settle("rejected", { rejectedReason: `rolled back: ${refusalReasons(err).join("; ")}`.slice(0, 500) })
-        : "in_progress";
+      const { requestStatus, retryable } = proven
+        ? await settleProvenRefusal(refusalPairs(err), `rolled back: ${refusalReasons(err).join("; ")}`)
+        : { requestStatus: "in_progress", retryable: false };
       const { tenantRestored, lifecycleRecorded } = await restoreAfterRefusal(requestStatus);
       await record(ctx, {
         tenantId,
@@ -713,6 +741,7 @@ function buildDeleteHandler(ctx: TenantDeletionRoutesContext): Handler {
         detail: "the deletion was refused and the transaction rolled back; the tenant is unchanged",
         refusals: refusalReasons(err),
         requestStatus,
+        retryable,
         tenantRestored,
         lifecycleRecorded,
       });
@@ -720,7 +749,7 @@ function buildDeleteHandler(ctx: TenantDeletionRoutesContext): Handler {
 
     if (!outcome.ok) {
       const detail = outcome.refusals.map((r) => `${r.stage}/${r.reason}`).join("; ");
-      const requestStatus = await settle("rejected", { rejectedReason: detail.slice(0, 500) });
+      const { requestStatus, retryable } = await settleProvenRefusal(outcome.refusals, detail);
       const { tenantRestored, lifecycleRecorded } = await restoreAfterRefusal(requestStatus);
       await record(ctx, {
         tenantId,
@@ -738,6 +767,7 @@ function buildDeleteHandler(ctx: TenantDeletionRoutesContext): Handler {
         error: "deletion_refused",
         refusals: outcome.refusals,
         requestStatus,
+        retryable,
         tenantRestored,
         lifecycleRecorded,
       });
@@ -792,6 +822,28 @@ function buildDeleteHandler(ctx: TenantDeletionRoutesContext): Handler {
       tombstone: tombstoneReceipt(outcome.stored),
     });
   };
+}
+
+/**
+ * The refusals a `DeletionPipelineAborted` carries, as pairs for the retry classifier.
+ *
+ * One entry not shaped like a refusal makes the whole list one sentinel pair that classifies
+ * `final`: dropping it instead would let a single well-formed retryable reason beside it answer
+ * `retry` for a refusal nobody could read, and an unclassifiable refusal is `final` by the
+ * classifier's own rule. A missing list is the same sentinel, for the same reason.
+ */
+const UNREADABLE_REFUSAL = Object.freeze({ stage: "unknown", reason: "malformed_refusal" });
+
+function refusalPairs(err: unknown): readonly { readonly stage: string; readonly reason: string }[] {
+  const refusals = (err as { refusals?: unknown } | null)?.refusals;
+  if (!Array.isArray(refusals)) return [UNREADABLE_REFUSAL];
+  const pairs: { readonly stage: string; readonly reason: string }[] = [];
+  for (const r of refusals) {
+    const row = r as { stage?: unknown; reason?: unknown } | null;
+    if (typeof row?.stage !== "string" || typeof row.reason !== "string") return [UNREADABLE_REFUSAL];
+    pairs.push({ stage: row.stage, reason: row.reason });
+  }
+  return pairs;
 }
 
 function refusalReasons(err: unknown): readonly string[] {

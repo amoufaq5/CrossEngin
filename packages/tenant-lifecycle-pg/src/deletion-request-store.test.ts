@@ -47,6 +47,7 @@ function rowOf(over: Record<string, unknown> = {}): Record<string, unknown> {
     retention_obligations: JSON.stringify(["none"]),
     retained_data_categories: JSON.stringify([]),
     notes: null,
+    last_attempt_refusal: null,
     tombstone_id: null,
     ...over,
   };
@@ -170,7 +171,9 @@ describe("the column list", () => {
   it("carries the request's own id and the tombstone that completes it", () => {
     expect(REQUEST_COLUMNS).toContain("request_id");
     expect(REQUEST_COLUMNS).toContain("tombstone_id");
-    expect(REQUEST_COLUMNS).toHaveLength(24);
+    // ADR-0453's release reason, read back with every other column.
+    expect(REQUEST_COLUMNS).toContain("last_attempt_refusal");
+    expect(REQUEST_COLUMNS).toHaveLength(25);
   });
 });
 
@@ -389,14 +392,18 @@ describe("read and dueForExecution", () => {
     expect(sql().some((s) => s.includes("set_config('app.platform_audit', 'on', true)"))).toBe(true);
   });
 
-  it("orders due requests by deadline, not submission", async () => {
+  it("orders never-attempted requests by deadline, not submission, ahead of released ones", async () => {
     const { conn, calls } = fakePg();
     await new PostgresDeletionRequestStore(conn).dueForExecution(collector().report);
     const select = calls.find((c) => c.sql.includes("ORDER BY"));
     // Article 12(3) is what the platform is late against, and a request submitted later can be due
-    // sooner if it was verified sooner.
+    // sooner if it was verified sooner. A released request (ADR-0453) keeps its early deadline, so by
+    // deadline alone `limit` stuck requests would hold every batch slot for ever: released rows sort
+    // after fresh ones, and among themselves least recently attempted first, so they rotate.
     expect(select?.sql).toContain("status = 'verified'");
-    expect(select?.sql).toContain("ORDER BY deadline_at, request_id");
+    expect(select?.sql).toContain(
+      "ORDER BY (last_attempt_refusal IS NOT NULL), in_progress_at ASC NULLS FIRST, deadline_at, request_id",
+    );
   });
 
   it("with a grace gate, holds a verified request until its grace ends or its deadline nears", async () => {
@@ -405,7 +412,7 @@ describe("read and dueForExecution", () => {
       now: "2026-10-03T13:00:00.000Z",
       graceMs: 7 * 86_400_000,
     });
-    const select = calls.find((c) => c.sql.includes("ORDER BY deadline_at"));
+    const select = calls.find((c) => c.sql.includes("ORDER BY (last_attempt_refusal IS NOT NULL)"));
     expect(select?.sql).toContain("verified_at + $2 * interval '1 millisecond'");
     expect(select?.sql).toContain("deadline_at - $3 * interval '1 millisecond'");
     expect(select?.sql).toContain("<= $4::timestamptz");
@@ -420,7 +427,7 @@ describe("read and dueForExecution", () => {
         graceMs: -1,
       }),
     ).rejects.toThrow(/non-negative/);
-    expect(calls.some((c) => c.sql.includes("ORDER BY deadline_at"))).toBe(false);
+    expect(calls.some((c) => c.sql.includes("status = 'verified'"))).toBe(false);
   });
 
   it("finds the requests a run stranded, oldest first", async () => {
@@ -782,6 +789,82 @@ describe("transition", () => {
     expect(update?.sql).toContain("in_progress_at =");
     expect(update?.sql).not.toContain("completed_at =");
     expect(update?.sql).not.toContain("verified_at =");
+  });
+});
+
+describe("the release: in_progress -> verified (ADR-0453)", () => {
+  const ATTEMPT = "2026-10-03T00:00:00.000Z";
+  const inProgress = (): Record<string, unknown> => rowOf({ status: "in_progress", in_progress_at: ATTEMPT });
+  const released = (): Record<string, unknown> =>
+    rowOf({ in_progress_at: ATTEMPT, last_attempt_refusal: "erase/rls_would_confine_this_session" });
+
+  it("records the refused attempt and leaves the verification and the deadline alone", async () => {
+    const { conn, calls } = fakePg([inProgress()], [released()]);
+    const out = await new PostgresDeletionRequestStore(conn).transition(REQ, "verified", {
+      at: "2026-10-03T00:05:00.000Z",
+      lastAttemptRefusal: "erase/rls_would_confine_this_session",
+    });
+    expect(out?.status).toBe("verified");
+    expect(out?.lastAttemptRefusal).toBe("erase/rls_would_confine_this_session");
+    // Verification is the act of a person who authenticated, and the grace is measured from it:
+    // re-stamping `verified_at` would restart the wait and rewrite who verified. And Article 12(3)
+    // runs from the original submission, so `deadline_at` is in no SET clause either.
+    const update = calls.find((c) => c.sql.startsWith("UPDATE"));
+    expect(update?.sql).toContain("last_attempt_refusal =");
+    expect(update?.sql).not.toContain("verified_at =");
+    expect(update?.sql).not.toContain("verified_by =");
+    // The SET clause only: the RETURNING list names every column, deadline_at included.
+    const setClause = (update?.sql.split("WHERE")[0] ?? "").trim();
+    expect(setClause).toBe("UPDATE meta.gdpr_deletion_requests SET status = $2, last_attempt_refusal = $3");
+    expect(setClause).not.toContain("deadline_at");
+    // Guarded like every transition: the row must still read in_progress.
+    expect(update?.params[update.params.length - 1]).toBe("in_progress");
+  });
+
+  it("refuses a release that does not say why, before any UPDATE", async () => {
+    const { conn, sql } = fakePg([inProgress()], [released()]);
+    const err = await new PostgresDeletionRequestStore(conn)
+      .transition(REQ, "verified", { at: ATTEMPT })
+      .catch((e: unknown) => e);
+    expect((err as DeletionRequestRefused).refusal).toBe("contract_violated");
+    expect(sql().some((s) => s.startsWith("UPDATE"))).toBe(false);
+  });
+
+  it("refuses a release that tries to re-verify", async () => {
+    const { conn, sql } = fakePg([inProgress()], [released()]);
+    const err = await new PostgresDeletionRequestStore(conn)
+      .transition(REQ, "verified", {
+        at: ATTEMPT,
+        lastAttemptRefusal: "erase/table_missing",
+        verifiedBy: "someone-else",
+      })
+      .catch((e: unknown) => e);
+    expect((err as DeletionRequestRefused).refusal).toBe("contract_violated");
+    expect(sql().some((s) => s.startsWith("UPDATE"))).toBe(false);
+  });
+
+  it("refuses lastAttemptRefusal on any transition that is not the release", async () => {
+    const { conn, sql } = fakePg([rowOf()], [inProgress()]);
+    const err = await new PostgresDeletionRequestStore(conn)
+      .transition(REQ, "in_progress", { at: ATTEMPT, lastAttemptRefusal: "erase/table_missing" })
+      .catch((e: unknown) => e);
+    expect((err as DeletionRequestRefused).refusal).toBe("contract_violated");
+    expect(sql().some((s) => s.startsWith("UPDATE"))).toBe(false);
+  });
+
+  it("still re-verifies from submitted the old way, stamping verified_at", async () => {
+    const { conn, calls } = fakePg(
+      [rowOf({ status: "submitted", verified_at: null, verified_by: null, verification_method: null })],
+      [rowOf()],
+    );
+    await new PostgresDeletionRequestStore(conn).transition(REQ, "verified", {
+      at: "2026-10-02T00:00:00.000Z",
+      verifiedBy: "support-1",
+      verificationMethod: "email_link",
+    });
+    const update = calls.find((c) => c.sql.startsWith("UPDATE"));
+    expect(update?.sql).toContain("verified_at =");
+    expect(update?.sql.split("WHERE")[0]).not.toContain("last_attempt_refusal");
   });
 });
 

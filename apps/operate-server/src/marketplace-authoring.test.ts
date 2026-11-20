@@ -7,7 +7,7 @@ import {
   PackManifestSchema,
   PackPublisherRegistry,
   parsePackPublisherSpec,
-  signPackManifest,
+  signPackRelease,
   type PackManifest,
 } from "@crossengin/marketplace";
 import {
@@ -111,16 +111,23 @@ function manifest(overrides: Partial<PackManifest> = {}): PackManifest {
   });
 }
 
-function submitBody(m: PackManifest, channel = "beta", signer = keypair): Record<string, unknown> {
+function submitBody(m: PackManifest, channel = "beta", signer = keypair, bundleSha256 = SHA): Record<string, unknown> {
   return {
     packId: "com.acme.loyalty",
     version: "1.0.0",
     manifest: m,
     channel,
-    bundleSha256: SHA,
+    bundleSha256,
     bundleSizeBytes: 4096,
     manifestSha256: packManifestDigest(m),
-    signature: signPackManifest({ manifest: m, privateKeyBase64: signer.privateKeyBase64, publicKeyBase64: signer.publicKeyBase64, signedAt: "2026-06-01T00:00:00.000Z" }),
+    signature: signPackRelease({
+      manifest: m,
+      version: "1.0.0",
+      bundleSha256,
+      privateKeyBase64: signer.privateKeyBase64,
+      publicKeyBase64: signer.publicKeyBase64,
+      signedAt: "2026-06-01T00:00:00.000Z",
+    }),
     changelog: "Initial release",
   };
 }
@@ -167,11 +174,48 @@ describe("authoring — submit", () => {
     const ctx = makeCtx();
     const submit = buildSubmitHandler(ctx);
     expect(((await submit(input("pack_author", submitBody(manifest())))) as HandlerOutput).status).toBe(201);
-    const again = { ...submitBody(manifest()), bundleSha256: "b".repeat(64) };
+    // Re-signed for the new bundle, so it is the duplicate version and not the bundle that refuses.
+    const again = submitBody(manifest(), "beta", keypair, "b".repeat(64));
     const out = (await submit(input("pack_author", again))) as HandlerOutput & { body: { reason: string } };
     expect(out.status).toBe(409);
     expect(out.body.reason).toBe("version_exists");
     expect((await ctx.store.getByPackVersion("com.acme.loyalty", "1.0.0"))?.bundleSha256).toBe(SHA);
+  });
+
+  // ADR-0452 measured this live as a 201: one signature re-sent as 9.9.9 with a new bundle.
+  it.each([
+    ["a different version", { version: "9.9.9" }, "release_version_mismatch"],
+    ["a different bundle", { bundleSha256: "b".repeat(64) }, "release_bundle_mismatch"],
+  ] as const)("400s a captured signature replayed with %s, and stores nothing", async (_label, patch, reason) => {
+    const ctx = makeCtx();
+    const submit = buildSubmitHandler(ctx);
+    const out = (await submit(input("pack_author", { ...submitBody(manifest()), ...patch }))) as HandlerOutput & {
+      body: { reason: string };
+    };
+    expect(out.status).toBe(400);
+    expect(out.body.reason).toBe(reason);
+    expect(await ctx.store.getByPackVersion("com.acme.loyalty", "9.9.9")).toBeNull();
+    expect(await ctx.store.getByPackVersion("com.acme.loyalty", "1.0.0")).toBeNull();
+  });
+
+  it("400s a captured signature replayed over a different manifest carrying that manifest's own digest", async () => {
+    const submit = buildSubmitHandler(makeCtx());
+    const other = manifest({ name: "Loyalty, edited" });
+    const body = { ...submitBody(manifest()), manifest: other, manifestSha256: packManifestDigest(other) };
+    const out = (await submit(input("pack_author", body))) as HandlerOutput & { body: { reason: string } };
+    expect(out.status).toBe(400);
+    expect(out.body.reason).toBe("release_manifest_mismatch");
+  });
+
+  it("400s a manifest-only signature by name, not as a schema error", async () => {
+    const submit = buildSubmitHandler(makeCtx());
+    const body = submitBody(manifest());
+    const { release: _release, ...legacy } = body["signature"] as Record<string, unknown>;
+    const out = (await submit(input("pack_author", { ...body, signature: legacy }))) as HandlerOutput & {
+      body: { error: string; reason: string };
+    };
+    expect(out.status).toBe(400);
+    expect(out.body).toMatchObject({ error: "submission_rejected", reason: "legacy_signature_form" });
   });
 
   it("propagates a failure that is not a refusal instead of reporting it as one", async () => {

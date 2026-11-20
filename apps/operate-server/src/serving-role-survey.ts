@@ -179,8 +179,9 @@ export function formatServingRoleSurvey(
           "warn",
           "[pg] deletion capabilities are declared and this session is confined, so the Article 17" +
             " shared-table erasure will refuse every deletion with rls_would_confine_this_session" +
-            " (a confined DELETE reports 0 rows while they remain); run the deletion surfaces as a" +
-            " role that bypasses RLS on its targets — deploy/README.md, \"The database roles\"",
+            " (a confined DELETE reports 0 rows while they remain); set DELETION_PGUSER and" +
+            " DELETION_PGPASSWORD to the database owner so the deletion pipeline alone runs" +
+            " unconfined (ADR-0453) — deploy/README.md, \"The database roles\"",
         );
       }
       break;

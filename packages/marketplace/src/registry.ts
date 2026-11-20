@@ -47,6 +47,31 @@ export const SECURITY_REVIEW_STATUSES = [
 ] as const;
 export type SecurityReviewStatus = (typeof SECURITY_REVIEW_STATUSES)[number];
 
+/**
+ * The one release-envelope form this build signs and verifies. It is the domain tag of the signed
+ * bytes as well as a field inside them, so the two cannot disagree about which message a signature
+ * is over (ADR-0393's wire-version lesson); a second form is a new member here, never an edit.
+ */
+export const PACK_RELEASE_FORM = "crossengin.pack.release.v1" as const;
+
+/**
+ * What a publisher signs: the release, not the manifest alone. A signature over the manifest proved
+ * only that the publisher authored *some* version with that content, so a captured one could be filed
+ * under any `version` with any bundle (ADR-0452, live). The envelope binds the four facts a
+ * `meta.pack_versions` row is about; the signer's fingerprint and `signedAt` are in the signed bytes
+ * too, taken from the signature beside this claim rather than restated in it (ADR-0454).
+ */
+export const PackReleaseClaimSchema = z
+  .object({
+    form: z.literal(PACK_RELEASE_FORM),
+    packId: z.string().regex(PACK_ID_REGEX),
+    version: z.string().regex(SEMVER_REGEX),
+    manifestSha256: z.string().regex(SHA256_REGEX),
+    bundleSha256: z.string().regex(SHA256_REGEX),
+  })
+  .strict();
+export type PackReleaseClaim = z.infer<typeof PackReleaseClaimSchema>;
+
 export const PackSignatureSchema = z
   .object({
     algorithm: z.literal("ed25519"),
@@ -57,6 +82,10 @@ export const PackSignatureSchema = z
       message: "signature must be base64-encoded",
     }),
     signedAt: Iso8601,
+    // Optional so a manifest-only signature — every one written before ADR-0454 — parses and reaches
+    // a verifier that refuses it by name (`legacy_signature_form`), rather than a ZodError that names
+    // a missing key. It never verifies: nothing in this build checks a signature without a release.
+    release: PackReleaseClaimSchema.optional(),
   })
   .strict();
 export type PackSignature = z.infer<typeof PackSignatureSchema>;
@@ -167,6 +196,30 @@ export const PackVersionRecordSchema = z
         path: ["status"],
         message: "versions with failed security review must not be published",
       });
+    }
+    // A stored version must describe the release its own signature names. The submission refuses a
+    // disagreement before it builds the record, so this catches a row edited afterwards in one place
+    // only — a column changed with the signed claim left behind reads as unreadable. It does not bind
+    // the row to its signer: an edit that rewrites the column *and* `signature.release` together
+    // passes here, and only re-verifying the signature against the publisher registry would catch it,
+    // which the read path does not do.
+    const release = v.signature.release;
+    if (release !== undefined) {
+      const fields = [
+        ["packId", release.packId, v.packId],
+        ["version", release.version, v.version],
+        ["manifestSha256", release.manifestSha256, v.manifestSha256],
+        ["bundleSha256", release.bundleSha256, v.bundleSha256],
+      ] as const;
+      for (const [field, signed, stored] of fields) {
+        if (signed !== stored) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: [field],
+            message: `${field} disagrees with the release its signature names`,
+          });
+        }
+      }
     }
     if (v.supersededBy !== undefined && compareSemver(v.supersededBy, v.version) <= 0) {
       ctx.addIssue({

@@ -4,3 +4,4 @@ export * from "./router.js";
 export * from "./helpers.js";
 export * from "./mock.js";
 export * from "./inactivity.js";
+export * from "./tenant-pseudonym.js";

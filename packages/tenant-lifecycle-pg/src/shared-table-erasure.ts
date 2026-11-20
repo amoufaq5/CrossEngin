@@ -709,6 +709,45 @@ export async function probeSharedTableErasability(
   return { missing, confined, unscoped };
 }
 
+/** What a connection would meet if an Article 17 erasure ran on it now (ADR-0453). */
+export interface ErasureConfinementProbe {
+  /** How many tables were asked about: the erasable and statutory catalogued tables plus boot targets. */
+  readonly probed: number;
+  /** Tables whose `DELETE` RLS would confine on this session — `rls_would_confine_this_session`. */
+  readonly confined: readonly string[];
+  readonly missing: readonly string[];
+  readonly unscoped: readonly string[];
+}
+
+/**
+ * The erasure's own probe, run read-only against a connection at boot, so a deployment can be told
+ * whether its deletions would be refused `rls_would_confine_this_session` before one is attempted.
+ *
+ * **The same targets and the same statement** `eraseSharedTablesWithin` probes — the erasable and
+ * statutory halves of `partitionSharedTables` plus the boot manifest's targets — because a boot
+ * check that asked a different question (role attributes, say) would be a second spelling of the
+ * rule, and ADR-0362 measured the composed spelling wrong on 2 of 8 sessions where
+ * `row_security_active` is right on 8. Asked, never assumed from the role's name.
+ */
+export async function probeErasureConfinement(
+  conn: PgConnection,
+  opts: {
+    readonly schema?: string;
+    readonly bootTargets?: readonly BootSchemaErasureTarget[];
+    readonly catalog?: readonly TableDefinition[];
+  } = {},
+): Promise<ErasureConfinementProbe> {
+  const schema = opts.schema ?? "meta";
+  if (!IDENT_RE.test(schema)) throw new Error(`invalid schema identifier: ${JSON.stringify(schema)}`);
+  const partition = partitionSharedTables(opts.catalog ?? META_TABLES, schema);
+  const boot: SharedTableTarget[] = (opts.bootTargets ?? [])
+    .filter((t) => IDENT_RE.test(t.schema) && IDENT_RE.test(t.table))
+    .map((t) => ({ schema: t.schema, table: t.table, qualified: `${t.schema}.${t.table}` }));
+  const targets = [...boot, ...partition.erasable, ...partition.statutory];
+  const probe = await conn.transaction(async (tx) => probeSharedTableErasability(tx, targets));
+  return { probed: targets.length, ...probe };
+}
+
 /**
  * Every table in the given schemas that this emitter plainly created, so the target list can be
  * compared against the database in **both** directions.

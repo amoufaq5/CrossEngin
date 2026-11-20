@@ -22,13 +22,25 @@ export const PROBLEM_TYPES = {
   gateway_timeout: "https://crossengin.io/errors/gateway-timeout",
   sunset_endpoint: "https://crossengin.io/errors/sunset-endpoint",
   weak_tls_rejected: "https://crossengin.io/errors/weak-tls-rejected",
+  // Residency refusals (ADR-0457). Two producers answer them — the pre-auth hint check and the
+  // post-auth gate on the verified tenant — and before these entries each spelled its own type URI
+  // under a different host, so one route answered 421 in two shapes.
+  residency_misdirected: "https://crossengin.io/errors/residency-misdirected",
+  residency_violation: "https://crossengin.io/errors/residency-violation",
+  residency_unresolved: "https://crossengin.io/errors/residency-unresolved",
 } as const;
 export type ProblemType = (typeof PROBLEM_TYPES)[keyof typeof PROBLEM_TYPES];
 
 export const PROBLEM_STATUS_CODES = [
-  400, 401, 403, 404, 405, 406, 409, 410, 415, 422, 429, 500, 502, 503, 504,
+  400, 401, 403, 404, 405, 406, 409, 410, 415, 421, 422, 429, 500, 502, 503, 504,
 ] as const;
 export type ProblemStatusCode = (typeof PROBLEM_STATUS_CODES)[number];
+
+/**
+ * The header a residency 421 names the tenant's home region in. Carried beside
+ * `extensions.correctRegion` on every 421, so a client keyed on either finds it.
+ */
+export const RESIDENCY_REGION_HEADER = "x-crossengin-region";
 
 export const SECURITY_HEADER_NAMES = [
   "strict_transport_security",
@@ -81,6 +93,13 @@ export const ProblemDetailsResponseSchema = z
         path: ["extensions", "wwwAuthenticate"],
         message:
           "401 problem details should include wwwAuthenticate extension",
+      });
+    }
+    if (status === 421 && typeof p.extensions.correctRegion !== "string") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["extensions", "correctRegion"],
+        message: "421 problem details should include correctRegion extension",
       });
     }
     if (status === 410 && !p.extensions.sunsetAt) {

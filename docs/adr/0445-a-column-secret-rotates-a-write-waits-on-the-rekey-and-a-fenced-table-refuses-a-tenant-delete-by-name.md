@@ -198,7 +198,7 @@ change, not a policy edit.
 
 | Question | Owner | Deadline |
 |---|---|---|
-| Two configurations boot clean and then fail every PHI request with an opaque 500, explained only in the log: switching back to derived mode after a rekey, and a new secret with rows still wrapped under the old generation and no previous secret. The key rows are readable at boot, so both could be boot refusals. Found live. | CrossEngin platform | _unscheduled_ |
+| Two configurations boot clean and then fail every PHI request with an opaque 500, explained only in the log: switching back to derived mode after a rekey, and a new secret with rows still wrapped under the old generation and no previous secret. The key rows are readable at boot, so both could be boot refusals. Found live. **Closed by ADR-0455.** | CrossEngin platform | _unscheduled_ |
 | `--rewrap-kek` does not provision a seeded row for a tenant that holds ciphertext and has no data-key row; the route is to keep the previous secret set and serve the tenant once. | CrossEngin platform | _unscheduled_ |
 | No KMS: the KEK is derived from a secret the deployment holds. Out of scope; the boot line says so. | CrossEngin platform | _unscheduled_ |
 | Derived mode cannot rotate its secret; its route is envelope mode first. | CrossEngin platform | _unscheduled_ |

@@ -183,6 +183,7 @@ function harness(
     readonly requestReadThrows?: boolean;
     readonly claimReturnsNull?: boolean;
     readonly rejectReturnsNull?: boolean;
+    readonly releaseThrows?: boolean;
   } = {},
 ): Harness {
   const events: TenantDeletionEvent[] = [];
@@ -199,6 +200,7 @@ function harness(
         requestMoves.push({ to, fields: { ...fields } });
         if (to === "in_progress" && behaviour.claimReturnsNull === true) return null;
         if (to === "rejected" && behaviour.rejectReturnsNull === true) return null;
+        if (to === "verified" && behaviour.releaseThrows === true) throw new Error("release refused");
         return approvingOf({ status: to });
       },
     },
@@ -587,20 +589,110 @@ describe("the delete route", () => {
   });
 
   it("reports a rolled-back pipeline as 409, saying the tenant is unchanged", async () => {
+    // `duplicate_attestation` is the caller's own body, so the refusal is final and the request is
+    // closed. This test used `subsystem_unattested` before ADR-0453, which is a deployment
+    // declaration and now releases the request instead — that arm has its own tests below.
     const aborted = Object.assign(new Error("rolled back"), {
       name: "DeletionPipelineAborted",
-      refusals: [{ stage: "assemble", reason: "subsystem_unattested", detail: "backups" }],
+      refusals: [{ stage: "assemble", reason: "duplicate_attestation", detail: "backups twice" }],
     });
     const h = harness({}, { deleteThrows: aborted });
     const res = await call(h.ctx, DELETE, { parsedBody: BODY });
     // Not a 500: nothing is broken. The deletion was refused after the drop and correctly undone.
     expect(res.status).toBe(409);
     expect(res.body["error"]).toBe("deletion_rolled_back");
-    expect(res.body["refusals"]).toEqual(["assemble/subsystem_unattested"]);
+    expect(res.body["refusals"]).toEqual(["assemble/duplicate_attestation"]);
     expect(h.retireCalls).toEqual([]);
-    // The rollback is proven, so the request is closed rather than stranded.
+    // The rollback is proven and the cause is final, so the request is closed rather than stranded.
     expect(h.requestMoves.map((m) => m.to)).toEqual(["in_progress", "rejected"]);
     expect(res.body["requestStatus"]).toBe("rejected");
+    expect(res.body["retryable"]).toBe(false);
+  });
+
+  describe("a retryable proven refusal releases the request (ADR-0453)", () => {
+    // Found live on the confined role: `rls_would_confine_this_session` rejected the verified request
+    // for good, so fixing the deployment still left the data subject to resubmit. The cause is the
+    // deployment's, the rollback is proven, so the request goes back to `verified` with the reason
+    // recorded, and a retry needs no new verification.
+    const RLS = [{ stage: "erase", reason: "rls_would_confine_this_session", detail: "meta.x" }];
+    for (const [arm, behaviour, error] of [
+      ["a returned refusal", { outcome: { ok: false as const, refusals: RLS } }, "deletion_refused"],
+      [
+        "a proven rollback",
+        { deleteThrows: Object.assign(new Error("rolled back"), { name: "DeletionPipelineAborted", refusals: RLS }) },
+        "deletion_rolled_back",
+      ],
+    ] as const) {
+      it(`moves in_progress -> verified with the refusal recorded, on ${arm}`, async () => {
+        const h = harness({}, behaviour);
+        const res = await call(h.ctx, DELETE, { parsedBody: BODY });
+        expect(res.status).toBe(409);
+        expect(res.body["error"]).toBe(error);
+        expect(h.requestMoves.map((m) => m.to)).toEqual(["in_progress", "verified"]);
+        expect(h.requestMoves[1]?.fields).toEqual({
+          at: AT,
+          lastAttemptRefusal: "erase/rls_would_confine_this_session",
+        });
+        // No rejection reason is written onto a request that was not rejected.
+        expect(h.requestMoves[1]?.fields["rejectedReason"]).toBeUndefined();
+        expect(res.body["requestStatus"]).toBe("verified");
+        expect(res.body["retryable"]).toBe(true);
+        expect(h.retireCalls).toEqual([]);
+      });
+    }
+
+    it("rejects when any one refusal is final, even beside a retryable one", async () => {
+      const h = harness(
+        {},
+        {
+          outcome: {
+            ok: false,
+            refusals: [...RLS, { stage: "assemble", reason: "scope_empty", detail: "nothing erased" }],
+          },
+        },
+      );
+      const res = await call(h.ctx, DELETE, { parsedBody: BODY });
+      expect(h.requestMoves.map((m) => m.to)).toEqual(["in_progress", "rejected"]);
+      expect(res.body["retryable"]).toBe(false);
+    });
+
+    it("rejects a rollback carrying one malformed refusal beside a retryable one", async () => {
+      // Dropping the malformed entry would leave the retryable one to answer `retry` for a refusal
+      // nobody could read; one unreadable entry makes the whole list unclassifiable, which is final.
+      const h = harness(
+        {},
+        {
+          deleteThrows: Object.assign(new Error("rolled back"), {
+            name: "DeletionPipelineAborted",
+            refusals: [...RLS, { stage: "erase" }],
+          }),
+        },
+      );
+      const res = await call(h.ctx, DELETE, { parsedBody: BODY });
+      expect(h.requestMoves.map((m) => m.to)).toEqual(["in_progress", "rejected"]);
+      expect(res.body["retryable"]).toBe(false);
+    });
+
+    it("does not call a refusal retryable when its release did not commit", async () => {
+      // The request is then still `in_progress`, where a retry is refused deletion_request_not_verified,
+      // so telling the caller to retry would send them to a refusal.
+      const h = harness({}, { outcome: { ok: false, refusals: RLS }, releaseThrows: true });
+      const res = await call(h.ctx, DELETE, { parsedBody: BODY });
+      expect(res.status).toBe(409);
+      expect(res.body["requestStatus"]).toBe("in_progress");
+      expect(res.body["retryable"]).toBe(false);
+    });
+
+    it("rejects a rollback whose refusals are not shaped as stage/reason pairs", async () => {
+      // An unclassifiable refusal keeps the answer it had before ADR-0453.
+      const h = harness(
+        {},
+        { deleteThrows: Object.assign(new Error("rolled back"), { name: "DeletionPipelineAborted" }) },
+      );
+      const res = await call(h.ctx, DELETE, { parsedBody: BODY });
+      expect(h.requestMoves.map((m) => m.to)).toEqual(["in_progress", "rejected"]);
+      expect(res.body["retryable"]).toBe(false);
+    });
   });
 
   it("reports a returned refusal as 409 without retiring the tenant", async () => {
@@ -609,32 +701,32 @@ describe("the delete route", () => {
       {
         outcome: {
           ok: false,
-          refusals: [{ stage: "erase", reason: "external_dependents", detail: "view public.x" }],
+          refusals: [{ stage: "erase", reason: "table_missing", detail: "meta.x" }],
         },
       },
     );
     const res = await call(h.ctx, DELETE, { parsedBody: BODY });
     expect(res.status).toBe(409);
     expect(res.body["error"]).toBe("deletion_refused");
+    // A missing table is the deployment's to fix, and the shared erasure finds it before it deletes
+    // anything, so the request is released rather than consumed.
+    expect(res.body["requestStatus"]).toBe("verified");
     expect(h.retireCalls).toEqual([]);
     expect(h.events[0]?.operation).toBe(TENANT_DELETE_REFUSED_OPERATION);
   });
 
-  describe("restoring the tenant after a refused deletion", () => {
-    // Found live on the confined role: every attempt is refused `rls_would_confine_this_session`,
-    // the refusal closes the verified request for good, and the tenant the verify route made
-    // read-only sat in `pending_deletion` with nothing left holding it. The reject route restores
-    // through the same mover and records the move in the trail, so this path must do both.
-    const RETURNED = {
-      outcome: {
-        ok: false as const,
-        refusals: [{ stage: "erase", reason: "rls_would_confine_this_session", detail: "meta.x" }],
-      },
-    };
+  describe("restoring the tenant after a finally refused deletion", () => {
+    // A final refusal closes the verified request for good, and the tenant the verify route made
+    // read-only would sit in `pending_deletion` with nothing left holding it. The reject route
+    // restores through the same mover and records the move in the trail, so this path does both.
+    // These arms used `rls_would_confine_this_session` before ADR-0453; that cause now releases the
+    // request and keeps the tenant read-only (the last test here), so a final cause stands in.
+    const FINAL = [{ stage: "assemble", reason: "scope_empty", detail: "nothing of the tenant's" }];
+    const RETURNED = { outcome: { ok: false as const, refusals: FINAL } };
     const THROWN = {
       deleteThrows: Object.assign(new Error("rolled back"), {
         name: "DeletionPipelineAborted",
-        refusals: [{ stage: "erase", reason: "rls_would_confine_this_session", detail: "meta.x" }],
+        refusals: FINAL,
       }),
     };
 
@@ -744,6 +836,25 @@ describe("the delete route", () => {
         parsedBody: BODY,
       });
       expect(res.status).toBe(500);
+      expect(w.restored).toEqual([]);
+      expect(trailInsert(w.statements)).toEqual([]);
+    });
+
+    it("keeps the tenant pending_deletion when the refusal releases the request", async () => {
+      // Restoring here would reopen writes into data a retry is about to destroy (ADR-0334's
+      // reason `pending_deletion` exists), so the released request keeps holding the tenant.
+      const w = wired();
+      const rls = [{ stage: "erase", reason: "rls_would_confine_this_session", detail: "meta.x" }];
+      for (const behaviour of [
+        { outcome: { ok: false as const, refusals: rls } },
+        { deleteThrows: Object.assign(new Error("rolled back"), { name: "DeletionPipelineAborted", refusals: rls }) },
+      ]) {
+        const res = await call(harness(w.over, behaviour).ctx, DELETE, { parsedBody: BODY });
+        expect(res.status).toBe(409);
+        expect(res.body["requestStatus"]).toBe("verified");
+        expect(res.body["tenantRestored"]).toBeNull();
+        expect(res.body["lifecycleRecorded"]).toBeNull();
+      }
       expect(w.restored).toEqual([]);
       expect(trailInsert(w.statements)).toEqual([]);
     });

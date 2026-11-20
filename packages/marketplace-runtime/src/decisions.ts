@@ -17,10 +17,15 @@ import type {
  */
 export const INSTALL_REJECTION_REASONS = [
   "already_installed",
+  "legacy_signature_form",
   "publisher_unregistered",
   "pack_outside_publisher_namespace",
   "author_kind_not_registered",
   "signature_invalid",
+  "release_pack_mismatch",
+  "release_manifest_mismatch",
+  "release_version_mismatch",
+  "release_bundle_mismatch",
   "incompatible",
   "review_required",
 ] as const;
@@ -34,9 +39,11 @@ export interface InstallRequest {
   readonly pack: PackManifest;
   /** The specific version being installed. */
   readonly version: string;
+  /** The digest of that version's bundle; the signed release must name it, as it must the version. */
+  readonly bundleSha256: string;
   /** The version's platform/region/plan/compliance compatibility envelope. */
   readonly compatibility: PackCompatibility;
-  /** The publisher's detached signature over the manifest. */
+  /** The publisher's detached signature over the release (pack, version, manifest and bundle digests). */
   readonly signature: PackSignature;
   /**
    * The platform's pinned publisher keys. The signature is verified against the registered key its

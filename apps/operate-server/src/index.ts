@@ -39,6 +39,7 @@ export * from "./ai-design-routes.js";
 export * from "./tenant-gateway-cache.js";
 export * from "./manifest-activation-poller.js";
 export * from "./ai-design-budget.js";
+export * from "./ai-tenant-pseudonym.js";
 export * from "./design-jobs.js";
 export * from "./design-runner.js";
 export * from "./manifest-view.js";

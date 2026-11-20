@@ -82,10 +82,20 @@ function isDenial(v: { readonly principalId: string } | HandlerOutput): v is Han
  * not allowed to publish it — where the old mapping keyed a 400 on the word "signature" in a message.
  */
 const SUBMISSION_REFUSAL_STATUS: Readonly<Record<PackSubmissionRefusal, number>> = Object.freeze({
+  // A well-formed body in a signature form this build refuses: the remedy is the caller's (re-sign the
+  // release), so 400 and not 403, which would say the signer is not allowed rather than unheard.
+  legacy_signature_form: 400,
   publisher_unregistered: 403,
   pack_outside_publisher_namespace: 403,
   author_kind_not_registered: 403,
   signature_invalid: 400,
+  // The signature verified and names a different release than the body submits: the body disagrees
+  // with its own signature, which is the replay ADR-0452 measured. 400 for the same reason as
+  // `manifest_digest_mismatch` — the request contradicts itself, independent of who sent it.
+  release_pack_mismatch: 400,
+  release_manifest_mismatch: 400,
+  release_version_mismatch: 400,
+  release_bundle_mismatch: 400,
   pack_id_mismatch: 400,
   manifest_digest_mismatch: 400,
   version_exists: 409,

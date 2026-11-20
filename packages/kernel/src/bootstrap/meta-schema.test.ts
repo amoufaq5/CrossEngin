@@ -1939,6 +1939,13 @@ describe("table column shapes", () => {
     // completion_sha256 commits to the proof; this one can find it.
     expect(col("tombstone_id")?.type).toBe("TEXT");
     expect(col("tombstone_id")?.check).toContain("tomb_");
+    // ADR-0453: a released attempt's refusal. Nullable with no default, so no stored row is claimed
+    // to have had an attempt refused; the CHECK is the contract's min(1) and nothing more.
+    const released = col("last_attempt_refusal");
+    expect(released?.type).toBe("TEXT");
+    expect(released?.notNull).toBeUndefined();
+    expect(released?.default).toBeUndefined();
+    expect(released?.check).toBe("char_length(last_attempt_refusal) >= 1");
   });
 
   it("META_GDPR_DELETION_REQUESTS is readable after its tenant is gone, by SELECT only", () => {

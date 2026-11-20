@@ -40,7 +40,12 @@ export const DELETION_REQUEST_TRANSITIONS: Readonly<
 > = Object.freeze({
   submitted: ["verified", "rejected"],
   verified: ["in_progress", "deferred", "rejected"],
-  in_progress: ["completed", "rejected"],
+  // `in_progress -> verified` is the **release** (ADR-0453): only for an attempt whose refusal is
+  // proven to have rolled back (nothing was destroyed) and whose cause is the deployment's rather
+  // than the request's, so the data subject need not resubmit. An unproven failure must never take
+  // it — re-running on the assumption that a deletion did not commit is how a tenant is deleted
+  // twice — and the release keeps `verifiedAt`/`verifiedBy` and `deadlineAt` exactly as they were.
+  in_progress: ["completed", "rejected", "verified"],
   deferred: ["in_progress", "rejected"],
   completed: [],
   rejected: [],
@@ -158,6 +163,16 @@ export const GdprDeletionRequestSchema = z
     deadlineExtendedAt: Iso8601.nullable().default(null),
     /** The reason Article 12(3) requires an extension to state. Required with the instant. */
     deadlineExtensionReason: z.string().min(1).optional(),
+    /**
+     * Why the last attempt to execute this request was refused and released back to `verified`
+     * (ADR-0453), as `stage/reason` pairs. Absent on a request no attempt has been released from.
+     *
+     * Its own field rather than `rejectedReason` on a non-rejected row, whose name would claim a
+     * rejection that did not happen, or `notes`, which is the submitter's. It survives a later
+     * completion deliberately: it is the record of an attempt, and an attempt that was refused
+     * before one that succeeded is history rather than state.
+     */
+    lastAttemptRefusal: z.string().min(1).optional(),
     retentionObligations: z.array(z.enum(RETENTION_OBLIGATIONS)).default(["none"]),
     retainedDataCategories: z.array(z.string().min(1)).default([]),
     notes: z.string().min(1).optional(),
@@ -261,6 +276,15 @@ export const GdprDeletionRequestSchema = z
           message: `status '${v.status}' requires verificationMethod`,
         });
       }
+    }
+    if (v.lastAttemptRefusal !== undefined && v.inProgressAt === null) {
+      // A refused attempt is an attempt: the release keeps `inProgressAt` as the instant it began,
+      // so a refusal with no attempt instant is a record of something that never started.
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["lastAttemptRefusal"],
+        message: "a refused attempt requires inProgressAt, the instant the attempt began",
+      });
     }
     if (v.status === "in_progress" && v.inProgressAt === null) {
       ctx.addIssue({

@@ -60,11 +60,13 @@ export function admitInstallation(
     };
   }
 
-  // 2. Publisher — the manifest must be signed by a registered key whose namespace covers the pack.
+  // 2. Publisher — the release (this version, this bundle) must be signed by a registered key whose
+  //    namespace covers the pack.
   const publisher = verifyPackPublisher({
     manifest: request.pack,
     signature: request.signature,
     registry: request.publishers,
+    submitted: { version: request.version, bundleSha256: request.bundleSha256 },
   });
   if (!publisher.ok) {
     return { outcome: "rejected", reason: publisher.refusal, reasons: [publisher.detail] };

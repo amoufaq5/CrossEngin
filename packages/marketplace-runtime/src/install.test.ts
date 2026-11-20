@@ -5,7 +5,7 @@ import {
   PackManifestSchema,
   PackPublisherRegistry,
   parsePackPublisherSpec,
-  signPackManifest,
+  signPackRelease,
   type PackCompatibility,
   type PackInstallation,
   type PackManifest,
@@ -29,6 +29,7 @@ import {
   UNINSTALL_PATH,
 } from "./install.js";
 
+const BUNDLE_SHA = "a".repeat(64);
 const TENANT = "00000000-0000-4000-8000-000000000001";
 const NOW = "2026-05-16T12:00:00.000Z";
 
@@ -66,8 +67,10 @@ function signed(overrides: Partial<PackManifest> = {}): {
 } {
   const pack = manifest(overrides);
   const kp = generateEd25519Keypair();
-  const signature = signPackManifest({
+  const signature = signPackRelease({
     manifest: pack,
+    version: "1.0.0",
+    bundleSha256: BUNDLE_SHA,
     privateKeyBase64: kp.privateKeyBase64,
     publicKeyBase64: kp.publicKeyBase64,
     signedAt: NOW,
@@ -85,6 +88,7 @@ function request(overrides: Partial<InstallRequest> = {}): InstallRequest {
     requestedBy: "user-admin",
     pack: s.pack,
     version: "1.0.0",
+    bundleSha256: BUNDLE_SHA,
     compatibility: compatibility(),
     signature: s.signature,
     publishers: s.publishers,
@@ -140,7 +144,32 @@ describe("admitInstallation — gates", () => {
     );
     expect(decision.outcome).toBe("rejected");
     if (decision.outcome !== "rejected") return;
-    expect(decision.reason).toBe("signature_invalid");
+    expect(decision.reason).toBe("release_manifest_mismatch");
+  });
+
+  it("rejects a catalog entry naming a version the publisher did not sign", () => {
+    const s = signed();
+    const decision = admitInstallation(
+      request({ pack: s.pack, signature: s.signature, publishers: s.publishers, version: "1.0.1" }),
+      ctx,
+    );
+    expect(decision).toMatchObject({ outcome: "rejected", reason: "release_version_mismatch" });
+  });
+
+  it("rejects a catalog entry naming a bundle the publisher did not sign", () => {
+    const s = signed();
+    const decision = admitInstallation(
+      request({ pack: s.pack, signature: s.signature, publishers: s.publishers, bundleSha256: "b".repeat(64) }),
+      ctx,
+    );
+    expect(decision).toMatchObject({ outcome: "rejected", reason: "release_bundle_mismatch" });
+  });
+
+  it("rejects a manifest-only signature by name", () => {
+    const s = signed();
+    const { release: _release, ...legacy } = s.signature;
+    const decision = admitInstallation(request({ pack: s.pack, signature: legacy, publishers: s.publishers }), ctx);
+    expect(decision).toMatchObject({ outcome: "rejected", reason: "legacy_signature_form" });
   });
 
   it("rejects an incompatible tenant (platform too old) with reasons", () => {

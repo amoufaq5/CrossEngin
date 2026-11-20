@@ -6,7 +6,7 @@ import {
   PackManifestSchema,
   PackPublisherRegistry,
   parsePackPublisherSpec,
-  signPackManifest,
+  signPackRelease,
   type PackManifest,
 } from "@crossengin/marketplace";
 
@@ -37,8 +37,10 @@ function submitInput(m: PackManifest) {
     bundleSha256: SHA,
     bundleSizeBytes: 4096,
     manifestSha256: packManifestDigest(m),
-    signature: signPackManifest({
+    signature: signPackRelease({
       manifest: m,
+      version: "1.0.0",
+      bundleSha256: SHA,
       privateKeyBase64: keypair.privateKeyBase64,
       publicKeyBase64: keypair.publicKeyBase64,
       signedAt: "2026-06-01T00:00:00.000Z",

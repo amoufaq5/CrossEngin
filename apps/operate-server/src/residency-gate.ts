@@ -1,4 +1,10 @@
-import type { Handler, HandlerOutput, HandlerRegistry } from "@crossengin/api-gateway-runtime";
+import {
+  residencyRefusal,
+  type Handler,
+  type HandlerOutput,
+  type HandlerRegistry,
+  type ResidencyRefusalInput,
+} from "@crossengin/api-gateway-runtime";
 import type { Region, ResidencyProfile } from "@crossengin/residency";
 import { decideRegionRouting, type TenantResidencyDirectory } from "@crossengin/residency-runtime";
 
@@ -60,34 +66,15 @@ export interface ResidencyGateOptions {
   readonly onRefused?: (refusal: ResidencyGateRefusal) => void;
 }
 
-const MISDIRECTED_TYPE = "https://crossengin.dev/problems/misdirected-region";
-const VIOLATION_TYPE = "https://crossengin.dev/problems/residency-violation";
-const UNRESOLVED_TYPE = "https://crossengin.dev/problems/residency-unresolved";
-
-function residencyProblem(
-  status: number,
-  type: string,
-  title: string,
-  detail: string,
-  reason: string,
-  correctRegion: Region | null,
-): HandlerOutput {
-  const headers: Record<string, string> = { "content-type": "application/problem+json" };
-  if (correctRegion !== null) headers["x-crossengin-region"] = correctRegion;
-  if (status === 503) headers["retry-after"] = "5";
-  return {
-    kind: "json",
-    status,
-    headers,
-    body: {
-      type,
-      title,
-      status,
-      detail,
-      reason,
-      ...(correctRegion !== null ? { correctRegion } : {}),
-    },
-  };
+/**
+ * The gate's refusal, built by the same function the pre-auth hint check calls (ADR-0457), so a
+ * client cannot tell from the body or the residency headers which of the two answered.
+ */
+function residencyProblem(input: ResidencyRefusalInput): HandlerOutput {
+  const env = residencyRefusal(input);
+  // The length is the dispatcher's to compute from the body it serializes, not the handler's.
+  const { "content-length": _length, ...headers } = env.response.headers;
+  return { kind: "json", status: env.body.status, headers, body: env.body };
 }
 
 export function withResidency(
@@ -114,38 +101,21 @@ export function withResidency(
       profile = await opts.directory.resolve(tenantId);
     } catch {
       refuse("unresolved");
-      return residencyProblem(
-        503,
-        UNRESOLVED_TYPE,
-        "Residency unresolved",
-        "This tenant's residency profile could not be read, so whether this region may serve it is unknown.",
-        "residency_unresolved",
-        null,
-      );
+      return residencyProblem({ decision: "unresolved" });
     }
     if (profile === null) return handler(input);
     const decision = decideRegionRouting(profile, opts.region);
     if (decision.action === "serve") return handler(input);
     if (decision.action === "redirect") {
       refuse("misdirected");
-      return residencyProblem(
-        421,
-        MISDIRECTED_TYPE,
-        "Misdirected region",
-        decision.reason,
-        "residency_misdirected",
-        decision.region,
-      );
+      return residencyProblem({
+        decision: "misdirected",
+        detail: decision.reason,
+        correctRegion: decision.region,
+      });
     }
     refuse("forbidden");
-    return residencyProblem(
-      403,
-      VIOLATION_TYPE,
-      "Residency violation",
-      decision.reason,
-      "residency_forbidden",
-      null,
-    );
+    return residencyProblem({ decision: "forbidden", detail: decision.reason });
   };
 }
 

@@ -258,13 +258,35 @@ RLS-bypassing role is one of its refusals above.
   and either way the API then owns the entity tables, so on those tables the store's own `tenant_id`
   predicates are again the only isolation. `--per-tenant-manifests` on that store additionally
   creates one schema per tenant, which needs `CREATE` on the database.
-- **The Article 17 deletion surfaces** (`--tenant-deletion-routes`, `--deletion-request-routes`,
-  `--deletion-runner-ms`) refuse every deletion on a confined session with
-  `rls_would_confine_this_session`, by design: a `DELETE` the policies confine reports zero rows
-  while the rows remain, so the erasure asks first and refuses rather than signing a proof over data
-  that is still there. The API warns at boot when deletion capabilities are declared on a confined
-  role. None of the three is on the shipped command; mounting them means running the API as a role
-  that bypasses RLS on the erasure targets, which is the trade this section exists to make visible.
+- **The Article 17 deletion pipeline** (run by `--tenant-deletion-routes` and `--deletion-runner-ms`)
+  refuses every deletion on a confined session with `rls_would_confine_this_session`, by design: the
+  shared-table erasure asks Postgres before it deletes anything, because a `DELETE` the policies
+  confine reports zero rows while the rows remain, and it refuses rather than signing a proof over
+  data that is still there. (`--tenant-erasure-routes` drops a tenant's own schema, which needs that
+  schema's owner rather than an unconfined session; `--deletion-request-routes` only moves requests.)
+  **Set `DELETION_PGUSER` and `DELETION_PGPASSWORD` in `.env`** and the deletion pipeline — every
+  statement of the erasure, the tombstone and its chain anchor, and the tenant-erasure route's survey
+  and drop — runs on a separate connection as that role, while every request, including the
+  tombstone read route, stays on the confined app role (ADR-0453). Environment only, never a flag.
+  The boot line `[deletion] Article 17 erasure runs as …` says which role, whether it is a superuser,
+  and whether a deletion can complete there — by running the erasure's own probe, which also names a
+  missing or unscoped target table, rather than trusting the variable.
+  **Which role to name is a trade-off, stated plainly.** The owner (`POSTGRES_USER` /
+  `POSTGRES_PASSWORD`) works for all three surfaces, and in the official image it is a **superuser**:
+  setting it puts a superuser credential in the internet-facing `api` process, so a compromise of
+  that process yields the whole database server (`COPY … TO PROGRAM` included), not only the ability
+  to bypass row-level security. A dedicated role created by hand as `NOSUPERUSER BYPASSRLS`, with
+  at least `SELECT`/`DELETE` on the erasure's targets and `INSERT` on `meta.tenant_tombstones`,
+  `meta.forensic_chain_entries` and `meta.tenant_lifecycle_events` (a grant set not verified live),
+  confines that to the database's rows — but it cannot `DROP SCHEMA` a tenant schema it does not own, so with per-tenant manifests a
+  deletion that reaches the schema eraser fails mid-transaction and is left `in_progress` for
+  reconciliation. `app-role` does not create such a role; ADR-0453 records it as open.
+  Unset, a deletion refused for a cause the deployment can fix *before anything is destroyed* (a
+  confined role, a missing table) releases its request back to `verified` — the refusal recorded in
+  `last_attempt_refusal`, the deadline unchanged, the tenant still `pending_deletion` — so it is
+  retried once the cause is fixed, without the data subject resubmitting. A refusal raised after the
+  erasure has begun deleting is rejected, as before, because retrying it would repeat a full erasure
+  and rollback on every runner tick. None of the deletion flags is on the shipped command.
 - **The workflow engine and the job fleet** (`--workflow-workers`, `--workflow-cancel-role`) do
   not either, and neither is on the shipped command. The fleet's claims are deliberately
   cross-tenant, so one fleet serves every tenant, and `meta.job_runs`, `meta.workflow_timers` and
@@ -481,6 +503,14 @@ reading once after the first `up`:
   the same response just withheld. `erp-core` has one such field
   (`Employee.work_email`, `pii`), so this line says `plaintext_disclosing` until
   `CURSOR_ENCRYPTION_SECRET` is set, and names the field either way.
+- **`[ai-design] tenant pseudonym: …`** — whether the AI Architect's model provider can
+  tell tenants apart (only with `--ai-design`). `CURSOR_ENCRYPTION_SECRET` has a second
+  purpose (ADR-0456): it keys the opaque per-tenant id sent as Anthropic `metadata.user_id`
+  or the OpenAI-compatible `user` field, so a vendor can attribute abuse to one tenant
+  without learning the tenant id. `keyed` means it is sent; `absent` means the secret is
+  unset and no tenant identifier is sent at all — never the raw id. Rotating the secret
+  therefore also gives every tenant a new identity at the vendor, resetting its per-tenant
+  abuse history, which is a cost beside the cursor 400 to weigh before rotating.
 - **`[read-state] per-viewer notification read state mounted for roles: …`** — who gets a
   real unread count. This is not an exposure line but a *silence* line, and it is here
   because the failure is invisible from the UI: the client catches a refusal and falls back

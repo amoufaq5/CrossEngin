@@ -1,4 +1,4 @@
-import type { PackVersionRecord } from "@crossengin/marketplace";
+import { PACK_RELEASE_FORM, type PackVersionRecord } from "@crossengin/marketplace";
 import type { PgConnection, UnreadableRow } from "@crossengin/kernel-pg";
 import { describe, expect, it } from "vitest";
 
@@ -156,6 +156,36 @@ describe("a version row the contract refuses", () => {
     expect(refused).toHaveLength(1);
     expect(refused[0]?.identity).toBe("com.acme.loyalty@not-a-semver");
     expect(refused[0]?.detail).toBe("version: invalid_string");
+  });
+
+  it("refuses a row edited to a version its signed release does not name (ADR-0454)", async () => {
+    // A signature carrying a release binds the row's own columns, so moving `version` in place after
+    // submission — the replay ADR-0452 measured, done by UPDATE instead of by submission — reads as
+    // an unreadable row rather than as a release the publisher never made.
+    const signed = fakePackVersion({
+      signature: {
+        algorithm: "ed25519",
+        publicKeyFingerprint: "a".repeat(64),
+        signature: "c2lnbmF0dXJl",
+        signedAt: "2026-06-01T00:00:00.000Z",
+        release: {
+          form: PACK_RELEASE_FORM,
+          packId: "com.acme.loyalty",
+          version: "1.0.0",
+          manifestSha256: "a".repeat(64),
+          bundleSha256: "a".repeat(64),
+        },
+      },
+    });
+    const edited = { ...rowFrom(signed), version: "9.9.9" };
+    const refused: UnreadableRow[] = [];
+    const store = new PostgresPackVersionStore(answeringPg([rowFrom(signed), edited]));
+    const got = await store.listByPack("com.acme.loyalty", (row) => {
+      refused.push(row);
+    });
+    expect(got.map((r) => r.version)).toEqual(["1.0.0"]);
+    expect(refused.map((r) => r.identity)).toEqual(["com.acme.loyalty@9.9.9"]);
+    expect(refused[0]?.detail).toBe("version: custom");
   });
 
   it("withholds a malformed signature column's text, where JSON.parse would have quoted it", async () => {

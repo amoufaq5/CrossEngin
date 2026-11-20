@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 
-import type { ForwardedProto, HttpMethod, PipelineExecution } from "@crossengin/api-gateway";
+import { PROBLEM_TYPES, type ForwardedProto, type HttpMethod, type PipelineExecution } from "@crossengin/api-gateway";
 import type {
   AbacBatchEvaluator,
   AbacEvaluator,
@@ -47,6 +47,11 @@ import {
 } from "@crossengin/operate-runtime";
 
 import type { EdgeTrust } from "@crossengin/api-gateway-runtime";
+import {
+  residencyRefusal,
+  withDefaultSecurityHeaders,
+  type ProblemEnvelope,
+} from "@crossengin/api-gateway-runtime";
 import { parseMethod, rawToIncoming, splitTarget, type RawHttpRequest, type RawHttpResponse } from "./http.js";
 import {
   buildPrincipalWiring,
@@ -94,7 +99,9 @@ export interface ServerErrorEvent {
   readonly cause?: unknown;
 }
 
-const INTERNAL_ERROR_TYPE = "https://crossengin.io/problems/internal-server-error";
+// The registry's own URI, so a 500 the serving core answers before the gateway carries the same
+// `type` as one the gateway answers (ADR-0457's one-shape rule, applied to the 500).
+const INTERNAL_ERROR_TYPE = PROBLEM_TYPES.internal_server_error;
 const INTERNAL_ERROR_DETAIL =
   "the request could not be completed; quote this response's x-request-id when reporting it";
 
@@ -183,8 +190,6 @@ export interface OperateHttpServerOptions {
 }
 
 const METHOD_NOT_ALLOWED_TYPE = "https://crossengin.io/problems/method-not-allowed";
-const MISDIRECTED_REGION_TYPE = "https://crossengin.io/problems/misdirected-region";
-const RESIDENCY_VIOLATION_TYPE = "https://crossengin.io/problems/residency-violation";
 
 /**
  * The framework-agnostic serving core: turns a `RawHttpRequest` + body into a
@@ -303,7 +308,7 @@ export class OperateHttpServer {
       return this.webhookRoute.handle(body, raw.headers);
     }
     // Data-residency edge routing (pre-auth): route/deny by the request's tenant hint before dispatch.
-    const residency = await this.checkResidency(raw);
+    const residency = await this.checkResidency(raw, requestId);
     if (residency !== null) return residency;
     // `x-forwarded-proto` is read **only from a trusted edge**, which is the fifth member of the
     // same class as the certificate and the TLS version: it is a caller-settable header, and before
@@ -351,20 +356,32 @@ export class OperateHttpServer {
    * naming a tenant with no profile, passes here whatever the credential's tenant requires. The
    * decision is `applyResidencyGate` (`residency-gate.ts`), on the authenticated tenant.
    */
-  private async checkResidency(raw: RawHttpRequest): Promise<RawHttpResponse | null> {
+  private async checkResidency(raw: RawHttpRequest, requestId: string): Promise<RawHttpResponse | null> {
     if (this.regionGuard === null) return null;
     const header = this.regionGuard.tenantHeader ?? "x-tenant-id";
     const raw0 = raw.headers[header];
     const hint = Array.isArray(raw0) ? raw0[0] : raw0;
     if (hint === undefined || hint === "") return null;
-    const profile = await this.regionGuard.directory.resolve(hint);
+    // Advisory, so a directory that cannot answer is no answer here: the request goes on to the
+    // post-auth gate, which is the residency decision and refuses an unreadable profile with its own
+    // retryable 503. Throwing here made the same condition a 500 for a caller who sent the hint and a
+    // 503 for one who did not.
+    let profile: Awaited<ReturnType<TenantResidencyDirectory["resolve"]>>;
+    try {
+      profile = await this.regionGuard.directory.resolve(hint);
+    } catch {
+      return null;
+    }
     if (profile === null) return null;
     const decision = decideRegionRouting(profile, this.regionGuard.region);
     if (decision.action === "redirect") {
-      return regionProblem(421, MISDIRECTED_REGION_TYPE, "Misdirected region", decision.reason, decision.region);
+      return preAuthResidencyResponse(
+        residencyRefusal({ decision: "misdirected", detail: decision.reason, correctRegion: decision.region }),
+        requestId,
+      );
     }
     if (decision.action === "deny") {
-      return regionProblem(403, RESIDENCY_VIOLATION_TYPE, "Residency violation", decision.reason, null);
+      return preAuthResidencyResponse(residencyRefusal({ decision: "forbidden", detail: decision.reason }), requestId);
     }
     return null;
   }
@@ -409,16 +426,19 @@ export function logGatewayInternalError(
   console.error(`[5xx] ${at.requestId} ${at.stage} ${detail}`);
 }
 
-/** A residency problem doc carrying the correct region (as a header + an extension). */
-function regionProblem(status: number, type: string, title: string, detail: string, correctRegion: Region | null): RawHttpResponse {
-  const extensions = correctRegion !== null ? { correctRegion } : {};
-  const bodyBytes = new TextEncoder().encode(JSON.stringify({ type, title, status, detail, extensions }));
-  const headers: Record<string, string> = {
-    "content-type": "application/problem+json",
-    "content-length": bodyBytes.byteLength.toString(),
+/**
+ * The pre-auth residency refusal on the wire. The body and the residency headers come from
+ * `residencyRefusal`, the function the post-auth gate also calls (ADR-0457); the security headers
+ * and `x-request-id` are added here because this answer never enters the gateway, which is what adds
+ * them to the gate's — so the two refusals carry the same header set as well as the same bytes.
+ */
+function preAuthResidencyResponse(env: ProblemEnvelope, requestId: string): RawHttpResponse {
+  const secured = withDefaultSecurityHeaders(env.response);
+  return {
+    status: secured.status,
+    headers: { ...secured.headers, "x-request-id": requestId },
+    body: secured.bodyBytes,
   };
-  if (correctRegion !== null) headers["x-crossengin-region"] = correctRegion;
-  return { status, headers, body: bodyBytes };
 }
 
 function headerScheme(raw: RawHttpRequest): ForwardedProto | null {

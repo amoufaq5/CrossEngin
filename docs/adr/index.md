@@ -1,10 +1,10 @@
 # ADR index
 
-446 records. Generated from the ADR files themselves — regenerate rather than
+451 records. Generated from the ADR files themselves — regenerate rather than
 hand-edit, so a title or status change in an ADR cannot silently drift from this table:
 `python3 docs/adr/generate-index.py`.
 
-- **Accepted:** 367  **Proposed:** 79
+- **Accepted:** 372  **Proposed:** 79
 - ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never written;
   those milestones landed under other numbers. The gap is permanent and intentional.
 - ADR-0046 is the Phase 2 plan; **ADR-0077 is the Phase 3 plan (P1–P8)**. Phase 4 has no
@@ -458,3 +458,8 @@ hand-edit, so a title or status change in an ADR cannot silently drift from this
 | [0450](0450-an-ai-design-is-priced-reserved-and-bounded-before-it-is-sent-and-its-transcript-is-written-in-its-tenants-scope.md) | An AI design is priced, reserved and bounded before it is sent, and its transcript is written in its tenant's scope | — | Accepted | 2026-11-19 |
 | [0451](0451-a-usage-window-is-billed-once-a-notice-goes-only-where-it-can-arrive-and-residency-is-checked-on-the-proven-tenant.md) | A usage window is billed once, a notice goes only where it can arrive, and residency is checked on the proven tenant | — | Accepted | 2026-11-19 |
 | [0452](0452-a-pack-is-trusted-by-a-registered-publisher-and-admitted-against-its-tenants-own-facts.md) | A pack is trusted by a registered publisher and admitted against its tenant's own facts | — | Accepted | 2026-11-19 |
+| [0453](0453-an-article-17-deletion-runs-on-its-own-owner-connection-and-a-proven-refusal-the-deployment-can-fix-is-released-for-retry.md) | An Article 17 deletion runs on its own owner connection, and a proven refusal the deployment can fix is released for retry | — | Accepted | 2026-11-20 |
+| [0454](0454-a-pack-signature-covers-the-release-not-the-manifest.md) | A pack signature covers the release, not the manifest | — | Accepted | 2026-11-20 |
+| [0455](0455-a-column-key-configuration-that-cannot-open-the-stored-keys-refuses-to-boot.md) | A column-key configuration that cannot open the stored keys refuses to boot | — | Accepted | 2026-11-20 |
+| [0456](0456-an-ai-provider-is-sent-a-keyed-per-tenant-pseudonym-and-never-the-tenant-id.md) | An AI provider is sent a keyed per-tenant pseudonym, and never the tenant id | — | Accepted | 2026-11-20 |
+| [0457](0457-a-residency-refusal-has-one-shape-whichever-check-answers-it.md) | A residency refusal has one shape, whichever check answers it | — | Accepted | 2026-11-20 |

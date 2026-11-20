@@ -1,5 +1,5 @@
 import type { Handler, HandlerInput } from "@crossengin/api-gateway-runtime";
-import { HandlerRegistry } from "@crossengin/api-gateway-runtime";
+import { HandlerRegistry, residencyRefusal } from "@crossengin/api-gateway-runtime";
 import { buildProfileFromTemplate } from "@crossengin/residency";
 import { InMemoryTenantResidencyDirectory } from "@crossengin/residency-runtime";
 import { describe, expect, it } from "vitest";
@@ -79,6 +79,15 @@ describe("residency-gate — the decision on the authenticated tenant", () => {
     })(input(EU));
     expect(out.status).toBe(421);
     expect(out.headers?.["x-crossengin-region"]).toBe("eu-central");
+    // ADR-0457: the registry's type and both carriers of the home region, the shape the pre-auth
+    // hint check answers too, from the one builder.
+    if (out.kind !== "json") throw new Error("expected a json refusal");
+    const body = out.body as { detail: string; type: string; extensions: unknown };
+    expect(body.type).toBe("https://crossengin.io/errors/residency-misdirected");
+    expect(body.extensions).toEqual({ reason: "residency_misdirected", correctRegion: "eu-central" });
+    expect(body).toEqual(
+      residencyRefusal({ decision: "misdirected", detail: body.detail, correctRegion: "eu-central" }).body,
+    );
     expect(inner.calls).toBe(0);
     expect(refusals).toEqual([
       { decision: "misdirected", operationId: "products.list", tenantId: EU, region: "us-east" },

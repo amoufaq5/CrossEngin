@@ -200,6 +200,13 @@ services:
       # the session. The boot line `[pg] row-level security:` says which this process got.
       PGUSER: ${POSTGRES_APP_USER:-${POSTGRES_USER}}
       PGPASSWORD: ${POSTGRES_APP_PASSWORD:-${POSTGRES_PASSWORD}}
+      # The one exception to the confined role (ADR-0453): an Article 17 deletion must empty tables
+      # the app role's policies confine, so the deletion pipeline — and nothing else — connects as
+      # the role named here, on its own connection. Opt-in: empty means deletions run on the app role
+      # and are refused rls_would_confine_this_session; the `[deletion]` boot line says which. None of
+      # the deletion flags is on the command below, so setting these alone changes nothing.
+      DELETION_PGUSER: ${DELETION_PGUSER:-}
+      DELETION_PGPASSWORD: ${DELETION_PGPASSWORD:-}
       NODE_ENV: production
       # Credentials reach the API through the environment, not through `command`, because argv is
       # readable by anyone who can run `ps` (ADR-0301). `${VAR:-}` passes an empty value when the

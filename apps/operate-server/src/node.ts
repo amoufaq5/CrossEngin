@@ -23,6 +23,7 @@ import {
   admissionRemedy,
   createNodePgConnection,
   formatCheckAdmissionSurvey,
+  UNBOUNDED_POOL_SETTINGS,
   formatPgPoolSettings,
   parsePgEnvConfig,
   SERVING_POOL_SETTINGS,
@@ -168,6 +169,14 @@ import {
   shreddabilityOf,
 } from "./data-key-envelope.js";
 import { fenceColumnKeyGeneration } from "./column-key-fence.js";
+import {
+  ColumnKeyConfigurationRefused,
+  assessColumnKeyConsistency,
+  checkKeylessCiphertext,
+  formatColumnKeyConsistency,
+  keylessCiphertextSecret,
+  surveyDataKeyRows,
+} from "./column-key-consistency.js";
 import {
   formatColumnSecretRing,
   kekResolverFor,
@@ -381,12 +390,18 @@ import {
   PostgresDeletionRequestStore,
   PostgresLifecycleEventStore,
   PostgresTombstoneStore,
+  PIPELINE_PERFORMED_SUBSYSTEMS,
   censusBootSchemaTables,
   deleteTenantAtomically,
   formatDeadlineFinding,
   lifecycleTrailGaps,
   probeLifecycleTrail,
 } from "@crossengin/tenant-lifecycle-pg";
+import {
+  formatDeletionConnectionLine,
+  probeDeletionConnection,
+  resolveDeletionOwnerConfig,
+} from "./deletion-owner-connection.js";
 import {
   DeletionCapabilitiesSchema,
   TENANT_LIFECYCLE_STATES,
@@ -403,6 +418,7 @@ import {
   buildMarketplaceAdminRoutes,
   loadPackCatalog,
   surveyPackCatalog,
+  formatPackCatalogSurvey,
 } from "./marketplace-admin.js";
 import { buildMarketplaceTenantContext, formatMarketplaceTenantFacts } from "./marketplace-tenant-context.js";
 import { buildMarketplaceAuthoringRoutes } from "./marketplace-authoring.js";
@@ -443,6 +459,11 @@ import {
 } from "./pending-deletion-admission.js";
 import { PostgresTenantManifestStore, manifestSummary } from "./tenant-manifests.js";
 import { buildDesignDesigner, buildDesignProviderFromEnv } from "./ai-design.js";
+import {
+  formatAiTenantPseudonym,
+  resolveAiTenantPseudonymSource,
+  tenantPseudonymForOf,
+} from "./ai-tenant-pseudonym.js";
 import { buildAiDesignRoutes } from "./ai-design-routes.js";
 import {
   TenantGatewayCache,
@@ -468,7 +489,11 @@ import {
   buildTenantDeletionRoutes,
   newTombstoneId,
 } from "./tenant-deletion-routes.js";
-import { buildDeletionRequestRoutes, newRequestId } from "./deletion-request-routes.js";
+import {
+  buildDeletionRequestRoutes,
+  newRequestId,
+  recordTenantLifecycle,
+} from "./deletion-request-routes.js";
 import { DeletionEscalationConfigSchema } from "./deletion-escalation-config.js";
 import { DeletionEvidenceEscalator } from "./deletion-evidence-escalation.js";
 import { buildPageDispatcher, buildPageSendersFromEnv } from "./page-senders-env.js";
@@ -993,6 +1018,28 @@ async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<
       ? resolveColumnSecretRing(process.env, options.columnKeyMode)
       : undefined;
   if (secretRing !== undefined) console.info(`[phi] ${formatColumnSecretRing(secretRing)}`);
+  // ADR-0455: a mode or a ring that cannot open the data keys the database already holds is refused
+  // here, naming the condition, rather than booting clean and answering those tenants with a 500.
+  if (secretRing !== undefined) {
+    const keyConsistency = assessColumnKeyConsistency({
+      mode: options.columnKeyMode,
+      ring: secretRing,
+      survey: await surveyDataKeyRows(conn, { schema: schema ?? "meta" }),
+      // Tenants with no key row are the case the key rows cannot answer: their ciphertext is read
+      // under a key this secret derives, and a replaced generation-1 secret leaves the table empty.
+      // Same boot schema as the seed probe below, which is where the column store writes.
+      ciphertext: await checkKeylessCiphertext(conn, {
+        keySchema: schema ?? "meta",
+        bootSchema: schema ?? COLUMN_STORE_DEFAULT_SCHEMA,
+        secret: keylessCiphertextSecret(options.columnKeyMode, secretRing),
+      }),
+    });
+    for (const line of formatColumnKeyConsistency(keyConsistency)) {
+      if (line.level === "info") console.info(`[phi] ${line.text}`);
+      else if (line.level === "warn") console.warn(`[phi] ${line.text}`);
+    }
+    if (keyConsistency.verdict === "refuse") throw new ColumnKeyConfigurationRefused(keyConsistency);
+  }
   let columnConn: PgConnection = conn;
   const columnKey = ((): ColumnEncryptionKeySource | undefined => {
     if (
@@ -1385,8 +1432,11 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         ...(options.store === "pg-columns" ? [options.schema ?? COLUMN_STORE_DEFAULT_SCHEMA] : []),
       ]),
     ]);
+    // Not when the deletion pipeline has its own connection (ADR-0453): this session's confinement
+    // then says nothing about the erasure, and the `[deletion]` line probes the one that does.
     const erasureDeclared =
-      options.deletionCapabilityDeclarations !== null || options.deletionCapabilities !== null;
+      (options.deletionCapabilityDeclarations !== null || options.deletionCapabilities !== null) &&
+      resolveDeletionOwnerConfig(parsePgEnvConfig()).kind === "absent";
     for (const line of formatServingRoleSurvey(servingRole, erasureDeclared)) {
       if (line.level === "warn") console.warn(line.text);
       else console.info(line.text);
@@ -1786,6 +1836,35 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       );
     }
   }
+  // ADR-0453. The connection an Article 17 deletion runs on: a separate owner connection when
+  // `DELETION_PGUSER` is set, used for the pipeline's statements and nothing else, so the serving
+  // role stays confined for every request; otherwise the serving connection, as before. Boot asks
+  // the erasure's own confinement probe on whichever it is, rather than trusting the variable.
+  let deletionPipelineConn: PgConnection | undefined;
+  if (
+    conn !== undefined &&
+    (options.tenantErasureRoutes || options.tenantDeletionRoutes || options.deletionRunnerMs !== null)
+  ) {
+    const ownerSource = resolveDeletionOwnerConfig(parsePgEnvConfig());
+    if (ownerSource.kind === "configured") {
+      // Two connections at most: the pipeline runs one transaction per deletion, and the boot probe
+      // is the only other user. Unbounded session limits on purpose, like every operator path
+      // (`UNBOUNDED_POOL_SETTINGS`): an erasure of a large tenant is one long statement.
+      deletionPipelineConn = createNodePgConnection(ownerSource.config, {
+        pool: { ...UNBOUNDED_POOL_SETTINGS, maxConnections: 2 },
+      });
+    }
+    const said = formatDeletionConnectionLine(
+      ownerSource.kind,
+      // No `schema`: neither `deleteTenantAtomically` call site passes one, so the erasure reads
+      // `meta`, and a probe of `--schema` would answer for a schema no deletion touches.
+      await probeDeletionConnection(deletionPipelineConn ?? conn, {
+        bootTargets: deletionBootSchema.targets,
+      }),
+    );
+    if (said.level === "info") console.info(`[deletion] ${said.line}`);
+    else console.warn(`[deletion] ${said.line}`);
+  }
   // Resolved once per request in the auth stage and cached, so the five places that build an
   // `auth.Principal` read one answer instead of each asking its own. Built only alongside an
   // evaluator (see the policy block above), and reading through `PostgresUserStore.membershipFor`,
@@ -2054,9 +2133,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     );
     console.log(`[marketplace] ${PACK_INSTALL_EFFECT.detail}`);
     const catalogFindings = surveyPackCatalog(catalog, packPublishers);
-    console.log(
-      `[marketplace] pack catalog: ${catalog.list().length.toString()} version(s), ${(catalog.list().length - catalogFindings.length).toString()} signed by a registered publisher`,
-    );
+    console.log(formatPackCatalogSurvey(catalog.list().length, catalogFindings));
     for (const f of catalogFindings) {
       console.warn(`[marketplace] catalog ${f.packId}@${f.version} will be refused at install: ${f.refusal} — ${f.detail}`);
     }
@@ -2590,6 +2667,9 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           `${options.deletionGraceDays.toString()}-day grace after verification (--deletion-grace-days)`,
       );
       const eraseConn = conn;
+      // The survey and the drop run on the deletion pipeline's connection (ADR-0453): dropping a
+      // tenant's schema needs its owner, and the request reads stay on the serving connection.
+      const schemaEraseConn = deletionPipelineConn ?? conn;
       const emitter = requireEmitter("--tenant-erasure-routes");
       const registry = (): TenantColumnStoreRegistry | null => tenantStoreRegistry;
       extraRouteList.push(
@@ -2600,13 +2680,13 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           eraser: {
             survey: async (tenantId) => {
               const { survey, collateral } = await surveyTenantSchemaWithCollateral(
-                eraseConn,
+                schemaEraseConn,
                 tenantId,
               );
               return { ...survey, collateral };
             },
             erase: async (tenantId, authority) => {
-              const erasure = await eraseTenantSchema(eraseConn, tenantId, authority);
+              const erasure = await eraseTenantSchema(schemaEraseConn, tenantId, authority);
               // Forget before reporting: `storeFor` is synchronous and would otherwise keep handing
               // out a store bound to a schema that no longer exists, so the next request for this
               // tenant would fail against dropped tables instead of falling back.
@@ -2690,10 +2770,14 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           `${options.deletionGraceDays.toString()}-day grace after verification (--deletion-grace-days)`,
       );
       const delConn = conn;
+      // Every statement of the pipeline runs on this one (ADR-0453): the owner connection when
+      // configured, so the erasure is not confined; the request and tenant rows stay on `delConn`.
+      const pipelineConn = deletionPipelineConn ?? conn;
       const emitter = requireEmitter("--tenant-deletion-routes");
       // The same chain the audit log anchors into, not a second one: one tamper-evident trail per
       // tenant is the point (ADR-0286).
-      const tombstones = new PostgresTombstoneStore(delConn, auditChainProducer, schemaOpt);
+      const tombstones = new PostgresTombstoneStore(pipelineConn, auditChainProducer, schemaOpt);
+      const tombstoneReads = new PostgresTombstoneStore(delConn, auditChainProducer, schemaOpt);
       const tenantStore = new PostgresTenantStore(delConn);
       const registry = (): TenantColumnStoreRegistry | null => tenantStoreRegistry;
       extraRouteList.push(
@@ -2701,7 +2785,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           deleter: {
             delete: async (req) => {
               const outcome = await deleteTenantAtomically(
-                delConn,
+                pipelineConn,
                 tombstones,
                 eraseTenantSchemaWithin,
                 {
@@ -2744,7 +2828,9 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
               return outcome;
             },
             retire: async (tenantId) => (await tenantStore.setStatus(tenantId, "deleted")) !== null,
-            tombstonesFor: async (tenantId) => tombstones.listForTenant(tenantId),
+            // A read request, so the serving connection's own store and not the pipeline's: the
+            // owner connection runs the pipeline's statements and nothing else (ADR-0453).
+            tombstonesFor: async (tenantId) => tombstoneReads.listForTenant(tenantId),
           },
           // The approval this route executes under is a verified deletion request (H-05), so the
           // request store is part of the route rather than an optional extra.
@@ -3938,12 +4024,16 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
               ),
           })
         : undefined;
+    // The opaque per-tenant id the provider is sent instead of the tenant id (ADR-0456), keyed by
+    // CURSOR_ENCRYPTION_SECRET through its own HKDF label; absent secret → nothing is sent.
+    const aiTenantPseudonym = resolveAiTenantPseudonymSource(process.env);
     const designer =
       providerBuild !== null
         ? buildDesignDesigner({
             provider: providerBuild.provider,
             model: providerBuild.model,
             providerLabel: providerBuild.providerLabel,
+            tenantPseudonymFor: tenantPseudonymForOf(aiTenantPseudonym),
             ensureRoles: options.aiDesignRoles,
             // Until M-16 neither was passed: the shipped `--ai-max-request-dollars 2` was parsed,
             // handed to the budget and read by nothing, so no design was ever refused by it.
@@ -3976,6 +4066,9 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       // operator who configured a key correctly got silence, so the one surface that could confirm
       // which vendor a tenant's business description is about to be sent to said nothing at all.
       console.log(`[ai-design] provider: ${providerBuild.providerLabel}`);
+      const pseudonymLine = formatAiTenantPseudonym(aiTenantPseudonym, providerBuild);
+      if (pseudonymLine.level === "warn") console.warn(`[ai-design] ${pseudonymLine.line}`);
+      else console.log(`[ai-design] ${pseudonymLine.line}`);
       // And the resolution can DISCARD the operator's own declaration. The Anthropic arm, and the
       // OpenAI arm on api.openai.com, gate `--ai-model` on a pricing catalogue (`isAnthropicModel` /
       // `isOpenAiChatModel`) and fall back to a priceable default on a miss (an OpenAI custom base
@@ -5297,18 +5390,42 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       );
     } else {
       const runConn = conn;
+      // The pipeline's connection (ADR-0453); the request store stays on the serving `runConn`.
+      const pipelineConn = deletionPipelineConn ?? conn;
       const runnerCapabilities = deletionCapabilities;
       // Hoisted, not read through `options` at the call site: the kind is chosen inside the `run`
       // closure, where the `else if (… === null)` guard above does not narrow.
       const runnerKind = TENANT_WIDE_KIND_BY_SCOPE[options.deletionSubjectScope];
       const emitter = auditEmitter;
-      const tombstones = new PostgresTombstoneStore(runConn, auditChainProducer, schemaOpt);
+      const tombstones = new PostgresTombstoneStore(pipelineConn, auditChainProducer, schemaOpt);
       const requests = new PostgresDeletionRequestStore(runConn, schemaOpt);
       const tenantStore = new PostgresTenantStore(runConn);
+      const runnerTenantState = buildTenantStateMover(tenantStore, {
+        onNoMatch: ({ tenantId }) =>
+          console.warn(`[platform] tenant ${tenantId} was not pending_deletion; nothing to restore`),
+      });
       const registry = (): TenantColumnStoreRegistry | null => tenantStoreRegistry;
       const executedBy = options.deletionRunnerExecutedBy ?? DEFAULT_DELETION_EXECUTED_BY;
       // The approver is no longer configured here (H-05): it is each request's verifier, a
       // principal who authenticated to make that act, and the runner refuses one equal to itself.
+      //
+      // The runner supplies no attestations, so a subsystem the capabilities require to attest and
+      // the pipeline does not perform refuses every scheduled deletion `assemble/subsystem_unattested`
+      // — after both erasures, so it rejects the request rather than releasing it (ADR-0453). That is
+      // a fact about this boot's declaration, so it is said here, once, rather than discovered per
+      // request.
+      const unattestable = requiredSubsystemsFor(runnerCapabilities).filter(
+        (s) => !(PIPELINE_PERFORMED_SUBSYSTEMS as readonly string[]).includes(s),
+      );
+      if (unattestable.length > 0) {
+        console.warn(
+          `[deletion] runner: --deletion-capabilities requires an attestation for ` +
+            `${unattestable.join(", ")}, which the runner cannot supply, so every scheduled deletion ` +
+            "will be refused assemble/subsystem_unattested and its request rejected; declare each " +
+            "absent or present_not_erased as is true of this deployment, or delete through " +
+            "--tenant-deletion-routes with the attestation in the body",
+        );
+      }
       console.log(
         `[deletion] runner grace: ${options.deletionGraceDays.toString()} day(s) between verify and ` +
           "execution — rejecting a request inside that window cancels it; the wait yields to the " +
@@ -5324,9 +5441,24 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           ),
         newTombstoneId: () => newTombstoneId(randomUUID()),
         capabilities: runnerCapabilities,
+        // A final refusal rejects the request, so the tenant the verify route made read-only is
+        // restored here as the synchronous route and the reject route restore it (ADR-0453). A
+        // released request is not rejected and does not reach this: its deletion is still owed.
+        restoreTenantAfterRejection: async ({ requestId, tenantId }) => {
+          const { fromState } = await runnerTenantState.restore(tenantId);
+          await recordTenantLifecycle(lifecycleEvents !== null ? { lifecycleEvents } : {}, {
+            tenantId,
+            action: "restore",
+            fromState,
+            occurredAt: new Date().toISOString(),
+            reason: `deletion request ${requestId} refused`,
+            actorUserId: executedBy,
+            source: "deletion",
+          });
+        },
         run: async (input) => {
           const outcome = await deleteTenantAtomically(
-            runConn,
+            pipelineConn,
             tombstones,
             eraseTenantSchemaWithin,
             {
@@ -5381,6 +5513,10 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           // they are errors in the log even though the tick itself succeeded.
           if (result.outcome === "aborted" || result.outcome === "completed_unrecorded") {
             console.error(`${line} — needs reconciliation: ${result.detail ?? "no detail"}`);
+          } else if (result.outcome === "refused_retryable") {
+            // Released back to `verified` (ADR-0453): said every tick it recurs, because it is a
+            // standing condition of the deployment and the deadline is still running.
+            console.warn(`${line} — released for retry: ${result.detail ?? "no detail"}`);
           } else if (result.outcome !== "not_claimed") {
             console.log(line);
           }
@@ -6519,6 +6655,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           // The pool last, once nothing that holds a connection is still running. Left open before,
           // so a shutdown under `docker stop` was a kill with the server-side sessions still live.
           .then(() => conn?.close())
+          .then(() => deletionPipelineConn?.close())
           .then(
             () => resolve(),
             (err: unknown) => reject(err instanceof Error ? err : new Error(String(err))),

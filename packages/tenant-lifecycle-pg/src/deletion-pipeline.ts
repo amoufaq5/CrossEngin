@@ -94,6 +94,42 @@ export interface PipelineRefusal {
   readonly detail: string;
 }
 
+/**
+ * Every reason the `input` stage refuses with, so a total map over refusal reasons
+ * (`DELETION_REFUSAL_RETRYABILITY`, ADR-0453) has a vocabulary to be total over. Both producers are
+ * typed `InputPipelineRefusal`, whose `reason` is this union rather than `PipelineRefusal`'s free
+ * string — so a sixth reason pushed there without being added here is a compile error, by the type
+ * of the array and not by a `satisfies` an author could leave off.
+ */
+export const PIPELINE_INPUT_REFUSAL_REASONS = [
+  "performed_subsystem_attested",
+  "performed_subsystem_self_exempted",
+  "kind_claims_a_narrower_subject",
+  "subject_named_on_a_tenant_wide_erasure",
+  "tenant_state_unresolvable",
+] as const;
+export type PipelineInputRefusalReason = (typeof PIPELINE_INPUT_REFUSAL_REASONS)[number];
+
+/** A refusal of the `input` stage, narrowed to that stage's vocabulary. */
+type InputPipelineRefusal = PipelineRefusal & {
+  readonly stage: "input";
+  readonly reason: PipelineInputRefusalReason;
+};
+
+/**
+ * The schema eraser's refusal vocabulary, **restated** at the seam because this package must not
+ * depend on `operate-runtime-pg`, whose `ERASURE_REFUSAL_REASONS` it mirrors.
+ * `apps/operate-server`, which imports both, asserts the two are equal, so a fifth reason added
+ * there fails a test rather than reaching `DELETION_REFUSAL_RETRYABILITY` as an unknown string.
+ */
+export const SCHEMA_ERASER_REFUSAL_REASONS = [
+  "not_a_tenant_schema",
+  "schema_not_this_tenant",
+  "four_eyes_violated",
+  "external_dependents",
+] as const;
+export type SchemaEraserRefusalReason = (typeof SCHEMA_ERASER_REFUSAL_REASONS)[number];
+
 /** The slice of the erasure this pipeline needs, so it imports no `operate-runtime-pg` types. */
 export interface SchemaEraserWithin {
   (
@@ -381,8 +417,8 @@ function eraseRefusals(
  * map over the dispositions, and a fifth disposition has to answer there instead of inheriting an
  * answer from a comparison written here.
  */
-function inputRefusals(input: DeleteTenantInput): readonly PipelineRefusal[] {
-  const out: PipelineRefusal[] = [];
+function inputRefusals(input: DeleteTenantInput): readonly InputPipelineRefusal[] {
+  const out: InputPipelineRefusal[] = [];
   const performed = new Set<DeletionSubsystem>(PIPELINE_PERFORMED_SUBSYSTEMS);
   for (const attestation of input.attestations ?? []) {
     if (!performed.has(attestation.subsystem)) continue;
@@ -518,19 +554,15 @@ export async function deleteTenantAtomically(
         input.schema ?? "meta",
       );
       if (fromState === null) {
-        return {
-          ok: false,
-          refusals: [
-            {
-              stage: "input" as const,
-              reason: "tenant_state_unresolvable",
-              detail:
-                `${input.schema ?? "meta"}.tenants holds no row for ${input.tenantId}, so the` +
-                " transition this deletion performs has no source state; substituting one would" +
-                " put a fabricated fact in the only record that outlives the tenant",
-            },
-          ],
+        const unresolvable: InputPipelineRefusal = {
+          stage: "input",
+          reason: "tenant_state_unresolvable",
+          detail:
+            `${input.schema ?? "meta"}.tenants holds no row for ${input.tenantId}, so the` +
+            " transition this deletion performs has no source state; substituting one would" +
+            " put a fabricated fact in the only record that outlives the tenant",
         };
+        return { ok: false, refusals: [unresolvable] };
       }
     }
 

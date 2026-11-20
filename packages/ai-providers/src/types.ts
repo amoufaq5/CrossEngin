@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { TenantPseudonymSchema } from "./tenant-pseudonym.js";
+
 export const RegionSchema = z.enum(["eu", "us", "me", "ap", "sa"]);
 export type Region = z.infer<typeof RegionSchema>;
 
@@ -91,6 +93,12 @@ export const CompletionRequestSchema = z.object({
   temperature: z.number().min(0).max(2).optional(),
   jsonMode: z.boolean().optional(),
   tenantId: z.string().min(1),
+  /**
+   * The opaque per-tenant identifier the provider is sent in place of `tenantId`, which never
+   * leaves this process (ADR-0456). Absent means the deployment configured no pseudonym source, and
+   * the builders then send no tenant identifier at all rather than a fallback.
+   */
+  tenantPseudonym: TenantPseudonymSchema.optional(),
   sessionId: z.string().min(1),
 });
 export type CompletionRequest = z.infer<typeof CompletionRequestSchema>;
@@ -130,6 +138,8 @@ export const EmbeddingRequestSchema = z.object({
   model: z.string().optional(),
   texts: z.array(z.string()).min(1),
   tenantId: z.string().min(1),
+  /** See `CompletionRequestSchema.tenantPseudonym`. */
+  tenantPseudonym: TenantPseudonymSchema.optional(),
   sessionId: z.string().min(1).optional(),
 });
 export type EmbeddingRequest = z.infer<typeof EmbeddingRequestSchema>;

@@ -4076,6 +4076,17 @@ export const META_GDPR_DELETION_REQUESTS: TableDefinition = {
     },
     { name: "notes", type: "TEXT" },
     /**
+     * Why the last execution attempt was refused and the request released back to `verified`
+     * (ADR-0453). Nullable with no default: every stored row predates it and no attempt of theirs was
+     * released, so any default would assert a refusal that never happened. `>= 1` with no upper
+     * bound, matching `GdprDeletionRequestSchema.lastAttemptRefusal`'s `min(1)` (ADR-0373's rule).
+     */
+    {
+      name: "last_attempt_refusal",
+      type: "TEXT",
+      check: "char_length(last_attempt_refusal) >= 1",
+    },
+    /**
      * The tombstone that completed this request. Without it a `completed` request names no proof:
      * `completion_sha256` commits to one but a digest is not a lookup key, so the record of the
      * deletion and the record of the request for it could not be joined (ADR-0321).

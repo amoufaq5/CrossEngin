@@ -9,7 +9,7 @@ import {
   parsePackPublisherSpec,
   verifyPackPublisher,
 } from "./publishers.js";
-import { signPackManifest } from "./signing.js";
+import { signPackRelease } from "./signing.js";
 
 function manifest(id: string, kind: PackAuthorKind): PackManifest {
   const trusted = kind === "crossengin_official" || kind === "certified_partner";
@@ -24,11 +24,16 @@ function manifest(id: string, kind: PackAuthorKind): PackManifest {
   });
 }
 
+const BUNDLE = "a".repeat(64);
+const SUBMITTED = { version: "1.0.0", bundleSha256: BUNDLE };
+
 function signed(m: PackManifest, kp = generateEd25519Keypair()) {
   return {
     kp,
-    signature: signPackManifest({
+    signature: signPackRelease({
       manifest: m,
+      version: SUBMITTED.version,
+      bundleSha256: SUBMITTED.bundleSha256,
       privateKeyBase64: kp.privateKeyBase64,
       publicKeyBase64: kp.publicKeyBase64,
       signedAt: "2026-05-16T12:00:00.000Z",
@@ -104,7 +109,7 @@ describe("verifyPackPublisher", () => {
   it("accepts a pack signed by the registered key inside its namespace", () => {
     const m = manifest("com.acme.pharmacy", "community");
     const s = signed(m);
-    const v = verifyPackPublisher({ manifest: m, signature: s.signature, registry: registryFor("com.acme", "community", s.kp.publicKeyBase64) });
+    const v = verifyPackPublisher({ manifest: m, signature: s.signature, submitted: SUBMITTED, registry: registryFor("com.acme", "community", s.kp.publicKeyBase64) });
     expect(v.ok).toBe(true);
   });
 
@@ -112,29 +117,86 @@ describe("verifyPackPublisher", () => {
     const m = manifest("com.acme.pharmacy", "community");
     const s = signed(m);
     const other = generateEd25519Keypair();
-    const v = verifyPackPublisher({ manifest: m, signature: s.signature, registry: registryFor("com.acme", "community", other.publicKeyBase64) });
+    const v = verifyPackPublisher({ manifest: m, signature: s.signature, submitted: SUBMITTED, registry: registryFor("com.acme", "community", other.publicKeyBase64) });
     expect(v).toMatchObject({ ok: false, refusal: "publisher_unregistered" });
   });
 
   it("refuses a pack id outside the publisher's namespace", () => {
     const m = manifest("org.rival.pharmacy", "community");
     const s = signed(m);
-    const v = verifyPackPublisher({ manifest: m, signature: s.signature, registry: registryFor("com.acme", "community", s.kp.publicKeyBase64) });
+    const v = verifyPackPublisher({ manifest: m, signature: s.signature, submitted: SUBMITTED, registry: registryFor("com.acme", "community", s.kp.publicKeyBase64) });
     expect(v).toMatchObject({ ok: false, refusal: "pack_outside_publisher_namespace" });
   });
 
   it("refuses an author kind the publisher was not registered as, which is how review exemption was claimed", () => {
     const m = manifest("com.acme.pharmacy", "crossengin_official");
     const s = signed(m);
-    const v = verifyPackPublisher({ manifest: m, signature: s.signature, registry: registryFor("com.acme", "community", s.kp.publicKeyBase64) });
+    const v = verifyPackPublisher({ manifest: m, signature: s.signature, submitted: SUBMITTED, registry: registryFor("com.acme", "community", s.kp.publicKeyBase64) });
     expect(v).toMatchObject({ ok: false, refusal: "author_kind_not_registered" });
   });
 
-  it("refuses a manifest altered after signing", () => {
+  it("refuses a manifest altered after signing: the release names the original manifest's digest", () => {
     const m = manifest("com.acme.pharmacy", "community");
     const s = signed(m);
     const tampered = { ...m, name: "Tampered" };
-    const v = verifyPackPublisher({ manifest: tampered, signature: s.signature, registry: registryFor("com.acme", "community", s.kp.publicKeyBase64) });
+    const v = verifyPackPublisher({ manifest: tampered, signature: s.signature, submitted: SUBMITTED, registry: registryFor("com.acme", "community", s.kp.publicKeyBase64) });
+    expect(v).toMatchObject({ ok: false, refusal: "release_manifest_mismatch" });
+  });
+
+  // ADR-0452 measured the replay live: one publisher signature re-sent under another version with a
+  // new bundle answered 201. Each arm below is that capture replayed against one changed fact.
+  it("refuses a captured signature replayed under a different version", () => {
+    const m = manifest("com.acme.pharmacy", "community");
+    const s = signed(m);
+    const v = verifyPackPublisher({
+      manifest: m,
+      signature: s.signature,
+      submitted: { ...SUBMITTED, version: "9.9.9" },
+      registry: registryFor("com.acme", "community", s.kp.publicKeyBase64),
+    });
+    expect(v).toMatchObject({ ok: false, refusal: "release_version_mismatch" });
+  });
+
+  it("refuses a captured signature replayed with a different bundle", () => {
+    const m = manifest("com.acme.pharmacy", "community");
+    const s = signed(m);
+    const v = verifyPackPublisher({
+      manifest: m,
+      signature: s.signature,
+      submitted: { ...SUBMITTED, bundleSha256: "b".repeat(64) },
+      registry: registryFor("com.acme", "community", s.kp.publicKeyBase64),
+    });
+    expect(v).toMatchObject({ ok: false, refusal: "release_bundle_mismatch" });
+  });
+
+  it("refuses a captured signature whose release was rewritten to match the replay", () => {
+    const m = manifest("com.acme.pharmacy", "community");
+    const s = signed(m);
+    const rewritten = { ...s.signature, release: { ...s.signature.release!, version: "9.9.9" } };
+    const v = verifyPackPublisher({
+      manifest: m,
+      signature: rewritten,
+      submitted: { ...SUBMITTED, version: "9.9.9" },
+      registry: registryFor("com.acme", "community", s.kp.publicKeyBase64),
+    });
     expect(v).toMatchObject({ ok: false, refusal: "signature_invalid" });
   });
+
+  it("refuses a release signed for another pack id inside the same namespace", () => {
+    const signedFor = manifest("com.acme.pharmacy", "community");
+    const s = signed(signedFor);
+    const other = manifest("com.acme.clinic", "community");
+    const v = verifyPackPublisher({ manifest: other, signature: s.signature, submitted: SUBMITTED, registry: registryFor("com.acme", "community", s.kp.publicKeyBase64) });
+    expect(v).toMatchObject({ ok: false, refusal: "release_pack_mismatch" });
+  });
+
+  it("refuses a manifest-only signature by name, before asking the registry anything", () => {
+    const m = manifest("com.acme.pharmacy", "community");
+    const s = signed(m);
+    const { release: _release, ...legacy } = s.signature;
+    // An unregistered registry: the legacy form is refused first, because no key could verify it.
+    const v = verifyPackPublisher({ manifest: m, signature: legacy, submitted: SUBMITTED, registry: new PackPublisherRegistry([]) });
+    expect(v).toMatchObject({ ok: false, refusal: "legacy_signature_form" });
+  });
+
 });

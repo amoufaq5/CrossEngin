@@ -562,8 +562,8 @@ export class TenantGatewayCache {
  * `ColumnEncryptionUnavailable` enumerates classified column labels, so the detail that makes the
  * log useful is exactly the detail a caller may not have — it goes to `onBuildRefused` instead.
  *
- * Constructed here rather than through the pipeline, following `regionProblem` in `server.ts`,
- * which refuses pre-auth the same way: there is no compiled gateway to route this through.
+ * Constructed here rather than through the pipeline, as `server.ts`' pre-auth residency refusal is
+ * (`preAuthResidencyResponse`): there is no compiled gateway to route this through.
  */
 function gatewayUnavailableProblem(
   tenantId: string,

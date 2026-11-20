@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DISTRIBUTION_CHANNELS,
+  PACK_RELEASE_FORM,
   PACK_VERSION_STATUSES,
   PackVersionListSchema,
   PackVersionRecordSchema,
@@ -78,6 +79,40 @@ describe("PackVersionRecordSchema", () => {
 
   it("accepts a valid published version", () => {
     expect(() => PackVersionRecordSchema.parse(base)).not.toThrow();
+  });
+
+  describe("against the release its signature names", () => {
+    const release = {
+      form: PACK_RELEASE_FORM,
+      packId: base.packId,
+      version: base.version,
+      manifestSha256: base.manifestSha256,
+      bundleSha256: base.bundleSha256,
+    };
+    const withRelease = { ...base, signature: { ...base.signature, release } };
+
+    it("accepts a row that agrees with its signed release", () => {
+      expect(() => PackVersionRecordSchema.parse(withRelease)).not.toThrow();
+    });
+
+    it.each([
+      ["packId", { packId: "com.crossengin.y" }],
+      ["version", { version: "9.9.9" }],
+      ["manifestSha256", { manifestSha256: "c".repeat(64) }],
+      ["bundleSha256", { bundleSha256: "d".repeat(64) }],
+    ] as const)("refuses a row whose %s was edited after signing", (field, patch) => {
+      const result = PackVersionRecordSchema.safeParse({ ...withRelease, ...patch });
+      expect(result.success).toBe(false);
+      expect(result.error?.issues.map((i) => i.path[0])).toContain(field);
+    });
+
+    it("refuses a release in a form this build does not know", () => {
+      const result = PackVersionRecordSchema.safeParse({
+        ...withRelease,
+        signature: { ...withRelease.signature, release: { ...release, form: "crossengin.pack.release.v2" } },
+      });
+      expect(result.success).toBe(false);
+    });
   });
 
   it("rejects published without publishedAt", () => {

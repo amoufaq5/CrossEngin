@@ -5,7 +5,7 @@ import {
   PackManifestSchema,
   PackPublisherRegistry,
   parsePackPublisherSpec,
-  signPackManifest,
+  signPackRelease,
   type PackAuthorKind,
   type PackManifest,
   type PackSignature,
@@ -34,13 +34,20 @@ function manifest(overrides: Partial<PackManifest> = {}): PackManifest {
   });
 }
 
-function submitInput(m: PackManifest, overrides: Partial<SubmitVersionInput> = {}): SubmitVersionInput {
-  const signature: PackSignature = signPackManifest({
+function signRelease(m: PackManifest, version = "1.0.0", bundleSha256 = SHA): PackSignature {
+  return signPackRelease({
     manifest: m,
+    version,
+    bundleSha256,
     privateKeyBase64: keypair.privateKeyBase64,
     publicKeyBase64: keypair.publicKeyBase64,
     signedAt: "2026-06-01T00:00:00.000Z",
   });
+}
+
+/** A submission of release 1.0.0 with bundle `SHA`, signed; overrides change what is *submitted*. */
+function submitInput(m: PackManifest, overrides: Partial<SubmitVersionInput> = {}): SubmitVersionInput {
+  const signature = signRelease(m);
   return {
     packId: "com.acme.loyalty",
     version: "1.0.0",
@@ -122,6 +129,58 @@ describe("PackSubmissionEngine.submit", () => {
       "manifest_digest_mismatch",
     );
     expect(engine().submit(submitInput(manifest())).manifestSha256).toBe(packManifestDigest(manifest()));
+  });
+
+  describe("a captured signature replayed onto another release (ADR-0452, measured live)", () => {
+    it("refuses it under a different version", () => {
+      expect(refusal(() => engine().submit(submitInput(manifest(), { version: "9.9.9" })))).toBe(
+        "release_version_mismatch",
+      );
+    });
+
+    it("refuses it with a different bundle", () => {
+      expect(refusal(() => engine().submit(submitInput(manifest(), { bundleSha256: "b".repeat(64) })))).toBe(
+        "release_bundle_mismatch",
+      );
+    });
+
+    it("refuses it over a different manifest, even with that manifest's own digest beside it", () => {
+      const other = manifest({ name: "Acme Loyalty 2" });
+      const replay = submitInput(manifest(), { manifest: other, manifestSha256: packManifestDigest(other) });
+      expect(refusal(() => engine().submit(replay))).toBe("release_manifest_mismatch");
+    });
+
+    it("refuses the exact shape measured live: new version, new bundle, an arbitrary digest", () => {
+      // The caller's digest is compared first, so the arbitrary one is what is named.
+      const replay = submitInput(manifest(), { version: "9.9.9", bundleSha256: "b".repeat(64), manifestSha256: "c".repeat(64) });
+      expect(refusal(() => engine().submit(replay))).toBe("manifest_digest_mismatch");
+      // With the digest corrected, the version is what the signature refuses.
+      const corrected = { ...replay, manifestSha256: packManifestDigest(manifest()) };
+      expect(refusal(() => engine().submit(corrected))).toBe("release_version_mismatch");
+    });
+
+    it("refuses an official publisher's replay, which would otherwise have been review-exempt", () => {
+      const official = manifest({
+        author: { kind: "crossengin_official", name: "CrossEngin", email: "x@crossengin.io", verifiedAt: "2026-01-01T00:00:00.000Z" },
+      });
+      expect(refusal(() => engine("crossengin_official").submit(submitInput(official, { version: "2.0.0" })))).toBe(
+        "release_version_mismatch",
+      );
+    });
+
+    it("admits the same facts when the publisher signed that release", () => {
+      const signed = signRelease(manifest(), "9.9.9", "b".repeat(64));
+      const draft = engine().submit(
+        submitInput(manifest(), { version: "9.9.9", bundleSha256: "b".repeat(64), signature: signed }),
+      );
+      expect(draft).toMatchObject({ version: "9.9.9", bundleSha256: "b".repeat(64) });
+      expect(draft.signature.release?.version).toBe("9.9.9");
+    });
+  });
+
+  it("refuses a manifest-only signature by name rather than as an invalid signature", () => {
+    const { release: _release, ...legacy } = signRelease(manifest());
+    expect(refusal(() => engine().submit(submitInput(manifest(), { signature: legacy })))).toBe("legacy_signature_form");
   });
 
   it("refuses a pack id outside the publisher's namespace", () => {
