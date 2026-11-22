@@ -15,6 +15,7 @@
  */
 
 import type { AiPricingProvenance, DeclaredModelPrice } from "./ai-design.js";
+import { AI_MODEL_PRICE_VAR } from "./ai-model-source.js";
 
 /**
  * A catalogue price older than this is reported, not refused. Vendor prices move between releases
@@ -151,7 +152,9 @@ export function decideAiDesignPricing(input: AiDesignPricingInput): AiDesignPric
       return {
         refusal:
           `${why}. Declare its price with ${AI_MODEL_PRICE_FLAG} <input>:<output>[:<cachedInput>] (USD per million ` +
-          `tokens), or pass ${AI_ALLOW_UNPRICED_MODEL_FLAG} to accept an unbounded spend`,
+          `tokens; or ${AI_MODEL_PRICE_VAR} in the environment, which is the route a compose deployment has, ` +
+          `and 0:0 for a model that is genuinely free` +
+          `), or pass ${AI_ALLOW_UNPRICED_MODEL_FLAG} to accept an unbounded spend`,
         info: [],
         warnings: [],
       };

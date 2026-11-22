@@ -35,6 +35,7 @@ import { ALLOW_CURSOR_DISCLOSURE_FLAG } from "./cursor-encryption.js";
 import { ALLOW_UNCOVERED_SETTLEMENT_FLAG } from "./settlement-coverage-survey.js";
 import type { DeclaredModelPrice } from "./ai-design.js";
 import { AiModelPriceInvalid, parseDeclaredModelPrice } from "./ai-design-pricing.js";
+import { AiSettingInvalid, parseAiMaxOutputTokens, parseAiProviderTimeoutMs } from "./ai-model-source.js";
 import {
   AI_TENANT_PSEUDONYM_FLAG,
   AI_TENANT_PSEUDONYM_MODES,
@@ -568,6 +569,8 @@ export interface ServeOptions {
   readonly aiMaxRequestDollars: number | null;
   /** How long a provider call may go without sending a byte before it is aborted; null is the provider default. */
   readonly aiProviderTimeoutMs: number | null;
+  /** `--ai-max-output-tokens`: each design attempt's output budget, or null for the default 8192. */
+  readonly aiMaxOutputTokens: number | null;
   /** A declared per-token price for the configured model, which the ceilings are computed from. */
   readonly aiModelPrice: DeclaredModelPrice | null;
   /** Serve a model with no catalogue or declared price, whose ceilings then bound nothing. */
@@ -940,6 +943,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let stripeUsageSyncConfig: string | null = null;
   let aiMaxRequestDollars: number | null = null;
   let aiProviderTimeoutMs: number | null = null;
+  let aiMaxOutputTokens: number | null = null;
   let aiModelPrice: DeclaredModelPrice | null = null;
   let allowUnpricedModel = false;
   let aiProviderRef: string | null = null;
@@ -1601,11 +1605,21 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       i += consumed();
     } else if (arg === "--ai-provider-timeout-ms" || arg.startsWith("--ai-provider-timeout-ms=")) {
       const raw = takeValue(arg, next, "--ai-provider-timeout-ms");
-      const n = Number(raw);
-      if (!Number.isInteger(n) || n < 1000 || n > 3_600_000) {
-        throw new CliUsageError(`invalid --ai-provider-timeout-ms: ${raw} (an integer from 1000 to 3600000)`);
+      try {
+        aiProviderTimeoutMs = parseAiProviderTimeoutMs(raw, "--ai-provider-timeout-ms");
+      } catch (err) {
+        if (err instanceof AiSettingInvalid) throw new CliUsageError(err.message);
+        throw err;
       }
-      aiProviderTimeoutMs = n;
+      i += consumed();
+    } else if (arg === "--ai-max-output-tokens" || arg.startsWith("--ai-max-output-tokens=")) {
+      const raw = takeValue(arg, next, "--ai-max-output-tokens");
+      try {
+        aiMaxOutputTokens = parseAiMaxOutputTokens(raw, "--ai-max-output-tokens");
+      } catch (err) {
+        if (err instanceof AiSettingInvalid) throw new CliUsageError(err.message);
+        throw err;
+      }
       i += consumed();
     } else if (arg === "--ai-model-price" || arg.startsWith("--ai-model-price=")) {
       const raw = takeValue(arg, next, "--ai-model-price");
@@ -2840,6 +2854,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     stripeUsageSyncConfig,
     aiMaxRequestDollars,
     aiProviderTimeoutMs,
+    aiMaxOutputTokens,
     aiModelPrice,
     allowUnpricedModel,
     aiProviderRef,
@@ -3665,8 +3680,10 @@ Options:
                        said at boot
   --ai-design          Expose the in-product AI Architect under /v1/ai — POST a business description,
                        get a validated manifest proposal, activate it as the tenant's live system
-                       (needs --store pg|pg-columns + ANTHROPIC_API_KEY or OPENAI_API_KEY, optional
-                       OPENAI_BASE_URL for a self-hosted OSS model). Implies --per-tenant-manifests
+                       (needs --store pg|pg-columns and a provider, tried in this order:
+                       LOCAL_LLM_BASE_URL / OLLAMA_BASE_URL for a self-hosted model, then
+                       ANTHROPIC_API_KEY, then OPENAI_API_KEY with optional OPENAI_BASE_URL for any
+                       OpenAI-compatible host). Implies --per-tenant-manifests
   --ai-design-role <role>  Role allowed to call the /v1/ai routes (repeatable; default erp_admin +
                        platform_admin). Fail-closed
   --ai-model <id>      Model override for the AI designer (defaults per provider; passed through
@@ -3684,11 +3701,15 @@ Options:
                        discovered after it. The monthly ceiling still applies; this bounds one
                        prompt. Off by default
   --ai-provider-timeout-ms <n>  Abort a provider call that sends nothing for this long (ms,
-                       1000-3600000; default 120000). An inactivity deadline, so a slow stream
-                       that keeps sending is never cut off
+                       1000-3600000; default 120000; or OPERATE_AI_PROVIDER_TIMEOUT_MS). An
+                       inactivity deadline, so a slow stream that keeps sending is never cut off
+  --ai-max-output-tokens <n>  Output budget of each design attempt (1024-32768; default 8192; or
+                       OPERATE_AI_MAX_OUTPUT_TOKENS). Lower it for a host whose per-minute token
+                       allowance counts max tokens; a design that does not fit fails truncated_json
   --ai-model-price <in>:<out>[:<cachedIn>]  Declare the configured model's price, USD per million
                        tokens; both ceilings are computed from it. Needed for a model the built-in
-                       catalogue does not price, and to correct a stale catalogue price
+                       catalogue does not price, and to correct a stale catalogue price (or
+                       OPERATE_AI_MODEL_PRICE; 0:0 declares a free model)
   --ai-allow-unpriced-model  Serve a model with no catalogue or declared price. Its ceilings then
                        admit every request; refused at boot without this flag or --ai-model-price
   --ai-provider-ref <provider:qualifier>  Where the AI provider runs, as a tenant residency

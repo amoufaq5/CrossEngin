@@ -353,7 +353,18 @@ import {
   formatDeclaredIndexPlan,
   formatDeclaredIndexResults,
 } from "@crossengin/operate-runtime-pg";
-import { aiModelLine, resolveAiModel } from "./ai-model-source.js";
+import {
+  AI_MAX_OUTPUT_TOKENS_VAR,
+  AI_MODEL_PRICE_VAR,
+  AI_PROVIDER_TIMEOUT_VAR,
+  AiSettingInvalid,
+  aiModelLine,
+  aiSettingSource,
+  parseAiMaxOutputTokens,
+  parseAiProviderTimeoutMs,
+  resolveAiModel,
+  resolveAiSetting,
+} from "./ai-model-source.js";
 import { buildCredentialRoutes, DEFAULT_MIN_PASSWORD_LENGTH } from "./credential-routes.js";
 import { platformAuthorityRoles } from "./platform-authority.js";
 import { PostgresCredentialStore } from "./credential-store.js";
@@ -457,7 +468,7 @@ import {
   pendingDeletionAdmissionMessage,
 } from "./pending-deletion-admission.js";
 import { PostgresTenantManifestStore, manifestSummary } from "./tenant-manifests.js";
-import { buildDesignDesigner, buildDesignProviderFromEnv } from "./ai-design.js";
+import { buildDesignDesigner, buildDesignProviderFromEnv, DEFAULT_DESIGN_MAX_TOKENS } from "./ai-design.js";
 import {
   formatAiTenantPseudonym,
   resolveAiTenantPseudonymSource,
@@ -475,7 +486,7 @@ import {
   PostgresActivationWatermarkSource,
 } from "./manifest-activation-poller.js";
 import { DEFAULT_AI_DESIGN_MAX_USD_PER_MONTH, buildAiDesignBudget } from "./ai-design-budget.js";
-import { decideAiDesignPricing } from "./ai-design-pricing.js";
+import { AiModelPriceInvalid, decideAiDesignPricing, parseDeclaredModelPrice } from "./ai-design-pricing.js";
 import { buildAiProviderResidencyGate, formatAiProviderResidency } from "./ai-provider-residency.js";
 import { PostgresDesignJobStore } from "./design-jobs.js";
 import { PostgresDesignReviewStore } from "./design-review-store.js";
@@ -3996,10 +4007,56 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     // `ai-model-source.ts` for why that copy was a defect and not merely duplication.
     const aiModel = resolveAiModel(options.aiModel, process.env);
     console.info(aiModelLine(aiModel));
+    // The price, the output budget and the provider timeout have an environment route too, so a
+    // free OpenAI-compatible host or a CPU-only self-hosted model is configurable from .env alone
+    // (`ai-model-source.ts`). Parsed here, before anything is built, so a malformed variable
+    // refuses the boot by name.
+    const aiPriceSetting = resolveAiSetting(options.aiModelPrice, process.env, AI_MODEL_PRICE_VAR, (raw, route) => {
+      try {
+        return parseDeclaredModelPrice(raw);
+      } catch (err) {
+        if (err instanceof AiModelPriceInvalid) {
+          throw new AiSettingInvalid(`invalid ${route}: ${JSON.stringify(raw)} (expected <input>:<output>[:<cachedInput>], USD per million tokens)`);
+        }
+        throw err;
+      }
+    });
+    const aiModelPrice = aiPriceSetting.value;
+    const aiTimeoutSetting = resolveAiSetting(
+      options.aiProviderTimeoutMs,
+      process.env,
+      AI_PROVIDER_TIMEOUT_VAR,
+      parseAiProviderTimeoutMs,
+    );
+    const aiMaxOutputSetting = resolveAiSetting(
+      options.aiMaxOutputTokens,
+      process.env,
+      AI_MAX_OUTPUT_TOKENS_VAR,
+      parseAiMaxOutputTokens,
+    );
+    if (aiPriceSetting.source !== "none") {
+      const p = aiModelPrice;
+      console.info(
+        `[ai-design] declared model price: $${String(p?.inputUsdPerMillion)} in / $${String(p?.outputUsdPerMillion)} out per million tokens` +
+          aiSettingSource(aiPriceSetting, "--ai-model-price", AI_MODEL_PRICE_VAR),
+      );
+    }
+    if (aiTimeoutSetting.source !== "none") {
+      console.info(
+        `[ai-design] provider inactivity timeout: ${String(aiTimeoutSetting.value)} ms` +
+          aiSettingSource(aiTimeoutSetting, "--ai-provider-timeout-ms", AI_PROVIDER_TIMEOUT_VAR),
+      );
+    }
+    console.info(
+      `[ai-design] max output tokens per design attempt: ${String(aiMaxOutputSetting.value ?? DEFAULT_DESIGN_MAX_TOKENS)}` +
+        (aiMaxOutputSetting.source === "none"
+          ? ` (the default; set --ai-max-output-tokens or ${AI_MAX_OUTPUT_TOKENS_VAR} to change it)`
+          : aiSettingSource(aiMaxOutputSetting, "--ai-max-output-tokens", AI_MAX_OUTPUT_TOKENS_VAR)),
+    );
     const providerBuild = buildDesignProviderFromEnv(process.env, {
       ...(aiModel.model !== null ? { model: aiModel.model } : {}),
-      ...(options.aiProviderTimeoutMs !== null ? { inactivityTimeoutMs: options.aiProviderTimeoutMs } : {}),
-      ...(options.aiModelPrice !== null ? { declaredPrice: options.aiModelPrice } : {}),
+      ...(aiTimeoutSetting.value !== null ? { inactivityTimeoutMs: aiTimeoutSetting.value } : {}),
+      ...(aiModelPrice !== null ? { declaredPrice: aiModelPrice } : {}),
     });
     const aiMaxUsdPerMonth = options.aiMaxUsdPerMonth ?? DEFAULT_AI_DESIGN_MAX_USD_PER_MONTH;
     // Durable per-tenant monthly spend ceiling over meta.architect_tenant_cost (the same ledger
@@ -4045,6 +4102,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
             providerLabel: providerBuild.providerLabel,
             tenantPseudonymFor: tenantPseudonymForOf(aiTenantPseudonym),
             ensureRoles: options.aiDesignRoles,
+            ...(aiMaxOutputSetting.value !== null ? { maxTokens: aiMaxOutputSetting.value } : {}),
             // Until M-16 neither was passed: the shipped `--ai-max-request-dollars 2` was parsed,
             // handed to the budget and read by nothing, so no design was ever refused by it.
             ...(options.aiMaxRequestDollars !== null ? { maxRequestDollars: options.aiMaxRequestDollars } : {}),
@@ -4106,7 +4164,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         maxUsdPerMonth: aiMaxUsdPerMonth,
         maxRequestDollars: options.aiMaxRequestDollars,
         allowUnpricedModel: options.allowUnpricedModel,
-        declaredPrice: options.aiModelPrice,
+        declaredPrice: aiModelPrice,
         now: new Date(),
       });
       for (const line of pricingDecision.info) console.log(`[ai-design] ${line}`);

@@ -4,8 +4,11 @@
 #   docker compose -f docker-compose.yml -f docker-compose.ai.yml up -d --build
 #
 # Add docker-compose.ai-gpu.yml as a third -f on a GPU host. Without a GPU this
-# still works, but generation is slow enough that designing a system takes
-# minutes rather than seconds — fine to try, not fine for tenants.
+# still works, but slowly: a 7B model on two Ampere A1 cores generates a few
+# tokens a second, so one design can take tens of minutes — fine to try, not
+# fine for tenants. On Oracle's Always Free shape (2 OCPU / 12 GB) a hosted key
+# is the practical choice; the default here is a 7B model because a 14B one
+# (~9 GB) does not fit in 12 GB beside the database, API and UI.
 
 services:
   ollama:
@@ -13,6 +16,11 @@ services:
     # change the model runtime under a deployment that changed nothing. The two services name the same
     # tag so the pull and the server agree on the on-disk model format.
     image: ollama/ollama:0.40.16
+    environment:
+      # A design prompt is ~3-4k tokens and asks for up to 8k of output, which Ollama's small
+      # default context window would truncate into a design that fails truncated_json.
+      OLLAMA_CONTEXT_LENGTH: ${OLLAMA_CONTEXT_LENGTH:-16384}
+    mem_limit: ${OLLAMA_MEMORY_LIMIT:-8g}
     volumes:
       - ollama-models:/root/.ollama
     # Never published: only the api service reaches it, over the compose network.
@@ -41,7 +49,7 @@ services:
     environment:
       OLLAMA_HOST: http://ollama:11434
     entrypoint: ["ollama"]
-    command: ["pull", "${OPERATE_AI_MODEL:-qwen2.5:14b-instruct}"]
+    command: ["pull", "${OPERATE_AI_MODEL:-qwen2.5:7b-instruct}"]
     logging:
       driver: json-file
       options:
@@ -77,7 +85,10 @@ services:
       # OpenAI-compatible endpoint, but the local provider prices at zero — so the per-tenant AI budget
       # guard stops refusing design requests over tokens that cost nothing, and the transcript names the
       # provider that actually served the turn.
-      LOCAL_LLM_BASE_URL: http://ollama:11434
+      # WITH /v1: the local provider appends `/chat/completions`, and Ollama's OpenAI-compatible
+      # route is /v1/chat/completions. Without it every design answered a 404 (the value was carried
+      # over from the OpenAI provider, which appends /v1 itself, when the overlay switched providers).
+      LOCAL_LLM_BASE_URL: http://ollama:11434/v1
       # Optional — the local provider omits the header when this is empty, which is what Ollama wants;
       # a vLLM box behind an auth proxy needs it. Deliberately not `OPENAI_API_KEY`: that name would be
       # picked up by the real OpenAI client if the base URL above were ever unset, turning a
@@ -98,7 +109,10 @@ services:
       # variable the base declares. There is nothing left to keep in step, which is the only fix
       # that has ever worked on this class (ADR-0288): make the duplicate unnecessary rather than
       # correct. `--ai-design` is already on the base command.
-      OPERATE_AI_MODEL: ${OPERATE_AI_MODEL:-qwen2.5:14b-instruct}
+      OPERATE_AI_MODEL: ${OPERATE_AI_MODEL:-qwen2.5:7b-instruct}
+      # A CPU-only model can take longer than the default 120 s to send its first token on a ~4k
+      # token prompt; the timeout is an inactivity deadline, so a slow stream is never cut off.
+      OPERATE_AI_PROVIDER_TIMEOUT_MS: ${OPERATE_AI_PROVIDER_TIMEOUT_MS:-900000}
 
 volumes:
   ollama-models:

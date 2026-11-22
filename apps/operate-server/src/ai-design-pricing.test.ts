@@ -58,6 +58,9 @@ describe("decideAiDesignPricing", () => {
     expect(d.refusal).toContain(AI_MODEL_PRICE_FLAG);
     expect(d.refusal).toContain(AI_ALLOW_UNPRICED_MODEL_FLAG);
     expect(d.refusal).toContain("$50/tenant/month and $2/request ceilings");
+    // A compose deployment cannot pass the flag without editing the shipped command, so the refusal
+    // has to name the variable it can set.
+    expect(d.refusal).toContain("OPERATE_AI_MODEL_PRICE");
   });
 
   it("serves an unpriced model under the hatch and warns that the ceiling bounds nothing", () => {

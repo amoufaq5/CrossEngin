@@ -2125,3 +2125,56 @@ describe("CURSOR_ENCRYPTION_SECRET's second purpose is documented where an opera
     expect(readme).toContain("[ai-design] tenant pseudonym:");
   });
 });
+
+describe("every AI provider path is reachable from .env, and the overlay reaches Ollama", () => {
+  const AI_COMPOSE = resolve(here, "../../../deploy/docker-compose.ai.yml");
+  const ENV_EXAMPLE = resolve(here, "../../../deploy/.env.example");
+  const api = liveLines(composeService(COMPOSE, "api"));
+  const overlayApi = liveLines(composeService(AI_COMPOSE, "api"));
+  const ollama = liveLines(composeService(AI_COMPOSE, "ollama"));
+
+  it("forwards the AI variables the server reads, each empty when unset", () => {
+    // Without these the free OpenAI-compatible path needed an edit to the `command`, because
+    // OPENAI_BASE_URL never reached the container and a third-party model is refused at boot
+    // without a declared price (ai-model-source.ts).
+    for (const v of [
+      "OPENAI_BASE_URL",
+      "LOCAL_LLM_BASE_URL",
+      "LOCAL_LLM_API_KEY",
+      "OPERATE_AI_MODEL",
+      "OPERATE_AI_MODEL_PRICE",
+      "OPERATE_AI_MAX_OUTPUT_TOKENS",
+      "OPERATE_AI_PROVIDER_TIMEOUT_MS",
+    ]) {
+      expect(api, v).toContain(`${v}: \${${v}:-}`);
+    }
+  });
+
+  it("points the overlay at Ollama's /v1, because the local provider appends only /chat/completions", () => {
+    // packages/ai-providers-local appends `/chat/completions` to the base and Ollama serves the
+    // OpenAI-compatible route at /v1/chat/completions; the base without /v1 was a 404 per design.
+    expect(overlayApi).toContain("LOCAL_LLM_BASE_URL: http://ollama:11434/v1");
+    const localProvider = readFileSync(
+      resolve(here, "../../../packages/ai-providers-local/src/provider.ts"),
+      "utf8",
+    );
+    expect(localProvider).toContain('"/chat/completions"');
+    expect(localProvider).not.toContain('"/v1/chat/completions"');
+  });
+
+  it("defaults the overlay to a model that fits a 12 GB VM, with room for the design prompt", () => {
+    expect(overlayApi).toContain("OPERATE_AI_MODEL: ${OPERATE_AI_MODEL:-qwen2.5:7b-instruct}");
+    expect(readFileSync(AI_COMPOSE, "utf8")).toContain('"pull", "${OPERATE_AI_MODEL:-qwen2.5:7b-instruct}"');
+    expect(ollama).toContain("OLLAMA_CONTEXT_LENGTH: ${OLLAMA_CONTEXT_LENGTH:-16384}");
+    expect(ollama).toMatch(/mem_limit: \$\{OLLAMA_MEMORY_LIMIT:-\d+g\}/);
+    expect(overlayApi).toContain("OPERATE_AI_PROVIDER_TIMEOUT_MS: ${OPERATE_AI_PROVIDER_TIMEOUT_MS:-900000}");
+  });
+
+  it("leaves OPERATE_AI_MODEL unset in .env.example, so a hosted key keeps the provider's default", () => {
+    // The base now forwards OPERATE_AI_MODEL, so an uncommented Ollama tag here would be sent to
+    // Anthropic or OpenAI as a model id neither has.
+    const env = readFileSync(ENV_EXAMPLE, "utf8");
+    expect(env).not.toMatch(/^OPERATE_AI_MODEL=/m);
+    expect(env).toMatch(/^# OPERATE_AI_MODEL=$/m);
+  });
+});

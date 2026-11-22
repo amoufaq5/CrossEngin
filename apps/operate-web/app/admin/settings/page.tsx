@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { AccountCodePicker } from "@/components/AccountCodePicker";
 import { getSettings, putSettings } from "@/lib/api";
@@ -69,11 +69,18 @@ export default function SettingsPage() {
   const [rows, setRows] = useState<NumberingRow[]>([]);
   const [status, setStatus] = useState<{ kind: "idle" | "saving" | "ok" | "error"; msg?: string }>({ kind: "idle" });
   const [loading, setLoading] = useState(true);
+  // The settings document as loaded. PUT /v1/admin/settings replaces the whole document, and this
+  // form edits only part of it, so a save starts from what was loaded: sections and finance keys
+  // the form does not show (inventory, depreciation, COGS/GRNI account codes, notifications, audit
+  // sampling) are carried through unchanged instead of being erased by the save.
+  const loadedRef = useRef<Record<string, unknown>>({});
 
   useEffect(() => {
     void (async () => {
       try {
-        const s = (await getSettings()) as {
+        const raw = await getSettings();
+        loadedRef.current = raw !== null && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+        const s = raw as {
           company?: Company;
           defaults?: Record<string, unknown>;
           finance?: Record<string, unknown>;
@@ -122,7 +129,8 @@ export default function SettingsPage() {
   async function save(): Promise<void> {
     setStatus({ kind: "saving" });
     try {
-      const payload: Record<string, unknown> = {};
+      const payload: Record<string, unknown> = { ...loadedRef.current };
+      for (const k of FORM_SECTIONS) delete payload[k];
 
       const cleanCompany: Company = {};
       for (const [k, v] of Object.entries(company)) if (v.trim() !== "") cleanCompany[k] = v.trim();
@@ -131,7 +139,7 @@ export default function SettingsPage() {
       const d = buildDefaults(defaults);
       if (Object.keys(d).length > 0) payload["defaults"] = d;
 
-      const fin = buildFinance(finance);
+      const fin = { ...unmanagedFinance(loadedRef.current["finance"]), ...buildFinance(finance) };
       const jmap = jurisdictionRowsToMap(jurisdictions);
       if (Object.keys(jmap).length > 0) fin["taxAccountsByJurisdiction"] = jmap;
       if (Object.keys(fin).length > 0) payload["finance"] = fin;
@@ -395,6 +403,40 @@ function buildDefaults(d: StrMap): Record<string, unknown> {
   if (d.dateFormat) out.dateFormat = d.dateFormat;
   if (d.numberFormat) out.numberFormat = d.numberFormat;
   if (d.weekStartDay !== undefined && d.weekStartDay !== "") out.weekStartDay = Number(d.weekStartDay);
+  return out;
+}
+
+/** Sections this form owns outright: what it shows is what is saved, so clearing a field removes it. */
+const FORM_SECTIONS = ["company", "defaults", "finance", "features", "numbering"] as const;
+
+/** The finance keys this form edits; every other finance key is carried through a save unchanged. */
+const FORM_FINANCE_KEYS: ReadonlySet<string> = new Set([
+  "accountingStandard",
+  "rounding",
+  "defaultTaxJurisdiction",
+  "defaultPaymentTermsDays",
+  "multiCurrencyEnabled",
+  "pricesIncludeTax",
+  "arAccountCode",
+  "revenueAccountCode",
+  "apAccountCode",
+  "expenseAccountCode",
+  "cashAccountCode",
+  "taxPayableAccountCode",
+  "taxInputAccountCode",
+  "fxGainLossAccountCode",
+  "unrealizedFxGainLossAccountCode",
+  "whtReceivableAccountCode",
+  "taxRecoverableAccountCode",
+  "taxAccountsByJurisdiction",
+]);
+
+function unmanagedFinance(loaded: unknown): Record<string, unknown> {
+  if (loaded === null || typeof loaded !== "object") return {};
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(loaded as Record<string, unknown>)) {
+    if (!FORM_FINANCE_KEYS.has(k)) out[k] = v;
+  }
   return out;
 }
 

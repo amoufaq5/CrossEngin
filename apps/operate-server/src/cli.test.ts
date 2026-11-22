@@ -3044,6 +3044,14 @@ describe("parseServeArgs — AI provider timeout, price and residency (M-16, M-1
     expect(o.aiProviderRef).toBe("anthropic:us");
   });
 
+  it("reads --ai-max-output-tokens and refuses one outside 1024..32768", () => {
+    expect(parseServeArgs(base).aiMaxOutputTokens).toBeNull();
+    expect(parseServeArgs([...base, "--ai-max-output-tokens", "4096"]).aiMaxOutputTokens).toBe(4096);
+    expect(parseServeArgs([...base, "--ai-max-output-tokens=2048"]).aiMaxOutputTokens).toBe(2048);
+    expect(() => parseServeArgs([...base, "--ai-max-output-tokens", "512"])).toThrow(CliUsageError);
+    expect(() => parseServeArgs([...base, "--ai-max-output-tokens", "40000"])).toThrow(/--ai-max-output-tokens/);
+  });
+
   it("refuses a malformed value of each", () => {
     expect(() => parseServeArgs([...base, "--ai-provider-timeout-ms", "10"])).toThrow(CliUsageError);
     expect(() => parseServeArgs([...base, "--ai-provider-timeout-ms", "1.5e9"])).toThrow(CliUsageError);

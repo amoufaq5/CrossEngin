@@ -23,6 +23,7 @@ import { stripComments } from "@crossengin/testing/strategy";
 
 import {
   DESIGN_EXAMPLE_MANIFEST,
+  parentLineageIssues,
   DESIGN_FAILURE_FAULT,
   DESIGN_FAILURE_KINDS,
   DESIGN_FAULTS,
@@ -1760,8 +1761,13 @@ describe("serve() hands the designer the ceilings it is configured with (M-16)",
   });
 
   it("passes the provider timeout and a declared price to the provider build, and gates residency", () => {
-    expect(src).toContain("inactivityTimeoutMs: options.aiProviderTimeoutMs");
-    expect(src).toContain("declaredPrice: options.aiModelPrice");
+    // Both now resolve flag-then-environment (ai-model-source.ts), so the build reads the resolved
+    // values; reading the flag fields directly would drop OPERATE_AI_PROVIDER_TIMEOUT_MS and
+    // OPERATE_AI_MODEL_PRICE, and the second would make the boot refuse a priced model.
+    expect(src).toContain("inactivityTimeoutMs: aiTimeoutSetting.value");
+    expect(src).toContain("declaredPrice: aiModelPrice");
+    expect(src).not.toContain("declaredPrice: options.aiModelPrice");
+    expect(src).toContain("maxTokens: aiMaxOutputSetting.value");
     expect(src).toContain("{ providerAdmission }");
     expect(src).toContain("if (pricingDecision.refusal !== null) throw");
   });
@@ -1854,5 +1860,62 @@ describe("the design spec teaches the field-grant syntax its classification rule
     expect(r.attempts).toBe(2);
     const feedback = requests[1]?.messages.map((m) => m.content).join("\n") ?? "";
     expect(feedback).toContain("permissions.Customer.fields.contact_email");
+  });
+});
+
+describe("a design on a deployment that serves a pack must extend that pack", () => {
+  const CORE = { slug: "operate-erp/core", entityNames: ["Invoice", "Account"] } as const;
+  const standalone = ManifestSchema.parse(DESIGN_EXAMPLE_MANIFEST);
+
+  it("refuses a design that forgot meta.extends, naming the parent and the consequence", () => {
+    // Measured live before this check: a mock returning the example verbatim was stored, reviewed,
+    // approved and activated, and the tenant's /v1/invoices then answered 404 — the design had
+    // replaced the ERP, because validation ran on the design alone and found it valid standalone.
+    const issues = parentLineageIssues(standalone, CORE);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toContain('["operate-erp/core"]');
+    expect(issues[0]).toContain("replaces the whole ERP");
+  });
+
+  it("refuses a wrong or extra parent, and a reused parent entity without overrides", () => {
+    expect(parentLineageIssues(exampleExtending("operate-erp/retail"), CORE)).toHaveLength(1);
+    const reused = ManifestSchema.parse({
+      ...exampleExtending(CORE.slug),
+      entities: [...(exampleExtending(CORE.slug).entities ?? []), { name: "Invoice", fields: [{ name: "note", type: { kind: "text" } }] }],
+    });
+    const issues = parentLineageIssues(reused, CORE);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toContain("entity Invoice");
+    const overridden = ManifestSchema.parse({
+      ...reused,
+      entities: (reused.entities ?? []).map((e) => (e.name === "Invoice" ? { ...e, overrides: true } : e)),
+    });
+    expect(parentLineageIssues(overridden, CORE)).toEqual([]);
+  });
+
+  it("accepts the exact parent, and asks nothing of a deployment that serves no pack", () => {
+    expect(parentLineageIssues(exampleExtending(CORE.slug), CORE)).toEqual([]);
+    expect(parentLineageIssues(standalone, null)).toEqual([]);
+  });
+
+  it("retries the attempt with the issue as feedback, then succeeds once the model complies", async () => {
+    const { provider, requests } = scriptedProvider([
+      textTurn(JSON.stringify(DESIGN_EXAMPLE_MANIFEST)),
+      textTurn(JSON.stringify(exampleExtending(CORE.slug))),
+    ]);
+    const result = await designManifest({ tenantId: DESIGN_TENANT, provider, parentPack: CORE, description: "desc" });
+    expect(result.ok).toBe(true);
+    expect(result.attempts).toBe(2);
+    expect(result.diagnosis[0]?.failure).toBe("cross_validation_failed");
+    const feedback = requests[1]?.messages.at(-1)?.content ?? "";
+    expect(feedback).toContain("meta.extends must be exactly");
+  });
+
+  it("fails the design rather than storing a replacement when the model never complies", async () => {
+    const { provider } = scriptedProvider([textTurn(JSON.stringify(DESIGN_EXAMPLE_MANIFEST))]);
+    const result = await designManifest({ tenantId: DESIGN_TENANT, provider, parentPack: CORE, description: "desc" });
+    expect(result.ok).toBe(false);
+    expect(result.manifest).toBeNull();
+    expect(result.attempts).toBe(MAX_DESIGN_ATTEMPTS);
   });
 });

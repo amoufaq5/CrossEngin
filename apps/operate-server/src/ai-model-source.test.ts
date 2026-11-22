@@ -1,10 +1,17 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  AI_MAX_OUTPUT_TOKENS_VAR,
   AI_MODEL_SOURCES,
   AI_MODEL_VAR,
+  AI_PROVIDER_TIMEOUT_VAR,
+  AiSettingInvalid,
   aiModelLine,
+  aiSettingSource,
+  parseAiMaxOutputTokens,
+  parseAiProviderTimeoutMs,
   resolveAiModel,
+  resolveAiSetting,
   type AiModelSource,
 } from "./ai-model-source.js";
 
@@ -113,5 +120,43 @@ describe("the overlay this exists for", () => {
       ].map((r) => r.source),
     );
     expect([...sources].sort()).toEqual([...AI_MODEL_SOURCES].sort());
+  });
+});
+
+describe("resolveAiSetting — the price, output budget and timeout environment routes", () => {
+  it("reads absent, env, argv and both, and treats an empty variable as absent", () => {
+    const parse = (raw: string, route: string) => parseAiMaxOutputTokens(raw, route);
+    expect(resolveAiSetting(null, {}, AI_MAX_OUTPUT_TOKENS_VAR, parse)).toEqual({ value: null, source: "none", ignored: null });
+    expect(resolveAiSetting(null, { [AI_MAX_OUTPUT_TOKENS_VAR]: "  " }, AI_MAX_OUTPUT_TOKENS_VAR, parse).source).toBe("none");
+    expect(resolveAiSetting(null, { [AI_MAX_OUTPUT_TOKENS_VAR]: "4096" }, AI_MAX_OUTPUT_TOKENS_VAR, parse)).toEqual({
+      value: 4096,
+      source: "env",
+      ignored: null,
+    });
+    expect(resolveAiSetting(2048, {}, AI_MAX_OUTPUT_TOKENS_VAR, parse)).toEqual({ value: 2048, source: "argv", ignored: null });
+    const both = resolveAiSetting(2048, { [AI_MAX_OUTPUT_TOKENS_VAR]: "4096" }, AI_MAX_OUTPUT_TOKENS_VAR, parse);
+    expect(both).toEqual({ value: 2048, source: "both", ignored: "4096" });
+    expect(aiSettingSource(both, "--ai-max-output-tokens", AI_MAX_OUTPUT_TOKENS_VAR)).toContain(
+      `${AI_MAX_OUTPUT_TOKENS_VAR}=4096 is ignored`,
+    );
+  });
+
+  it("refuses a malformed variable by name even when the flag would win", () => {
+    expect(() =>
+      resolveAiSetting(2048, { [AI_MAX_OUTPUT_TOKENS_VAR]: "lots" }, AI_MAX_OUTPUT_TOKENS_VAR, parseAiMaxOutputTokens),
+    ).toThrow(new RegExp(`invalid ${AI_MAX_OUTPUT_TOKENS_VAR}: lots`));
+    expect(() =>
+      resolveAiSetting(null, { [AI_PROVIDER_TIMEOUT_VAR]: "999" }, AI_PROVIDER_TIMEOUT_VAR, parseAiProviderTimeoutMs),
+    ).toThrow(AiSettingInvalid);
+  });
+
+  it("bounds the output budget at 1024..32768 and the timeout at 1000..3600000", () => {
+    expect(parseAiMaxOutputTokens("1024", "x")).toBe(1024);
+    expect(parseAiMaxOutputTokens("32768", "x")).toBe(32_768);
+    expect(() => parseAiMaxOutputTokens("1023", "x")).toThrow(AiSettingInvalid);
+    expect(() => parseAiMaxOutputTokens("32769", "x")).toThrow(AiSettingInvalid);
+    expect(() => parseAiMaxOutputTokens("4096.5", "x")).toThrow(AiSettingInvalid);
+    expect(parseAiProviderTimeoutMs("900000", "x")).toBe(900_000);
+    expect(() => parseAiProviderTimeoutMs("3600001", "x")).toThrow(AiSettingInvalid);
   });
 });

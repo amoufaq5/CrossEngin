@@ -10239,6 +10239,24 @@ Two constraints worth knowing before suggesting a host:
   at all. Inside the compose stack the hop is a private Docker network, so the `prefer` default
   there is reasonable and the boot line says which was got either way.
 
+- **`deploy/GO-LIVE.md` is the end-to-end path** (ADR-0463): Oracle Always Free, Cloudflare DNS
+  (grey cloud — the orange proxy keeps the TLS-ALPN challenge from Caddy), the bootstrap, onboarding
+  and the three AI paths. The bootstrap, onboarding and AI commands were run against the real server
+  booted with the shipped compose `command:` as `crossengin_app`; the Oracle, Cloudflare and
+  `docker compose up` steps were **not** run from here and rest on `ORACLE.md`. **There is no self-registration**, and the guide says so:
+  `deploy/onboard-tenant.sh` creates a tenant, its `erp_admin` and a random password in one command,
+  sends every body on stdin (one carries the password, and argv is readable by `ps`), and stops
+  before the password when the server warns that the role is undeclared. **Every AI setting has an
+  environment route** (`OPERATE_AI_MODEL_PRICE`, `OPERATE_AI_MAX_OUTPUT_TOKENS` behind a new
+  `--ai-max-output-tokens`, `OPERATE_AI_PROVIDER_TIMEOUT_MS`; the flag wins and the boot line says
+  so), the compose block forwards all seven AI variables, and the Ollama overlay is corrected rather
+  than documented around: its base URL lacked `/v1`, so it could not have served one design.
+  **Walking the guide found an engine defect**: `designManifest` validated a design on its own, so
+  one that forgot `meta.extends` was a valid standalone manifest, approved and activated as a
+  *replacement* of the tenant's ERP (live: `/v1/invoices` 404 after activation).
+  `parentLineageIssues` now refuses a missing or wrong parent and a reused parent entity without
+  `overrides: true`, as a retryable `cross_validation_failed` with the issue as the corrective.
+
 ## What's actually left
 
 Nothing planned is unbuilt; what remains are follow-ups named in the ADRs that
@@ -15987,7 +16005,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 456 records; 377 Accepted, 79 Proposed (the
+title or status change cannot drift. 457 records; 378 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

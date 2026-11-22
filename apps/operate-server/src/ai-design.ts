@@ -196,7 +196,7 @@ export const MAX_DESIGN_ATTEMPTS = 3;
 export const MAX_DESIGN_RESPONSE_CHARS = 262144;
 export const DESIGN_PROGRESS_CHARS_STEP = 400;
 
-const DEFAULT_DESIGN_MAX_TOKENS = 8192;
+export const DEFAULT_DESIGN_MAX_TOKENS = 8192;
 const MAX_FEEDBACK_ISSUES = 10;
 const MAX_ASSISTANT_ECHO_CHARS = 4000;
 const SLUG_REGEX = /^[a-z0-9][a-z0-9-]*(\/[a-z0-9][a-z0-9-]*)*$/;
@@ -408,6 +408,41 @@ export function buildDesignSystemPrompt(opts: {
       : "Example of a complete valid manifest:",
     JSON.stringify(DESIGN_EXAMPLE_MANIFEST, null, 2),
   ].join("\n");
+}
+
+/**
+ * Why a design does not extend the pack this deployment serves, or `[]`.
+ *
+ * The system prompt says `meta.extends` MUST name the parent, and until this check nothing held
+ * the model to it: validation ran on the design alone, so a design that forgot the key was a valid
+ * *standalone* manifest — stored, shown to the reviewer, approved and activated, at which point it
+ * **replaced** the tenant's ERP (measured live: the tenant's `/v1/invoices` answered 404 after
+ * activation). A wrong parent is refused too, because the gateway admits exactly one, and so is
+ * a reused parent entity name without `overrides: true`, which resolution refuses at gateway
+ * build — a 503 for the tenant after a 200 for the activation. Each is a fact about this attempt the
+ * model can correct, so it is retried like any other content failure rather than refused outright.
+ */
+export function parentLineageIssues(
+  manifest: Manifest,
+  parent: DesignParentPack | null,
+): readonly string[] {
+  if (parent === null) return [];
+  const declared = manifest.meta.extends ?? [];
+  const issues: string[] = [];
+  if (declared.length !== 1 || declared[0] !== parent.slug) {
+    issues.push(
+      `meta.extends must be exactly ["${parent.slug}"] (got ${JSON.stringify(declared)}): this deployment serves that pack, and a design that does not extend it replaces the whole ERP when it is activated`,
+    );
+  }
+  const inherited = new Set(parent.entityNames);
+  for (const entity of manifest.entities ?? []) {
+    if (inherited.has(entity.name) && entity.overrides !== true) {
+      issues.push(
+        `entity ${entity.name} is already declared by ${parent.slug}: rename it, or set overrides: true to replace the inherited definition deliberately`,
+      );
+    }
+  }
+  return issues;
 }
 
 /**
@@ -1067,6 +1102,13 @@ export async function designManifest(opts: {
     }
 
     const manifest: Manifest = parsed.data;
+    const lineageIssues = parentLineageIssues(manifest, opts.parentPack);
+    if (lineageIssues.length > 0) {
+      record("cross_validation_failed", lineageIssues, text.length, classified.shape, classified.wrapper);
+      messages.push({ role: "assistant", content: truncate(text, MAX_ASSISTANT_ECHO_CHARS) });
+      messages.push({ role: "user", content: correctiveMessage(issues) });
+      continue;
+    }
     let crossIssues: readonly string[];
     try {
       const result = tryValidateManifest(manifest);

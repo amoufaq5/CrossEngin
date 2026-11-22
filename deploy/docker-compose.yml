@@ -241,6 +241,19 @@ services:
       # simply not registered rather than half-configured.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # The rest of the AI configuration, so every provider path is reachable from .env without
+      # editing the command below. OPENAI_BASE_URL points the OpenAI provider at any
+      # OpenAI-compatible host (the prefix BEFORE /v1); a third-party model then needs a declared
+      # price (OPERATE_AI_MODEL_PRICE, "0:0" for a free one) or the boot refuses it, and a free
+      # host's per-minute token allowance usually needs a smaller OPERATE_AI_MAX_OUTPUT_TOKENS.
+      # LOCAL_LLM_BASE_URL is the self-hosted route; the AI overlay sets it for you.
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      LOCAL_LLM_BASE_URL: ${LOCAL_LLM_BASE_URL:-}
+      LOCAL_LLM_API_KEY: ${LOCAL_LLM_API_KEY:-}
+      OPERATE_AI_MODEL: ${OPERATE_AI_MODEL:-}
+      OPERATE_AI_MODEL_PRICE: ${OPERATE_AI_MODEL_PRICE:-}
+      OPERATE_AI_MAX_OUTPUT_TOKENS: ${OPERATE_AI_MAX_OUTPUT_TOKENS:-}
+      OPERATE_AI_PROVIDER_TIMEOUT_MS: ${OPERATE_AI_PROVIDER_TIMEOUT_MS:-}
       SES_REGION: ${SES_REGION:-}
       SES_FROM_ADDRESS: ${SES_FROM_ADDRESS:-}
       SES_FROM_NAME: ${SES_FROM_NAME:-}

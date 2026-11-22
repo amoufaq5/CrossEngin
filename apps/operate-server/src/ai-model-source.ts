@@ -94,3 +94,91 @@ export function aiModelLine(resolved: ResolvedAiModel): string {
       return `[ai-design] model: not named by --ai-model or ${AI_MODEL_VAR}; the provider's default stands`;
   }
 }
+
+/**
+ * Three more AI settings reach the server from the environment, for the same reason the model does
+ * and one more. The reason the model needed a route is above; the further reason is the free
+ * OpenAI-compatible hosts (Groq, OpenRouter and the like) an operator on a free tier reaches for.
+ * Using one needs a declared price -- an unpriced third-party model is refused at boot, because
+ * the cost ceilings would otherwise bound nothing -- and usually a smaller output budget, because
+ * those hosts count a request's `max_tokens` against a tokens-per-minute allowance (Groq's free
+ * 8,000 TPM refuses this server's default 8,192-token request outright). Both were flag-only, so
+ * the free path needed an edit to the compose `command`, which is the one file a deployment should
+ * not have to fork. The provider timeout is the third: a CPU-only self-hosted model can take longer
+ * than the 120 s default to send its first token, and the overlay has no `command` to put it in.
+ *
+ * Every setting keeps the model's precedence: the flag wins, and the boot line names the source
+ * and anything ignored. A malformed variable is a boot refusal naming the variable, parsed by the
+ * same function as the flag so the two routes cannot accept different grammars.
+ */
+export const AI_MODEL_PRICE_VAR = "OPERATE_AI_MODEL_PRICE";
+export const AI_MAX_OUTPUT_TOKENS_VAR = "OPERATE_AI_MAX_OUTPUT_TOKENS";
+export const AI_PROVIDER_TIMEOUT_VAR = "OPERATE_AI_PROVIDER_TIMEOUT_MS";
+
+export const AI_MAX_OUTPUT_TOKENS_MIN = 1024;
+export const AI_MAX_OUTPUT_TOKENS_MAX = 32_768;
+export const AI_PROVIDER_TIMEOUT_MIN_MS = 1000;
+export const AI_PROVIDER_TIMEOUT_MAX_MS = 3_600_000;
+
+/** Thrown for a value either route supplies that the setting cannot take; the message names the route. */
+export class AiSettingInvalid extends Error {
+  override readonly name = "AiSettingInvalid";
+}
+
+function boundedInteger(raw: string, min: number, max: number, route: string): number {
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < min || n > max) {
+    throw new AiSettingInvalid(`invalid ${route}: ${raw} (an integer from ${min} to ${max})`);
+  }
+  return n;
+}
+
+/** The one parser for `--ai-max-output-tokens` and `OPERATE_AI_MAX_OUTPUT_TOKENS`. */
+export function parseAiMaxOutputTokens(raw: string, route: string): number {
+  return boundedInteger(raw, AI_MAX_OUTPUT_TOKENS_MIN, AI_MAX_OUTPUT_TOKENS_MAX, route);
+}
+
+/** The one parser for `--ai-provider-timeout-ms` and `OPERATE_AI_PROVIDER_TIMEOUT_MS`. */
+export function parseAiProviderTimeoutMs(raw: string, route: string): number {
+  return boundedInteger(raw, AI_PROVIDER_TIMEOUT_MIN_MS, AI_PROVIDER_TIMEOUT_MAX_MS, route);
+}
+
+export interface ResolvedAiSetting<T> {
+  readonly value: T | null;
+  readonly source: AiModelSource;
+  /** The variable's raw text when the flag outranked it, so the boot line can say it was ignored. */
+  readonly ignored: string | null;
+}
+
+/**
+ * Flag first, then the variable, with empty and whitespace read as absent on the variable (compose
+ * writes `${VAR:-}`, so unset arrives as ""). The variable is parsed even when the flag wins, so a
+ * malformed value is refused rather than sitting unnoticed until the flag is removed.
+ */
+export function resolveAiSetting<T>(
+  flag: T | null,
+  env: Readonly<Record<string, string | undefined>>,
+  variable: string,
+  parse: (raw: string, route: string) => T,
+): ResolvedAiSetting<T> {
+  const raw = (env[variable] ?? "").trim();
+  const fromEnv = raw === "" ? null : parse(raw, variable);
+  if (flag !== null && fromEnv !== null) return { value: flag, source: "both", ignored: raw };
+  if (flag !== null) return { value: flag, source: "argv", ignored: null };
+  if (fromEnv !== null) return { value: fromEnv, source: "env", ignored: null };
+  return { value: null, source: "none", ignored: null };
+}
+
+/** `(from --flag)`, `(from VAR)`, or the `both` sentence; empty for `none`. */
+export function aiSettingSource(resolved: ResolvedAiSetting<unknown>, flag: string, variable: string): string {
+  switch (resolved.source) {
+    case "argv":
+      return ` (from ${flag})`;
+    case "env":
+      return ` (from ${variable})`;
+    case "both":
+      return ` (from ${flag}; ${variable}=${resolved.ignored ?? ""} is ignored, because an explicit argument outranks an ambient default)`;
+    case "none":
+      return "";
+  }
+}

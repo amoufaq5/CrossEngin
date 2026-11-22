@@ -181,6 +181,15 @@ At your registrar, create **two** A records pointing at the instance's public IP
 Both are needed: the `Caddyfile` serves the UI on the apex and the API on `api.`, and Let's
 Encrypt will not issue a certificate until the name resolves to this machine.
 
+**On Cloudflare DNS (free), set both records to *DNS only* — the grey cloud, not the orange one.**
+Caddy obtains its own certificates by answering Let's Encrypt's challenge on this VM. The
+orange-cloud proxy terminates TLS at Cloudflare, so the TLS-ALPN challenge cannot reach Caddy, the
+HTTP challenge reaches it only while Cloudflare's *Always Use HTTPS* is off, and once a certificate
+exists you are running two TLS hops whose SSL mode must be *Full (strict)* or the hop to this VM is
+unauthenticated. Grey cloud avoids all three: Cloudflare only answers DNS. (You can turn the proxy on
+later, deliberately, once you have read what it changes.) Add no `AAAA` record either: the instance
+has no IPv6 address unless you configured one, and a client preferring IPv6 would be sent nowhere.
+
 **Success looks like:** `dig +short yourdomain.com` and `dig +short api.yourdomain.com` both
 return your IP. Give DNS a few minutes.
 
@@ -253,6 +262,11 @@ What each secret does, so you know what rotating one costs:
 | `CREDENTIAL_PEPPER` | password hashes, which `meta.users` holds with no RLS | **every password stops verifying.** Do not change it after users exist |
 | `OPERATE_TOKEN_SIGNING_KEY` | session tokens; the public half is derived from it | every session gets one 401 and a re-login |
 | `CURSOR_ENCRYPTION_SECRET` | the keyset cursor, which otherwise carries a classified field's plaintext | cursors in flight get one 400 and a restarted page walk |
+| `AUDIT_CHAIN_SIGNING_KEY` | the Ed25519 key every audit-chain entry is signed with; the public half is derived from it | entries already written stay verifiable under the old key's registered fingerprint; do not rotate casually |
+
+Generate these four as **base64**, as above, and not as hex: hex draws from only 16 characters,
+and the boot's floor is 16 distinct byte values, so a hex string is refused as `too_uniform`
+whenever it happens to miss one of them — roughly half the time at 48 characters.
 
 **Leave `COLUMN_ENCRYPTION_SECRET` unset.** The default `erp-core` declares no `phi`/`regulated`
 field, so nothing would use it. `erp-healthcare` and `erp-government` do declare them — and
@@ -271,8 +285,10 @@ docker compose up -d --build
 docker compose logs -f api
 ```
 
-The first build takes **10–20 minutes** on 2 A1 cores. Expect `extensions` and `migrate` to run once
-and exit 0, then `api` to boot, then `web`.
+The first build takes **10–20 minutes** on 2 A1 cores. Expect five one-shot steps to run and
+exit 0 — `extensions`, `migrate`, `app-role`, `eraser-role` and `document-indexes` — then `api` to
+boot, then `web`, `caddy` and `backup`. `docker compose ps -a` shows the one-shots as `Exited (0)`;
+any other exit code stops `api` from starting, and `docker compose logs <step>` names why.
 
 > **If `migrate` exits 1 here, this is the arm64 case and the most likely single failure on Oracle.**
 > `docker compose logs migrate` will say `PRECONDITIONS FAILED — no statements were executed …
@@ -435,10 +451,13 @@ real — it is just answered by one membership now:
 Neither reaches the other's surfaces, and in both directions it is a 403 rather than a missing
 link — the sidebar shows every section to everyone and the API is what refuses. `platform_admin` is
 not one of the fifteen roles `erp-core` declares, so a session carrying it has no entity permissions
-at all and every ERP page comes back empty; the shipped compose passes `--ai-design-role erp_admin`,
-which *replaces* the default rather than adding to it, so `platform_admin` is refused at the AI
-Studio too. Going the other way, `/v1/platform/*` is guarded by `--platform-admin-role`, which
-defaults to `platform_admin` alone.
+at all and every ERP page comes back empty. The two exceptions are the AI Studio and tenant
+settings: the shipped compose passes `--ai-design-role` and `--admin-role` **twice each**, naming
+`erp_admin` and `platform_admin`, so an operator holding only `platform_admin` can still design and
+configure. Going the other way, `/v1/platform/*` is guarded by `--platform-admin-role`, which
+defaults to `platform_admin` alone, so a customer's own `erp_admin` never reaches the platform
+console — including **Platform → Design Reviews**, which is why only the operator can approve a
+design.
 
 **One person doing both jobs is one membership with both roles.**
 `meta.user_tenant_membership` is `UNIQUE (user_id, tenant_id)` — one *row* per person per tenant —
@@ -638,8 +657,8 @@ The read-state grant is per role and the boot line names the roles it was given 
 carrying a role that is not on that line falls back to the approximation silently, so add another
 `--read-state-role` line for each role your people actually hold.
 
-What is still off is the rest of what **recurs**: no job fires, no timer fires and no audit row is
-anchored until you say so.
+What is still off is the rest of what **recurs**: no job fires and no timer fires until you say so.
+(Audit rows *are* anchored and verified by default once `AUDIT_CHAIN_SIGNING_KEY` is set.)
 
 | Flag | What it turns on | Needs |
 |---|---|---|
@@ -887,13 +906,17 @@ it, and nothing writes a tenant data export either. What exists is whole-tenant 
 so before you promise a tenant GDPR compliance, know that answering "what do you hold about me"
 and "give me my data" is work you would do by hand against the database.
 
-**`--workflow-workers` and `--schedule-ms` are inert rather than off.** `JOB_HANDLER_PROVIDERS`
-ships empty and `erp-core` declares 14 jobs, so the job worker refuses `no_job_handlers` and the
-timer and activity workers refuse `no_definitions` — all three print their reason and the server
-boots. `--schedule-ms` is worse than inert: it enqueues a run per fire into a queue nothing drains,
-and the shipped crons include `*/15`, so a deployment that passes it alone accumulates pending rows
-for ever. Read the boot log after each `docker compose up -d`: every one of these names what is
-missing.
+**`--workflow-workers` and `--schedule-ms` run five of `erp-core`'s fourteen jobs.** Since ADR-0430
+the job worker has real handlers for overdue invoices, reorder points, depreciation, sales-order →
+invoice and one event job, written through the same guards and GL effects an HTTP request goes
+through; the other nine (the third-party integrations among them) are declined by name at boot, and
+the producers enqueue only served jobs. Two things to know before turning them on. `--schedule-ms`
+needs `--schedule-all-tenants` (or `--schedule-tenant <uuid>`) beside it, or the boot refuses. And
+sales-order → invoice fails 422 on any tenant that has not set **Settings → Finance → default
+payment terms**, which nothing reports in advance — set it before a customer places orders. The
+timer and activity workers still refuse `no_definitions`, because no workflow definition is
+authored on a stock deployment; that is harmless and printed. Read the boot log after each
+`docker compose up -d`: every one of these names what is missing.
 
 ### The self-hosted model, if you want one
 

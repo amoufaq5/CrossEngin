@@ -365,7 +365,7 @@ makes the key a **person** rather than a service account:
   preference routes refuse it outright rather than handing two keys one shared identity,
   and the notification inbox is per-recipient so it comes back empty. This is the right
   shape for the bootstrap key in `.env.example`: an operator, not a tenant user.
-- `token:cashier:<tenant-uuid>:<user-uuid>` — names a principal, resolves as a `user`, and
+- `token:ap_clerk:<tenant-uuid>:<user-uuid>` — names a principal, resolves as a `user`, and
   the per-person surfaces work. That `<user-uuid>` must be a real `meta.users.id`.
 
 The registry that creates one is mounted: `--platform-user-routes --platform-user-role
@@ -385,14 +385,14 @@ value is `platform_admin`.
 curl -sS -X POST https://api.erp.example.com/v1/platform/users \
   -H "x-api-key: $ADMIN_TOKEN" -H 'content-type: application/json' \
   -d '{"user":{"id":"<user-uuid>","email":"ana@acme.example","displayName":"Ana"},
-       "membership":{"tenantId":"<tenant-uuid>","primaryRole":"cashier","status":"active"}}'
+       "membership":{"tenantId":"<tenant-uuid>","primaryRole":"ap_clerk","status":"active"}}'
 
 # Or grant a membership to an existing principal (the tenant comes from the path, never
 # the body). `status` has no default: "active" grants access now, "invited" only promises
 # it, and only an active membership resolves as a notification recipient.
 curl -sS -X POST https://api.erp.example.com/v1/platform/tenants/<tenant-uuid>/members \
   -H "x-api-key: $ADMIN_TOKEN" -H 'content-type: application/json' \
-  -d '{"userId":"<user-uuid>","primaryRole":"cashier","status":"active"}'
+  -d '{"userId":"<user-uuid>","primaryRole":"ap_clerk","status":"active"}'
 ```
 
 The rest of the surface is `GET /v1/platform/users` and `/users/{id}`,
@@ -635,12 +635,13 @@ tenant id is **minted by the server** (`POST /v1/platform/tenants` takes `{slug,
 rejects an `id` key), which is also why `OPERATE_ADMIN_API_KEY`'s tenant uuid is a placeholder
 that can never name a real tenant — and why `/v1/platform` is exempt from the tenant-status gate.
 
-**A session's roles are frozen until it expires.** The membership's primary role *and its
-secondary roles* are read at login and stamped into the token, and nothing re-reads the
-directory per request. So granting, revoking or downgrading a membership takes effect at the
-next login, within `--session-token-ttl` (one hour by default; lower it if that window
-matters to you). The same is true of suspending a user. If you need a session cut off now,
-rotate `OPERATE_TOKEN_SIGNING_KEY` — that invalidates every session at once.
+**What ends a session, and how fast.** The membership's primary role *and its secondary roles*
+are read at login and stamped into the token, so *granting* or *changing* a role takes effect at
+that person's next login. *Taking access away* does not wait for the token to expire: a
+**revoked** membership stops working within **30 seconds** (the membership directory's cache,
+ADR-0381), a **suspended** user's sessions end at once, and setting or changing a password ends
+that user's other sessions (ADR-0448). If you need *every* session cut off now, rotate
+`OPERATE_TOKEN_SIGNING_KEY`.
 
 Secondary roles are additive and were inert before ADR-0369: the membership form accepted
 them, stored them and showed them in the Members panel, and the session carried the primary
@@ -1276,6 +1277,16 @@ residency or procurement constraint, not a preference.
 routes still mount and `POST /v1/ai/design` answers **503** — deliberately, so a
 missing key is not a failed boot.
 
+**Any OpenAI-compatible host works the same way, all from `.env`** — Groq, OpenRouter, Together,
+a vLLM box: set `OPENAI_API_KEY`, `OPENAI_BASE_URL` (the prefix *before* `/v1`, because the client
+appends `/v1/chat/completions` — `https://api.groq.com/openai`, `https://openrouter.ai/api`) and
+`OPERATE_AI_MODEL`. Such a model has no catalogue price, so the boot **refuses** until you declare
+one in `OPERATE_AI_MODEL_PRICE` as `<input>:<output>` USD per million tokens (`0:0` for a
+genuinely free tier — which leaves the monthly ceiling bounding nothing). Free tiers usually cap
+output tokens per request, so `OPERATE_AI_MAX_OUTPUT_TOKENS=4096` (default 8192) keeps a design
+inside the cap. Read the provider's data-use terms first: a tenant's business description is what
+is sent.
+
 ### B — self-hosted model, all on this VM
 
 No edits needed. Bring the stack up with the AI overlay:
@@ -1298,12 +1309,17 @@ raw speed:
 
 - **It must emit strict JSON.** The Architect's output is parsed into a manifest and
   cross-validated; a model that drifts out of JSON fails the design, however quickly
-  it fails. Instruction-tuned 14B-class models are the smallest that hold up.
-- **It must fit in VRAM.** ~10-12 GB for a 14B at 4-bit, ~6 GB for a 7-8B. Spilling
-  to system RAM costs most of the GPU's advantage.
+  it fails. Instruction-tuned 14B-class models hold up best; the overlay defaults to
+  `qwen2.5:7b-instruct` because a 14B one (~9 GB) does not fit beside the database,
+  API and UI on a 12 GB VM such as Oracle's Always Free shape.
+- **It must fit in memory.** ~10-12 GB for a 14B at 4-bit, ~6 GB for a 7-8B. The overlay
+  caps the `ollama` container at `OLLAMA_MEMORY_LIMIT` (8g) and sets a 16k context
+  (`OLLAMA_CONTEXT_LENGTH`), because Ollama's small default window truncates a design.
 
-Without a GPU this still runs, but a design takes minutes instead of seconds — fine
-to try, not fine to put in front of tenants.
+Without a GPU this still runs, but a design takes minutes instead of seconds — tens of
+minutes for a 7B on two Ampere cores, which is why the overlay raises
+`OPERATE_AI_PROVIDER_TIMEOUT_MS` to 15 minutes. Fine to try, not fine to put in front of
+tenants.
 
 ## Which host to run this on
 

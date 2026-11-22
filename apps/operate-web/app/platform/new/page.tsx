@@ -7,32 +7,33 @@ import { useState } from "react";
 import { Topbar } from "@/components/Topbar";
 import { createTenant, PlatformError } from "@/lib/platform";
 
+// Mirrors of the server's vocabularies. The authority is
+// apps/operate-server/src/platform-tenants.ts (TENANT_TIERS, TENANT_REGIONS and SLUG_RE): its body
+// schema is `.strict()` over those enums, so any other value here is a 400 on every submit, which is
+// what this page did until the lists were copied from the server rather than invented.
 const TIERS: ReadonlyArray<{ value: string; label: string }> = [
-  { value: "free", label: "Free" },
-  { value: "starter", label: "Starter" },
-  { value: "growth", label: "Growth" },
+  { value: "small", label: "Small" },
   { value: "enterprise", label: "Enterprise" },
+  { value: "regulated", label: "Regulated" },
+  { value: "on-prem", label: "On-prem" },
 ];
 
 const REGIONS: ReadonlyArray<{ value: string; label: string }> = [
-  { value: "eu-central", label: "EU Central" },
-  { value: "eu-west", label: "EU West" },
-  { value: "us-east", label: "US East" },
-  { value: "us-west", label: "US West" },
-  { value: "me-uae", label: "Middle East (UAE)" },
-  { value: "gcc-ksa", label: "GCC (KSA)" },
-  { value: "apac-sg", label: "APAC (Singapore)" },
-  { value: "ap-south", label: "AP South" },
+  { value: "eu", label: "Europe" },
+  { value: "us", label: "United States" },
+  { value: "me", label: "Middle East" },
+  { value: "ap", label: "Asia-Pacific" },
+  { value: "sa", label: "South America" },
 ];
 
-const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
+const SLUG_RE = /^[a-z][a-z0-9-]{1,48}$/;
 
 export default function NewTenantPage() {
   const router = useRouter();
   const [slug, setSlug] = useState("");
   const [name, setName] = useState("");
-  const [tier, setTier] = useState<string>("free");
-  const [region, setRegion] = useState<string>("eu-central");
+  const [tier, setTier] = useState<string>("small");
+  const [region, setRegion] = useState<string>("eu");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<{ slug?: string; name?: string }>({});
@@ -42,7 +43,8 @@ export default function NewTenantPage() {
     const s = slug.trim();
     const n = name.trim();
     if (s === "") errs.slug = "Slug is required";
-    else if (!SLUG_RE.test(s)) errs.slug = "Lowercase letters, digits and hyphens only";
+    else if (!SLUG_RE.test(s))
+      errs.slug = "2–49 characters: a lowercase letter first, then lowercase letters, digits or hyphens";
     if (n === "") errs.name = "Name is required";
     if (Object.keys(errs).length > 0) {
       setFieldErrors(errs);
@@ -99,7 +101,7 @@ export default function NewTenantPage() {
                 <p className="mt-1 text-xs text-red-600">{fieldErrors.slug}</p>
               ) : (
                 <p className="mt-1 text-xs text-ink-faint">
-                  Unique, URL-safe identifier. Lowercase letters, digits and hyphens.
+                  Unique, URL-safe identifier, used as the workspace name at sign-in. Starts with a letter.
                 </p>
               )}
             </div>
