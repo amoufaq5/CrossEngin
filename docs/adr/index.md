@@ -1,10 +1,10 @@
 # ADR index
 
-458 records. Generated from the ADR files themselves — regenerate rather than
+459 records. Generated from the ADR files themselves — regenerate rather than
 hand-edit, so a title or status change in an ADR cannot silently drift from this table:
 `python3 docs/adr/generate-index.py`.
 
-- **Accepted:** 379  **Proposed:** 79
+- **Accepted:** 380  **Proposed:** 79
 - ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never written;
   those milestones landed under other numbers. The gap is permanent and intentional.
 - ADR-0046 is the Phase 2 plan; **ADR-0077 is the Phase 3 plan (P1–P8)**. Phase 4 has no
@@ -470,3 +470,4 @@ hand-edit, so a title or status change in an ADR cannot silently drift from this
 | [0462](0462-the-api-description-declares-the-residency-gate-it-is-served-behind-and-the-ai-provider-refusal-is-a-registered-problem.md) | The API description declares the residency gate it is served behind, and the AI provider's residency refusal is a registered problem | — | Accepted | 2026-11-20 |
 | [0463](0463-a-design-must-extend-the-pack-the-deployment-serves-and-every-ai-provider-path-is-reachable-from-env.md) | A design must extend the pack the deployment serves, and every AI provider path is reachable from `.env` | — | Accepted | 2026-11-22 |
 | [0464](0464-sign-up-is-a-request-an-operator-approves-in-one-transaction.md) | Sign-up is a request an operator approves, and approval creates the workspace in one transaction | — | Accepted | 2026-11-23 |
+| [0465](0465-an-approved-workspace-gets-a-starter-chart-of-accounts.md) | An approved workspace gets a starter chart of accounts, written through the create handler after the approval commits | — | Accepted | 2026-11-23 |

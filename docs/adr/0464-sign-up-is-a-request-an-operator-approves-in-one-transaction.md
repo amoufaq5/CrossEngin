@@ -228,8 +228,9 @@ Two shapes are worth knowing:
    confirm out of band, which is where this is caught.
 3. **No email verification and no mail channel.** The operator transmits the password. Self-service
    password reset, and staff invitations by a customer's own admin, both still need the operator.
-4. **No starter chart of accounts.** An approved workspace has no ledger accounts, so its first
-   invoice is refused until its admin creates them (register P2.18).
+4. ~~**No starter chart of accounts.**~~ — **closed by ADR-0465**: an approval creates a 21-account
+   starter chart and fills the workspace's unset finance account settings, after the approval
+   commits; the approver can opt out, and a platform operator can run it again for any tenant.
 5. **Race codes and clocks.**
    - Two concurrent approvals of one request can answer the loser with `tenant_exists` or
      `user_exists` rather than `not_pending`.

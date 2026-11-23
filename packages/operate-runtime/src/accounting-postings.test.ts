@@ -228,6 +228,33 @@ describe("a credit note reverses tax per code, as recognition split it", () => {
 });
 
 describe("withholding is not owed by the payer", () => {
+  it("posts the withheld amount to the WHT receivable, not the output tax account", async () => {
+    const h = harness();
+    const vat = await taxCode(h, "VAT20", "20.000", "vat");
+    const wht = await taxCode(h, "WHT10", "10.000", "withholding");
+    const inv = await invoice(h, [{ net: "50.00", code: vat }, { net: "50.00", code: wht }]);
+    await h.ok("invoice.send", { params: { id: inv } });
+    expect(Object.fromEntries(await h.balances())).toEqual({
+      accounts_receivable: 105,
+      wht_receivable: 5,
+      revenue: -100,
+      tax_payable: -10,
+    });
+  });
+
+  it("posts tax withheld from a vendor to the WHT payable, not input tax", async () => {
+    const h = harness();
+    const wht = await taxCode(h, "WHT10", "10.000", "withholding");
+    const bill = await h.ok("bill.create", {
+      body: { vendor_id: ACCOUNT, bill_date: "2026-06-15", due_date: "2026-07-15", subtotal: "100.00", tax_total: "0.00", total: "100.00" },
+    });
+    await h.ok("billLine.create", {
+      body: { bill_id: String(bill["id"]), description: "x", unit_price: "100.00", amount: "100.00", tax_code_id: wht },
+    });
+    await h.ok("bill.approve", { params: { id: String(bill["id"]) } });
+    expect(Object.fromEntries(await h.balances())).toEqual({ accounts_payable: -90, wht_payable: -10, expense: 100 });
+  });
+
   it("a payment of the total less withholding settles the invoice", async () => {
     const h = harness();
     const wht = await taxCode(h, "WHT5", "5.000", "withholding");

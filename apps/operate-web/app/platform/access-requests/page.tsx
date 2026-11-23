@@ -20,9 +20,10 @@ import {
   type ApproveAccessRequestBody,
   type ApproveAccessRequestResult,
   type ExistingUserRef,
+  type StarterChartAnswer,
 } from "@/lib/access-requests";
 import { formatAge, formatCell, titleCase } from "@/lib/format";
-import { PlatformError } from "@/lib/platform";
+import { describeStarterChart, PlatformError } from "@/lib/platform";
 import { classifyRequestFailure, requestFailureSentence } from "@/lib/request-failure";
 
 const PAGE_LIMIT = 50;
@@ -436,6 +437,7 @@ function ApprovedBanner({
               <p className="mt-1 text-xs">{PASSWORD_HANDOVER}</p>
             </>
           )}
+          <StarterChartOutcome answer={result.starterChart} />
           <p className="mt-2 text-xs">
             The customer signs in with workspace <span className="font-mono">{result.tenant.slug}</span>.{" "}
             <Link
@@ -453,6 +455,48 @@ function ApprovedBanner({
           Dismiss
         </button>
       </div>
+    </div>
+  );
+}
+
+/**
+ * The chart outcome. The report itself is described by `describeStarterChart`, the same reader the
+ * workspace's own panel uses, so the two say the same thing about one report. Undefined is a server
+ * a build behind, which sends no field: said as unknown rather than guessed, since either guess names
+ * the wrong next step.
+ */
+function StarterChartOutcome({ answer }: { answer: StarterChartAnswer | undefined }): ReactElement {
+  if (answer === undefined) {
+    return <p className="mt-2">Chart of accounts: the server did not say whether one was created.</p>;
+  }
+  if (answer.outcome === "not_requested") {
+    return <p className="mt-2">No chart of accounts requested; the workspace starts with none.</p>;
+  }
+  if (answer.outcome === "failed") {
+    return (
+      <p className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-amber-800">
+        Chart of accounts not finished ({answer.error}). The workspace is approved; accounts already created
+        are kept, and Create starter chart of accounts on the workspace&apos;s page finishes it once the cause
+        is fixed.
+      </p>
+    );
+  }
+  const d = describeStarterChart(answer);
+  return (
+    <div
+      className={
+        d.complete ? "mt-2" : "mt-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-amber-800"
+      }
+    >
+      <p>Chart of accounts: {d.headline}</p>
+      <p className="mt-1 text-xs">{d.counts}</p>
+      {d.details.length > 0 && (
+        <ul className="mt-1 list-disc pl-5 text-xs">
+          {d.details.map((line) => (
+            <li key={line}>{line}</li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }
@@ -499,6 +543,7 @@ function ApprovePanel({
   // Required before an attach is sent: the request's email is whatever the requester typed, so the
   // server will not attach an existing account on the request's word alone (ADR-0464).
   const [ownerConfirmed, setOwnerConfirmed] = useState(false);
+  const [starterChart, setStarterChart] = useState(true);
 
   function body(attach: boolean): ApproveAccessRequestBody | string {
     const s = slug.trim();
@@ -532,6 +577,8 @@ function ApprovePanel({
       out.attachExistingUser = true;
       out.confirmedExistingOwner = true;
     } else out.password = password;
+    // Absent is the server's yes, and the body is strict, so only the opt-out is sent.
+    if (!starterChart) out.starterChart = false;
     return out;
   }
 
@@ -654,6 +701,23 @@ function ApprovePanel({
           <p className="mt-1 text-xs text-ink-faint">Optional.</p>
         </div>
       </div>
+
+      <label className="mt-4 flex items-start gap-2 text-sm text-ink">
+        <input
+          type="checkbox"
+          className="mt-0.5"
+          checked={starterChart}
+          disabled={submitting}
+          onChange={(e) => setStarterChart(e.target.checked)}
+        />
+        <span>
+          Create a starter chart of accounts
+          <span className="block text-xs text-ink-faint">
+            21 ledger accounts, with the workspace&apos;s finance account settings pointed at them, so its
+            first invoice can post. Untick for a company bringing its own chart.
+          </span>
+        </span>
+      </label>
 
       {existing === null ? (
         <div className="mt-4">

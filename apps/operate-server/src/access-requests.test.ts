@@ -1,4 +1,5 @@
 import type { PgConnection, PgQueryResult, UnreadableRow } from "@crossengin/kernel-pg";
+import { STARTER_CHART_VERSION, type StarterChartReport } from "@crossengin/operate-runtime";
 import { assertBindArity } from "@crossengin/testing";
 import { createHash } from "node:crypto";
 
@@ -473,7 +474,29 @@ interface Harness {
   readonly acts: string[];
   readonly creations: TenantCreationEvent[];
   readonly contexts: string[];
+  readonly charts: { tenantId: string; provisioningId: string; principalId: string; committed: boolean }[];
   committed: boolean;
+}
+
+const CHART_REPORT: StarterChartReport = {
+  outcome: "complete",
+  version: STARTER_CHART_VERSION,
+  created: ["1000", "1100"],
+  existing: [],
+  refused: [],
+  settingsFilled: ["cashAccountCode", "arAccountCode"],
+  settingsSkipped: [],
+  settingsDangling: [],
+};
+
+const CHART_ACTING_ROLES = ["erp_admin"] as const;
+
+/** A thrown error with a message that must never reach the 201. */
+class ChartStoreDown extends Error {
+  constructor() {
+    super("connection to 10.0.0.5 refused for tenant acme-secret");
+    this.name = "ChartStoreDown";
+  }
 }
 
 function harness(opts: {
@@ -485,12 +508,14 @@ function harness(opts: {
   auditThrows?: boolean;
   declared?: readonly string[];
   shed?: boolean;
+  chartThrows?: unknown;
 } = {}): Harness {
   const h: Harness = {
     events: [],
     acts: [],
     creations: [],
     contexts: [],
+    charts: [],
     committed: false,
     ctx: undefined as unknown as AccessRequestRoutesContext,
   };
@@ -614,6 +639,13 @@ function harness(opts: {
       h.acts.push("recordCreation");
       h.creations.push(event);
     },
+    provisionStarterChart: async (tenantId, by) => {
+      h.acts.push(`starterChart:${tenantId}`);
+      h.charts.push({ tenantId, ...by, committed: h.committed });
+      if (opts.chartThrows !== undefined) throw opts.chartThrows;
+      return CHART_REPORT;
+    },
+    starterChartActingRoles: CHART_ACTING_ROLES,
     onUnreadable: () => undefined,
     clock: () => new Date(AT),
   };
@@ -757,8 +789,14 @@ describe("approve", () => {
         finance: { defaultPaymentTermsDays: 30 },
       })}`,
       "markApproved",
+      `starterChart:${TENANT}`,
     ]);
-    expect(out.body).toMatchObject({ attachedExistingUser: false, passwordSet: true, user: { id: USER } });
+    expect(out.body).toMatchObject({
+      attachedExistingUser: false,
+      passwordSet: true,
+      user: { id: USER },
+      starterChart: CHART_REPORT,
+    });
     // The approval is recorded before the write, carries its facts, and nowhere the password.
     expect(h.events[0]?.operation).toBe(ACCESS_REQUEST_APPROVED_OPERATION);
     expect(h.events[0]?.detail).toEqual({
@@ -766,6 +804,9 @@ describe("approve", () => {
       slug: "acme",
       primaryRole: "erp_admin",
       attachedExistingUser: false,
+      starterChart: true,
+      starterChartActingRoles: ["erp_admin"],
+      starterChartVersion: STARTER_CHART_VERSION,
     });
     for (const carrier of [out.body, h.events, h.creations]) {
       expect(JSON.stringify(carrier)).not.toContain(PASSWORD);
@@ -886,12 +927,16 @@ describe("approve", () => {
       "platform.access_request_approved",
       "platform.access_request_refused",
     ]);
+    // No workspace was committed, so there is nothing to give a chart to.
+    expect(h.charts).toEqual([]);
   });
 
   it("maps a taken slug to 409 tenant_exists", async () => {
-    const out = await approve(harness({ createThrows: new DuplicateTenantError("acme") }), { password: PASSWORD });
+    const h = harness({ createThrows: new DuplicateTenantError("acme") });
+    const out = await approve(h, { password: PASSWORD });
     expect(out.status).toBe(409);
     expect(out.body).toMatchObject({ error: "tenant_exists" });
+    expect(h.charts).toEqual([]);
   });
 
   it("is 503 and writes nothing when the approval cannot be recorded", async () => {
@@ -899,6 +944,108 @@ describe("approve", () => {
     const out = await approve(h, { password: PASSWORD });
     expect(out.status).toBe(503);
     expect(h.acts).toEqual([]);
+  });
+
+  describe("the starter chart of accounts", () => {
+    it("is provisioned after the approval commits, for the new tenant, as the approving operator", async () => {
+      const h = harness();
+      const out = await approve(h, { password: PASSWORD });
+      expect(out.status).toBe(201);
+      expect(h.charts).toEqual([{ tenantId: TENANT, provisioningId: REQ, principalId: OPERATOR, committed: true }]);
+      // Last, and only once: strictly after the decision row landed.
+      expect(h.acts.indexOf(`starterChart:${TENANT}`)).toBe(h.acts.indexOf("markApproved") + 1);
+      expect(h.acts.filter((a) => a.startsWith("starterChart:"))).toHaveLength(1);
+      expect((out.body as { starterChart: unknown }).starterChart).toEqual(CHART_REPORT);
+    });
+
+    it("an explicit true is the same as absent", async () => {
+      const h = harness();
+      const out = await approve(h, { password: PASSWORD, starterChart: true });
+      expect(out.status).toBe(201);
+      expect(h.charts).toHaveLength(1);
+      expect(h.events[0]?.detail).toMatchObject({ starterChart: true });
+    });
+
+    it("is skipped when the operator says so, and the choice is on the record", async () => {
+      const h = harness();
+      const out = await approve(h, { password: PASSWORD, starterChart: false });
+      expect(out.status).toBe(201);
+      expect(h.charts).toEqual([]);
+      expect(h.acts.some((a) => a.startsWith("starterChart:"))).toBe(false);
+      expect((out.body as { starterChart: unknown }).starterChart).toEqual({ outcome: "not_requested" });
+      expect(h.events[0]?.detail).toMatchObject({ starterChart: false });
+      expect(h.events[0]?.detail).not.toHaveProperty("starterChartActingRoles");
+      expect(h.events[0]?.detail).not.toHaveProperty("starterChartVersion");
+    });
+
+    it("records the roles the accounts are written as when the chart is requested", async () => {
+      const h = harness();
+      const ctx: AccessRequestRoutesContext = { ...h.ctx, starterChartActingRoles: ["erp_admin", "controller"] };
+      const found = buildAccessRequestRoutes(ctx).find((r) => r.route.operationId === "platform.access_requests.approve");
+      const run = found?.handler as unknown as (input: Record<string, unknown>) => Promise<Out>;
+      const out = await run({
+        principal: { principalId: OPERATOR },
+        params: { id: REQ },
+        request: {},
+        parsedBody: { password: PASSWORD },
+      });
+      expect(out.status).toBe(201);
+      expect(h.events[0]?.detail).toMatchObject({
+        starterChart: true,
+        starterChartActingRoles: ["erp_admin", "controller"],
+        starterChartVersion: STARTER_CHART_VERSION,
+      });
+    });
+
+    it("a throw is reported as failed by name, and never undoes the approval", async () => {
+      const h = harness({ chartThrows: new ChartStoreDown() });
+      const out = await approve(h, { password: PASSWORD });
+      expect(out.status).toBe(201);
+      expect(h.committed).toBe(true);
+      expect(h.acts).toContain("markApproved");
+      expect((out.body as { starterChart: unknown }).starterChart).toEqual({
+        outcome: "failed",
+        error: "ChartStoreDown",
+      });
+      // The message carries an address and a tenant name; only the error's name is answered.
+      expect(JSON.stringify(out.body)).not.toContain("10.0.0.5");
+      expect(JSON.stringify(out.body)).not.toContain("acme-secret");
+      // Nothing about the failure is recorded as a refusal: the approval stands.
+      expect(h.events.map((e) => e.operation)).toEqual([ACCESS_REQUEST_APPROVED_OPERATION]);
+    });
+
+    it("a thrown non-Error is reported as unknown", async () => {
+      const out = await approve(harness({ chartThrows: "boom" }), { password: PASSWORD });
+      expect(out.status).toBe(201);
+      expect((out.body as { starterChart: unknown }).starterChart).toEqual({ outcome: "failed", error: "unknown" });
+    });
+
+    it("is provisioned for an attached existing user too", async () => {
+      const h = harness({ existing: { id: USER, email: "ada@acme.test", status: "active" } });
+      const out = await approve(h, { attachExistingUser: true, confirmedExistingOwner: true });
+      expect(out.status).toBe(201);
+      expect(h.charts).toHaveLength(1);
+      expect(h.events[0]?.detail).toMatchObject({
+        attachedExistingUser: true,
+        starterChart: true,
+        starterChartActingRoles: ["erp_admin"],
+      });
+    });
+
+    it.each([["yes"], [1], [null], [{}]])("refuses a non-boolean %j before anything is recorded", async (value) => {
+      const h = harness();
+      const out = await approve(h, { password: PASSWORD, starterChart: value });
+      expect(out.status).toBe(400);
+      expect(out.body).toEqual({ error: "invalid_request", fields: ["starterChart"] });
+      expect(h.events).toEqual([]);
+      expect(h.acts).toEqual([]);
+    });
+
+    it("is never asked when the approval was not recorded", async () => {
+      const h = harness({ auditThrows: true });
+      expect((await approve(h, { password: PASSWORD })).status).toBe(503);
+      expect(h.charts).toEqual([]);
+    });
   });
 
   it("is 503 when the password derivation is shed, before anything is recorded", async () => {

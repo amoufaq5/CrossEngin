@@ -84,6 +84,13 @@ export const FinanceSettingsSchema = z
     /** LedgerAccount.account_code for income tax recoverable — debited when a WHT certificate clears. */
     taxRecoverableAccountCode: z.string().max(32).optional(),
     /**
+     * LedgerAccount.account_code for tax this tenant withheld from a supplier and owes the authority —
+     * the credit a withholding line on a bill posts when its code names no account of its own. A
+     * liability: crediting input tax instead (the old fallback) made it read as tax the tenant could
+     * recover (ADR-0465).
+     */
+    whtPayableAccountCode: z.string().max(32).optional(),
+    /**
      * LedgerAccount.account_code debited by the monthly depreciation run. Unlike the codes above it
      * has no literal fallback: a depreciation entry posted to a code that names no account is a
      * charge nobody can find, so the run refuses until both of these are set.
@@ -204,13 +211,93 @@ export type TenantSettings = z.infer<typeof TenantSettingsSchema>;
 
 export const EMPTY_TENANT_SETTINGS: TenantSettings = {};
 
+/**
+ * The finance settings that name a `LedgerAccount` by its `account_code`. A type derived from the
+ * schema rather than a list, so a map keyed on it (the starter chart's) is a compile error the day a
+ * posting effect gains a new account to resolve.
+ */
+export type FinanceAccountCodeKey = {
+  [K in keyof FinanceSettings]-?: K extends `${string}AccountCode` ? K : never;
+}[keyof FinanceSettings];
+
+/** The same set at runtime, read off the schema's own shape. */
+export const FINANCE_ACCOUNT_CODE_KEYS: readonly FinanceAccountCodeKey[] = Object.keys(
+  FinanceSettingsSchema.shape,
+).filter((k): k is FinanceAccountCodeKey => k.endsWith("AccountCode"));
+
+/**
+ * `settings` with each given account code written into `finance` **only where that key is unset**,
+ * and which keys that filled. An account code an admin already chose is never replaced: the
+ * provisioning that calls this is filling a gap, not deciding the tenant's books for it.
+ */
+export function mergeUnsetFinanceAccountCodes(
+  settings: TenantSettings,
+  codes: Readonly<Partial<Record<FinanceAccountCodeKey, string>>>,
+): FinanceAccountCodeFill & { readonly settings: TenantSettings } {
+  const finance: Record<string, unknown> = { ...(settings.finance ?? {}) };
+  const filled: FinanceAccountCodeKey[] = [];
+  for (const key of FINANCE_ACCOUNT_CODE_KEYS) {
+    const code = codes[key];
+    if (code === undefined || financeAccountCodeIsSet(finance[key])) continue;
+    finance[key] = code;
+    filled.push(key);
+  }
+  const merged = filled.length === 0 ? settings : TenantSettingsSchema.parse({ ...settings, finance });
+  return { settings: merged, filled, inEffect: financeAccountCodesOf(merged) };
+}
+
+/**
+ * A blank code is unset: the schema admits `""`, and `resolveAccountId` resolves nothing for it, so a
+ * fill that treated it as chosen would leave the tenant refused while reporting the setting as kept.
+ */
+export function financeAccountCodeIsSet(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+/** The finance account codes a settings document sets, blank ones omitted. */
+export function financeAccountCodesOf(
+  settings: TenantSettings,
+): Readonly<Partial<Record<FinanceAccountCodeKey, string>>> {
+  const finance: Record<string, unknown> = { ...(settings.finance ?? {}) };
+  const out: Partial<Record<FinanceAccountCodeKey, string>> = {};
+  for (const key of FINANCE_ACCOUNT_CODE_KEYS) {
+    const value = finance[key];
+    if (financeAccountCodeIsSet(value)) out[key] = value;
+  }
+  return out;
+}
+
+/** What a fill did, and every finance account code in effect once it had. */
+export interface FinanceAccountCodeFill {
+  readonly filled: readonly FinanceAccountCodeKey[];
+  /**
+   * Every set account code after the fill, including ones an admin chose. The caller checks these
+   * name an account: a code chosen by hand for an account nobody created leaves the first invoice
+   * refused, and a report saying "complete" over it would be false.
+   */
+  readonly inEffect: Readonly<Partial<Record<FinanceAccountCodeKey, string>>>;
+}
+
 /** Persists per-tenant operational settings (singleton document per tenant). */
 export interface SettingsStore {
   get(tenantId: string): Promise<TenantSettings>;
   put(tenantId: string, settings: TenantSettings, updatedBy?: string | null): Promise<TenantSettings>;
 }
 
-export class InMemorySettingsStore implements SettingsStore {
+/**
+ * Writes finance account codes into keys that are unset, as one read-modify-write the store makes
+ * atomic, and answers which keys it filled. A get-then-put by the caller would replace a code an
+ * admin set between the two.
+ */
+export interface FinanceAccountCodeFiller {
+  fillUnsetFinanceAccountCodes(
+    tenantId: string,
+    codes: Readonly<Partial<Record<FinanceAccountCodeKey, string>>>,
+    updatedBy: string | null,
+  ): Promise<FinanceAccountCodeFill>;
+}
+
+export class InMemorySettingsStore implements SettingsStore, FinanceAccountCodeFiller {
   private readonly byTenant = new Map<string, TenantSettings>();
 
   get(tenantId: string): Promise<TenantSettings> {
@@ -221,6 +308,15 @@ export class InMemorySettingsStore implements SettingsStore {
     const parsed = TenantSettingsSchema.parse(settings);
     this.byTenant.set(tenantId, parsed);
     return Promise.resolve(parsed);
+  }
+
+  fillUnsetFinanceAccountCodes(
+    tenantId: string,
+    codes: Readonly<Partial<Record<FinanceAccountCodeKey, string>>>,
+  ): Promise<FinanceAccountCodeFill> {
+    const merged = mergeUnsetFinanceAccountCodes(this.byTenant.get(tenantId) ?? EMPTY_TENANT_SETTINGS, codes);
+    if (merged.filled.length > 0) this.byTenant.set(tenantId, merged.settings);
+    return Promise.resolve({ filled: merged.filled, inEffect: merged.inEffect });
   }
 }
 

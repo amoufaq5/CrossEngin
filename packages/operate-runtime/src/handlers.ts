@@ -1407,7 +1407,8 @@ async function writeTxn(
           `in this tenant, and none matched; nothing was written` +
           (err.target === "LedgerAccount"
             ? " — set the tenant's finance account codes (PUT /v1/admin/settings, `finance`) to " +
-              "ledger accounts that exist"
+              "ledger accounts that exist; a workspace with no chart of its own can ask a platform operator " +
+              "for the starter chart of accounts (POST /v1/platform/tenants/{id}/starter-chart)"
             : ""),
       });
     }

@@ -7,7 +7,7 @@
 // lib/users.ts' reason: the same `{error, detail}` documents through the same proxy, and the
 // 401-redirect inside `throwProblem` is the half a second copy would forget.
 
-import { PlatformError, throwProblem } from "@/lib/platform";
+import { PlatformError, throwProblem, type StarterChartReport } from "@/lib/platform";
 
 export const ACCESS_REQUEST_STATUSES = ["pending", "approved", "rejected"] as const;
 export type AccessRequestStatus = (typeof ACCESS_REQUEST_STATUSES)[number];
@@ -62,6 +62,11 @@ export interface ApproveAccessRequestBody {
   readonly paymentTermsDays?: number;
   readonly attachExistingUser?: boolean;
   readonly confirmedExistingOwner?: boolean;
+  /**
+   * Absent means the server creates the starter chart of accounts (ADR-0465). Send `false` only
+   * for a company bringing its own chart: the body is `.strict()`, so `true` is the silence.
+   */
+  readonly starterChart?: boolean;
 }
 
 export interface ApprovedTenant {
@@ -77,7 +82,18 @@ export interface ApproveAccessRequestResult {
   readonly membership: { readonly primaryRole: string; readonly status: string } | null;
   readonly attachedExistingUser: boolean;
   readonly passwordSet: boolean;
+  /** Optional only because a server a build behind sends none; the console says so rather than guessing. */
+  readonly starterChart?: StarterChartAnswer;
 }
+
+/**
+ * What an approval says about the chart. `failed` is a throw after the workspace committed, so the
+ * approval stands and the chart is finished from the workspace's own page.
+ */
+export type StarterChartAnswer =
+  | StarterChartReport
+  | { readonly outcome: "not_requested" }
+  | { readonly outcome: "failed"; readonly error: string };
 
 /** The person a 409 `user_exists` / `user_not_active` names, so the console can offer to attach. */
 export interface ExistingUserRef {
@@ -103,6 +119,7 @@ export class AccessRequestApproveError extends PlatformError {
 }
 
 export { PlatformError };
+export type { StarterChartReport };
 
 function platformPath(suffix: string): string {
   return `/api/v1/platform/access-requests${suffix}`;
@@ -180,8 +197,10 @@ async function throwApproveProblem(res: Response): Promise<never> {
 
 /**
  * Creates the workspace, its first admin, that admin's membership and password, and the default
- * settings, in one transaction on the server. The response never carries the password; the caller
- * already holds it.
+ * settings, in one transaction on the server; then, unless `starterChart: false`, the starter chart
+ * of accounts and the finance account codes pointed at it (ADR-0465), after that transaction
+ * commits — so a chart that fails is reported on the result and never undoes the approval. The
+ * response never carries the password; the caller already holds it.
  */
 export async function approveAccessRequest(
   id: string,

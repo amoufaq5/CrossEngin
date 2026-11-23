@@ -174,14 +174,17 @@ export function entityAuditEntry(
 
 /**
  * The row's `reason`: the transition or link detail, and — for a write background work made — which
- * job run made it. The actor's kind is `system` either way and the actor shape has no field for a
- * job, so without this a job's write and a bare api-key's would be one row shape with nothing to
- * tell them apart (ADR-0331's shared placeholder, at the audit trail).
+ * job run or which provisioning act made it. The actor's kind is `system` either way and the actor
+ * shape has no field for either, so without this a system write and a bare api-key's would be one
+ * row shape with nothing to tell them apart (ADR-0331's shared placeholder, at the audit trail).
  */
 function reasonOf(event: EntityWriteAuditEvent): string | null {
   const act = event.detail === null ? null : `${event.action}:${event.detail}`;
   if (event.origin === undefined) return act;
-  const by = `job:${event.origin.jobId} run:${event.origin.runId}`;
+  const by =
+    event.origin.kind === "job"
+      ? `job:${event.origin.jobId} run:${event.origin.runId}`
+      : `provisioning:${event.origin.operation} id:${event.origin.provisioningId}`;
   return act === null ? by : `${by} ${act}`;
 }
 

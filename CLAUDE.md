@@ -10276,7 +10276,26 @@ Two constraints worth knowing before suggesting a host:
   capped at 200, and reject-all exists. Live on PG 16 as `crossengin_app` with the shipped compose
   command: a forced mid-transaction failure left no tenant, no user, no audit row and the request
   pending. Open: no per-client rate limit behind the proxy, address squatting, no email
-  verification, no starter chart of accounts.
+  verification.
+- **An approved workspace gets a starter chart of accounts** (ADR-0465). After the approval commits,
+  `ensureStarterChart` writes 21 ledger accounts through the real create handler as a system actor
+  (the `provisioning` origin of ADR-0430's system writer, `req_prov_` request ids, an audit row per
+  account reading `provisioning:starter_chart id:<id>`) under `--job-actor-role` (default
+  `erp_admin`) — a **bounded escalation**, since `platform_admin` reaches no entity operation, so
+  both audit records carry `actingRoles` and the chart version. It then fills only **unset** finance
+  `*AccountCode` settings, one locked read-modify-write, and only from a code exactly one account
+  carries and that this run created or that has the chart's type, is active and postable; anything
+  else is reported (`settingsSkipped`, `settingsDangling`). Six outcomes, reported and never
+  thrown: a failed chart never undoes an approval. `POST /v1/platform/tenants/{id}/starter-chart`
+  runs the same code for any active tenant (platform-admin grant, recorded before writing, 503 if
+  the record cannot be written); the console has an approval checkbox and a tenant-page button, and
+  `deploy/onboard-tenant.sh` calls it (`NO_STARTER_CHART=1` skips). **Withholding now posts to a
+  withholding account** — the code's own `gl_account_code`, else `whtReceivableAccountCode` (invoice)
+  or the new `whtPayableAccountCode` (bill), never the tax account — so an upgrading workspace with
+  an uncoded withholding code is refused 409 until those are set (`deploy/README.md`'s upgrade
+  section). Live on PG 16 as `crossengin_app` on both stores: 21 accounts, 18 settings, idempotent
+  rerun, opt-out, refusal under `--job-actor-role erp_viewer`, the first invoice debiting 1100, and a
+  withheld bill crediting 2210.
 
 ## What's actually left
 
@@ -14885,8 +14904,9 @@ land with or before it.
     refusal names nothing.**~~ — **closed by ADR-0423 on both stores**: the refusal is
     **409 `server_reference_unresolved`** naming the entity, field and target, and for a
     `LedgerAccount` target the settings remedy; `--store pg` now refuses too, because H-09 made it
-    enforce references, so the dangling-reference posting below no longer happens anywhere. Whether
-    the platform should provision default ledger accounts is open. The original entry: ADR-0121's GL resolution is
+    enforce references, so the dangling-reference posting below no longer happens anywhere. The
+    provisioning half is **closed by ADR-0465**: an approved workspace gets a starter chart, and any
+    other tenant can be given one by route. The original entry: ADR-0121's GL resolution is
     `(await resolveAccountId(…)) ?? c.arAccountRef`, and the fallbacks are literals
     (`"accounts_receivable"`, `"revenue"`, `"tax_payable"`, `"accounts_payable"`, `"expense"`,
     `"tax_input"`, `"cash"`, the two FX names) written into `JournalLine.ledger_account_id` — which
@@ -16026,7 +16046,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 458 records; 379 Accepted, 79 Proposed (the
+title or status change cannot drift. 459 records; 380 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

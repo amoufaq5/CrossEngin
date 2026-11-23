@@ -3810,7 +3810,10 @@ Options:
                        lifecycle rule and the audit row — so this role is authorized exactly as a
                        person holding it would be; the audit row names the job run, never a person.
                        A role the served manifest does not declare registers no job handler at all,
-                       said at boot
+                       said at boot. It is also the role the starter chart of accounts is written as
+                       (an approved access request, or POST
+                       /v1/platform/tenants/{id}/starter-chart), so it needs LedgerAccount create:
+                       erp_admin or controller in the shipped packs
   --ai-design          Expose the in-product AI Architect under /v1/ai — POST a business description,
                        get a validated manifest proposal, activate it as the tenant's live system
                        (needs --store pg|pg-columns and a provider, tried in this order:

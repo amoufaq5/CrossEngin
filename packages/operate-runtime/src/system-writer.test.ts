@@ -159,6 +159,44 @@ describe("buildSystemEntityAccess — a background write runs the request pipeli
     );
   });
 
+  it("mints a req_prov_ request id for a provisioning write and hands the handler that origin", async () => {
+    const { compiled } = setup();
+    const origin = { kind: "provisioning", operation: "starter_chart", provisioningId: "areq-01HX9!" } as const;
+    const seen: { requestId: string; origin: unknown }[] = [];
+    const recording: Handler = (input) => {
+      seen.push({ requestId: input.request.id, origin: systemWriteOriginOf(input.principal) });
+      return { kind: "json", status: 201, body: { id: "rec_1" } };
+    };
+    compiled.handlers.register("ledgerAccount.create", recording);
+    const access = compiled.systemEntityAccess.forTenant(TENANT, { roles: ["erp_admin"], origin });
+    const r = await access.create("LedgerAccount", { account_code: "1000", name: "Cash", account_type: "asset" });
+    expect(r.kind).toBe("written");
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.requestId).toMatch(/^req_prov_areq01HX9_[0-9]+$/);
+    expect(seen[0]?.origin).toEqual(origin);
+  });
+
+  it("still mints a req_job_ request id for a job write, carrying the run id", async () => {
+    const { compiled, access } = setup();
+    const ids: string[] = [];
+    const recording: Handler = (input) => {
+      ids.push(input.request.id);
+      return { kind: "json", status: 201, body: { id: "rec_1" } };
+    };
+    compiled.handlers.register("ledgerAccount.create", recording);
+    await access.create("LedgerAccount", { account_code: "1000", name: "Cash", account_type: "asset" });
+    expect(ids[0]).toMatch(/^req_job_8b1a9953c4614b6d9f3e0c5a2f7d41aa_[0-9]+$/);
+  });
+
+  it("files a provisioning write's audit record under the provisioning origin", async () => {
+    const { compiled, audited } = setup();
+    const origin = { kind: "provisioning", operation: "starter_chart", provisioningId: "areq_7" } as const;
+    const access = compiled.systemEntityAccess.forTenant(TENANT, { roles: ["erp_admin"], origin });
+    const r = await access.create("LedgerAccount", { account_code: "1000", name: "Cash", account_type: "asset" });
+    expect(r.kind).toBe("written");
+    expect(audited[0]).toMatchObject({ actorUserId: null, origin });
+  });
+
   it("refuses an actor with no role, since no grant could name it", () => {
     const { compiled } = setup();
     expect(() => compiled.systemEntityAccess.forTenant(TENANT, { ...ACTOR, roles: [] })).toThrow(/at least one role/);

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { DEFAULT_DRAIN_PAGE_SIZE, isReadCeilingExceeded, ReadCeilingExceeded } from "./list-drain.js";
 import { settlementCoverageGuard } from "./write-guards.js";
-import { InMemoryEntityStore, type EntityStore } from "./store.js";
+import { InMemoryEntityStore, ReferenceNotFound, type EntityRecord, type EntityStore } from "./store.js";
 import {
   bookingRateStampEffect,
   computeLineTaxBreakdown,
@@ -548,7 +548,7 @@ describe("recognitionGlPostingEffect — per-TaxCode GL account", () => {
     controlDescription: "AR",
     netDescription: "Revenue",
     taxDescription: "Tax payable",
-    taxLines: { entity: "InvoiceLine", refField: "invoice_id", netField: "line_total" },
+    taxLines: { entity: "InvoiceLine", refField: "invoice_id", netField: "line_total", withholdingAccountRef: "wht_receivable" },
     clock,
   });
   const issue = (store: InMemoryEntityStore, id: string, before: Record<string, unknown>) =>
@@ -590,7 +590,7 @@ describe("recognitionGlPostingEffect — per-TaxCode GL account", () => {
       controlDescription: "AR",
       netDescription: "Revenue",
       taxDescription: "Tax payable",
-      taxLines: { entity: "InvoiceLine", refField: "invoice_id", netField: "line_total" },
+      taxLines: { entity: "InvoiceLine", refField: "invoice_id", netField: "line_total", withholdingAccountRef: "wht_receivable" },
       resolveJurisdictionAccounts: async () => ({ UK: "2201", DE: "2202" }),
       clock,
     });
@@ -619,7 +619,7 @@ describe("recognitionGlPostingEffect — per-TaxCode GL account", () => {
       controlDescription: "AR",
       netDescription: "Revenue",
       taxDescription: "Tax payable",
-      taxLines: { entity: "InvoiceLine", refField: "invoice_id", netField: "line_total" },
+      taxLines: { entity: "InvoiceLine", refField: "invoice_id", netField: "line_total", withholdingAccountRef: "wht_receivable" },
       resolveJurisdictionAccounts: async () => ({ UK: "2201" }),
       clock,
     });
@@ -679,7 +679,7 @@ describe("recognitionGlPostingEffect — per-TaxCode GL account", () => {
       controlDescription: "AR",
       netDescription: "Revenue",
       taxDescription: "Tax payable",
-      taxLines: { entity: "InvoiceLine", refField: "invoice_id", netField: "line_total" },
+      taxLines: { entity: "InvoiceLine", refField: "invoice_id", netField: "line_total", withholdingAccountRef: "wht_receivable" },
       stampWithholdingField: "withholding_total",
       clock,
     });
@@ -705,7 +705,7 @@ describe("recognitionGlPostingEffect — per-TaxCode GL account", () => {
       controlDescription: "AR",
       netDescription: "Revenue",
       taxDescription: "Tax payable",
-      taxLines: { entity: "InvoiceLine", refField: "invoice_id", netField: "line_total" },
+      taxLines: { entity: "InvoiceLine", refField: "invoice_id", netField: "line_total", withholdingAccountRef: "wht_receivable" },
       stampWithholdingField: "withholding_total",
       clock,
     });
@@ -732,7 +732,7 @@ describe("recognitionGlPostingEffect — line-level tax codes", () => {
     controlDescription: "AR",
     netDescription: "Revenue",
     taxDescription: "Tax payable",
-    taxLines: { entity: "InvoiceLine", refField: "invoice_id", netField: "line_total" },
+    taxLines: { entity: "InvoiceLine", refField: "invoice_id", netField: "line_total", withholdingAccountRef: "wht_receivable" },
     clock,
   });
   const issue = (store: InMemoryEntityStore, id: string, before: Record<string, unknown>) =>
@@ -1263,7 +1263,7 @@ describe("amounts that arrive as wire decimals", () => {
       controlDescription: "AR",
       netDescription: "Revenue",
       taxDescription: "Tax payable",
-      taxLines: { entity: "InvoiceLine", refField: "invoice_id", netField: "line_total" },
+      taxLines: { entity: "InvoiceLine", refField: "invoice_id", netField: "line_total", withholdingAccountRef: "wht_receivable" },
       clock,
     });
     const store = new InMemoryEntityStore();
@@ -1487,7 +1487,7 @@ describe("recognitionGlPostingEffect — the whole line set (withholding past th
       controlDescription: "AR",
       netDescription: "Revenue",
       taxDescription: "Tax",
-      taxLines: { entity: "InvoiceLine", refField: "invoice_id", netField: "line_total", ...(maxRows === undefined ? {} : { maxRows }) },
+      taxLines: { entity: "InvoiceLine", refField: "invoice_id", netField: "line_total", withholdingAccountRef: "wht_receivable", ...(maxRows === undefined ? {} : { maxRows }) },
       stampWithholdingField: "withholding_total",
       clock,
     });
@@ -2039,5 +2039,220 @@ describe("entersState — the three prior-state effects stay inert on a create",
     const inv = await store.create(TENANT, "Invoice", { invoice_number: "INV-V2", state: "void", document_type: "invoice", total: 10 });
     await creditNoteGlPostingEffect({ clock })(create("Invoice", inv, store, String(inv.id)));
     expect((await store.list(TENANT, "JournalEntry")).length).toBe(0);
+  });
+});
+
+describe("recognitionGlPostingEffect — where withholding posts", () => {
+  function recognition(opts: {
+    readonly sale: boolean;
+    readonly codes?: { control?: string; net?: string; tax?: string; withholding?: string };
+    readonly jurisdictions?: Record<string, string>;
+  }) {
+    return recognitionGlPostingEffect({
+      entity: opts.sale ? "Invoice" : "Bill",
+      triggerState: opts.sale ? "sent" : "approved",
+      controlSide: opts.sale ? "debit" : "credit",
+      numberField: opts.sale ? "invoice_number" : "bill_number",
+      controlAccountRef: opts.sale ? "ar" : "ap",
+      netAccountRef: opts.sale ? "revenue" : "expense",
+      taxAccountRef: opts.sale ? "tax_payable" : "tax_input",
+      controlDescription: "Control",
+      netDescription: "Net",
+      taxDescription: "Tax",
+      contraDocumentType: { field: "document_type", value: "credit_note" },
+      taxLines: opts.sale
+        ? { entity: "InvoiceLine", refField: "invoice_id", netField: "line_total", withholdingAccountRef: "wht_receivable" }
+        : { entity: "BillLine", refField: "bill_id", netField: "amount", withholdingAccountRef: "wht_payable" },
+      ...(opts.codes !== undefined ? { resolveAccountCodes: async () => opts.codes ?? {} } : {}),
+      ...(opts.jurisdictions !== undefined ? { resolveJurisdictionAccounts: async () => opts.jurisdictions ?? {} } : {}),
+      clock,
+    });
+  }
+
+  const SALE_CODES = { control: "1200", net: "4000", tax: "2200", withholding: "1310" };
+  const PURCHASE_CODES = { control: "2100", net: "5000", tax: "1300", withholding: "2210" };
+
+  async function chart(store: InMemoryEntityStore): Promise<void> {
+    for (const [id, code] of [
+      ["acc_ar", "1200"],
+      ["acc_rev", "4000"],
+      ["acc_out", "2200"],
+      ["acc_whtr", "1310"],
+      ["acc_rec", "1320"],
+      ["acc_ap", "2100"],
+      ["acc_exp", "5000"],
+      ["acc_in", "1300"],
+      ["acc_whtp", "2210"],
+    ] as const) {
+      await store.create(TENANT, "LedgerAccount", { id, account_code: code });
+    }
+  }
+
+  async function balances(store: EntityStore): Promise<Record<string, number>> {
+    const out: Record<string, number> = {};
+    for (const l of await store.list(TENANT, "JournalLine")) {
+      const acct = String(l.ledger_account_id);
+      out[acct] = Math.round(((out[acct] ?? 0) + Number(l.debit) - Number(l.credit)) * 100) / 100;
+    }
+    return out;
+  }
+
+  /**
+   * Net 100, VAT 10, WHT 5, total 110: a line carries one code, so the VAT and the withholding each
+   * ride on their own 50 (VAT 20%, WHT 10%), which is the shape the reconciliation gate admits.
+   */
+  async function document(
+    store: InMemoryEntityStore,
+    sale: boolean,
+    wht: Record<string, unknown> = {},
+    extra: Record<string, unknown> = {},
+  ): Promise<EntityRecord> {
+    await store.create(TENANT, "TaxCode", { id: "vat", code: "VAT20", rate_pct: 20, kind: "vat", jurisdiction: "UK" });
+    await store.create(TENANT, "TaxCode", { id: "wht", code: "WHT10", rate_pct: 10, kind: "withholding", ...wht });
+    const doc = await store.create(TENANT, sale ? "Invoice" : "Bill", {
+      [sale ? "invoice_number" : "bill_number"]: sale ? "INV-1" : "BILL-1",
+      state: "draft",
+      document_type: "invoice",
+      subtotal: 100,
+      tax_total: 10,
+      total: 110,
+      ...extra,
+    });
+    const line = sale ? "InvoiceLine" : "BillLine";
+    const ref = sale ? "invoice_id" : "bill_id";
+    const net = sale ? "line_total" : "amount";
+    await store.create(TENANT, line, { [ref]: String(doc.id), [net]: 50, tax_code_id: "vat" });
+    await store.create(TENANT, line, { [ref]: String(doc.id), [net]: 50, tax_code_id: "wht" });
+    return doc;
+  }
+
+  const recognise = (effect: ReturnType<typeof recognition>, store: EntityStore, doc: EntityRecord, sale: boolean) =>
+    effect({
+      operation: "transition",
+      entity: sale ? "Invoice" : "Bill",
+      tenantId: TENANT,
+      id: String(doc.id),
+      before: doc,
+      after: { ...doc, state: sale ? "sent" : "approved" },
+      store,
+    });
+
+  it("debits the WHT receivable on a sale, leaves output tax whole, and the certificate clears it to zero", async () => {
+    const store = new InMemoryEntityStore();
+    await chart(store);
+    const inv = await document(store, true);
+    await recognise(recognition({ sale: true, codes: SALE_CODES }), store, inv, true);
+    expect(await balances(store)).toEqual({ acc_ar: 105, acc_whtr: 5, acc_rev: -100, acc_out: -10 });
+
+    const cert = await store.create(TENANT, "WhtCertificate", { certificate_number: "C-1", state: "draft", amount: 5, currency: "USD" });
+    await whtCertificateClearingEffect({
+      resolveAccountCodes: async () => ({ whtReceivable: "1310", taxRecoverable: "1320" }),
+      clock,
+    })({
+      operation: "transition",
+      entity: "WhtCertificate",
+      tenantId: TENANT,
+      id: String(cert.id),
+      before: cert,
+      after: { ...cert, state: "confirmed" },
+      store,
+    });
+    expect(await balances(store)).toEqual({ acc_ar: 105, acc_whtr: 0, acc_rec: 5, acc_rev: -100, acc_out: -10 });
+  });
+
+  it("credits the WHT payable on a purchase, not input tax", async () => {
+    const store = new InMemoryEntityStore();
+    await chart(store);
+    const bill = await document(store, false);
+    await recognise(recognition({ sale: false, codes: PURCHASE_CODES }), store, bill, false);
+    expect(await balances(store)).toEqual({ acc_ap: -105, acc_whtp: -5, acc_exp: 100, acc_in: 10 });
+  });
+
+  it("posts to the withholding code's own gl_account_code when it names one", async () => {
+    const store = new InMemoryEntityStore();
+    await chart(store);
+    await store.create(TENANT, "LedgerAccount", { id: "acc_own", account_code: "1399" });
+    const inv = await document(store, true, { gl_account_code: "1399" });
+    await recognise(recognition({ sale: true, codes: SALE_CODES }), store, inv, true);
+    const b = await balances(store);
+    expect(b.acc_own).toBe(5);
+    expect(b.acc_whtr).toBeUndefined();
+  });
+
+  it("falls to the withholding default, not the tax account, when the code's own account does not resolve", async () => {
+    const store = new InMemoryEntityStore();
+    await chart(store);
+    const inv = await document(store, true, { gl_account_code: "9999" });
+    await recognise(recognition({ sale: true, codes: SALE_CODES }), store, inv, true);
+    expect((await balances(store)).acc_whtr).toBe(5);
+  });
+
+  it("never consults the per-jurisdiction tax map for withholding, which stays in force for regular tax", async () => {
+    const store = new InMemoryEntityStore();
+    await chart(store);
+    await store.create(TENANT, "LedgerAccount", { id: "acc_uk", account_code: "2201" });
+    const inv = await document(store, true, { jurisdiction: "UK" });
+    await recognise(recognition({ sale: true, codes: SALE_CODES, jurisdictions: { UK: "2201" } }), store, inv, true);
+    expect(await balances(store)).toEqual({ acc_ar: 105, acc_whtr: 5, acc_rev: -100, acc_uk: -10 });
+  });
+
+  it("posts to the literal ref when no withholding code is configured", async () => {
+    const store = new InMemoryEntityStore();
+    const inv = await document(store, true);
+    await recognise(recognition({ sale: true }), store, inv, true);
+    expect(await balances(store)).toEqual({ ar: 105, wht_receivable: 5, revenue: -100, tax_payable: -10 });
+
+    const billStore = new InMemoryEntityStore();
+    const bill = await document(billStore, false);
+    await recognise(recognition({ sale: false }), billStore, bill, false);
+    expect((await balances(billStore)).wht_payable).toBe(-5);
+  });
+
+  it("is refused by a store that enforces references when the default resolves to no account", async () => {
+    class EnforcingStore extends InMemoryEntityStore {
+      override async create(tenantId: string, entity: string, record: Record<string, unknown>): Promise<EntityRecord> {
+        if (entity === "JournalLine" && (await this.get(tenantId, "LedgerAccount", String(record.ledger_account_id))) === null) {
+          throw new ReferenceNotFound("JournalLine", "ledger_account_id", "LedgerAccount");
+        }
+        return super.create(tenantId, entity, record);
+      }
+    }
+    const store = new EnforcingStore();
+    await chart(store);
+    const inv = await document(store, true);
+    // Every account but the withholding one is configured.
+    const { withholding: _unset, ...codes } = SALE_CODES;
+    await expect(recognise(recognition({ sale: true, codes }), store, inv, true)).rejects.toBeInstanceOf(ReferenceNotFound);
+    // The control: configured, the same document posts.
+    const posted = new EnforcingStore();
+    await chart(posted);
+    const inv2 = await document(posted, true);
+    await recognise(recognition({ sale: true, codes: SALE_CODES }), posted, inv2, true);
+    expect((await balances(posted)).acc_whtr).toBe(5);
+  });
+
+  it("leaves a document with no withholding as it was", async () => {
+    const store = new InMemoryEntityStore();
+    await chart(store);
+    await store.create(TENANT, "TaxCode", { id: "vat", code: "VAT10", rate_pct: 10, kind: "vat" });
+    const inv = await store.create(TENANT, "Invoice", {
+      invoice_number: "INV-2",
+      state: "draft",
+      document_type: "invoice",
+      subtotal: 100,
+      tax_total: 10,
+      total: 110,
+    });
+    await store.create(TENANT, "InvoiceLine", { invoice_id: String(inv.id), line_total: 100, tax_code_id: "vat" });
+    await recognise(recognition({ sale: true, codes: SALE_CODES }), store, inv, true);
+    expect(await balances(store)).toEqual({ acc_ar: 110, acc_rev: -100, acc_out: -10 });
+  });
+
+  it("credits the WHT receivable on a credit note, the mirror of the sale", async () => {
+    const store = new InMemoryEntityStore();
+    await chart(store);
+    const note = await document(store, true, {}, { document_type: "credit_note" });
+    await recognise(recognition({ sale: true, codes: SALE_CODES }), store, note, true);
+    expect(await balances(store)).toEqual({ acc_ar: -105, acc_whtr: -5, acc_rev: 100, acc_out: 10 });
   });
 });

@@ -2,6 +2,10 @@ import type { PgConnection } from "@crossengin/kernel-pg";
 import {
   EMPTY_TENANT_SETTINGS,
   TenantSettingsSchema,
+  mergeUnsetFinanceAccountCodes,
+  type FinanceAccountCodeFiller,
+  type FinanceAccountCodeFill,
+  type FinanceAccountCodeKey,
   type SettingsStore,
   type TenantSettings,
 } from "@crossengin/operate-runtime";
@@ -13,7 +17,7 @@ import { withTenantContext } from "./tenant-context.js";
  * `meta.operate_tenant_settings`, one row per tenant, confined by RLS. Reads
  * validate the stored document so a hand-edited row can't widen the contract.
  */
-export class PostgresSettingsStore implements SettingsStore {
+export class PostgresSettingsStore implements SettingsStore, FinanceAccountCodeFiller {
   constructor(
     private readonly conn: PgConnection,
     private readonly schema = "meta",
@@ -31,8 +35,7 @@ export class PostgresSettingsStore implements SettingsStore {
       );
       const raw = res.rows[0]?.settings;
       if (raw === undefined || raw === null) return EMPTY_TENANT_SETTINGS;
-      const doc = typeof raw === "string" ? (JSON.parse(raw) as unknown) : raw;
-      const parsed = TenantSettingsSchema.safeParse(doc);
+      const parsed = TenantSettingsSchema.safeParse(storedDocument(raw));
       return parsed.success ? parsed.data : EMPTY_TENANT_SETTINGS;
     });
   }
@@ -72,5 +75,76 @@ export class PostgresSettingsStore implements SettingsStore {
       [tenantId, JSON.stringify(parsed), updatedBy],
     );
     return parsed;
+  }
+
+  /**
+   * Fills only the finance account-code keys that are unset, under a row lock, so an admin's code
+   * written between this read and this write cannot be replaced (a get-then-put by the caller
+   * could). A stored document the contract no longer accepts is **refused** rather than read as
+   * empty the way `get` reads it: writing a merge of `{}` over an unreadable row would replace every
+   * setting the tenant has with the few this fills.
+   */
+  async fillUnsetFinanceAccountCodes(
+    tenantId: string,
+    codes: Readonly<Partial<Record<FinanceAccountCodeKey, string>>>,
+    updatedBy: string | null = null,
+  ): Promise<FinanceAccountCodeFill> {
+    return withTenantContext(this.conn, tenantId, async (tx) => {
+      // Two passes at most: a tenant with no settings row has nothing to lock, so the row is
+      // inserted with `DO NOTHING`, and losing that race to another writer means the row now exists
+      // and the second pass locks it instead of overwriting what that writer saved.
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const res = await tx.query<{ settings: unknown }>(
+          `SELECT settings FROM ${this.schema}.operate_tenant_settings WHERE tenant_id = $1::uuid FOR UPDATE`,
+          [tenantId],
+        );
+        const row = res.rows[0];
+        if (row === undefined) {
+          const merged = mergeUnsetFinanceAccountCodes(EMPTY_TENANT_SETTINGS, codes);
+          if (merged.filled.length === 0) return { filled: [], inEffect: merged.inEffect };
+          const inserted = await tx.query<{ tenant_id: string }>(
+            `INSERT INTO ${this.schema}.operate_tenant_settings (tenant_id, settings, updated_at, updated_by)
+             VALUES ($1::uuid, $2::jsonb, now(), $3)
+             ON CONFLICT (tenant_id) DO NOTHING
+             RETURNING tenant_id`,
+            [tenantId, JSON.stringify(merged.settings), updatedBy],
+          );
+          if (inserted.rows.length > 0) return { filled: merged.filled, inEffect: merged.inEffect };
+          continue;
+        }
+        let current: TenantSettings = EMPTY_TENANT_SETTINGS;
+        if (row.settings !== null) {
+          const parsed = TenantSettingsSchema.safeParse(storedDocument(row.settings));
+          if (!parsed.success) throw new SettingsRowUnreadable(tenantId);
+          current = parsed.data;
+        }
+        const merged = mergeUnsetFinanceAccountCodes(current, codes);
+        if (merged.filled.length > 0) await this.putWithin(tx, tenantId, merged.settings, updatedBy);
+        return { filled: merged.filled, inEffect: merged.inEffect };
+      }
+      throw new Error(`tenant ${tenantId}'s settings row appeared and disappeared during one fill`);
+    });
+  }
+}
+
+/**
+ * The stored document, or a value the contract refuses: a text column holding malformed JSON is the
+ * same "unreadable row" as a well-formed one the contract refuses, and must not escape as a raw
+ * `SyntaxError` a caller cannot tell apart from a fault.
+ */
+function storedDocument(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+/** A stored settings row the contract no longer accepts; names the tenant and never the document. */
+export class SettingsRowUnreadable extends Error {
+  constructor(readonly tenantId: string) {
+    super(`tenant ${tenantId}'s stored settings do not satisfy the settings contract`);
+    this.name = "SettingsRowUnreadable";
   }
 }

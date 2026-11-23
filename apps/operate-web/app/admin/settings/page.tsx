@@ -224,10 +224,11 @@ export default function SettingsPage() {
               <AccountCodePicker label="FX gain/loss code" value={finance.fxGainLossAccountCode ?? ""} onChange={(v) => setD(setFinance, "fxGainLossAccountCode", v)} />
               <AccountCodePicker label="Unrealized FX code" value={finance.unrealizedFxGainLossAccountCode ?? ""} onChange={(v) => setD(setFinance, "unrealizedFxGainLossAccountCode", v)} />
               <AccountCodePicker label="WHT receivable code" value={finance.whtReceivableAccountCode ?? ""} onChange={(v) => setD(setFinance, "whtReceivableAccountCode", v)} />
+              <AccountCodePicker label="WHT payable code" value={finance.whtPayableAccountCode ?? ""} onChange={(v) => setD(setFinance, "whtPayableAccountCode", v)} />
               <AccountCodePicker label="Tax recoverable code" value={finance.taxRecoverableAccountCode ?? ""} onChange={(v) => setD(setFinance, "taxRecoverableAccountCode", v)} />
             </div>
             <p className="mt-3 text-xs text-ink-faint">
-              Account codes map to your chart of accounts (LedgerAccount): invoice issue posts AR / revenue / tax-payable; bill approval posts expense / input-tax / AP; a completed payment settles cash against AR/AP, booking any cash-vs-balance gap to FX gain/loss. Confirming a WHT certificate reclasses the withheld tax from WHT-receivable to tax-recoverable.
+              Account codes map to your chart of accounts (LedgerAccount): invoice issue posts AR / revenue / tax-payable; bill approval posts expense / input-tax / AP, with tax withheld from the supplier credited to WHT-payable; a completed payment settles cash against AR/AP, booking any cash-vs-balance gap to FX gain/loss. Tax a customer withheld from an invoice is debited to WHT-receivable, and confirming its WHT certificate reclasses it to tax-recoverable. A tax code that names its own GL account overrides the withholding codes. Inventory, COGS, GRNI, inventory-variance and the two depreciation codes are not on this form: set them through PUT /v1/admin/settings (a save here keeps them).
             </p>
 
             <div className="mt-5 border-t border-line pt-4">
@@ -427,6 +428,7 @@ const FORM_FINANCE_KEYS: ReadonlySet<string> = new Set([
   "fxGainLossAccountCode",
   "unrealizedFxGainLossAccountCode",
   "whtReceivableAccountCode",
+  "whtPayableAccountCode",
   "taxRecoverableAccountCode",
   "taxAccountsByJurisdiction",
 ]);
@@ -460,6 +462,7 @@ function buildFinance(f: StrMap): Record<string, unknown> {
   if (f.fxGainLossAccountCode?.trim()) out.fxGainLossAccountCode = f.fxGainLossAccountCode.trim();
   if (f.unrealizedFxGainLossAccountCode?.trim()) out.unrealizedFxGainLossAccountCode = f.unrealizedFxGainLossAccountCode.trim();
   if (f.whtReceivableAccountCode?.trim()) out.whtReceivableAccountCode = f.whtReceivableAccountCode.trim();
+  if (f.whtPayableAccountCode?.trim()) out.whtPayableAccountCode = f.whtPayableAccountCode.trim();
   if (f.taxRecoverableAccountCode?.trim()) out.taxRecoverableAccountCode = f.taxRecoverableAccountCode.trim();
   return out;
 }

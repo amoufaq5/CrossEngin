@@ -56,7 +56,9 @@ import {
   type EntityStore,
   type SequenceAllocator,
   type SettingsStore,
+  type FinanceAccountCodeFiller,
   OPENAPI_PATH,
+  ensureStarterChart,
 } from "@crossengin/operate-runtime";
 import { type PgConnection } from "@crossengin/kernel-pg";
 import {
@@ -379,6 +381,11 @@ import {
   isAccessRequestIntakePath,
 } from "./access-requests.js";
 import { formatAccessRequestBootLine, resolveAccessRequestIntake } from "./access-request-env.js";
+import {
+  STARTER_CHART_PROVISIONED_OPERATION,
+  buildStarterChartRoutes,
+  type StarterChartProvisioner,
+} from "./starter-chart-routes.js";
 import { platformAuthorityRoles } from "./platform-authority.js";
 import { PostgresCredentialStore } from "./credential-store.js";
 import {
@@ -919,7 +926,8 @@ async function resolveJwtConfig(
 interface ResolvedStores {
   readonly store: EntityStore;
   readonly allocator: SequenceAllocator;
-  readonly settingsStore: SettingsStore;
+  /** Also fills unset finance account codes, which the starter chart of accounts needs (ADR-0465). */
+  readonly settingsStore: SettingsStore & FinanceAccountCodeFiller;
   /** The Postgres connection (present only for pg stores), reused for billing wiring. */
   readonly conn?: PgConnection;
   /**
@@ -2265,6 +2273,47 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       }),
     );
   };
+  // The starter chart of accounts (ADR-0465): the accounts a workspace needs before its first posting,
+  // written through this deployment's own create handler as the `--job-actor-role` principal, so
+  // each account meets the grants, validation, defaults and audit row a person's create does. The
+  // gateway is resolved per tenant at call time for the job writer's reason — a tenant serving its own
+  // activated manifest is written through its own gateway — and `resolveJobAccess` is declared below
+  // and read only when an approval or the console asks, by which point it is initialised.
+  //
+  // One provisioning per tenant at a time in this process. On `--store pg` before `document-indexes`
+  // has run, `account_code` is unique by declaration only, so an approval racing the console button
+  // would each read no accounts and create twenty-one apiece; serialising them makes the second read
+  // what the first wrote. Two replicas are not covered — that case needs the index, which the boot
+  // line already names.
+  const starterChartInFlight = new Map<string, Promise<unknown>>();
+  const provisionStarterChart: StarterChartProvisioner = async (tenantId, by) => {
+    const prior = starterChartInFlight.get(tenantId) ?? Promise.resolve();
+    const run = prior.catch(() => undefined).then(() => provisionStarterChartNow(tenantId, by));
+    starterChartInFlight.set(tenantId, run);
+    try {
+      return await run;
+    } finally {
+      if (starterChartInFlight.get(tenantId) === run) starterChartInFlight.delete(tenantId);
+    }
+  };
+  const provisionStarterChartNow: StarterChartProvisioner = async (tenantId, by) => {
+    const resolved = await resolveJobAccess(tenantId);
+    if (resolved.kind === "unavailable") {
+      const err = new Error(resolved.reason);
+      err.name = "TenantGatewayUnavailable";
+      throw err;
+    }
+    return ensureStarterChart({
+      access: resolved.access,
+      tenantId,
+      actor: {
+        roles: options.jobActorRoles,
+        origin: { kind: "provisioning", operation: "starter_chart", provisioningId: by.provisioningId },
+      },
+      settings: settingsStore,
+      updatedBy: by.principalId,
+    });
+  };
   // Platform super-admin: the /v1/platform routes manage the meta.tenants registry (list/create/suspend/
   // archive/reactivate + stats) across all tenants, gated to the configured platform-admin role(s). Enabled
   // by --platform-admin over a pg store.
@@ -2278,6 +2327,36 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         onLifecycleError: (err, action) =>
           console.error(`[lifecycle] console ${action} not recorded`, err),
         recordCreation: recordTenantCreation,
+      }),
+      ...buildStarterChartRoutes({
+        tenants: new PostgresTenantStore(conn),
+        principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
+        adminRoles: new Set(options.platformAdminRoles),
+        provision: provisionStarterChart,
+        actingRoles: options.jobActorRoles,
+        newProvisioningId: () => randomUUID(),
+        // Filed in the tenant's own scope, beside its creation record, and before any account is
+        // written; the accounts' own audit rows carry the same provisioning id in their reason.
+        record: async (event): Promise<void> => {
+          if (auditEmitter === null) throw new Error("no audit emitter on this deployment");
+          await auditEmitter.emit(
+            auditEntry({
+              id: randomUUID(),
+              tenantId: event.tenantId,
+              occurredAt: event.at,
+              operation: STARTER_CHART_PROVISIONED_OPERATION,
+              entity: "Tenant",
+              entityId: event.tenantId,
+              actor: auditActor({ userId: event.principalId }),
+              after: {
+                provisioningId: event.provisioningId,
+                roles: event.roles,
+                actingRoles: event.actingRoles,
+                chartVersion: event.chartVersion,
+              },
+            }),
+          );
+        },
       }),
     );
   }
@@ -3855,6 +3934,8 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           );
         },
         recordCreation: recordTenantCreation,
+        provisionStarterChart,
+        starterChartActingRoles: options.jobActorRoles,
         onUnreadable: (row) =>
           console.error(
             `[access-request] row ${row.identity ?? "(no id)"} is unreadable and was left out of the page: ${row.detail}`,

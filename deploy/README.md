@@ -671,7 +671,7 @@ and what is not:
 | Where | What you can do |
 | --- | --- |
 | **Platform → Tenants** | List, filter by status, create. Open one to see its record and to suspend / archive / reactivate it — each needs a typed **reason**, which lands in the tenant's permanent lifecycle trail. |
-| **Platform → Tenants → one tenant** | Grant a membership (user id, primary role, optional secondary roles, and a status you must choose), activate or revoke one, and see every member of that tenant. The secondary roles are additive and take effect at that person's next login — they were accepted and inert before ADR-0369. |
+| **Platform → Tenants → one tenant** | Grant a membership (user id, primary role, optional secondary roles, and a status you must choose), activate or revoke one, and see every member of that tenant. The secondary roles are additive and take effect at that person's next login — they were accepted and inert before ADR-0369. **Create starter chart of accounts** gives an active tenant the 21 ledger accounts it lacks and points its unset finance account-code settings at them (ADR-0465). It never replaces an existing account or a chosen setting, and points a setting at an account the tenant already had only if that account has the chart's type and is active and postable; otherwise the report names the setting for the tenant's admin to choose. It is how a tenant created here or by `onboard-tenant.sh` with `NO_STARTER_CHART=1` gets a chart. It writes as `--job-actor-role`, which needs `LedgerAccount` create: a `403 forbidden` on every account means that flag, not your grant. |
 | **Platform → Users** | List every `meta.users` row with a per-status census, filter by status or by exact email address, provision a new one, and open one to suspend / reactivate / retire it. |
 | **Platform → Users → one user** | **Set their password.** This is the route that did not exist before ADR-0364 and the reason onboarding needed a shell. It cannot be aimed at yourself. |
 | **Platform → Design Reviews** | Approve or reject a manifest the Architect designed, with a field-level diff. This page used to 404: the routes behind it mount on `--design-review`, which the compose did not pass. It does now, via `--require-design-review`. Five of the manifest's **seventeen** sections get an itemised layer; the other twelve — `jobs` and `views` among them, and both *are* served — appear in the section census instead, which says *that* they changed and grades it, without saying what inside them changed. |
@@ -966,6 +966,30 @@ Raise `API_MEMORY_LIMIT` before anything else on a deployment with a long audit 
 integrity proof loads a scope's whole chain into memory, and Node sizes its heap from this limit
 (measured: 524 MiB under the `1g` default). A service that exceeds its limit is killed and
 restarted by `restart: unless-stopped`, which `docker compose ps` shows as a restart count.
+
+### Upgrading to withholding accounts (ADR-0465)
+
+A withholding tax line used to post to the tax account when its `TaxCode` named no
+`gl_account_code`: an invoice's debited output tax, and a bill's credited input tax. Both were
+wrong, and they now post to the withholding accounts — so on an existing workspace with such a tax
+code, **sending an invoice or approving a bill is refused `409 server_reference_unresolved`** until
+the account is configured:
+
+- **invoices** need `finance.whtReceivableAccountCode` (or an account coded `wht_receivable`);
+- **bills** need `finance.whtPayableAccountCode`, a setting that is new, so no existing workspace
+  has it.
+
+Set both in Settings → Finance & tax (WHT receivable code, WHT payable code) to accounts that exist,
+or give the tax code its own `gl_account_code`. A workspace with no chart of its own can instead be
+given the starter chart (its tenant page in Platform, or
+`POST /v1/platform/tenants/{id}/starter-chart`), which creates 1310 and 2210 and fills the two
+settings if they are unset. Entries posted before the upgrade stay where they are: an invoice posted
+then debited output tax, so confirming its WHT certificate now credits a receivable that was never
+debited — correct it by manual journal.
+
+**Rolling the binary back after this is not safe for settings.** The finance settings schema is
+strict, so an older binary reading a row that carries `whtPayableAccountCode` refuses the whole
+document and reads every finance setting as empty. Remove the key before rolling back.
 
 ### Before an upgrade that changes the schema
 

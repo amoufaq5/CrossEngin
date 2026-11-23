@@ -159,7 +159,7 @@ describe("recognition with a declared jurisdiction", () => {
       controlDescription: "AR",
       netDescription: "Revenue",
       taxDescription: "Tax payable",
-      taxLines: { entity: "InvoiceLine", refField: "invoice_id", netField: "line_total", determination: sales(jurisdiction) },
+      taxLines: { entity: "InvoiceLine", refField: "invoice_id", netField: "line_total", withholdingAccountRef: "wht_receivable", determination: sales(jurisdiction) },
       clock,
     });
 
@@ -291,6 +291,7 @@ describe("recognition of a purchase reverse charge", () => {
         entity: "BillLine",
         refField: "bill_id",
         netField: "amount",
+        withholdingAccountRef: "wht_payable",
         determination: {
           side: "purchase",
           dateField: "bill_date",

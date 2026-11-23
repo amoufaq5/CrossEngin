@@ -186,3 +186,156 @@ export async function platformStats(): Promise<TenantCounts> {
   const json = await getJson<{ counts: TenantCounts }>("/stats");
   return json.counts;
 }
+
+/** The server's `StarterChartReport` (ADR-0465), field for field. */
+export interface StarterChartReport {
+  readonly outcome: StarterChartOutcome;
+  readonly version: string;
+  readonly created: readonly string[];
+  readonly existing: readonly string[];
+  readonly refused: ReadonlyArray<{ readonly code: string; readonly status: number; readonly error: string }>;
+  readonly settingsFilled: readonly string[];
+  readonly settingsSkipped: ReadonlyArray<{
+    readonly key: string;
+    readonly code: string;
+    readonly reason: StarterSettingSkipReason;
+  }>;
+  /** `null` when the check could not run, which is not the same as having found none. */
+  readonly settingsDangling: ReadonlyArray<{ readonly key: string; readonly code: string }> | null;
+  /** The error's name when the settings could not be written. */
+  readonly settingsError?: string;
+}
+
+export type StarterChartOutcome =
+  | "complete"
+  | "partial"
+  | "refused"
+  | "not_served"
+  | "duplicates_present"
+  | "settings_unwritten";
+
+export type StarterSettingSkipReason = "type_mismatch" | "archived" | "not_postable" | "duplicated" | "absent";
+
+/** What a chart report says, in words. One reader for the approval banner and the tenant panel, so the two cannot disagree. */
+export interface StarterChartDescription {
+  readonly complete: boolean;
+  readonly headline: string;
+  readonly counts: string;
+  readonly details: readonly string[];
+}
+
+const SKIP_REASON_SENTENCE: Readonly<Record<StarterSettingSkipReason, (code: string) => string>> = {
+  type_mismatch: (code) => `the existing account ${code} is of a different type than the chart's`,
+  archived: (code) => `the existing account ${code} is archived`,
+  not_postable: (code) => `the existing account ${code} is not postable`,
+  duplicated: (code) => `more than one account carries code ${code}`,
+  absent: (code) => `the account ${code} was removed while the chart was being created`,
+};
+
+export function describeStarterChart(report: StarterChartReport): StarterChartDescription {
+  const counts =
+    `${report.created.length} created · ${report.existing.length} already present · ` +
+    `${report.refused.length} refused · ${report.settingsFilled.length} finance settings filled`;
+  const refusedLine =
+    report.refused.length === 0
+      ? []
+      : [`Refused: ${report.refused.map((r) => `${r.code} (${r.status} ${r.error})`).join(", ")}.`];
+  const allForbidden = report.refused.length > 0 && report.refused.every((r) => r.status === 403 && r.error === "forbidden");
+  // A per-account 403 is the write path refusing the role the chart is written as, not the
+  // operator: the route itself already admitted them.
+  const forbiddenCause =
+    "The role this deployment writes the chart as (--job-actor-role) may not create LedgerAccount; " +
+    "an operator fixes that flag.";
+  const skipped = report.settingsSkipped.map(
+    (s) => `${s.key} left unset: ${SKIP_REASON_SENTENCE[s.reason](s.code)}, so the setting was left for you to choose.`,
+  );
+  const dangling =
+    report.settingsDangling === null
+      ? ["Whether every finance setting names an existing account could not be checked."]
+      : report.settingsDangling.map((d) => `${d.key} names account ${d.code}, which does not exist.`);
+  const inPlace = report.created.length + report.existing.length;
+
+  switch (report.outcome) {
+    case "complete":
+      return {
+        complete: true,
+        headline: `${inPlace} ledger accounts in place, finance settings set.`,
+        counts,
+        details: [],
+      };
+    case "partial":
+      return {
+        complete: false,
+        headline:
+          report.refused.length > 0
+            ? `The chart is only partly in place (${inPlace} accounts).`
+            : report.settingsSkipped.length === 0 && report.settingsDangling === null
+              ? `${inPlace} ledger accounts in place; whether every finance setting names an existing account could not be checked.`
+              : `${inPlace} ledger accounts in place; some finance settings need a choice.`,
+        counts,
+        details: [...refusedLine, ...(allForbidden ? [forbiddenCause] : []), ...skipped, ...dangling],
+      };
+    case "refused":
+      return {
+        complete: false,
+        headline: "No account was created: every account in the chart was refused.",
+        counts,
+        details: allForbidden
+          ? [`${forbiddenCause} Until then a second run gives the same answer.`]
+          : refusedLine,
+      };
+    case "not_served":
+      return {
+        complete: false,
+        headline: "Nothing was created: this deployment does not serve ledger accounts.",
+        counts,
+        details: [],
+      };
+    case "duplicates_present":
+      return {
+        complete: false,
+        headline:
+          (report.created.length > 0
+            ? `${report.created.length} accounts were created, then no finance setting was written`
+            : "Nothing was written") +
+          ": more than 1,000 accounts carry the chart's codes — duplicates; remove them first.",
+        counts,
+        details: [],
+      };
+    case "settings_unwritten":
+      return {
+        complete: false,
+        headline:
+          report.settingsError === "SettingsRowUnreadable"
+            ? `${inPlace} accounts are in place; this workspace's stored settings are unreadable — its admin ` +
+              "replaces them in Settings, signed in to the workspace, then Create starter chart of accounts " +
+              "is run again."
+            : `${inPlace} accounts are in place; the finance settings could not be written ` +
+              `(${report.settingsError ?? "unknown"}).`,
+        counts,
+        details: refusedLine,
+      };
+  }
+}
+
+export interface StarterChartProvisioning {
+  readonly tenantId: string;
+  readonly provisioningId: string;
+  readonly starterChart: StarterChartReport;
+}
+
+/**
+ * Creates the starter chart of accounts the tenant lacks and points its unset finance account codes
+ * at it (ADR-0465). Idempotent on the server, so it is also how a partly refused chart is finished.
+ * The body must be `{}`: the server parses it `.strict()` and the chart takes no options. A tenant
+ * that is not active is a 409 `tenant_not_active`, which the caller names rather than retries.
+ */
+export async function provisionStarterChart(id: string): Promise<StarterChartProvisioning> {
+  const res = await fetch(apiPath(`/tenants/${encodeURIComponent(id)}/starter-chart`), {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json" },
+    body: "{}",
+  });
+  if (!res.ok) await throwProblem(res);
+  return (await res.json()) as StarterChartProvisioning;
+}

@@ -1406,7 +1406,9 @@ export interface RecognitionGlConfig {
   readonly contraDocumentType?: { readonly field: string; readonly value: string };
   /** How the document's booking rate is found; absent, it posts at rate 1. */
   readonly fx?: PostingFxConfig;
-  readonly resolveAccountCodes?: (tenantId: string) => Promise<{ control?: string; net?: string; tax?: string }>;
+  readonly resolveAccountCodes?: (
+    tenantId: string,
+  ) => Promise<{ control?: string; net?: string; tax?: string; withholding?: string }>;
   /**
    * When set, the tax split is derived from the document's *lines* — each line's
    * `TaxCode` (or flat rate) drives a per-code tax line in the GL, instead of one
@@ -1443,6 +1445,13 @@ export interface RecognitionTaxLinesConfig {
   /** TaxCode field carrying its kind + the value that marks a withholding code. */
   readonly codeKindField?: string;
   readonly withholdingKind?: string;
+  /**
+   * Where a withholding code's tax posts when the code names no `gl_account_code` of its own and
+   * `resolveAccountCodes` answers no `withholding` code: a receivable from the authority on a sale, a
+   * payable to it on a purchase. Required, because the only other account in reach is the document's
+   * tax account — output or input tax — and posting withholding there is the defect this replaced.
+   */
+  readonly withholdingAccountRef: string;
   /**
    * When set, each line's code and rate are determined from the tenant's declared jurisdiction and
    * its `TaxRule`s on the document's date (`tax-determination.ts`), and a document whose total does
@@ -1820,31 +1829,47 @@ export function recognitionGlPostingEffect(config: RecognitionGlConfig): WriteEf
       { account: controlAccount, description: c.controlDescription, side: controlSide, units: totalUnits - withholdingUnits },
       { account: netAccount, description: c.netDescription, side: opposite, units: subtotalUnits },
     ];
-    if (taxGroups !== null && taxGroups.length > 0) {
-      // Per-code tax account resolution, most specific first: the code's own
-      // `gl_account_code`, else the tenant's per-jurisdiction default (by the code's
-      // jurisdiction), else the document default tax account. Regular tax sits opposite
-      // the control (adds to it); withholding sits on the control side (a contra that
-      // reduced the control line above).
+    const taxLinesConfig = config.taxLines;
+    if (taxGroups !== null && taxGroups.length > 0 && taxLinesConfig !== undefined) {
+      // Regular tax resolves most specific first: the code's own `gl_account_code`, else the
+      // tenant's per-jurisdiction default (by the code's jurisdiction), else the document default
+      // tax account, and sits opposite the control (adds to it). Withholding sits on the control
+      // side (a contra that reduced the control line above) and resolves on its own path below.
       const jurisdictionAccounts = config.resolveJurisdictionAccounts
         ? await config.resolveJurisdictionAccounts(input.tenantId)
         : {};
-      const acctCache = new Map<string, string>();
-      const resolveCode = async (code: string): Promise<string> => {
-        const cached = acctCache.get(code);
-        if (cached !== undefined) return cached;
-        const resolved = (await resolveAccountId(input, c, code)) ?? taxAccount;
+      const acctCache = new Map<string, string | null>();
+      const resolveCode = async (code: string): Promise<string | null> => {
+        if (acctCache.has(code)) return acctCache.get(code) ?? null;
+        const resolved = await resolveAccountId(input, c, code);
         acctCache.set(code, resolved);
         return resolved;
       };
-      const determinationConfig = config.taxLines?.determination;
+      const determinationConfig = taxLinesConfig.determination;
       let selfAssessedAccount: string | null = null;
+      let withholdingAccount: string | null = null;
       for (const group of taxGroups) {
         const groupUnits = moneyUnits(group.tax) ?? 0n;
         if (groupUnits <= 0n) continue;
+        if (group.withholding && !group.selfAssessed) {
+          // Withholding is owed by or to the tax authority, not output or input tax, so neither the
+          // per-jurisdiction map (it names output/input tax accounts) nor the document's tax account
+          // is consulted: the code's own account, else the withholding default.
+          withholdingAccount ??=
+            (await resolveAccountId(input, c, codes.withholding)) ?? taxLinesConfig.withholdingAccountRef;
+          const own = group.accountCode !== null && group.accountCode.length > 0 ? await resolveCode(group.accountCode) : null;
+          planned.push({
+            account: own ?? withholdingAccount,
+            description: `Withholding (${group.label})`,
+            side: controlSide,
+            units: groupUnits,
+          });
+          continue;
+        }
         const accountCode =
           group.accountCode ?? (group.jurisdiction !== null ? jurisdictionAccounts[group.jurisdiction] : undefined);
-        const account = accountCode !== undefined && accountCode.length > 0 ? await resolveCode(accountCode) : taxAccount;
+        const account =
+          accountCode !== undefined && accountCode.length > 0 ? ((await resolveCode(accountCode)) ?? taxAccount) : taxAccount;
         if (group.selfAssessed) {
           // Reverse charge: the buyer accounts for the tax the seller did not charge, as input tax on
           // the expense side and an equal output-tax liability on the control side. The pair nets to
@@ -1865,9 +1890,7 @@ export function recognitionGlPostingEffect(config: RecognitionGlConfig): WriteEf
           });
           continue;
         }
-        const side: GlSide = group.withholding ? controlSide : opposite;
-        const desc = group.withholding ? `Withholding (${group.label})` : `${c.taxDescription} (${group.label})`;
-        planned.push({ account, description: desc, side, units: groupUnits });
+        planned.push({ account, description: `${c.taxDescription} (${group.label})`, side: opposite, units: groupUnits });
       }
     } else if (taxUnits > 0n) {
       planned.push({ account: taxAccount, description: c.taxDescription, side: opposite, units: taxUnits });

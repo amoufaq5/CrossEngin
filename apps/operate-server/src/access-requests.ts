@@ -9,7 +9,7 @@ import {
   type PgConnection,
   type UnreadableRowReporter,
 } from "@crossengin/kernel-pg";
-import type { ExtraGatewayRoute, TenantSettings } from "@crossengin/operate-runtime";
+import { STARTER_CHART_VERSION, type ExtraGatewayRoute, type StarterChartReport, type TenantSettings } from "@crossengin/operate-runtime";
 import { setTenantContextWithin, type PostgresSettingsStore } from "@crossengin/operate-runtime-pg";
 import { z } from "zod";
 
@@ -30,6 +30,7 @@ import {
   type PostgresUserStore,
   type UserRegistryAuditEvent,
 } from "./platform-users.js";
+import type { StarterChartProvisioner } from "./starter-chart-routes.js";
 import { roleNameHasNoWhitespace } from "./token-mint.js";
 
 /**
@@ -763,6 +764,19 @@ export interface AccessRequestRoutesContext {
   readonly recordCreation: (tx: PgConnection, event: TenantCreationEvent) => Promise<void>;
   readonly onUnreadable: UnreadableRowReporter;
   readonly onApproved?: (requestId: string, slug: string) => void;
+  /**
+   * Creates the starter chart of accounts for a just-approved workspace and fills its unset finance
+   * account codes (ADR-0465). **Required**, so a deployment cannot mount approvals that silently
+   * skip the chart; it is called after the approval commits and may throw, which is reported on the
+   * 201 as `failed` rather than undoing an approval that already happened.
+   */
+  readonly provisionStarterChart: StarterChartProvisioner;
+  /**
+   * The roles the chart's accounts are written as (`--job-actor-role`), recorded in the approval's
+   * audit detail when a chart is requested, so the trail says under whose authority they were
+   * written and not only who approved.
+   */
+  readonly starterChartActingRoles: readonly string[];
   readonly clock?: () => Date;
 }
 
@@ -978,6 +992,13 @@ const ApproveBodySchema = z
     paymentTermsDays: z.number().int().min(0).max(365).optional(),
     attachExistingUser: z.boolean().optional(),
     confirmedExistingOwner: z.boolean().optional(),
+    /**
+     * Whether to create the starter chart of accounts after the workspace commits (ADR-0465).
+     * Absent means yes: without it the workspace's first invoice is refused until an admin builds a
+     * chart by hand, so the default is the one a new customer can use. `false` is for a company
+     * bringing its own chart.
+     */
+    starterChart: z.boolean().optional(),
   })
   .strict();
 
@@ -1010,6 +1031,28 @@ export interface ContactEmailKey {
  */
 export function contactEmailHmacSha256(key: Uint8Array, email: string): string {
   return hmacSha256Hex(key, normalizeEmail(email));
+}
+
+/** What the 201 says about the chart: the report, or why there is none. */
+export type StarterChartAnswer =
+  | StarterChartReport
+  | { readonly outcome: "not_requested" }
+  | { readonly outcome: "failed"; readonly error: string };
+
+async function provisionChart(
+  ctx: AccessRequestRoutesContext,
+  tenantId: string,
+  requestId: string,
+  principalId: string,
+): Promise<StarterChartAnswer> {
+  try {
+    return await ctx.provisionStarterChart(tenantId, { provisioningId: requestId, principalId });
+  } catch (err) {
+    // The error's name and never its message: a driver message can quote a value.
+    const error = err instanceof Error ? err.name : "unknown";
+    console.error(`[access-request] starter chart for request ${requestId} failed: ${error}`);
+    return { outcome: "failed", error };
+  }
 }
 
 const APPROVE_FORBIDDEN_DETAIL =
@@ -1060,6 +1103,7 @@ function buildApproveHandler(ctx: AccessRequestRoutesContext): Handler {
     const name = body.name ?? request.companyName;
     const email = normalizeEmail(body.email ?? request.email);
     const primaryRole = body.primaryRole ?? ctx.defaultPrimaryRole;
+    const wantsChart = body.starterChart !== false;
 
     // 4. Stricter than provisioning's warning: a workspace whose only admin holds a role its
     // manifest does not declare can do nothing, which is a failed onboarding and not a caveat.
@@ -1082,7 +1126,16 @@ function buildApproveHandler(ctx: AccessRequestRoutesContext): Handler {
       requestId: request.id,
       principalId: principal.principalId,
       roles,
-      detail: { requestId: request.id, slug, primaryRole, attachedExistingUser: false },
+      detail: {
+        requestId: request.id,
+        slug,
+        primaryRole,
+        attachedExistingUser: false,
+        starterChart: wantsChart,
+        ...(wantsChart
+          ? { starterChartActingRoles: [...ctx.starterChartActingRoles], starterChartVersion: STARTER_CHART_VERSION }
+          : {}),
+      },
     };
     const escalation = await refuseEscalation(
       {
@@ -1269,6 +1322,13 @@ function buildApproveHandler(ctx: AccessRequestRoutesContext): Handler {
       throw err;
     }
     ctx.onApproved?.(request.id, tenant.slug);
+    // 8. After the commit, because each account is written through the create handler, which opens
+    // its own transaction (ADR-0465). The workspace is approved whatever happens here: a chart that
+    // fails or is partly refused is reported on the 201, and the console's "create starter chart"
+    // act finishes it, since the provisioning is idempotent.
+    const starterChart: StarterChartAnswer = wantsChart
+      ? await provisionChart(ctx, tenant.id, request.id, principal.principalId)
+      : { outcome: "not_requested" };
     return json(
       201,
       {
@@ -1277,6 +1337,7 @@ function buildApproveHandler(ctx: AccessRequestRoutesContext): Handler {
         membership,
         attachedExistingUser: attached,
         passwordSet: hash !== null,
+        starterChart,
       },
       { "cache-control": "no-store" },
     );

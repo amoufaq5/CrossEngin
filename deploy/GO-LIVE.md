@@ -204,6 +204,16 @@ customer's own `erp_admin` runs their ERP but **cannot add their own staff** —
    **Generate** for the password, **copy it**, and approve. One transaction creates the workspace,
    the admin user, their membership, the password and the settings — if any part fails, none of it
    exists. The password is shown only on your screen and never comes back from the server.
+   **Create a starter chart of accounts** is ticked by default: right after the approval commits,
+   the workspace gets 21 ledger accounts and its 18 finance account-code settings pointed at them, so
+   its first invoice can post (the codes are listed under *The customer's first hour* below). Untick
+   it for a company bringing its own chart. The confirmation says what happened to the chart, and if
+   it is not complete it says why: accounts refused (a `403 forbidden` on every account means the
+   role this deployment writes the chart as, `--job-actor-role`, may not create `LedgerAccount` —
+   fix that flag), settings left for the admin to choose, or settings that name no account. The
+   workspace is approved either way. Once the cause is fixed, the workspace's page (**Create starter
+   chart of accounts**) finishes the chart; it never replaces an existing account or a setting
+   already chosen, so running it changes nothing that is already in place.
    If the email already belongs to an active user, you are offered to **attach that existing user**
    to the new workspace instead (their own password is kept) — but only after ticking that you have
    confirmed, outside the request, that the account belongs to the requester: anyone can file a
@@ -229,8 +239,8 @@ platform-user **and** credential-admin grants, which the bootstrap operator from
    ./onboard-tenant.sh acme "Acme Ltd" ana@acme.com "Ana Silva"
    ```
 
-   It creates the tenant, the user (as `erp_admin`, the customer's own administrator) and a random
-   password, and prints what to send:
+   It creates the tenant, the user (as `erp_admin`, the customer's own administrator), a random
+   password and the starter chart of accounts, and prints what to send:
 
    ```
    Sign in at:  https://yourdomain.com/login
@@ -241,8 +251,13 @@ platform-user **and** credential-admin grants, which the bootstrap operator from
 
    Send it over a channel you trust and ask them to change it at **`/account`** — the platform does
    not force a change at first sign-in. Options: `TIER=enterprise REGION=us ./onboard-tenant.sh …`,
-   and a fifth argument for a different role. It refuses a taken slug, and stops before setting a
-   password if the role is not one the ERP declares.
+   a fifth argument for a different role, and `NO_STARTER_CHART=1` for a company bringing its own
+   chart of accounts. It refuses a taken slug, and stops before setting a password if the role is
+   not one the ERP declares. The chart is the last step and prints a `chart` summary in the console's
+   words (accounts in place, and anything refused, left for the admin to choose, or naming no
+   account), then the counts. If the chart is not complete the login above it still works: the script
+   says why, how to finish once the cause is fixed (the workspace's **Create starter chart of
+   accounts** button, or the one request to re-run), and exits 0.
 
 **The same thing in the browser**, signed in as yourself:
 
@@ -251,6 +266,8 @@ platform-user **and** credential-admin grants, which the bootstrap operator from
 3. **Platform → Tenants → (the tenant) → Members → Grant membership** — that user id, primary role
    `erp_admin`, status **active**.
 4. **Platform → Users → (the user) → Set password**.
+5. **Platform → Tenants → (the tenant) → Create starter chart of accounts** — unless they bring
+   their own chart. Running it on a workspace that already has the accounts changes nothing.
 
 **Their staff:** repeat steps 2–4 in the browser. The script always creates a *new* tenant, so it
 cannot add a second person to an existing one. Give each person the narrowest role
@@ -264,9 +281,57 @@ that fits: `erp_admin`, `erp_accountant`, `controller`, `ap_clerk`, `sales_manag
    **payment terms (days)**. (Automatic jobs — overdue marking, depreciation, sales order →
    invoice — are off on this stack, see *What is not there yet*; payment terms still prefill each
    invoice's due date.)
-2. Create the **ledger accounts** they post to (accounts receivable, revenue, payables, expense,
-   cash, tax), then pick each one in **Settings → Finance & tax → … account code**. Until those
-   point at real accounts, sending an invoice is refused with a message naming the setting.
+2. Check the **chart of accounts**. A workspace approved with the default, or onboarded by the
+   script, already has the starter chart (ADR-0465) and its finance account-code settings point at
+   it. The admin can rename accounts and add more in the ledger accounts list. **Settings → Finance &
+   tax** shows 12 of the 18 account-code settings (AR, revenue, AP, expense, cash, output tax, input
+   tax, FX gain/loss, unrealized FX, WHT receivable, WHT payable, tax recoverable); the other six —
+   inventory, COGS, GRNI, inventory variance, depreciation expense and accumulated depreciation — are
+   changed through `PUT /v1/admin/settings` (`finance`), and a save from the form keeps them. The
+   chart (version `2026-11`):
+
+   | Code | Account | Type | Setting it fills |
+   | --- | --- | --- | --- |
+   | 1000 | Cash and bank | asset | cash |
+   | 1100 | Accounts receivable | asset | AR |
+   | 1200 | Inventory | asset | inventory |
+   | 1300 | Input tax recoverable | asset | input tax |
+   | 1310 | Withholding tax receivable | asset | WHT receivable |
+   | 1320 | Income tax recoverable | asset | tax recoverable |
+   | 1500 | Property and equipment | asset | — |
+   | 1590 | Accumulated depreciation | asset | accumulated depreciation |
+   | 2000 | Accounts payable | liability | AP |
+   | 2100 | Goods received not invoiced | liability | GRNI |
+   | 2200 | Output tax payable | liability | tax payable |
+   | 2210 | Withholding tax payable | liability | WHT payable |
+   | 3000 | Owner's equity | equity | — |
+   | 3100 | Retained earnings | equity | — |
+   | 4000 | Sales revenue | revenue | revenue |
+   | 4900 | Realized foreign exchange gain/loss | revenue | FX gain/loss |
+   | 4910 | Unrealized foreign exchange gain/loss | revenue | unrealized FX gain/loss |
+   | 5000 | Cost of goods sold | expense | COGS |
+   | 5100 | Inventory and purchase price variance | expense | inventory variance |
+   | 6000 | Operating expenses | expense | expense |
+   | 6500 | Depreciation expense | expense | depreciation expense |
+
+   Withholding: tax a customer withholds from an invoice is debited to 1310, and moved to 1320 when
+   its WHT certificate is confirmed; tax the workspace withholds from a supplier's bill is credited
+   to 2210. A tax code that names its own `gl_account_code` posts there instead. **A bill with
+   withholding cannot be settled yet**: nothing records the withheld amount on the bill, so paying the
+   supplier the net leaves the bill open and paying the gross leaves accounts payable in debit. Until
+   that lands, enter purchase-side withholding by manual journal entry (ADR-0465).
+
+   Only **unset** settings are filled, and an existing account with a chart code is never changed.
+   On a workspace that already had accounts — run through the button later — a setting is pointed at
+   an existing account only if that account has the chart's type and is active and postable; if not
+   (another numbering scheme, an archived account, two accounts with one code), the setting is left
+   unset and the report names it for the admin to choose. A workspace created without the chart —
+   unticked at approval, `NO_STARTER_CHART=1`, or created by hand in the console — has no ledger
+   accounts until its admin creates them or you run **Create starter chart of accounts**. Until its
+   settings point at real accounts, sending an invoice is refused `409 server_reference_unresolved`:
+   the message names the record and field that needed a ledger account (not which setting) and
+   points at the finance account-code settings and the starter-chart route. Opening balances are
+   posted by manual journal entry (there is no import).
 3. Their customers, vendors and items, then their first invoice.
 
 Taking access away is fast: revoking a membership stops it within 30 seconds, and suspending a user
@@ -365,9 +430,10 @@ So you can answer customers honestly:
 - **Instant self-registration and password reset by email** — no mail channel exists, so there is
   no email verification. Customers *request* access at `/request-access` and you approve each one
   (section 7); you reset passwords from **Platform → Users**.
-- **Starter chart of accounts** — an approved workspace starts with no ledger accounts, so its admin
-  creates them and points the account-code settings at them before the first invoice (section 7,
-  *The customer's first hour*).
+- **Industry or country charts of accounts** — every workspace gets the same 21-account starter
+  chart (section 7, *The customer's first hour*); there is no per-country variant and no import of an
+  existing chart, so a customer with their own chart creates it by hand or by API, one account at a
+  time.
 - **Email and SMS notifications** — in-app notifications work. Setting SES or Twilio credentials
   registers the channel, but nothing in the platform produces an email or SMS dispatch yet, so the
   boot's `[notify]` line saying `email, sms` does not mean anything will be sent.

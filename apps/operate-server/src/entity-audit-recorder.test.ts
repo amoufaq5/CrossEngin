@@ -304,4 +304,19 @@ describe("entityAuditEntry", () => {
     });
     expect(moved.reason).toBe("job:erp-core-overdue-invoice-reminder run:run-9 transition:mark_overdue");
   });
+
+  it("names the provisioning that made a write, and never as a job", () => {
+    const origin = {
+      kind: "provisioning" as const,
+      operation: "starter_chart" as const,
+      provisioningId: "11111111-1111-4111-8111-111111111111",
+    };
+    const at = { id: ID, occurredAt: "2026-11-17T10:00:00.000Z" };
+    const plain = entityAuditEntry(event({ actorUserId: null, origin }), at);
+    expect(plain.actor).toMatchObject({ kind: "system", userId: null });
+    expect(plain.reason).toBe("provisioning:starter_chart id:11111111-1111-4111-8111-111111111111");
+    expect(plain.reason).not.toContain("job:");
+    const moved = entityAuditEntry(event({ actorUserId: null, origin, action: "transition", detail: "activate" }), at);
+    expect(moved.reason).toBe("provisioning:starter_chart id:11111111-1111-4111-8111-111111111111 transition:activate");
+  });
 });

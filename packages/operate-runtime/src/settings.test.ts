@@ -3,9 +3,15 @@ import type { SequenceDefault } from "@crossengin/types/meta-schema";
 
 import {
   EMPTY_TENANT_SETTINGS,
+  FINANCE_ACCOUNT_CODE_KEYS,
+  financeAccountCodeIsSet,
+  financeAccountCodesOf,
+  FinanceSettingsSchema,
   InMemorySettingsStore,
+  mergeUnsetFinanceAccountCodes,
   sequenceSpecResolver,
   TenantSettingsSchema,
+  type FinanceAccountCodeKey,
 } from "./settings.js";
 
 describe("TenantSettingsSchema", () => {
@@ -175,5 +181,169 @@ describe("NotificationSettingsSchema", () => {
     expect(TenantSettingsSchema.safeParse({ notifications: { digest: { maxItems: 0 } } }).success).toBe(false);
     expect(TenantSettingsSchema.safeParse({ notifications: { digest: { maxItems: 1001 } } }).success).toBe(false);
     expect(TenantSettingsSchema.safeParse({ notifications: { digest: { frequency: "yearly" } } }).success).toBe(false);
+  });
+});
+
+describe("FINANCE_ACCOUNT_CODE_KEYS", () => {
+  it("is exactly the finance settings ending AccountCode, read off the schema's shape", () => {
+    const shapeKeys = Object.keys(FinanceSettingsSchema.shape);
+    expect([...FINANCE_ACCOUNT_CODE_KEYS].sort()).toEqual(shapeKeys.filter((k) => k.endsWith("AccountCode")).sort());
+    expect(FINANCE_ACCOUNT_CODE_KEYS).toHaveLength(18);
+    expect(new Set(FINANCE_ACCOUNT_CODE_KEYS).size).toBe(18);
+  });
+
+  it("includes the withholding-tax-payable code", () => {
+    expect(FINANCE_ACCOUNT_CODE_KEYS).toContain("whtPayableAccountCode");
+  });
+
+  it("leaves out the finance settings that name no account", () => {
+    for (const key of ["accountingStandard", "rounding", "defaultTaxJurisdiction", "defaultPaymentTermsDays"]) {
+      expect(FINANCE_ACCOUNT_CODE_KEYS).not.toContain(key);
+    }
+  });
+
+  it("names only keys that accept a 32-character account code and refuse a 33-character one", () => {
+    for (const key of FINANCE_ACCOUNT_CODE_KEYS) {
+      expect(FinanceSettingsSchema.safeParse({ [key]: "x".repeat(32) }).success).toBe(true);
+      expect(FinanceSettingsSchema.safeParse({ [key]: "x".repeat(33) }).success).toBe(false);
+    }
+  });
+});
+
+describe("financeAccountCodeIsSet", () => {
+  it("is true only for a string with something other than whitespace", () => {
+    expect(financeAccountCodeIsSet("1100")).toBe(true);
+    expect(financeAccountCodeIsSet(" AR ")).toBe(true);
+    expect(financeAccountCodeIsSet("")).toBe(false);
+    expect(financeAccountCodeIsSet("   ")).toBe(false);
+    expect(financeAccountCodeIsSet("\t\n")).toBe(false);
+    expect(financeAccountCodeIsSet(undefined)).toBe(false);
+    expect(financeAccountCodeIsSet(null)).toBe(false);
+    expect(financeAccountCodeIsSet(1100)).toBe(false);
+  });
+});
+
+describe("financeAccountCodesOf", () => {
+  it("returns the set account codes and omits blank ones and other finance settings", () => {
+    const settings = TenantSettingsSchema.parse({
+      finance: { arAccountCode: "1100", apAccountCode: "", cashAccountCode: "  ", rounding: "half_even" },
+    });
+    expect(financeAccountCodesOf(settings)).toEqual({ arAccountCode: "1100" });
+  });
+
+  it("is empty for a document with no finance section", () => {
+    expect(financeAccountCodesOf(EMPTY_TENANT_SETTINGS)).toEqual({});
+    expect(financeAccountCodesOf(TenantSettingsSchema.parse({ company: { name: "Acme" } }))).toEqual({});
+  });
+});
+
+describe("mergeUnsetFinanceAccountCodes", () => {
+  it("fills only the keys that are unset and says which", () => {
+    const settings = TenantSettingsSchema.parse({ finance: { arAccountCode: "AR-1", rounding: "half_even" } });
+    const out = mergeUnsetFinanceAccountCodes(settings, { arAccountCode: "1100", apAccountCode: "2000" });
+    expect(out.filled).toEqual(["apAccountCode"]);
+    expect(out.settings.finance).toEqual({ arAccountCode: "AR-1", rounding: "half_even", apAccountCode: "2000" });
+  });
+
+  it("answers every code in effect afterwards: the admin's and the filled ones", () => {
+    const settings = TenantSettingsSchema.parse({ finance: { arAccountCode: "AR-1", taxPayableAccountCode: "" } });
+    const out = mergeUnsetFinanceAccountCodes(settings, { arAccountCode: "1100", apAccountCode: "2000" });
+    expect(out.inEffect).toEqual({ arAccountCode: "AR-1", apAccountCode: "2000" });
+  });
+
+  it("answers what is in effect even when it fills nothing", () => {
+    const settings = TenantSettingsSchema.parse({ finance: { arAccountCode: "AR-1" } });
+    expect(mergeUnsetFinanceAccountCodes(settings, {}).inEffect).toEqual({ arAccountCode: "AR-1" });
+    expect(mergeUnsetFinanceAccountCodes(EMPTY_TENANT_SETTINGS, {}).inEffect).toEqual({});
+  });
+
+  it.each(["", "   "])("treats a blank stored code (%j) as unset and fills it", (blank) => {
+    const settings = TenantSettingsSchema.parse({ finance: { arAccountCode: blank } });
+    const out = mergeUnsetFinanceAccountCodes(settings, { arAccountCode: "1100" });
+    expect(out.filled).toEqual(["arAccountCode"]);
+    expect(out.settings.finance?.arAccountCode).toBe("1100");
+    expect(out.inEffect).toEqual({ arAccountCode: "1100" });
+  });
+
+  it("keeps every other section of the document", () => {
+    const settings = TenantSettingsSchema.parse({ company: { name: "Acme" }, defaults: { currency: "EUR" } });
+    const out = mergeUnsetFinanceAccountCodes(settings, { cashAccountCode: "1000" });
+    expect(out.settings.company?.name).toBe("Acme");
+    expect(out.settings.defaults?.currency).toBe("EUR");
+    expect(out.settings.finance?.cashAccountCode).toBe("1000");
+  });
+
+  it("returns the same object when nothing was filled", () => {
+    const settings = TenantSettingsSchema.parse({ finance: { arAccountCode: "AR-1" } });
+    const out = mergeUnsetFinanceAccountCodes(settings, { arAccountCode: "1100" });
+    expect(out.filled).toEqual([]);
+    expect(out.settings).toBe(settings);
+    expect(mergeUnsetFinanceAccountCodes(EMPTY_TENANT_SETTINGS, {}).settings).toBe(EMPTY_TENANT_SETTINGS);
+  });
+
+  it("returns a document the settings contract accepts", () => {
+    const codes = Object.fromEntries(FINANCE_ACCOUNT_CODE_KEYS.map((k, i) => [k, String(1000 + i)]));
+    const out = mergeUnsetFinanceAccountCodes(EMPTY_TENANT_SETTINGS, codes);
+    expect(out.filled).toHaveLength(18);
+    expect(Object.keys(out.inEffect)).toHaveLength(18);
+    expect(TenantSettingsSchema.safeParse(out.settings).success).toBe(true);
+  });
+
+  it("ignores an undefined code and a key that is not an account-code setting", () => {
+    const codes = {
+      arAccountCode: undefined,
+      rounding: "half_up",
+      notASetting: "9999",
+    } as unknown as Partial<Record<FinanceAccountCodeKey, string>>;
+    const out = mergeUnsetFinanceAccountCodes(EMPTY_TENANT_SETTINGS, codes);
+    expect(out.filled).toEqual([]);
+    expect(out.settings).toBe(EMPTY_TENANT_SETTINGS);
+  });
+
+  it("refuses a code the contract does not accept rather than storing it", () => {
+    expect(() => mergeUnsetFinanceAccountCodes(EMPTY_TENANT_SETTINGS, { arAccountCode: "x".repeat(33) })).toThrow();
+  });
+
+  it("does not mutate the document it was given", () => {
+    const settings = TenantSettingsSchema.parse({ finance: { rounding: "half_even" } });
+    mergeUnsetFinanceAccountCodes(settings, { arAccountCode: "1100" });
+    expect(settings.finance).toEqual({ rounding: "half_even" });
+  });
+});
+
+describe("InMemorySettingsStore.fillUnsetFinanceAccountCodes", () => {
+  it("fills unset keys on an untouched tenant, stores them and answers what is in effect", async () => {
+    const store = new InMemorySettingsStore();
+    expect(await store.fillUnsetFinanceAccountCodes("t1", { arAccountCode: "1100" })).toEqual({
+      filled: ["arAccountCode"],
+      inEffect: { arAccountCode: "1100" },
+    });
+    expect((await store.get("t1")).finance?.arAccountCode).toBe("1100");
+  });
+
+  it("never replaces a code already set, and reports it as in effect", async () => {
+    const store = new InMemorySettingsStore();
+    await store.put("t1", { finance: { arAccountCode: "AR-1" } });
+    expect(await store.fillUnsetFinanceAccountCodes("t1", { arAccountCode: "1100" })).toEqual({
+      filled: [],
+      inEffect: { arAccountCode: "AR-1" },
+    });
+    expect((await store.get("t1")).finance?.arAccountCode).toBe("AR-1");
+  });
+
+  it("fills over a blank stored code", async () => {
+    const store = new InMemorySettingsStore();
+    await store.put("t1", { finance: { arAccountCode: "  " } });
+    const out = await store.fillUnsetFinanceAccountCodes("t1", { arAccountCode: "1100" });
+    expect(out.filled).toEqual(["arAccountCode"]);
+    expect((await store.get("t1")).finance?.arAccountCode).toBe("1100");
+  });
+
+  it("writes nothing for a tenant when nothing is filled, and isolates tenants", async () => {
+    const store = new InMemorySettingsStore();
+    expect(await store.fillUnsetFinanceAccountCodes("t1", {})).toEqual({ filled: [], inEffect: {} });
+    expect(await store.get("t1")).toEqual(EMPTY_TENANT_SETTINGS);
+    await store.fillUnsetFinanceAccountCodes("t1", { apAccountCode: "2000" });
+    expect(await store.get("t2")).toEqual(EMPTY_TENANT_SETTINGS);
   });
 });

@@ -73,7 +73,8 @@ the remedy and the invoice still draft, then 200 `sent` after configuring the co
 1. A tenant's own activated manifest gets no indexes until an operator re-runs the step with that
    manifest — the step takes the boot pack.
 2. P2.18's ledger question (refuse versus keep a fallback) is answered by refusal on both stores;
-   whether the Architect should provision default ledger accounts is open.
+   whether the platform should provision default ledger accounts is answered by ADR-0465, which
+   gives an approved workspace a starter chart and a re-runnable route for any other tenant.
 
 ## References
 

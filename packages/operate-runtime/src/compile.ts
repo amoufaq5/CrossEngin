@@ -910,7 +910,18 @@ function defaultWriteEffectsWithStamps(
           netDescription: "Invoice — revenue",
           taxDescription: "Invoice — tax payable",
           ...(hasTaxCodes && names.has("InvoiceLine")
-            ? { taxLines: { entity: "InvoiceLine", refField: "invoice_id", netField: "line_total", ...taxDetermination("sales", "issue_date") }, stampWithholdingField: STAMPED_WITHHOLDING_FIELD, ...jurisdictionResolver }
+            ? {
+                taxLines: {
+                  entity: "InvoiceLine",
+                  refField: "invoice_id",
+                  netField: "line_total",
+                  // The receivable `whtCertificateClearingEffect` later credits, so the two agree.
+                  withholdingAccountRef: "wht_receivable",
+                  ...taxDetermination("sales", "issue_date"),
+                },
+                stampWithholdingField: STAMPED_WITHHOLDING_FIELD,
+                ...jurisdictionResolver,
+              }
             : {}),
           ...clockOpt,
           ...periodsOpt,
@@ -918,6 +929,7 @@ function defaultWriteEffectsWithStamps(
             ...(f.arAccountCode !== undefined ? { control: f.arAccountCode } : {}),
             ...(f.revenueAccountCode !== undefined ? { net: f.revenueAccountCode } : {}),
             ...(f.taxPayableAccountCode !== undefined ? { tax: f.taxPayableAccountCode } : {}),
+            ...(f.whtReceivableAccountCode !== undefined ? { withholding: f.whtReceivableAccountCode } : {}),
           })),
         }),
       );
@@ -971,7 +983,17 @@ function defaultWriteEffectsWithStamps(
         netDescription: "Bill — expense",
         taxDescription: "Bill — input tax",
         ...(hasTaxCodes && names.has("BillLine")
-          ? { taxLines: { entity: "BillLine", refField: "bill_id", netField: "amount", ...taxDetermination("purchase", "bill_date") }, ...jurisdictionResolver }
+          ? {
+              taxLines: {
+                entity: "BillLine",
+                refField: "bill_id",
+                netField: "amount",
+                // Tax withheld from a vendor is owed to the authority: a liability, not input tax.
+                withholdingAccountRef: "wht_payable",
+                ...taxDetermination("purchase", "bill_date"),
+              },
+              ...jurisdictionResolver,
+            }
           : {}),
         ...clockOpt,
         ...periodsOpt,
@@ -979,6 +1001,7 @@ function defaultWriteEffectsWithStamps(
           ...(f.apAccountCode !== undefined ? { control: f.apAccountCode } : {}),
           ...(f.expenseAccountCode !== undefined ? { net: f.expenseAccountCode } : {}),
           ...(f.taxInputAccountCode !== undefined ? { tax: f.taxInputAccountCode } : {}),
+          ...(f.whtPayableAccountCode !== undefined ? { withholding: f.whtPayableAccountCode } : {}),
         })),
       }),
     );

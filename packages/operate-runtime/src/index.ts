@@ -43,6 +43,7 @@ export * from "./write-surface.js";
 export * from "./maker-checker.js";
 export * from "./entity-audit.js";
 export * from "./system-writer.js";
+export * from "./starter-chart.js";
 
 export * from "./aging.js";
 export * from "./aging-handler.js";

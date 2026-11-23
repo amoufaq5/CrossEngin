@@ -12,10 +12,28 @@ import type { EntityRecord, EntityStore, ListFilter, ListSort } from "./store.js
  * no user to name, and a row whose actor is merely "nobody" cannot be told apart from a bare api-key
  * write, which also names no person.
  */
-export interface SystemWriteOrigin {
-  readonly kind: "job";
-  readonly jobId: string;
-  readonly runId: string;
+export type SystemWriteOrigin =
+  | {
+      readonly kind: "job";
+      readonly jobId: string;
+      readonly runId: string;
+    }
+  | {
+      /**
+       * Platform provisioning of a tenant's starting data — today only the starter chart of accounts
+       * an approved access request (or an operator) creates (ADR-0465). A kind of its own rather than
+       * a fake job, because the audit row must say an operator's act caused the write and no run of
+       * any declared job did.
+       */
+      readonly kind: "provisioning";
+      readonly operation: "starter_chart";
+      /** The access request or console act this provisioning ran for, so the audit rows join to it. */
+      readonly provisioningId: string;
+    };
+
+/** The token a system write's minted request id carries, so a log line names the run or provisioning. */
+function originToken(origin: SystemWriteOrigin): string {
+  return origin.kind === "job" ? origin.runId : origin.provisioningId;
 }
 
 /**
@@ -153,7 +171,8 @@ export function buildSystemEntityAccess(input: SystemEntityAccessInput): SystemE
       if (actor.roles.length === 0) {
         throw new Error("a system actor needs at least one role: authorization is the manifest's grants");
       }
-      const runToken = actor.origin.runId.replace(REQUEST_ID_SAFE, "").slice(0, 32);
+      const runToken = originToken(actor.origin).replace(REQUEST_ID_SAFE, "").slice(0, 32);
+      const requestPrefix = actor.origin.kind === "job" ? "req_job" : "req_prov";
       const dispatch = async (
         spec: RouteSpec | undefined,
         label: string,
@@ -202,7 +221,7 @@ export function buildSystemEntityAccess(input: SystemEntityAccessInput): SystemE
         };
         SYSTEM_ORIGINS.set(principal, actor.origin);
         const request: IncomingRequest = {
-          id: `req_job_${runToken}_${sequence.toString()}`,
+          id: `${requestPrefix}_${runToken}_${sequence.toString()}`,
           receivedAt: at,
           method: spec.method,
           path,

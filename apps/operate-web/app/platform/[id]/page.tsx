@@ -10,11 +10,14 @@ import { formatCell, titleCase } from "@/lib/format";
 import {
   getTenant,
   PlatformError,
+  describeStarterChart,
+  provisionStarterChart,
   setTenantStatus,
+  type StarterChartReport,
   type Tenant,
   type TenantAction,
 } from "@/lib/platform";
-import { detailNamesNoRoute } from "@/lib/request-failure";
+import { detailNamesNoRoute, requestFailureSentence } from "@/lib/request-failure";
 import {
   grantMembership,
   listMembers,
@@ -537,6 +540,8 @@ export default function TenantDetailPage({ params }: { params: Promise<{ id: str
               </dl>
             </div>
 
+            <StarterChartPanel tenantId={tenant.id} status={tenant.status} />
+
             <div className="mt-5 rounded-xl border border-line bg-white p-6">
               <div className="flex flex-wrap items-center gap-3">
                 <div className="flex-1">
@@ -873,5 +878,108 @@ export default function TenantDetailPage({ params }: { params: Promise<{ id: str
         )}
       </div>
     </>
+  );
+}
+
+/**
+ * The starter chart of accounts as an act on this workspace (ADR-0465): for a tenant created here or
+ * by `deploy/onboard-tenant.sh`, one approved before the chart existed, or one whose chart was partly
+ * refused. Idempotent on the server, so running it on a workspace that already has the chart changes
+ * nothing and says so — which is why it is always offered rather than hidden once done.
+ */
+function StarterChartPanel({ tenantId, status }: { tenantId: string; status: string }): ReactElement {
+  const [running, setRunning] = useState(false);
+  const [report, setReport] = useState<StarterChartReport | null>(null);
+  const [failure, setFailure] = useState<string | null>(null);
+
+  async function run(): Promise<void> {
+    setRunning(true);
+    setFailure(null);
+    setReport(null);
+    try {
+      const result = await provisionStarterChart(tenantId);
+      setReport(result.starterChart);
+    } catch (e) {
+      setFailure(describeStarterChartFailure(e));
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  return (
+    <div className="mt-5 rounded-xl border border-line bg-white p-6">
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="flex-1">
+          <h2 className="text-sm font-bold tracking-tight text-ink">Chart of accounts</h2>
+          <p className="mt-1 text-sm text-ink-muted">
+            Creates the 21 starter ledger accounts this workspace lacks and points its unset finance account
+            settings at them, so an invoice, bill or payment can post. Accounts that already exist and settings
+            already chosen are left as they are, so running it again changes nothing that is already in place. A
+            setting is pointed at an account the workspace already had only if that account has the chart&apos;s
+            type and is active and postable; otherwise it is listed for the workspace&apos;s admin to choose.
+          </p>
+        </div>
+        <button
+          onClick={() => void run()}
+          disabled={running || status !== "active"}
+          className="rounded-lg bg-brand px-3 py-1.5 text-sm font-semibold text-white hover:bg-brand-700 disabled:opacity-60"
+        >
+          {running ? "Creating…" : "Create starter chart of accounts"}
+        </button>
+      </div>
+      {status !== "active" && (
+        <p className="mt-3 text-sm text-ink-muted">
+          Only an active workspace can be given a chart; this one is {status}.
+        </p>
+      )}
+      {failure !== null && (
+        <div className="mt-4 rounded-lg border border-brand-200 bg-brand-50 px-4 py-3 text-sm text-brand-700" role="alert">
+          {failure}
+        </div>
+      )}
+      {report !== null && <StarterChartReportView report={report} />}
+    </div>
+  );
+}
+
+function describeStarterChartFailure(e: unknown): string {
+  if (!(e instanceof PlatformError)) return `The chart was not created: ${requestFailureSentence(e)}`;
+  switch (e.code) {
+    case "tenant_not_active":
+      return `The chart was not created: ${e.message}`;
+    case "tenant_not_found":
+      return "This tenant no longer exists.";
+    case "forbidden":
+      return "Creating a chart of accounts needs the platform-admin grant, which your role does not hold.";
+    case "audit_unavailable":
+      return "The chart was not created, because the act could not be recorded. Try again once the audit log is reachable.";
+    case "starter_chart_failed":
+      return `The chart was not finished (${e.message}).`;
+    default:
+      if (e.status === 404 && detailNamesNoRoute(e.message)) {
+        return "This API does not serve the starter chart route; it needs an operate-server that includes it.";
+      }
+      return `The chart was not created: ${requestFailureSentence(e)}`;
+  }
+}
+
+function StarterChartReportView({ report }: { report: StarterChartReport }): ReactElement {
+  const d = describeStarterChart(report);
+  const tone = d.complete
+    ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+    : "border-amber-200 bg-amber-50 text-amber-800";
+  return (
+    <div className={`mt-4 rounded-lg border px-4 py-3 text-sm ${tone}`}>
+      <p className="font-medium">{d.headline}</p>
+      <p className="mt-1">{d.counts}</p>
+      {d.details.length > 0 && (
+        <ul className="mt-2 list-disc pl-5 text-xs">
+          {d.details.map((line) => (
+            <li key={line}>{line}</li>
+          ))}
+        </ul>
+      )}
+      <p className="mt-1 text-xs">Chart version {report.version}.</p>
+    </div>
   );
 }
