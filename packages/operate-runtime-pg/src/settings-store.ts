@@ -42,17 +42,35 @@ export class PostgresSettingsStore implements SettingsStore {
     settings: TenantSettings,
     updatedBy: string | null = null,
   ): Promise<TenantSettings> {
+    // Parsed before the transaction opens, as it was before `putWithin` existed: an invalid
+    // document costs no round trip. `putWithin` parses again, which is idempotent.
     const parsed = TenantSettingsSchema.parse(settings);
-    return withTenantContext(this.conn, tenantId, async (tx) => {
-      await tx.query(
-        `INSERT INTO ${this.schema}.operate_tenant_settings
-           (tenant_id, settings, updated_at, updated_by)
-         VALUES ($1::uuid, $2::jsonb, now(), $3)
-         ON CONFLICT (tenant_id)
-         DO UPDATE SET settings = EXCLUDED.settings, updated_at = now(), updated_by = EXCLUDED.updated_by`,
-        [tenantId, JSON.stringify(parsed), updatedBy],
-      );
-      return parsed;
-    });
+    return withTenantContext(this.conn, tenantId, (tx) =>
+      this.putWithin(tx, tenantId, parsed, updatedBy),
+    );
+  }
+
+  /**
+   * The `put` statement inside a transaction the caller holds, for a write that
+   * must commit with others (an approved access request creates the tenant and
+   * its settings together). The caller must already have set this tenant's
+   * context on `tx`: the table's isolation policy is its only write arm.
+   */
+  async putWithin(
+    tx: PgConnection,
+    tenantId: string,
+    settings: TenantSettings,
+    updatedBy: string | null = null,
+  ): Promise<TenantSettings> {
+    const parsed = TenantSettingsSchema.parse(settings);
+    await tx.query(
+      `INSERT INTO ${this.schema}.operate_tenant_settings
+         (tenant_id, settings, updated_at, updated_by)
+       VALUES ($1::uuid, $2::jsonb, now(), $3)
+       ON CONFLICT (tenant_id)
+       DO UPDATE SET settings = EXCLUDED.settings, updated_at = now(), updated_by = EXCLUDED.updated_by`,
+      [tenantId, JSON.stringify(parsed), updatedBy],
+    );
+    return parsed;
   }
 }

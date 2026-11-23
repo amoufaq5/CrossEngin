@@ -399,6 +399,22 @@ export interface TenantCreationEvent {
   readonly tenant: TenantRecord;
   readonly principalId: string;
   readonly at: string;
+  /**
+   * Present when the tenant was created by approving a public access request. It is the permanent
+   * record of which terms the customer accepted and when, because the request row itself is swept
+   * after its retention window; the contact address is carried only as an HMAC under a key derived
+   * from the credential pepper, since the audit log outlives an Article 17 erasure and an unkeyed
+   * digest of an email is confirmable by anyone who holds the log.
+   */
+  readonly origin?: {
+    readonly kind: "access_request";
+    readonly requestId: string;
+    readonly termsVersion: string;
+    readonly termsAcceptedAt: string;
+    readonly contactEmailHmacSha256: string;
+    /** The pepper version the digest's key was derived from, so a later check knows which to use. */
+    readonly contactEmailHmacPepperVersion: number;
+  };
 }
 
 export const TENANT_CREATED_OPERATION = "platform.tenant_created";

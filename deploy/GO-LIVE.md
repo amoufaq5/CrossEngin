@@ -74,6 +74,7 @@ cd crossengin
 git fetch origin && git checkout claude/eloquent-archimedes-bn69tr
 cd deploy
 cp .env.example .env
+chmod 600 .env      # it will hold every secret the platform has; no other account on the VM needs it
 ```
 
 The login, the user registry, the console and everything on this page are on that branch; `main`
@@ -135,17 +136,21 @@ browser. Your first account is the one thing made with `curl`, on the VM, using 
 
 ```bash
 cd ~/crossengin/deploy
-ADMIN=$(grep '^OPERATE_ADMIN_API_KEY=' .env | cut -d= -f2- | cut -d: -f1)
 API=http://127.0.0.1:8787
+# The bootstrap key goes to curl as a header FILE, never on the command line, where any account on
+# the VM could read it with `ps`. Delete the file at the end of this step.
+umask 077
+printf 'x-api-key: %s\ncontent-type: application/json\n' \
+  "$(grep '^OPERATE_ADMIN_API_KEY=' .env | cut -d= -f2- | cut -d: -f1)" > ~/.crossengin-admin-header
 
 # A tenant for yourself (the "workspace" you sign in to). Its id comes back in the response.
-curl -sS -X POST $API/v1/platform/tenants -H "x-api-key: $ADMIN" -H 'content-type: application/json' \
+curl -sS -X POST $API/v1/platform/tenants -H @$HOME/.crossengin-admin-header \
   -d '{"slug":"ops","name":"Platform Operations","tier":"small","region":"eu"}'
 TENANT=<the "id" from that response>
 ME=$(cat /proc/sys/kernel/random/uuid)
 
 # You, with two roles: platform_admin (the console) and erp_admin (the ERP itself).
-curl -sS -X POST $API/v1/platform/users -H "x-api-key: $ADMIN" -H 'content-type: application/json' \
+curl -sS -X POST $API/v1/platform/users -H @$HOME/.crossengin-admin-header \
   -d "{\"user\":{\"id\":\"$ME\",\"email\":\"you@yourdomain.com\",\"displayName\":\"You\"},
        \"membership\":{\"tenantId\":\"$TENANT\",\"primaryRole\":\"platform_admin\",
                        \"secondaryRoles\":[\"erp_admin\"],\"status\":\"active\"}}"
@@ -154,9 +159,10 @@ curl -sS -X POST $API/v1/platform/users -H "x-api-key: $ADMIN" -H 'content-type:
 # a command line `ps` can read.
 read -rs -p 'password: ' PW; echo
 PW="$PW" ME="$ME" python3 -c 'import json,os; print(json.dumps({"password": os.environ["PW"], "confirmUserId": os.environ["ME"]}))' |
-  curl -sS -X POST $API/v1/platform/users/$ME/credential -H "x-api-key: $ADMIN" \
-    -H 'content-type: application/json' --data-binary @-
+  curl -sS -X POST $API/v1/platform/users/$ME/credential -H @$HOME/.crossengin-admin-header \
+    --data-binary @-
 unset PW
+rm -f ~/.crossengin-admin-header
 ```
 
 The user call warns that `platform_admin` is not one of the ERP's roles. That is expected: it is the
@@ -167,16 +173,56 @@ password. You will see **Platform** in the sidebar.
 
 ## 7. Onboard a customer (a tenant and its people)
 
-**There is no self-registration.** No public sign-up page exists: it would need a public,
-rate-limited route, email verification and a mail channel to send the link, and none of the three is
-built. Every tenant and every user is created by you, the operator. A customer's own `erp_admin`
-runs their ERP but **cannot add their own staff** — you do that too.
+There is no *instant* self-registration — nobody gets a working account from a public page without
+you. What exists is **request and approve**: a customer asks for access, you approve it with one
+click, and the approval creates everything at once. Email verification and password reset by email
+still do not exist, because there is no mail channel, so you hand the password over yourself. A
+customer's own `erp_admin` runs their ERP but **cannot add their own staff** — you do that too.
 
-What works well in practice:
+### The sign-up request form (recommended)
 
-1. Put a short form on your website (any free form tool, or a `mailto:` link) asking for company
-   name, the admin's name and email, and their country.
-2. When one arrives, run **one command on the VM**:
+1. **Open the form.** Put your terms and privacy notice somewhere public (two https pages you
+   control), then in `deploy/.env` set:
+
+   ```
+   ACCESS_REQUEST_TERMS_URL=https://yourdomain.com/terms
+   ACCESS_REQUEST_PRIVACY_URL=https://yourdomain.com/privacy
+   ACCESS_REQUEST_TERMS_VERSION=2026-11-01
+   ```
+
+   and `docker compose up -d`. The boot log says `[access-request] intake open (terms v2026-11-01)`;
+   with the variables unset it says `intake CLOSED` and the form tells visitors sign-up is not open.
+   Change the version whenever the terms change: it is recorded with every acceptance.
+2. **Send people to `https://yourdomain.com/request-access`** (link it from your website; the
+   sign-in page links to it too). They give the company name, their name and email, an optional
+   workspace name and a message, read the privacy notice, and accept the terms. Nothing is created.
+3. **Watch for requests.** Platform → **Access requests** shows a count in the sidebar, and each
+   request logs `[access-request] new request …` (no name or email in the line). Pending requests
+   expire after **72 hours** if you do nothing; decided ones are deleted after **30 days**.
+4. **Approve.** Open the request, check or edit the workspace name, company name, email and role
+   (`erp_admin` by default), optionally set the default currency and payment terms, press
+   **Generate** for the password, **copy it**, and approve. One transaction creates the workspace,
+   the admin user, their membership, the password and the settings — if any part fails, none of it
+   exists. The password is shown only on your screen and never comes back from the server.
+   If the email already belongs to an active user, you are offered to **attach that existing user**
+   to the new workspace instead (their own password is kept) — but only after ticking that you have
+   confirmed, outside the request, that the account belongs to the requester: anyone can file a
+   request under someone else's address, so the server refuses an attach without that confirmation.
+5. **Send the sign-in details** over a channel other than that email address (a phone call, a
+   message), and ask them to change the password at **`/account`**.
+6. **Reject** with a reason, or **Reject all pending** if a bot fills the queue. The queue holds at
+   most 200 pending requests by default (`--access-request-max-pending`), and submissions are
+   rate-limited, so a flood cannot grow without bound.
+
+The terms acceptance — which version, when, and a keyed hash (HMAC) of the email, never the
+address — is written into the new workspace's permanent audit record when you approve, so it
+survives the request row's deletion. Approving needs your account to hold the platform-admin,
+platform-user **and** credential-admin grants, which the bootstrap operator from step 6 does.
+
+### Or from the command line
+
+1. Take the details any way you like (a form tool, a `mailto:` link).
+2. Run **one command on the VM**:
 
    ```bash
    cd ~/crossengin/deploy
@@ -206,8 +252,8 @@ What works well in practice:
    `erp_admin`, status **active**.
 4. **Platform → Users → (the user) → Set password**.
 
-**Their staff:** repeat steps 2–4 (or run the script with the customer's slug — it creates the
-tenant only once, so for a second person use the browser steps). Give each person the narrowest role
+**Their staff:** repeat steps 2–4 in the browser. The script always creates a *new* tenant, so it
+cannot add a second person to an existing one. Give each person the narrowest role
 that fits: `erp_admin`, `erp_accountant`, `controller`, `ap_clerk`, `sales_manager`, `sales_rep`,
 `procurement_manager`, `inventory_manager`, `warehouse_clerk`, `production_manager`,
 `project_manager`, `hr_manager`, `asset_manager`, `tax_manager`, `erp_viewer`.
@@ -215,7 +261,9 @@ that fits: `erp_admin`, `erp_accountant`, `controller`, `ap_clerk`, `sales_manag
 **The customer's first hour**, as their `erp_admin`:
 
 1. **Admin → Settings**: company profile, default currency, timezone, fiscal year start,
-   **payment terms (days)** — the overnight sales-order → invoice job fails without it.
+   **payment terms (days)**. (Automatic jobs — overdue marking, depreciation, sales order →
+   invoice — are off on this stack, see *What is not there yet*; payment terms still prefill each
+   invoice's due date.)
 2. Create the **ledger accounts** they post to (accounts receivable, revenue, payables, expense,
    cash, tax), then pick each one in **Settings → Finance & tax → … account code**. Until those
    point at real accounts, sending an invoice is refused with a message naming the setting.
@@ -301,17 +349,40 @@ The `backup` service dumps the database daily, test-restores each dump, and keep
 volume **on the same VM**. That protects against a bad upgrade or a mistaken delete; it does not
 protect against losing the VM or the account. Copy them off it — for example a nightly
 `rsync`/`scp` of the backup directory to another machine, or set `BACKUP_DIR` to a mounted remote
-store (README → *Backups*). Keep `.env` with them.
+store (README → *Backups*).
+
+**Keep `.env` somewhere else — never beside the backups.** `.env` holds the platform-admin key and
+every signing secret, so a folder holding both the dumps and `.env` is a full takeover of every
+tenant, not just a copy of their data. Put `.env` in a password manager. Encrypt the dumps before they
+leave the VM (`age` or `gpg`), and give the off-host copies an expiry you can state to customers.
+Once, before real customers, restore a dump onto a fresh VM end to end — the automatic check
+counts tables, not rows.
 
 ## What is not there yet
 
 So you can answer customers honestly:
 
-- **Self-registration and password reset by email** — no mail channel exists; you onboard people
-  and reset passwords from **Platform → Users**.
+- **Instant self-registration and password reset by email** — no mail channel exists, so there is
+  no email verification. Customers *request* access at `/request-access` and you approve each one
+  (section 7); you reset passwords from **Platform → Users**.
+- **Starter chart of accounts** — an approved workspace starts with no ledger accounts, so its admin
+  creates them and points the account-code settings at them before the first invoice (section 7,
+  *The customer's first hour*).
 - **Email and SMS notifications** — in-app notifications work. Setting SES or Twilio credentials
   registers the channel, but nothing in the platform produces an email or SMS dispatch yet, so the
   boot's `[notify]` line saying `email, sms` does not mean anything will be sent.
-- **Data export and subject-access requests** (GDPR Art. 15/20) — not built; tenant deletion is.
+- **Deleting a tenant's data** — the Article 17 deletion surfaces are built but **off** on this
+  stack. Until you turn them on ([`ORACLE.md`](./ORACLE.md) has the flags and the eraser role),
+  offboarding a customer means **suspending or archiving** the tenant, which cuts access and erases
+  nothing.
+- **Data export and subject-access requests** (GDPR Art. 15/20) — not built.
+- **Automatic background jobs** — off: invoices are not marked overdue on their own (the aging
+  report still ages by due date), depreciation is not posted, sales orders are not invoiced
+  automatically.
+- **Financial statements** — trial balance, P&L and balance sheet are not built; the reports are
+  AR/AP aging, withholding tax and period close.
+- **Printable invoices, data import, customer-managed staff, billing** — none built: invoices are
+  not rendered or emailed, data is entered by hand or through the API, you add every user, and every
+  tenant gets the whole product.
 - **Single sign-on** (SAML/OIDC) — not built; people sign in with email and password.
 - **File attachments** — no object storage is configured.

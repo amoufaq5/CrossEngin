@@ -3,6 +3,7 @@ import type { ColumnDefinition, TableDefinition } from "./types.js";
 import { emitMetaBootstrapSql } from "./index.js";
 import {
   META_AA_CONFLICTS,
+  META_ACCESS_REQUESTS,
   META_ACCESS_REVIEW_CAMPAIGNS,
   META_ACCESS_REVIEW_DECISIONS,
   META_ACCESS_REVIEW_EVIDENCE,
@@ -325,8 +326,8 @@ describe("no table carries the permissive platform arm any more", () => {
 });
 
 describe("META_TABLES", () => {
-  it("contains 146 tables", () => {
-    expect(META_TABLES).toHaveLength(146);
+  it("contains 147 tables", () => {
+    expect(META_TABLES).toHaveLength(147);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -343,6 +344,7 @@ describe("META_TABLES", () => {
       "aa_conflicts",
       "aa_split_brain_events",
       "aa_topology",
+      "access_requests",
       "access_review_campaigns",
       "access_review_decisions",
       "access_review_evidence",
@@ -3300,6 +3302,11 @@ const INSTANT_RANGE_CHECKED_COLUMNS: readonly string[] = [
   // ADR-0374's two, converted to the helper by ADR-0402 rather than left as a second spelling.
   "forensic_chain_entries.recorded_at",
   "forensic_chain_checkpoints.checkpointed_at",
+  // ADR-0464's access requests: every instant the store's row mapper parses as one.
+  "access_requests.terms_accepted_at",
+  "access_requests.created_at",
+  "access_requests.expires_at",
+  "access_requests.decided_at",
 ];
 
 const UUID_SHAPE_CHECKED_COLUMNS: readonly string[] = [
@@ -3308,6 +3315,7 @@ const UUID_SHAPE_CHECKED_COLUMNS: readonly string[] = [
   "access_review_campaigns.created_by",
   "access_review_decisions.decided_by_user_id",
   "gateway_pipeline_executions.principal_id",
+  "access_requests.decided_by",
 ];
 
 function columnsCarrying(expected: (column: string) => string): readonly string[] {
@@ -3333,8 +3341,8 @@ describe("the shared contract-refinement CHECK helpers", () => {
   it("separates the uuid shape from ADR-0302's structured-actor checks", () => {
     // `meta.notification_suppressions.applied_by` and its sibling carry
     // `user:<uuid>` / `system:<slug>` / `provider:<slug>`, which a regex counting `[0-9a-f]{8}-`
-    // also matches — so a count of "columns with a uuid-ish CHECK" is 7 while the number carrying
-    // *this* constraint is 5. The exact equality above is what separates them, and this is the
+    // also matches — so a count of "columns with a uuid-ish CHECK" is 8 while the number carrying
+    // *this* constraint is 6. The exact equality above is what separates them, and this is the
     // non-vacuity floor for that: the structured ones must exist and must not be in the set.
     const structured = META_TABLES.flatMap((table) =>
       table.columns
@@ -3382,6 +3390,98 @@ describe("a table-level constraint's name avoids the column-check naming family"
     expect(colliding).toMatch(/^workflow_timers_.+_check$/);
     const suffix = colliding.slice(META_WORKFLOW_TIMERS.name.length + 1, -"_check".length);
     expect(META_WORKFLOW_TIMERS.columns.map((c) => c.name)).toContain(suffix);
+  });
+});
+
+describe("META_ACCESS_REQUESTS", () => {
+  const byName = new Map(META_ACCESS_REQUESTS.columns.map((c) => [c.name, c]));
+
+  it("is platform-wide: no tenant_id and no RLS, because a request precedes any tenant", () => {
+    expect(byName.has("tenant_id")).toBe(false);
+    expect(META_ACCESS_REQUESTS.rls).toBeUndefined();
+  });
+
+  it("leaves approved_tenant_id unreferenced: SET NULL would contradict the pairing check", () => {
+    // An approved row must carry approved_tenant_id, so SET NULL on a tenant delete would violate
+    // access_requests_decision_pairing_check; RESTRICT would make the tenant undeletable (ADR-0335).
+    expect(byName.get("approved_tenant_id")?.type).toBe("UUID");
+    expect(byName.get("approved_tenant_id")?.references).toBeUndefined();
+  });
+
+  it("keeps the actor and the approved user unreferenced (ADR-0335)", () => {
+    expect(byName.get("decided_by")?.type).toBe("TEXT");
+    expect(byName.get("decided_by")?.references).toBeUndefined();
+    expect(byName.get("approved_user_id")?.references).toBeUndefined();
+  });
+
+  it("requires the fields an intake row always carries and leaves the decision nullable", () => {
+    for (const name of [
+      "id",
+      "company_name",
+      "contact_name",
+      "email",
+      "terms_version",
+      "terms_accepted_at",
+      "status",
+      "created_at",
+      "expires_at",
+    ]) {
+      expect([name, byName.get(name)?.notNull]).toEqual([name, true]);
+    }
+    for (const name of [
+      "requested_slug",
+      "message",
+      "decided_at",
+      "decided_by",
+      "decision_reason",
+      "approved_tenant_id",
+      "approved_user_id",
+    ]) {
+      expect([name, byName.get(name)?.notNull ?? false]).toEqual([name, false]);
+    }
+  });
+
+  it("status defaults to pending over exactly three states", () => {
+    const status = byName.get("status");
+    expect(status?.default).toBe("'pending'");
+    expect(status?.check).toBe("status IN ('pending', 'approved', 'rejected')");
+  });
+
+  it("refuses an email that is not already lower-cased", () => {
+    expect(byName.get("email")?.check).toContain("email = lower(email)");
+  });
+
+  it("pairs each status with the decision columns it requires", () => {
+    const pairing = META_ACCESS_REQUESTS.constraints?.find(
+      (c) => c.name === "access_requests_decision_pairing_check",
+    );
+    expect(pairing?.kind).toBe("check");
+    const expression = pairing?.kind === "check" ? pairing.expression : "";
+    for (const status of ["pending", "approved", "rejected"]) {
+      expect(expression).toContain(`status = '${status}'`);
+    }
+    expect(expression).toContain("approved_tenant_id IS NOT NULL");
+    expect(expression).toContain("decision_reason IS NULL");
+  });
+
+  it("allows one pending request per address and indexes the sweeper's predicate", () => {
+    const pendingEmail = META_ACCESS_REQUESTS.indexes?.find(
+      (i) => i.name === "idx_access_requests_pending_email",
+    );
+    expect(pendingEmail).toEqual({
+      name: "idx_access_requests_pending_email",
+      columns: ["email"],
+      unique: true,
+      where: "status = 'pending'",
+    });
+    const expiry = META_ACCESS_REQUESTS.indexes?.find(
+      (i) => i.name === "idx_access_requests_pending_expiry",
+    );
+    expect(expiry?.where).toBe("status = 'pending'");
+    expect(
+      META_ACCESS_REQUESTS.indexes?.find((i) => i.name === "idx_access_requests_status_created")
+        ?.columns,
+    ).toEqual(["status", "created_at"]);
   });
 });
 

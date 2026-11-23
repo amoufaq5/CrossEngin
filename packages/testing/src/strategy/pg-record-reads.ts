@@ -616,6 +616,18 @@ export const RECORD_READ_DIVERGENCES: readonly RecordReadDivergence[] = Object.f
       "the ref is fed back into `record_id = $3` in the same function, so the round trip closes on " +
       "the value. The row type is an inline literal, which is why no derivation was available (ADR-0423).",
   },
+  {
+    file: "apps/operate-server/src/access-requests.ts",
+    field: "c",
+    column: "created_at",
+    kind: "qualifier_differs",
+    note:
+      "Not a record field but the keyset cursor's wire key: `list` encodes " +
+      "`{c: created_at, i: id}` as base64url JSON, and `decodeListCursor` reads `c` back into " +
+      "`(created_at, id) < ($n::timestamptz, $m::uuid)` over the same `meta.access_requests` " +
+      "ordering, so the round trip closes on the value. The one-letter key keeps an opaque token " +
+      "short; it names the same instant the column holds (ADR-0464).",
+  },
   /* ------------------------------------------------- nested_record (6) */
   {
     file: ACCESS_REVIEWS,

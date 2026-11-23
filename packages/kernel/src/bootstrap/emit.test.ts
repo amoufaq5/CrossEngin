@@ -1003,8 +1003,10 @@ describe("the catalog's own emission is unchanged", () => {
     // member is ADR-0402's: `workflow_timers` carried none while `WorkflowTimerSchema` declared
     // nine cross-field clauses, and `incident_communications` went from two of fifteen to twelve.
     // The seventh is H-18's: a checkpoint's signature and its key fingerprint are written together
-    // or not at all.
+    // or not at all. The eighth is ADR-0464's: an access request's status decides which decision
+    // columns it must carry.
     expect(declaring).toEqual([
+      "access_requests",
       "forensic_chain_checkpoints",
       "incident_communications",
       "notification_read_watermarks",

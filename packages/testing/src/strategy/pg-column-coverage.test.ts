@@ -689,6 +689,8 @@ describe("the real workspace", () => {
         byTarget.set(column.references, (byTarget.get(column.references) ?? 0) + 1);
       }
     }
+    // 99, unchanged by ADR-0464: `meta.access_requests.approved_tenant_id` deliberately carries no
+    // reference (SET NULL would contradict that table's decision pairing check).
     expect(byTarget.get("meta.tenants.id")).toBe(99);
     // 96 and not 97 since ADR-0370 dropped `notification_templates.approved_by`'s, which is this
     // assertion doing its job rather than a figure to carry: the edit that removed the reference

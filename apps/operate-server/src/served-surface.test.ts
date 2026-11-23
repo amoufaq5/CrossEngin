@@ -35,8 +35,8 @@ const route = (operationId: string, segs: RouteDefinition["pathSegments"]): Rout
 });
 
 describe("OUT_OF_REGISTRY_SURFACES", () => {
-  it("declares all five kinds, with a method, a path and a mount symbol each", () => {
-    expect(OUT_OF_REGISTRY_SURFACE_KINDS).toHaveLength(5);
+  it("declares all seven kinds, with a method, a path and a mount symbol each", () => {
+    expect(OUT_OF_REGISTRY_SURFACE_KINDS).toHaveLength(7);
     for (const kind of OUT_OF_REGISTRY_SURFACE_KINDS) {
       const s = OUT_OF_REGISTRY_SURFACES[kind];
       expect(s.methods.length, kind).toBeGreaterThan(0);
@@ -46,10 +46,10 @@ describe("OUT_OF_REGISTRY_SURFACES", () => {
     }
   });
 
-  it("yields seven (method, path) pairs when every surface is mounted", () => {
-    // Five surfaces, seven pairs: the two health probes answer GET and HEAD alike.
+  it("yields nine (method, path) pairs when every surface is mounted", () => {
+    // Seven surfaces, nine pairs: the two health probes answer GET and HEAD alike.
     const all = mountedOutOfRegistryPaths(new Set(OUT_OF_REGISTRY_SURFACE_KINDS));
-    expect(all).toHaveLength(7);
+    expect(all).toHaveLength(9);
     expect(all.filter((p) => p.method === "HEAD")).toHaveLength(2);
     expect(all.map((p) => p.path)).toContain(STRIPE_WEBHOOK_PATH);
   });
@@ -71,15 +71,15 @@ describe("auditOutOfRegistrySurfaces", () => {
     // If the spelling it counts ever stopped being the spelling, every count would read 0 and the
     // fence would fire — which is the safe direction, but the floor makes the reason legible rather
     // than leaving a reader to wonder whether three findings mean three new interceptors.
-    expect(NODE_TS.split("inner.dispatch(raw, body)").length - 1).toBe(3);
+    expect(NODE_TS.split("inner.dispatch(raw, body)").length - 1).toBe(4);
     expect(NODE_TS.split("webhookRoute = {").length - 1).toBe(1);
   });
 
-  it("reports a fourth interceptor, which is a path no registry holds", () => {
+  it("reports a fifth interceptor, which is a path no registry holds", () => {
     const withAnother = `${NODE_TS}\n// (await x(raw, body)) ?? (await inner.dispatch(raw, body))\n`;
     const found = auditOutOfRegistrySurfaces({ nodeTs: withAnother, serverTs: SERVER_TS });
     expect(found.map((f) => f.kind)).toEqual(["interceptor_count_changed"]);
-    expect(found[0]?.detail).toContain("4 times");
+    expect(found[0]?.detail).toContain("5 times");
   });
 
   it("reports a second webhook route, which bypasses auth as well as the document", () => {
@@ -106,7 +106,7 @@ describe("auditOutOfRegistrySurfaces", () => {
 });
 
 describe("the measurement that decides the fence's shape", () => {
-  it("four of the five declared paths appear nowhere as a literal in the mounting source", () => {
+  it("none of the declared paths appears as a literal in the mounting source", () => {
     // This is why the forward check is the mount SYMBOL and not the path. Each surface reaches its
     // mount through its own exported constant, so "the declared path appears in node.ts" is testing
     // a coincidence: it would have fired on four surfaces before this module existed and on all

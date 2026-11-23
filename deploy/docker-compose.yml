@@ -317,6 +317,14 @@ services:
       # the chain's policy with no key in it; both sources may carry a key only if they state the
       # same one, compared by fingerprint.
       AUDIT_CHAIN_SIGNING_KEY: ${AUDIT_CHAIN_SIGNING_KEY:-}
+      # The public "request access" form (ADR-0464) opens only when ALL THREE are set: the terms a
+      # requester accepts, the privacy notice they are shown before submitting, and the version
+      # string recorded with every acceptance. Not secrets; here rather than in `command:` only so
+      # a deployment changes them in .env. Set one or two and the API refuses to boot naming the
+      # rest; set none and the form says sign-up is not open.
+      ACCESS_REQUEST_TERMS_URL: ${ACCESS_REQUEST_TERMS_URL:-}
+      ACCESS_REQUEST_PRIVACY_URL: ${ACCESS_REQUEST_PRIVACY_URL:-}
+      ACCESS_REQUEST_TERMS_VERSION: ${ACCESS_REQUEST_TERMS_VERSION:-}
     # Args in list form so no value is ever shell-split.
     command:
       - node
@@ -407,6 +415,14 @@ services:
       # lockout, so a wrong current password counts toward the same lock a wrong login does.
       - --credential-admin-role
       - platform_admin
+      # Self-service sign-up REQUESTS with one-click approval (ADR-0464). A visitor fills
+      # /request-access and NOTHING is created; Platform → Access requests approves one in a single
+      # transaction (workspace, admin user, membership, password, default settings) or rejects it.
+      # Mounting the routes is harmless on its own: the public form stays CLOSED until the three
+      # ACCESS_REQUEST_* variables in the environment block above are all set, and the boot line
+      # says which. Approving needs this deployment's platform-admin, platform-user AND
+      # credential-admin grants together, which the bootstrap operator holds.
+      - --access-request-routes
       # Who may read and write THIS TENANT'S OWN settings -- GET/PUT /v1/admin/settings, the two
       # routes behind the console's Settings and Billing pages. Repeatable, and BOTH names are
       # needed here for a measured reason rather than for symmetry:

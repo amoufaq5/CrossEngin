@@ -283,10 +283,23 @@ export class PostgresCredentialStore {
    * than reporting a success it did not have.
    */
   async setCredential(userId: string, credentialHash: string): Promise<boolean> {
+    return this.setCredentialWithin(this.conn, userId, credentialHash);
+  }
+
+  /**
+   * `setCredential` on a connection the caller holds, for a write that must commit with others
+   * (an approved access request creates the user and sets its first password in one
+   * transaction). `meta.users` carries no RLS, so no context needs setting first.
+   */
+  async setCredentialWithin(
+    tx: PgConnection,
+    userId: string,
+    credentialHash: string,
+  ): Promise<boolean> {
     // `session_epoch` advances in the same statement: a password set is the moment every session
     // minted under the previous one must stop working, and a second statement could land between
     // two requests that would then disagree about which sessions are current.
-    const result = await this.conn.query(
+    const result = await tx.query(
       `UPDATE ${this.users} SET credential_hash = $2, credential_updated_at = now(),` +
         " credential_failed_attempts = 0, credential_locked_until = NULL," +
         " session_epoch = session_epoch + 1, updated_at = now()" +

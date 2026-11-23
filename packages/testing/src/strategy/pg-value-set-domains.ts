@@ -729,6 +729,7 @@ export const VALUE_SET_DOMAINS: readonly ValueSetDomainDeclaration[] = [
   { table: "aa_split_brain_events", column: "status", link: "mirrors", ref: "@crossengin/active-active:SPLIT_BRAIN_STATUSES" },
   { table: "aa_topology", column: "kind", link: "mirrors", ref: "@crossengin/active-active:TOPOLOGY_KINDS" },
   { table: "aa_topology", column: "partition_strategy", link: "mirrors", ref: "@crossengin/active-active:PARTITION_STRATEGIES" },
+  { table: "access_requests", column: "status", link: "mirrors", ref: "@crossengin/operate-server:ACCESS_REQUEST_STATUSES" },
   { table: "access_review_campaigns", column: "auto_revoke_policy", link: "mirrors", ref: "@crossengin/access-reviews:AUTO_REVOKE_POLICIES" },
   { table: "access_review_campaigns", column: "framework", link: "mirrors", ref: "@crossengin/access-reviews:COMPLIANCE_FRAMEWORKS" },
   { table: "access_review_campaigns", column: "frequency", link: "mirrors", ref: "@crossengin/access-reviews:CAMPAIGN_FREQUENCIES" },

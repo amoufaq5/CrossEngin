@@ -2178,3 +2178,38 @@ describe("every AI provider path is reachable from .env, and the overlay reaches
     expect(env).toMatch(/^# OPERATE_AI_MODEL=$/m);
   });
 });
+
+describe("self-service sign-up requests (ADR-0464)", () => {
+  const args = apiCommandArgs();
+  const compose = readFileSync(COMPOSE, "utf8");
+  const env = readFileSync(resolve(here, "../../../deploy/.env.example"), "utf8");
+  const VARS = [
+    "ACCESS_REQUEST_TERMS_URL",
+    "ACCESS_REQUEST_PRIVACY_URL",
+    "ACCESS_REQUEST_TERMS_VERSION",
+  ] as const;
+
+  it("mounts the routes, which open the public form only once all three variables are set", () => {
+    expect(args).toContain("--access-request-routes");
+    // The flag's parse refusals, each of which this command satisfies — so a later edit that drops
+    // one of them is a boot failure rather than a silently closed console.
+    for (const required of ["--platform-admin", "--platform-user-routes", "--credential-login"]) {
+      expect(args).toContain(required);
+    }
+    expect(valuesAfter(args, "--credential-admin-role").length).toBeGreaterThan(0);
+  });
+
+  it("passes the three variables through the environment, defaulted empty so the form stays closed", () => {
+    for (const v of VARS) {
+      expect(compose).toContain(`${v}: \${${v}:-}`);
+      expect(args.join(" ")).not.toContain(v);
+    }
+  });
+
+  it("documents them in .env.example commented out, because an operator must write their own terms", () => {
+    for (const v of VARS) {
+      expect(env).toMatch(new RegExp(`^# ${v}=`, "m"));
+      expect(env).not.toMatch(new RegExp(`^${v}=`, "m"));
+    }
+  });
+});

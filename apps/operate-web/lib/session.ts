@@ -16,6 +16,13 @@ export const SESSION_COOKIE = "operate_session";
 /** Where an unauthenticated request is sent. */
 export const LOGIN_PATH = "/login";
 
+/**
+ * The public access-request form (ADR-0464): the one page besides the login that a browser with no
+ * session must reach, because the person on it has no workspace yet. `middleware.ts` excludes it
+ * from the gate and `AppChrome` renders it without the authenticated shell.
+ */
+export const REQUEST_ACCESS_PATH = "/request-access";
+
 /** The query parameter carrying where an unauthenticated request was going. */
 export const NEXT_PARAM = "next";
 

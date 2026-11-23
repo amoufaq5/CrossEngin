@@ -374,16 +374,21 @@ describe("operate-web route handlers call the guards (M-07)", () => {
   const PROXY = "app/api/[...path]/route.ts";
   const LOGIN = "app/api/auth/login/route.ts";
   const LOGOUT = "app/api/auth/logout/route.ts";
+  /** The public access-request submit (ADR-0464): unauthenticated, so it owes both guards the login does. */
+  const REQUEST_ACCESS = "app/api/request-access/route.ts";
 
-  it.each([PROXY, LOGIN, LOGOUT])("%s refuses a cross-site write before it does anything else", (file) => {
-    const text = source(file);
-    const guard = text.indexOf("crossSiteRefusal(provenanceOf(req))");
-    expect(guard).toBeGreaterThan(0);
-    const firstFetch = text.indexOf("fetch(");
-    if (firstFetch >= 0) expect(guard).toBeLessThan(firstFetch);
-  });
+  it.each([PROXY, LOGIN, LOGOUT, REQUEST_ACCESS])(
+    "%s refuses a cross-site write before it does anything else",
+    (file) => {
+      const text = source(file);
+      const guard = text.indexOf("crossSiteRefusal(provenanceOf(req))");
+      expect(guard).toBeGreaterThan(0);
+      const firstFetch = text.indexOf("fetch(");
+      if (firstFetch >= 0) expect(guard).toBeLessThan(firstFetch);
+    },
+  );
 
-  it.each([PROXY, LOGIN])("%s caps the body it reads and bounds the upstream wait", (file) => {
+  it.each([PROXY, LOGIN, REQUEST_ACCESS])("%s caps the body it reads and bounds the upstream wait", (file) => {
     const text = source(file);
     expect(text).toContain("readCappedBody(req, ");
     expect(text).not.toMatch(/req\.(?:text|json|arrayBuffer)\(\)/);

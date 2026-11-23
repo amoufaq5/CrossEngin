@@ -52,10 +52,19 @@ export function middleware(req: NextRequest): NextResponse {
 }
 
 export const config = {
-  // Everything except the login and logout handlers — which must be reachable with no session
-  // by definition — and Next's own build output. `/login` is handled above rather than
-  // excluded here. There is no `public/` directory in this app today; a static asset added
-  // there would need its path adding to this list, or the browser's request for it would be
-  // answered with a redirect to the login form.
-  matcher: ["/((?!api/auth/|_next/|favicon.ico|robots.txt).*)"],
+  // Everything except the paths that must be reachable with no session by definition, and Next's
+  // own build output:
+  //
+  // - `api/auth/` — the login and logout handlers.
+  // - `request-access` and `api/request-access` — the public access-request page and its two
+  //   handlers (ADR-0464), which a prospective customer reaches before any workspace exists for
+  //   them. `api/request-access` has no trailing slash because the submit handler is that exact
+  //   path and the terms handler sits under it. Both are prefixes, so `/request-accessX` is
+  //   excluded too; nothing is served there, and the `/api` proxy refuses a request with no cookie
+  //   on its own, so the overreach admits nothing.
+  //
+  // `/login` is handled above rather than excluded here. There is no `public/` directory in this
+  // app today; a static asset added there would need its path adding to this list, or the
+  // browser's request for it would be answered with a redirect to the login form.
+  matcher: ["/((?!api/auth/|api/request-access|request-access|_next/|favicon.ico|robots.txt).*)"],
 };

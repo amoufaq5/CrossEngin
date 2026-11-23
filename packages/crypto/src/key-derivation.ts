@@ -548,3 +548,36 @@ export function deriveAiTenantPseudonym(secret: Uint8Array, tenantId: string): s
   );
   return `${AI_TENANT_PSEUDONYM_PREFIX}${Buffer.from(derived).toString("hex")}`;
 }
+
+/**
+ * The info string for the key an access request's contact address is digested under in the audit
+ * log (ADR-0464). A sixth label, so the digest key is unrelated to every other derivation from the
+ * pepper — in particular to the password HMAC, whose key is the pepper itself.
+ */
+export const ACCESS_REQUEST_CONTACT_EMAIL_DERIVATION_INFO =
+  "crossengin.access-request.contact-email.v1";
+
+/**
+ * HKDF-SHA256(ikm = the credential pepper, empty salt, info =
+ * `ACCESS_REQUEST_CONTACT_EMAIL_DERIVATION_INFO`, `AEAD_KEY_BYTES`) — the key a contact address is
+ * HMAC'd under before it lands in `meta.audit_log`.
+ *
+ * **Keyed, never a bare digest**, for `deriveAiTenantPseudonym`'s reason: the audit log outlives an
+ * Article 17 erasure, and an unkeyed `sha256(email)` is confirmable by anyone who holds the log and
+ * a candidate address. Under a key only the deployment holds, it confirms nothing.
+ *
+ * No salt and no generation: there is no per-instance separator (one key per deployment pepper),
+ * and the pepper's own version is the generation — a caller records it beside the digest.
+ */
+export function deriveAccessRequestContactKey(pepper: Uint8Array): Uint8Array {
+  refuseWeakSecret(pepper, CREDENTIAL_PEPPER_LABEL);
+  return new Uint8Array(
+    hkdfSync(
+      "sha256",
+      pepper,
+      new Uint8Array(0),
+      new TextEncoder().encode(ACCESS_REQUEST_CONTACT_EMAIL_DERIVATION_INFO),
+      AEAD_KEY_BYTES,
+    ),
+  );
+}

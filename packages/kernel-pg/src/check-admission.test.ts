@@ -256,8 +256,28 @@ describe("declaredAdmissionChecks over the real catalog", () => {
     // original bound. So a parser that quietly gave up is still caught at 25.
     const unclassified = all.filter((d) => d.shape === "unclassified");
     const instantRanges = unclassified.filter((d) => d.expression === instantRangeCheck(d.column));
-    expect(instantRanges.length).toBe(37);
-    expect(unclassified.length - instantRanges.length).toBeLessThan(25);
+    // 37 from ADR-0402, plus ADR-0464's four on `meta.access_requests`.
+    expect(instantRanges.length).toBe(41);
+    // ADR-0464's six text-length bounds use the catalog's `char_length(x) BETWEEN …` idiom, which
+    // this taxonomy leaves unclassified like the nine siblings already in the tail. Named rather
+    // than absorbed into the ceiling, so the fence still holds at 25 for everything else.
+    const accessRequestLengths = unclassified.filter(
+      (d) =>
+        d.table === "meta.access_requests" &&
+        d.expression !== instantRangeCheck(d.column) &&
+        d.expression.startsWith(`char_length(${d.column})`),
+    );
+    expect(accessRequestLengths.map((d) => d.column).sort()).toEqual([
+      "company_name",
+      "contact_name",
+      "decision_reason",
+      "email",
+      "message",
+      "terms_version",
+    ]);
+    expect(
+      unclassified.length - instantRanges.length - accessRequestLengths.length,
+    ).toBeLessThan(25);
   });
 
   it("never derives a candidate it cannot cast", () => {

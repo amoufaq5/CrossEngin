@@ -2,6 +2,7 @@ import type { HttpMethod, RouteDefinition } from "@crossengin/api-gateway";
 import { renderPathTemplate } from "@crossengin/api-gateway";
 import type { OpenApiCoverageGap } from "@crossengin/operate-runtime";
 
+import { ACCESS_REQUEST_INTAKE_PATH, ACCESS_REQUEST_TERMS_PATH } from "./access-requests.js";
 import { AUTH_TOKEN_PATH } from "./auth-token-route.js";
 import { BOUNCE_WEBHOOK_PATH_PREFIX } from "./bounce-webhook-routes.js";
 import { HEALTH_PATHS } from "./health.js";
@@ -22,6 +23,8 @@ export const OUT_OF_REGISTRY_SURFACE_KINDS = [
   "credential_login",
   "bounce_webhook",
   "stripe_webhook",
+  "access_request_terms",
+  "access_request_intake",
 ] as const;
 export type OutOfRegistrySurfaceKind = (typeof OUT_OF_REGISTRY_SURFACE_KINDS)[number];
 
@@ -130,6 +133,28 @@ export const OUT_OF_REGISTRY_SURFACES: Readonly<
       "Signature-authenticated the same way, under Stripe's own `stripe-signature` header rather " +
       "than ours.",
   },
+  access_request_terms: {
+    methods: ["GET"],
+    path: ACCESS_REQUEST_TERMS_PATH,
+    pathKind: "exact",
+    mountedBy: "--access-request-routes",
+    mountSymbol: "buildAccessRequestIntake",
+    describable: true,
+    note:
+      "Public and unauthenticated: the terms a request must accept, or nulls when the intake is " +
+      "closed. Mounted by the same interceptor as the submission, so it counts as one wrapper.",
+  },
+  access_request_intake: {
+    methods: ["POST"],
+    path: ACCESS_REQUEST_INTAKE_PATH,
+    pathKind: "exact",
+    mountedBy: "--access-request-routes",
+    mountSymbol: "buildAccessRequestIntake",
+    describable: true,
+    note:
+      "Public and unauthenticated, ahead of the gateway for the login's reason. It answers a new " +
+      "request and an absorbed re-submit with one body, so it is not an oracle for who has asked.",
+  },
 };
 
 /** Every out-of-registry surface the deployment mounted, as `(method, path)` pairs. */
@@ -219,13 +244,17 @@ export const auditOutOfRegistrySurfaces = (sources: {
   return findings;
 };
 
-/** The three interceptor-mounted kinds, which is what `EXPECTED_INTERCEPTORS` counts. */
+/**
+ * The interceptor-mounted kinds, one per wrapper, which is what `EXPECTED_INTERCEPTORS` counts. The
+ * access-request intake serves two paths through one wrapper, so it is named once.
+ */
 const INTERCEPTOR_KINDS: readonly OutOfRegistrySurfaceKind[] = [
   "bounce_webhook",
   "credential_login",
   "liveness",
+  "access_request_intake",
 ];
-const EXPECTED_INTERCEPTORS = 3;
+const EXPECTED_INTERCEPTORS = 4;
 const EXPECTED_WEBHOOK_ROUTES = 1;
 
 export interface ServedSurface {

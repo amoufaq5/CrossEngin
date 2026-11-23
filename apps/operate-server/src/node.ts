@@ -366,6 +366,19 @@ import {
   resolveAiSetting,
 } from "./ai-model-source.js";
 import { buildCredentialRoutes, DEFAULT_MIN_PASSWORD_LENGTH } from "./credential-routes.js";
+import { deriveAccessRequestContactKey, hashPassword } from "@crossengin/crypto";
+import {
+  AccessRequestSweeper,
+  ACCESS_REQUEST_INTAKE_PATH,
+  ACCESS_REQUEST_MAX_BODY_BYTES,
+  ACCESS_REQUEST_SUBMISSIONS_PER_MINUTE,
+  PostgresAccessRequestStore,
+  SubmissionWindow,
+  buildAccessRequestIntake,
+  buildAccessRequestRoutes,
+  isAccessRequestIntakePath,
+} from "./access-requests.js";
+import { formatAccessRequestBootLine, resolveAccessRequestIntake } from "./access-request-env.js";
 import { platformAuthorityRoles } from "./platform-authority.js";
 import { PostgresCredentialStore } from "./credential-store.js";
 import {
@@ -437,6 +450,7 @@ import {
   PostgresTenantStore,
   TENANT_CREATED_OPERATION,
   buildPlatformAdminRoutes,
+  type TenantCreationEvent,
 } from "./platform-admin.js";
 import {
   CachedTenantStatusDirectory,
@@ -2212,6 +2226,45 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       console.warn(`[lifecycle] actions with no producer: ${gaps.join(", ")}`);
     }
   }
+  // A tenant's creation record, shared by the console's create route and an access-request
+  // approval so the two cannot come to record one act differently. Filed in the new tenant's own
+  // scope and in the INSERT's transaction, so the row and its record commit together. Its scope is
+  // the tenant's because the tenant row exists by then (meta.tenants carries no RLS), and a
+  // platform-scope entry would need a write elevation claimed inside a transaction about one
+  // tenant. `auditEmitter` is assigned below and read only when a request arrives, by which point it
+  // is set on every Postgres store — which both callers already require.
+  //
+  // `origin` is an approval's permanent terms evidence: `meta.audit_log` is retained past the
+  // request row's sweep and past an Article 17 erasure, which is also why the contact address is
+  // carried only as an HMAC under a pepper-derived key (an unkeyed digest would be confirmable).
+  const recordTenantCreation = async (
+    tx: PgConnection,
+    event: TenantCreationEvent,
+  ): Promise<void> => {
+    if (auditEmitter === null) throw new Error("no audit emitter on this deployment");
+    await setTenantContextWithin(tx, event.tenant.id);
+    await auditEmitter.emitWithin(
+      tx,
+      auditEntry({
+        id: randomUUID(),
+        tenantId: event.tenant.id,
+        occurredAt: event.at,
+        operation: TENANT_CREATED_OPERATION,
+        entity: "Tenant",
+        entityId: event.tenant.id,
+        actor: auditActor({ userId: event.principalId }),
+        after: {
+          slug: event.tenant.slug,
+          name: event.tenant.name,
+          status: event.tenant.status,
+          tier: event.tenant.tier,
+          region: event.tenant.region,
+          schemaName: event.tenant.schemaName,
+          ...(event.origin !== undefined ? { origin: event.origin } : {}),
+        },
+      }),
+    );
+  };
   // Platform super-admin: the /v1/platform routes manage the meta.tenants registry (list/create/suspend/
   // archive/reactivate + stats) across all tenants, gated to the configured platform-admin role(s). Enabled
   // by --platform-admin over a pg store.
@@ -2224,36 +2277,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         ...(lifecycleEvents !== null ? { lifecycleEvents } : {}),
         onLifecycleError: (err, action) =>
           console.error(`[lifecycle] console ${action} not recorded`, err),
-        // Filed in the new tenant's own scope and in the INSERT's transaction, so the row and its
-        // record commit together. Its scope is the tenant's because the tenant row exists by then
-        // (meta.tenants carries no RLS), and a platform-scope entry would need a write elevation
-        // claimed inside a transaction about one tenant. `auditEmitter` is assigned below this
-        // block and read only when a request arrives, by which point it is set on every Postgres
-        // store — which `--platform-admin` already requires.
-        recordCreation: async (tx, event): Promise<void> => {
-          if (auditEmitter === null) throw new Error("no audit emitter on this deployment");
-          await setTenantContextWithin(tx, event.tenant.id);
-          await auditEmitter.emitWithin(
-            tx,
-            auditEntry({
-              id: randomUUID(),
-              tenantId: event.tenant.id,
-              occurredAt: event.at,
-              operation: TENANT_CREATED_OPERATION,
-              entity: "Tenant",
-              entityId: event.tenant.id,
-              actor: auditActor({ userId: event.principalId }),
-              after: {
-                slug: event.tenant.slug,
-                name: event.tenant.name,
-                status: event.tenant.status,
-                tier: event.tenant.tier,
-                region: event.tenant.region,
-                schemaName: event.tenant.schemaName,
-              },
-            }),
-          );
-        },
+        recordCreation: recordTenantCreation,
       }),
     );
   }
@@ -3768,6 +3792,106 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         " characters; checked when one is set, never at login, so an existing shorter password" +
         " works until it is changed",
     );
+  }
+  // Public access requests and the operator's one-click approval (ADR-0464). The CLI refuses the
+  // flag without a Postgres store, `--credential-login`, `--platform-admin`, `--platform-user-routes`
+  // and `--credential-admin-role`, so reaching the mount means every store below exists; the
+  // remaining guard is the credential material, which the login resolved above.
+  let accessRequestIntake: ReturnType<typeof buildAccessRequestIntake> | null = null;
+  let accessRequestSweeper: AccessRequestSweeper | null = null;
+  if (options.accessRequestRoutes && conn !== undefined && credentialAuth?.ok === true && credentialStore !== null) {
+    const resolution = resolveAccessRequestIntake(process.env);
+    if (resolution.kind === "refused") {
+      // Refused rather than treated as closed: an operator who set some of the three meant to open
+      // the intake, and a closed one would be found out from a customer's 503.
+      console.error(`[access-request] ${resolution.reason}`);
+      throw new Error(`--access-request-routes cannot be served: ${resolution.reason}`);
+    }
+    const emitter = requireEmitter("--access-request-routes");
+    const accessRequests = new PostgresAccessRequestStore(conn, schemaOpt);
+    const pepper = credentialAuth.material.pepper;
+    extraRouteList.push(
+      ...buildAccessRequestRoutes({
+        store: accessRequests,
+        tenants: new PostgresTenantStore(conn),
+        users: new PostgresUserStore(conn, schemaOpt),
+        credentials: credentialStore,
+        settings: new PostgresSettingsStore(conn, options.schema ?? undefined),
+        principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
+        platformAdminRoles: new Set(options.platformAdminRoles),
+        platformUserRoles: new Set(options.platformUserRoles),
+        credentialAdminRoles: new Set(options.credentialAdminRoles),
+        platformAuthorityRoles: platformAuthorityRoles(options),
+        // A tenant created now has no activated manifest of its own, so it is served the
+        // deployment's; that is the set its first admin's role has to be declared in.
+        newTenantRoles: manifestRoleNames,
+        defaultPrimaryRole: options.accessRequestRole,
+        minPasswordLength: options.minPasswordLength ?? DEFAULT_MIN_PASSWORD_LENGTH,
+        hashPassword: async (password, accountKey): Promise<string | null> => {
+          const admission = await loginAdmission.enter(accountKey);
+          if (!admission.admitted) return null;
+          try {
+            return await hashPassword(password, pepper);
+          } finally {
+            admission.release();
+          }
+        },
+        contactEmailKey: {
+          key: deriveAccessRequestContactKey(new TextEncoder().encode(pepper.pepper)),
+          pepperVersion: pepper.version,
+        },
+        audit: async (event): Promise<void> => {
+          await emitter.emit(
+            auditEntry({
+              id: randomUUID(),
+              tenantId: null,
+              occurredAt: event.at,
+              operation: event.operation,
+              entity: "AccessRequest",
+              entityId: event.requestId,
+              actor: auditActor({ userId: event.principalId }),
+              after: { roles: event.roles, ...event.detail },
+            }),
+          );
+        },
+        recordCreation: recordTenantCreation,
+        onUnreadable: (row) =>
+          console.error(
+            `[access-request] row ${row.identity ?? "(no id)"} is unreadable and was left out of the page: ${row.detail}`,
+          ),
+        onApproved: (requestId, slug) =>
+          console.info(`[access-request] approved ${requestId} as tenant ${slug}`),
+      }),
+    );
+    accessRequestIntake = buildAccessRequestIntake({
+      store: accessRequests,
+      terms: resolution.kind === "open" ? resolution.terms : null,
+      maxPending: options.accessRequestMaxPending,
+      ttlHours: options.accessRequestTtlHours,
+      retentionDays: options.accessRequestRetentionDays,
+      window: new SubmissionWindow(ACCESS_REQUEST_SUBMISSIONS_PER_MINUTE),
+      onSubmitted: (id, pendingNow) =>
+        console.info(`[access-request] new request ${id} (pending now ${pendingNow.toString()})`),
+      onError: (err) =>
+        console.error(
+          `[access-request] intake store failure: ${err instanceof Error ? err.message : String(err)}`,
+        ),
+    });
+    accessRequestSweeper = new AccessRequestSweeper({
+      store: accessRequests,
+      retentionDays: options.accessRequestRetentionDays,
+      log: (line) => console.info(line),
+      onError: (line) => console.error(line),
+    });
+    accessRequestSweeper.start();
+    const bootLine = formatAccessRequestBootLine({
+      resolution,
+      maxPending: options.accessRequestMaxPending,
+      ttlHours: options.accessRequestTtlHours,
+      retentionDays: options.accessRequestRetentionDays,
+    });
+    if (resolution.kind === "closed") console.warn(bootLine);
+    else console.info(bootLine);
   }
   if (options.readStateRoutes) {
     if (conn === undefined) {
@@ -6527,6 +6651,28 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         ` stops it within that, not at the next login ${ttl.toString()}s away`,
     );
   }
+  // The public intake, in front of the gateway for the login's reason (ADR-0464). Its POST is
+  // bounded by the same per-client pre-authentication limiter the login uses, checked only for its
+  // own path so no other request is counted twice; the handler adds a process-wide ceiling.
+  if (accessRequestIntake !== null) {
+    const intake = accessRequestIntake;
+    mountedOutOfRegistry.add("access_request_terms");
+    mountedOutOfRegistry.add("access_request_intake");
+    const inner = dispatchTarget;
+    dispatchTarget = {
+      dispatch: async (raw, body): Promise<RawHttpResponse> => {
+        if (
+          preAuthLimiter !== undefined &&
+          raw.method.toUpperCase() === "POST" &&
+          isAccessRequestIntakePath(raw.url)
+        ) {
+          const decision = preAuthLimiter.check(raw);
+          if (!decision.allowed) return preAuthLimitedResponse(decision.retryAfterSeconds);
+        }
+        return (await intake(raw, body)) ?? (await inner.dispatch(raw, body));
+      },
+    };
+  }
 
   {
     const probeHealth = buildHealthInterceptor({
@@ -6622,10 +6768,22 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   auditPolicy?.refresher.start();
   metering?.flushScheduler.start();
   stripeUsageSync?.scheduler.start();
+  // The public intake's 8 KiB is enforced as the body arrives, not after it: the interceptor sees a
+  // body the transport has already buffered whole, so without this an anonymous caller is read up to
+  // the deployment-wide cap (10 MiB by default) before being told 400. An operator's own override for
+  // the same prefix still wins.
+  const routeBodyLimits =
+    accessRequestIntake !== null &&
+    !options.maxRequestBodyRoutes.some((o) => o.prefix === ACCESS_REQUEST_INTAKE_PATH)
+      ? [
+          ...options.maxRequestBodyRoutes,
+          { prefix: ACCESS_REQUEST_INTAKE_PATH, bytes: ACCESS_REQUEST_MAX_BODY_BYTES },
+        ]
+      : options.maxRequestBodyRoutes;
   const listener = createNodeRequestListener(
     dispatchTarget,
     options.maxRequestBodyBytes,
-    options.maxRequestBodyRoutes,
+    routeBodyLimits,
   );
   const server = createServer((req, res) => {
     void listener(req as unknown as NodeReqLike, res as unknown as NodeResLike);
@@ -6642,6 +6800,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     close: () =>
       new Promise<void>((resolve, reject) => {
         poller?.stop();
+        accessRequestSweeper?.stop();
         manifestPoller?.stop();
         jobScheduler?.stop();
         pruneScheduler?.stop();

@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { AEAD_KEY_BYTES } from "./aead.js";
 import { sha256 } from "./hashing.js";
 import {
+  ACCESS_REQUEST_CONTACT_EMAIL_DERIVATION_INFO,
   COLUMN_KEY_BYTES,
   COLUMN_KEY_DERIVATION_INFO,
   COLUMN_SECRET_REFUSAL_REASONS,
@@ -16,6 +17,7 @@ import {
   MIN_COLUMN_SECRET_DISTINCT_BYTES,
   PLATFORM_COLUMN_KEY_SCOPE,
   columnKeyFingerprint,
+  deriveAccessRequestContactKey,
   deriveTenantColumnKey,
   deriveTenantCursorKey,
   deriveTenantKek,
@@ -765,5 +767,53 @@ describe("the unreplaced-placeholder refusal", () => {
     // Anchored at the start, so a generated secret is not refused for a coincidence. A secret that
     // *begins* with it is refused, deliberately: the remedy is to generate one.
     expect(() => parseColumnEncryptionSecret(`x-REPLACE_WITH_but-not-a-placeholder-at-all`)).not.toThrow();
+  });
+});
+
+describe("deriveAccessRequestContactKey", () => {
+  const PEPPER = parseCredentialPepper("pepper-for-contact-digest-0123456789abcdef");
+
+  it("pins the info string, distinct from every other derivation label", () => {
+    expect(ACCESS_REQUEST_CONTACT_EMAIL_DERIVATION_INFO).toBe(
+      "crossengin.access-request.contact-email.v1",
+    );
+    expect(
+      new Set([
+        ACCESS_REQUEST_CONTACT_EMAIL_DERIVATION_INFO,
+        COLUMN_KEY_DERIVATION_INFO,
+        CURSOR_KEY_DERIVATION_INFO,
+        KEK_KEY_DERIVATION_INFO,
+      ]).size,
+    ).toBe(4);
+  });
+
+  it("is HKDF-SHA256 over the pepper with an empty salt, computed independently", () => {
+    const expected = new Uint8Array(
+      hkdfSync(
+        "sha256",
+        PEPPER,
+        new Uint8Array(0),
+        new TextEncoder().encode(ACCESS_REQUEST_CONTACT_EMAIL_DERIVATION_INFO),
+        AEAD_KEY_BYTES,
+      ),
+    );
+    const key = deriveAccessRequestContactKey(PEPPER);
+    expect(key).toEqual(expected);
+    expect(key.length).toBe(AEAD_KEY_BYTES);
+  });
+
+  it("is not the pepper itself, so it is unrelated to the password HMAC's key", () => {
+    expect(Buffer.from(deriveAccessRequestContactKey(PEPPER)).equals(Buffer.from(PEPPER))).toBe(false);
+  });
+
+  it("changes with the pepper", () => {
+    const other = parseCredentialPepper("another-pepper-for-the-digest-fedcba9876543210");
+    expect(deriveAccessRequestContactKey(other)).not.toEqual(deriveAccessRequestContactKey(PEPPER));
+  });
+
+  it("refuses a weak pepper", () => {
+    expect(() => deriveAccessRequestContactKey(new TextEncoder().encode("short"))).toThrow(
+      ColumnSecretRefused,
+    );
   });
 });

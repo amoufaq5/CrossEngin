@@ -3113,3 +3113,106 @@ describe("rekeyHelpText — the column-key pre-flight (ADR-0460)", () => {
     expect(rekeyHelpText).toContain("1 when the column-key check or the survey refuses");
   });
 });
+
+describe("--access-request-routes", () => {
+  const full = [
+    "--pack",
+    "erp-core",
+    "--store",
+    "pg",
+    "--jwt-issuer",
+    "https://i.test",
+    "--jwt-audience",
+    "a",
+    "--credential-login",
+    "--platform-admin",
+    "--platform-user-routes",
+    "--platform-user-role",
+    "platform_admin",
+    "--credential-admin-role",
+    "platform_admin",
+  ];
+  const without = (flag: string, takesValue = false): string[] => {
+    const i = full.indexOf(flag);
+    return [...full.slice(0, i), ...full.slice(i + (takesValue ? 2 : 1))];
+  };
+
+  it("parses with every grant an approval needs, and defaults the bounds", () => {
+    const opts = parseServeArgs([...full, "--access-request-routes"]);
+    expect(opts.accessRequestRoutes).toBe(true);
+    expect(opts.accessRequestMaxPending).toBe(200);
+    expect(opts.accessRequestTtlHours).toBe(72);
+    expect(opts.accessRequestRetentionDays).toBe(30);
+    expect(opts.accessRequestRole).toBe("erp_admin");
+  });
+
+  it("parses the bounds and the role", () => {
+    const opts = parseServeArgs([
+      ...full,
+      "--access-request-routes",
+      "--access-request-max-pending",
+      "10",
+      "--access-request-ttl-hours=24",
+      "--access-request-retention-days",
+      "7",
+      "--access-request-role",
+      "erp_viewer",
+    ]);
+    expect([opts.accessRequestMaxPending, opts.accessRequestTtlHours, opts.accessRequestRetentionDays]).toEqual([
+      10, 24, 7,
+    ]);
+    expect(opts.accessRequestRole).toBe("erp_viewer");
+  });
+
+  it.each([
+    ["--credential-login", false, /--credential-login/],
+    ["--platform-admin", false, /--platform-admin/],
+    ["--platform-user-routes", false, /--platform-user-routes/],
+  ])("refuses without %s, naming it", (flag, takesValue, message) => {
+    const argv = [...without(flag, takesValue), "--access-request-routes"];
+    // Removing the routes flag orphans its role flag; drop that too so the refusal is the one asked.
+    const cleaned =
+      flag === "--platform-user-routes"
+        ? argv.filter((a, i) => a !== "--platform-user-role" && argv[i - 1] !== "--platform-user-role")
+        : flag === "--credential-login"
+          ? argv.filter((a, i) => a !== "--credential-admin-role" && argv[i - 1] !== "--credential-admin-role")
+          : argv;
+    expect(() => parseServeArgs(cleaned)).toThrow(message);
+  });
+
+  it("refuses without --credential-admin-role", () => {
+    expect(() => parseServeArgs([...without("--credential-admin-role", true), "--access-request-routes"])).toThrow(
+      /--access-request-routes requires --credential-admin-role/,
+    );
+  });
+
+  it("refuses the memory store", () => {
+    expect(() =>
+      parseServeArgs(["--pack", "erp-core", "--store", "memory", "--access-request-routes"]),
+    ).toThrow(/--access-request-routes requires a Postgres store/);
+  });
+
+  it("refuses out-of-range bounds rather than clamping, and orphaned tuning flags", () => {
+    expect(() => parseServeArgs([...full, "--access-request-routes", "--access-request-max-pending", "0"])).toThrow(
+      /invalid --access-request-max-pending/,
+    );
+    expect(() => parseServeArgs([...full, "--access-request-routes", "--access-request-ttl-hours", "721"])).toThrow(
+      /invalid --access-request-ttl-hours/,
+    );
+    expect(() => parseServeArgs([...full, "--access-request-retention-days", "5"])).toThrow(
+      /--access-request-retention-days requires --access-request-routes/,
+    );
+  });
+
+  it("documents every flag in the help", () => {
+    for (const flag of [
+      "--access-request-routes",
+      "--access-request-max-pending",
+      "--access-request-ttl-hours",
+      "--access-request-retention-days",
+      "--access-request-role",
+    ]) {
+      expect(helpText).toMatch(new RegExp(`^ {2}${flag} `, "m"));
+    }
+  });
+});

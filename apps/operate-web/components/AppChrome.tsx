@@ -6,7 +6,7 @@ import type { ReactElement, ReactNode } from "react";
 import { ShellBar } from "@/components/ShellBar";
 import { Sidebar } from "@/components/Sidebar";
 import { SubscriptionBanner } from "@/components/SubscriptionBanner";
-import { LOGIN_PATH } from "@/lib/session";
+import { LOGIN_PATH, REQUEST_ACCESS_PATH } from "@/lib/session";
 
 /**
  * The authenticated chrome, and the one decision about when it renders.
@@ -25,7 +25,10 @@ import { LOGIN_PATH } from "@/lib/session";
 export function AppChrome({ children }: { children: ReactNode }): ReactElement {
   const pathname = usePathname();
 
-  if (pathname === LOGIN_PATH) return <>{children}</>;
+  // The access-request page is in the same position as the login for the same reason: its visitor
+  // holds no session, so the shell's schema read would be a guaranteed 401 and a redirect away from
+  // the form they came to fill in.
+  if (pathname === LOGIN_PATH || pathname === REQUEST_ACCESS_PATH) return <>{children}</>;
 
   return (
     <div className="flex min-h-screen flex-col">

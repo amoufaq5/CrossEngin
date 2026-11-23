@@ -97,6 +97,8 @@ export * from "./workflow-workers.js";
 export * from "./cli.js";
 export * from "./node.js";
 export * from "./platform-users.js";
+export * from "./access-requests.js";
+export * from "./access-request-env.js";
 export * from "./pending-deletion-admission.js";
 export * from "./user-fk-readiness.js";
 export * from "./envelope-tenant-readiness.js";

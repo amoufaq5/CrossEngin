@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 
+import { fetchAccessRequestCounts } from "@/lib/access-requests";
 import { FINANCE_ROLES } from "@/lib/aging";
 import { useInbox } from "@/lib/inbox";
 import {
@@ -36,7 +37,11 @@ const PLATFORM_LINKS: ReadonlyArray<{ href: string; label: string }> = [
   { href: "/platform", label: "Tenants" },
   { href: "/platform/users", label: "Users" },
   { href: "/platform/reviews", label: "Design Reviews" },
+  { href: "/platform/access-requests", label: "Access requests" },
 ];
+
+/** The one platform link that carries a count: the requests a customer is waiting on. */
+const ACCESS_REQUESTS_HREF = "/platform/access-requests";
 
 /** The longest declared prefix the path is under, or null when it is under none. */
 function activePlatformHref(pathname: string): string | null {
@@ -116,6 +121,21 @@ export function Sidebar() {
           // A failed fetch renders no badge — never an error in the nav.
           .catch(() => alive && reportUnreadBadgeCount(0)),
       );
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // Read once per document load, like the unread badge. A viewer without the platform-admin grant
+  // gets a 403, and a deployment that does not mount the queue a 404; both render no badge, because
+  // a nav link must degrade rather than show an error. `null` is "not known", which renders nothing,
+  // and is kept apart from 0, which also renders nothing but is a fact.
+  const [pendingRequests, setPendingRequests] = useState<number | null>(null);
+  useEffect(() => {
+    let alive = true;
+    fetchAccessRequestCounts()
+      .then((counts) => alive && setPendingRequests(counts.pending))
+      .catch(() => alive && setPendingRequests(null));
     return () => {
       alive = false;
     };
@@ -316,13 +336,18 @@ export function Sidebar() {
             <Link
               key={link.href}
               href={link.href}
-              className={`block rounded-lg px-3 py-1.5 text-sm transition ${
+              className={`flex items-center rounded-lg px-3 py-1.5 text-sm transition ${
                 activePlatformHref(pathname) === link.href
                   ? "border-l-2 border-brand bg-brand-50 font-semibold text-brand-700"
                   : "text-ink-muted hover:bg-surface-soft hover:text-ink"
               }`}
             >
               {link.label}
+              {link.href === ACCESS_REQUESTS_HREF && pendingRequests !== null && pendingRequests > 0 && (
+                <span className="ml-auto rounded-full bg-ink px-2 py-0.5 text-[11px] font-semibold text-white">
+                  {pendingRequests}
+                </span>
+              )}
             </Link>
           ))}
         </div>

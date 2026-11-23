@@ -450,6 +450,21 @@ export interface ServeOptions {
    * second opt-in is a feature with a trap in it (`--idempotency-store`'s reaper argument).
    */
   readonly credentialAdminRoles: readonly string[];
+  /**
+   * Mount the public access-request intake and the operator's approval routes (ADR-0464). Refused
+   * at parse without every grant an approval needs, because an approval creates a tenant,
+   * provisions a user and sets a password, and a queue nobody can approve is a promise to customers
+   * the deployment cannot keep.
+   */
+  readonly accessRequestRoutes: boolean;
+  /** Pending requests the intake accepts before answering 503 `queue_full` (1..10000). */
+  readonly accessRequestMaxPending: number;
+  /** Hours a pending request stays approvable (1..720). */
+  readonly accessRequestTtlHours: number;
+  /** Days a decided request is kept before the sweep deletes it (1..3650). */
+  readonly accessRequestRetentionDays: number;
+  /** The primary role an approved request's first user is granted unless the approver names one. */
+  readonly accessRequestRole: string;
   /** Mount the per-user notification preference routes (`meta.notification_preferences`). */
   readonly preferenceRoutes: boolean;
   /** Roles permitted to read and set one's own preferences. Fail-closed on empty. */
@@ -793,6 +808,22 @@ export class CliUsageError extends Error {}
 
 const DEFAULT_PORT = 8787;
 
+/** One of the `--access-request-*` integer bounds; out of range is refused, never clamped. */
+export function parseBoundedAccessRequestInt(
+  flag: string,
+  raw: string,
+  min: number,
+  max: number,
+): number {
+  const n = Number(raw);
+  if (!/^\d+$/.test(raw.trim()) || !Number.isInteger(n) || n < min || n > max) {
+    throw new CliUsageError(
+      `invalid ${flag}: ${raw} (integer ${min.toString()}..${max.toString()}; refused rather than clamped)`,
+    );
+  }
+  return n;
+}
+
 /**
  * Refused and never clamped (ADR-0332): a floor of 1 is the defect restated, and raising it for the
  * operator would leave the deployment believing it had configured something it had not.
@@ -893,6 +924,11 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let platformUserRoutes = false;
   const platformUserRoles: string[] = [];
   const credentialAdminRoles: string[] = [];
+  let accessRequestRoutes = false;
+  let accessRequestMaxPending: number | null = null;
+  let accessRequestTtlHours: number | null = null;
+  let accessRequestRetentionDays: number | null = null;
+  let accessRequestRole: string | null = null;
   let preferenceRoutes = false;
   const preferenceRoles: string[] = [];
   const preferenceAdminRoles: string[] = [];
@@ -1409,6 +1445,50 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       arg.startsWith("--credential-admin-role=")
     ) {
       credentialAdminRoles.push(takeValue(arg, next, "--credential-admin-role"));
+      i += consumed();
+    } else if (arg === "--access-request-routes") {
+      accessRequestRoutes = true;
+    } else if (
+      arg === "--access-request-max-pending" ||
+      arg.startsWith("--access-request-max-pending=")
+    ) {
+      accessRequestMaxPending = parseBoundedAccessRequestInt(
+        "--access-request-max-pending",
+        takeValue(arg, next, "--access-request-max-pending"),
+        1,
+        10_000,
+      );
+      i += consumed();
+    } else if (
+      arg === "--access-request-ttl-hours" ||
+      arg.startsWith("--access-request-ttl-hours=")
+    ) {
+      accessRequestTtlHours = parseBoundedAccessRequestInt(
+        "--access-request-ttl-hours",
+        takeValue(arg, next, "--access-request-ttl-hours"),
+        1,
+        720,
+      );
+      i += consumed();
+    } else if (
+      arg === "--access-request-retention-days" ||
+      arg.startsWith("--access-request-retention-days=")
+    ) {
+      accessRequestRetentionDays = parseBoundedAccessRequestInt(
+        "--access-request-retention-days",
+        takeValue(arg, next, "--access-request-retention-days"),
+        1,
+        3650,
+      );
+      i += consumed();
+    } else if (arg === "--access-request-role" || arg.startsWith("--access-request-role=")) {
+      const role = takeValue(arg, next, "--access-request-role").trim();
+      if (role === "" || /\s/.test(role)) {
+        throw new CliUsageError(
+          "invalid --access-request-role: a role name is non-empty and carries no whitespace",
+        );
+      }
+      accessRequestRole = role;
       i += consumed();
     } else if (arg === "--preference-routes") {
       preferenceRoutes = true;
@@ -2474,6 +2554,34 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
         " declaration is silently unmatchable",
     );
   }
+  // Each refusal names the one missing flag, because an approval performs every act those flags
+  // separately authorise and a queue nobody can approve is the inert-grant shape one surface out.
+  if (accessRequestRoutes) {
+    const missing: readonly (readonly [boolean, string])[] = [
+      [store === "memory", "a Postgres store (--store pg or pg-columns): requests live in meta.access_requests"],
+      [!credentialLogin, "--credential-login: an approval sets the first user's password under the login's pepper"],
+      [!platformAdmin, "--platform-admin (and its --platform-admin-role): an approval creates a tenant"],
+      [!platformUserRoutes, "--platform-user-routes: an approval provisions a user and grants a membership"],
+      [
+        credentialAdminRoles.length === 0,
+        "--credential-admin-role: an approval sets another user's password",
+      ],
+    ];
+    for (const [absent, what] of missing) {
+      if (absent) throw new CliUsageError(`--access-request-routes requires ${what}`);
+    }
+  } else {
+    for (const [flag, value] of [
+      ["--access-request-max-pending", accessRequestMaxPending],
+      ["--access-request-ttl-hours", accessRequestTtlHours],
+      ["--access-request-retention-days", accessRequestRetentionDays],
+      ["--access-request-role", accessRequestRole],
+    ] as const) {
+      if (value !== null) {
+        throw new CliUsageError(`${flag} requires --access-request-routes`);
+      }
+    }
+  }
   if (platformUserRoutes && store === "memory") {
     throw new CliUsageError(
       "--platform-user-routes requires a Postgres store (--store pg or pg-columns): the registry is" +
@@ -2799,6 +2907,11 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     platformUserRoutes,
     platformUserRoles,
     credentialAdminRoles,
+    accessRequestRoutes,
+    accessRequestMaxPending: accessRequestMaxPending ?? 200,
+    accessRequestTtlHours: accessRequestTtlHours ?? 72,
+    accessRequestRetentionDays: accessRequestRetentionDays ?? 30,
+    accessRequestRole: accessRequestRole ?? "erp_admin",
     preferenceRoutes,
     preferenceRoles,
     preferenceAdminRoles,
@@ -3612,6 +3725,26 @@ Options:
                        --credential-login. The route refuses being aimed at the caller — changing
                        your own password is POST /v1/account/password, which needs no grant and
                        mounts with --credential-login
+  --access-request-routes  Mount the public access-request intake (POST /v1/public/access-requests
+                       and GET /v1/public/access-requests/terms, unauthenticated) and the operator's
+                       routes under /v1/platform/access-requests. A request creates NOTHING; an
+                       approval creates the tenant, its first user, the membership, the password and
+                       the default settings in one transaction. Requires a Postgres store,
+                       --credential-login, --platform-admin, --platform-user-routes and
+                       --credential-admin-role, since an approval performs every act those grant.
+                       The intake opens only when ACCESS_REQUEST_TERMS_URL,
+                       ACCESS_REQUEST_PRIVACY_URL and ACCESS_REQUEST_TERMS_VERSION are all set in
+                       the environment; none set keeps it closed, some set refuses the boot
+  --access-request-max-pending <n>  Pending requests accepted before the intake answers 503
+                       queue_full (1..10000; default 200)
+  --access-request-ttl-hours <n>  Hours a pending request stays approvable before it expires
+                       (1..720; default 72)
+  --access-request-retention-days <n>  Days a decided request is kept before the hourly sweep
+                       deletes it (1..3650; default 30). The accepted terms outlive it in the
+                       tenant-creation audit row
+  --access-request-role <role>  Primary role an approved request's first user is granted unless
+                       the approver names one (default erp_admin); refused at approval unless the
+                       deployment's manifest declares it
   --preference-routes  Mount the per-user notification preference routes. Without them every user's
                        preferences are the built-in defaults for ever, so the consent half of
                        computeDispatchEligibility was unreachable. Needs --store pg|pg-columns

@@ -1,8 +1,9 @@
 "use client";
 
+import Link from "next/link";
 import { useState, type FormEvent, type ReactElement } from "react";
 
-import { NEXT_PARAM, safeNextPath } from "@/lib/session";
+import { NEXT_PARAM, REQUEST_ACCESS_PATH, safeNextPath } from "@/lib/session";
 
 /**
  * One generic failure. The API refuses to distinguish an unknown email from a wrong password
@@ -140,6 +141,15 @@ export default function LoginPage(): ReactElement {
             {busy ? "Signing in…" : "Sign in"}
           </button>
         </form>
+
+        {/* Offered whether or not this deployment takes requests: the page itself asks the API and
+            says "not open" when it does not, which is one round trip a visitor pays to learn it. */}
+        <p className="mt-4 text-center text-xs text-ink-faint">
+          No workspace yet?{" "}
+          <Link href={REQUEST_ACCESS_PATH} className="font-medium text-brand-600 hover:text-brand-700">
+            Request access
+          </Link>
+        </p>
       </div>
     </div>
   );

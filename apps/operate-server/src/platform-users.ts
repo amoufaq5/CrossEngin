@@ -526,6 +526,30 @@ export class PostgresUserStore {
     input: CreateUserInput,
     membership?: Omit<GrantMembershipInput, "userId">,
   ): Promise<{ readonly user: UserRecord; readonly membership: MembershipRecord | null }> {
+    try {
+      if (membership === undefined) {
+        return await this.conn.transaction((tx) => this.provisionWithin(tx, input));
+      }
+      return await withTenantContext(this.conn, membership.tenantId, (tx) =>
+        this.provisionWithin(tx, input, membership),
+      );
+    } catch (err) {
+      throw this.translate(err, normalizeEmail(input.email), membership?.tenantId ?? null);
+    }
+  }
+
+  /**
+   * `provision` inside a transaction the caller holds, for a user that must commit with other
+   * writes (an approved access request creates the tenant, this user, the membership and the
+   * password together). When a membership is supplied the caller must already have set that
+   * tenant's context on `tx`, since the membership table's isolation policy is its only write arm.
+   * Errors are translated exactly as `provision` translates them.
+   */
+  async provisionWithin(
+    tx: PgConnection,
+    input: CreateUserInput,
+    membership?: Omit<GrantMembershipInput, "userId">,
+  ): Promise<{ readonly user: UserRecord; readonly membership: MembershipRecord | null }> {
     const email = normalizeEmail(input.email);
     const params: unknown[] = [email, input.displayName ?? null, input.phoneE164 ?? null];
     if (input.id !== undefined) params.push(input.id);
@@ -541,11 +565,7 @@ export class PostgresUserStore {
           ` VALUES ($1, $2, $3, 'active') RETURNING ${USER_COLUMNS}`
         : `INSERT INTO ${this.users} (id, email, display_name, phone_e164, status)` +
           ` VALUES ($4::uuid, $1, $2, $3, 'active') RETURNING ${USER_COLUMNS}`;
-
-    const run = async (tx: PgConnection): Promise<{
-      user: UserRecord;
-      membership: MembershipRecord | null;
-    }> => {
+    try {
       const created = await tx.query<Record<string, unknown>>(insertUser, params);
       const row = created.rows[0];
       if (row === undefined) throw new Error("INSERT INTO users did not return a row");
@@ -553,17 +573,13 @@ export class PostgresUserStore {
       if (membership === undefined) return { user, membership: null };
       const granted = await this.insertMembership(tx, { ...membership, userId: user.id });
       return { user, membership: granted };
-    };
-
-    try {
-      if (membership === undefined) return await this.conn.transaction(run);
-      return await withTenantContext(this.conn, membership.tenantId, run);
     } catch (err) {
       throw this.translate(err, email, membership?.tenantId ?? null);
     }
   }
 
   private translate(err: unknown, email: string, tenantId: string | null): unknown {
+    if (err instanceof DuplicateUserError || err instanceof UnknownPrincipalError) return err;
     const parent = foreignKeyParent(err);
     if (parent !== null) {
       return new UnknownPrincipalError(
@@ -698,26 +714,41 @@ export class PostgresUserStore {
         this.insertMembership(tx, input),
       );
     } catch (err) {
-      const parent = foreignKeyParent(err);
-      if (parent !== null) {
-        return Promise.reject(
-          new UnknownPrincipalError(
-            `cannot grant a membership: ${parent} has no row for the id this grant names` +
-              ` (user=${input.userId} tenant=${input.tenantId})`,
-          ),
-        );
-      }
-      if (isUniqueViolation(err)) {
-        return Promise.reject(
-          new DuplicateMembershipError(
-            `this user already has a membership in this tenant` +
-              ` (user=${input.userId} tenant=${input.tenantId});` +
-              " change its status rather than granting a second",
-          ),
-        );
-      }
-      throw err;
+      throw this.translateMembership(err, input);
     }
+  }
+
+  /**
+   * `grantMembership` inside a transaction the caller holds, which must already carry this
+   * tenant's context. Errors are translated exactly as `grantMembership` translates them.
+   */
+  async grantMembershipWithin(
+    tx: PgConnection,
+    input: GrantMembershipInput,
+  ): Promise<MembershipRecord> {
+    try {
+      return await this.insertMembership(tx, input);
+    } catch (err) {
+      throw this.translateMembership(err, input);
+    }
+  }
+
+  private translateMembership(err: unknown, input: GrantMembershipInput): unknown {
+    const parent = foreignKeyParent(err);
+    if (parent !== null) {
+      return new UnknownPrincipalError(
+        `cannot grant a membership: ${parent} has no row for the id this grant names` +
+          ` (user=${input.userId} tenant=${input.tenantId})`,
+      );
+    }
+    if (isUniqueViolation(err)) {
+      return new DuplicateMembershipError(
+        `this user already has a membership in this tenant` +
+          ` (user=${input.userId} tenant=${input.tenantId});` +
+          " change its status rather than granting a second",
+      );
+    }
+    return err;
   }
 
   async membershipFor(tenantId: string, userId: string): Promise<MembershipRecord | null> {
@@ -877,12 +908,21 @@ export interface PlatformUserRoutesContext {
 }
 
 /**
+ * The slice of the routes' context the escalation refusal reads, so another surface that grants a
+ * membership (an approved access request) refuses by the same rule rather than a copy of it.
+ */
+export type EscalationRefusalContext = Pick<
+  PlatformUserRoutesContext,
+  "principalRoles" | "platformAuthorityRoles" | "audit" | "clock"
+>;
+
+/**
  * Refuses a grant naming a platform-authority role its granter does not hold, recording the
  * attempt as a refusal row. Before the act's own record, because nothing is written: what the row
  * says is that somebody tried.
  */
-async function refuseEscalation(
-  ctx: PlatformUserRoutesContext,
+export async function refuseEscalation(
+  ctx: EscalationRefusalContext,
   principal: ResolvedPrincipal | null,
   grantedRoles: readonly string[],
   event: Omit<UserRegistryAuditEvent, "at">,
@@ -911,7 +951,10 @@ function json(status: number, body: unknown): HandlerOutput {
   return { kind: "json", status, body };
 }
 
-function rolesOf(ctx: PlatformUserRoutesContext, principal: ResolvedPrincipal | null): string[] {
+function rolesOf(
+  ctx: Pick<PlatformUserRoutesContext, "principalRoles">,
+  principal: ResolvedPrincipal | null,
+): string[] {
   const { primaryRole, secondaryRoles } = ctx.principalRoles(principal);
   return [primaryRole, ...(secondaryRoles ?? [])];
 }
@@ -958,7 +1001,7 @@ async function record(
  * land, and a reader counting one against the other gets the refusal rate for free.
  */
 async function recordRefusal(
-  ctx: PlatformUserRoutesContext,
+  ctx: Pick<PlatformUserRoutesContext, "audit" | "clock">,
   attempted: Omit<UserRegistryAuditEvent, "at">,
   refusal: string,
   output: HandlerOutput,

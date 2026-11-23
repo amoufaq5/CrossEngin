@@ -13126,6 +13126,135 @@ export const META_TENANT_DATA_KEYS: TableDefinition = {
   },
 };
 
+/**
+ * A prospective customer's request for a workspace, submitted through the public intake and decided
+ * by a platform operator (ADR-0464). Nothing is provisioned at submission; approval creates the
+ * tenant, its first user, the membership, the credential and the settings in one transaction.
+ *
+ * Platform-wide and therefore **no `tenant_id` and no RLS**: a request exists *before* any tenant
+ * does, and the tenant it becomes is recorded in `approved_tenant_id`. The row is operational, not
+ * evidence — it is swept 30 days after a decision (or at `expires_at` if never decided) — so the
+ * permanent record of which terms were accepted lives in the approval's `meta.audit_log` row, which
+ * the Article 17 erasure retains.
+ */
+export const META_ACCESS_REQUESTS: TableDefinition = {
+  schema: "meta",
+  name: "access_requests",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "company_name",
+      type: "TEXT",
+      notNull: true,
+      check: "char_length(company_name) BETWEEN 1 AND 200",
+    },
+    {
+      name: "requested_slug",
+      type: "TEXT",
+      check: "requested_slug ~ '^[a-z][a-z0-9-]{1,48}$'",
+    },
+    {
+      name: "contact_name",
+      type: "TEXT",
+      notNull: true,
+      check: "char_length(contact_name) BETWEEN 1 AND 200",
+    },
+    {
+      // Lower-case is enforced here rather than trusted to the intake, because the partial unique
+      // index below is what makes a re-submit idempotent, and two spellings of one address would be
+      // two pending requests.
+      name: "email",
+      type: "TEXT",
+      notNull: true,
+      check: "char_length(email) BETWEEN 3 AND 254 AND email = lower(email)",
+    },
+    { name: "message", type: "TEXT", check: "char_length(message) <= 2000" },
+    {
+      name: "terms_version",
+      type: "TEXT",
+      notNull: true,
+      check: "char_length(terms_version) BETWEEN 1 AND 64",
+    },
+    {
+      name: "terms_accepted_at",
+      type: "TIMESTAMPTZ",
+      notNull: true,
+      check: instantRangeCheck("terms_accepted_at"),
+    },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      default: "'pending'",
+      check: "status IN ('pending', 'approved', 'rejected')",
+    },
+    {
+      // Checked unlike most siblings' `created_at`, because this one is read: the row mapper parses
+      // it as an instant and the list cursor is minted from it outside the page's unreadable-row
+      // handling, so an `infinity` here would fail the whole page rather than one row.
+      name: "created_at",
+      type: "TIMESTAMPTZ",
+      notNull: true,
+      default: "now()",
+      check: instantRangeCheck("created_at"),
+    },
+    {
+      name: "expires_at",
+      type: "TIMESTAMPTZ",
+      notNull: true,
+      check: instantRangeCheck("expires_at"),
+    },
+    { name: "decided_at", type: "TIMESTAMPTZ", check: instantRangeCheck("decided_at") },
+    {
+      // An actor column: TEXT with no reference, so the operator who decided stays deletable
+      // (ADR-0335). The uuid shape is what the reference used to guarantee.
+      name: "decided_by",
+      type: "TEXT",
+      check: uuidShapeCheck("decided_by"),
+    },
+    {
+      name: "decision_reason",
+      type: "TEXT",
+      check: "char_length(decision_reason) BETWEEN 1 AND 500",
+    },
+    // No reference at all, deliberately. `ON DELETE SET NULL` would contradict
+    // `access_requests_decision_pairing_check` (an approved row must carry this column), so a tenant
+    // delete would raise on the request row rather than null it; and ADR-0335's rule is that a column
+    // recording a past act must not make its subject undeletable, which `RESTRICT` would.
+    { name: "approved_tenant_id", type: "UUID" },
+    // A record of the past, so no reference (ADR-0335): the user may be retired independently.
+    { name: "approved_user_id", type: "UUID" },
+  ],
+  primaryKey: ["id"],
+  constraints: [
+    {
+      kind: "check",
+      name: "access_requests_decision_pairing_check",
+      expression:
+        "(status = 'pending' AND decided_at IS NULL AND decided_by IS NULL AND decision_reason IS NULL AND approved_tenant_id IS NULL AND approved_user_id IS NULL)" +
+        " OR (status = 'approved' AND decided_at IS NOT NULL AND decided_by IS NOT NULL AND approved_tenant_id IS NOT NULL AND approved_user_id IS NOT NULL)" +
+        " OR (status = 'rejected' AND decided_at IS NOT NULL AND decided_by IS NOT NULL AND approved_tenant_id IS NULL AND approved_user_id IS NULL)",
+    },
+  ],
+  indexes: [
+    {
+      // One pending request per address. A re-submit is absorbed by `ON CONFLICT … DO NOTHING`
+      // against this index, and the intake answers it exactly as it answers a new one.
+      name: "idx_access_requests_pending_email",
+      columns: ["email"],
+      unique: true,
+      where: "status = 'pending'",
+    },
+    // `IndexSpec` columns are quoted identifiers, so no `DESC`; a btree is read backwards as cheaply.
+    { name: "idx_access_requests_status_created", columns: ["status", "created_at"] },
+    {
+      name: "idx_access_requests_pending_expiry",
+      columns: ["expires_at"],
+      where: "status = 'pending'",
+    },
+  ],
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -13273,6 +13402,7 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_NOTIFICATION_USER_QUIET_HOURS,
   META_NOTIFICATION_FAX_OBSERVATIONS,
   META_TENANT_DATA_KEYS,
+  META_ACCESS_REQUESTS,
 ];
 
 /**

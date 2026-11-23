@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 24,075 tests**, all green, no
+**87 packages + 3 apps, 147 meta-schema tables, 24,179 tests**, all green, no
 type errors — and since ADR-0382 that is **checked by CI and a pre-commit hook** rather than only
 when someone runs the sweep by hand. The test figure moves every increment, so re-derive it from a
 sweep rather than quoting this line: `pnpm -r test` and sum the `Tests N passed` lines (88 packages
@@ -4088,7 +4088,7 @@ packages exist at only one layer, noted below where that is true.
 ### Substrate (the kernel itself)
 
 - **`kernel`** — the meta-schema and manifest compiler. Four areas: `bootstrap/`
-  (`META_TABLES`, the catalog of **146** platform Postgres tables, plus deterministic DDL
+  (`META_TABLES`, the catalog of **147** platform Postgres tables, plus deterministic DDL
   emit), `ddl/` (the DDL *vocabulary* — `resolvedFields`, field→Postgres types, built-in
   traits, column naming, default rendering, identifier quoting, structural entity diff;
   it does **not** emit entity tables, `operate-runtime-pg` does — ADR-0284),
@@ -8747,12 +8747,12 @@ Recurring patterns enforced by zod `superRefine`:
 
 ## Meta-schema
 
-`packages/kernel/src/bootstrap/meta-schema.ts` is the central catalog of **146**
+`packages/kernel/src/bootstrap/meta-schema.ts` is the central catalog of **147**
 platform-level Postgres tables. Each new package adds tables there and updates
 `meta-schema.test.ts` (count, sorted expected-names list, column assertions).
 
 **A fresh database holds one more table than the catalog does**, and it is not a stale count:
-`information_schema` reports 147 `meta` base tables against `META_TABLES`' 146, because
+`information_schema` reports 148 `meta` base tables against `META_TABLES`' 147, because
 `_meta_migrations` is created by `kernel-pg`'s applier for its own per-statement hash bookkeeping and
 is deliberately not emitted from the catalog. Verified. Count the catalog, not the database.
 
@@ -10243,7 +10243,7 @@ Two constraints worth knowing before suggesting a host:
   (grey cloud — the orange proxy keeps the TLS-ALPN challenge from Caddy), the bootstrap, onboarding
   and the three AI paths. The bootstrap, onboarding and AI commands were run against the real server
   booted with the shipped compose `command:` as `crossengin_app`; the Oracle, Cloudflare and
-  `docker compose up` steps were **not** run from here and rest on `ORACLE.md`. **There is no self-registration**, and the guide says so:
+  `docker compose up` steps were **not** run from here and rest on `ORACLE.md`. **There is no *instant* self-registration** — ADR-0464 added request-and-approve (next bullet) — and for the command-line path
   `deploy/onboard-tenant.sh` creates a tenant, its `erp_admin` and a random password in one command,
   sends every body on stdin (one carries the password, and argv is readable by `ps`), and stops
   before the password when the server warns that the role is undeclared. **Every AI setting has an
@@ -10256,6 +10256,27 @@ Two constraints worth knowing before suggesting a host:
   *replacement* of the tenant's ERP (live: `/v1/invoices` 404 after activation).
   `parentLineageIssues` now refuses a missing or wrong parent and a reused parent entity without
   `overrides: true`, as a retryable `cross_validation_failed` with the issue as the corrective.
+- **Sign-up is a request an operator approves** (ADR-0464). A public `/request-access` form posts to
+  `POST /v1/public/access-requests`, an out-of-registry interceptor (the login's pattern, so
+  `served-surface.ts` declares it and `preAuthLimiter` fronts it) that answers the **same 202** for a
+  new request, an absorbed duplicate and a honeypot hit, so it is not an oracle for users or slugs.
+  It stores a row in `meta.access_requests` (platform-wide, no `tenant_id`, one pending row per
+  address, actor and approved-id columns with **no** foreign key) and creates nothing. The intake
+  opens only when `ACCESS_REQUEST_TERMS_URL`, `ACCESS_REQUEST_PRIVACY_URL` and
+  `ACCESS_REQUEST_TERMS_VERSION` are **all** set; some set is a boot refusal. Approving at
+  `/platform/access-requests` needs **all three** operator grants (platform-admin, platform-user,
+  credential-admin) and runs **one transaction** through `PostgresTenantStore.create(input, within)`:
+  tenant, creation audit row, user + membership (or an attached existing user, only after
+  `confirmedExistingOwner`), password, default settings, and the request marked approved under a
+  `status='pending' AND expires_at > now()` guard whose miss rolls everything back. The password is
+  generated in the operator's browser and **never returned** (`cache-control: no-store`). Terms
+  acceptance lives in the tenant-creation audit row's `after.origin` with a **keyed** email hash
+  (HKDF of the credential pepper), because that row outlives an Article 17 erasure. Pending requests
+  expire after 72h, decided ones are swept after 30 days by an hourly in-process timer, the queue is
+  capped at 200, and reject-all exists. Live on PG 16 as `crossengin_app` with the shipped compose
+  command: a forced mid-transaction failure left no tenant, no user, no audit row and the request
+  pending. Open: no per-client rate limit behind the proxy, address squatting, no email
+  verification, no starter chart of accounts.
 
 ## What's actually left
 
@@ -16005,7 +16026,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 457 records; 378 Accepted, 79 Proposed (the
+title or status change cannot drift. 458 records; 379 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 
