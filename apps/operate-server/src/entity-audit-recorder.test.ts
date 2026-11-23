@@ -319,4 +319,11 @@ describe("entityAuditEntry", () => {
     const moved = entityAuditEntry(event({ actorUserId: null, origin, action: "transition", detail: "activate" }), at);
     expect(moved.reason).toBe("provisioning:starter_chart id:11111111-1111-4111-8111-111111111111 transition:activate");
   });
+
+  it("names the maintenance run that made a write, as neither a job nor a provisioning", () => {
+    const origin = { kind: "maintenance" as const, operation: "bill_withholding_backfill" as const, runId: "bwb_7" };
+    const plain = entityAuditEntry(event({ actorUserId: null, origin }), { id: ID, occurredAt: "2026-11-17T10:00:00.000Z" });
+    expect(plain.actor).toMatchObject({ kind: "system", userId: null });
+    expect(plain.reason).toBe("maintenance:bill_withholding_backfill run:bwb_7");
+  });
 });

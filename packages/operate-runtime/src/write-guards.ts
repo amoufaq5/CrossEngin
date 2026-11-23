@@ -1046,6 +1046,7 @@ export const SETTLEMENT_COVERAGE_DOCUMENTS: readonly SettlementCoverageConfig[] 
   {
     entity: "Bill",
     refField: "bill_id",
+    withholdingField: "withholding_total",
     noun: "a bill",
     // No credit-note arm: `Bill` declares no `document_type`/`credit_note_of` pair, so the
     // AR instrument has no AP counterpart here and naming one would be a remedy that cannot work.

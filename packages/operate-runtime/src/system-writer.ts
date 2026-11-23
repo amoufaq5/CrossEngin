@@ -29,12 +29,41 @@ export type SystemWriteOrigin =
       readonly operation: "starter_chart";
       /** The access request or console act this provisioning ran for, so the audit rows join to it. */
       readonly provisioningId: string;
+    }
+  | {
+      /**
+       * An operator-run maintenance pass correcting a server-owned fact the running server would have
+       * written had it existed at the time — today only stamping a legacy bill's withholding from its
+       * own recognition entry. Its own kind for `provisioning`'s reason: the row must say neither a
+       * job nor a tenant-creating act made the write. The field it corrects is server-owned, so the
+       * handler a `buildSystemEntityAccess` dispatch goes through refuses it `field_server_owned`
+       * like any other caller's: such a write goes through the store directly, and this origin is
+       * what its audit row carries. No dispatch runs under it today; the pass names its audit rows'
+       * request ids through `systemRequestId`, so they carry the same prefix a dispatch would.
+       */
+      readonly kind: "maintenance";
+      readonly operation: "bill_withholding_backfill";
+      /** The invocation this pass ran as, so every row one run wrote joins to the run. */
+      readonly runId: string;
     };
 
 /** The token a system write's minted request id carries, so a log line names the run or provisioning. */
 function originToken(origin: SystemWriteOrigin): string {
-  return origin.kind === "job" ? origin.runId : origin.provisioningId;
+  switch (origin.kind) {
+    case "job":
+      return origin.runId;
+    case "provisioning":
+      return origin.provisioningId;
+    case "maintenance":
+      return origin.runId;
+  }
 }
+
+const ORIGIN_REQUEST_PREFIX: Readonly<Record<SystemWriteOrigin["kind"], string>> = {
+  job: "req_job",
+  provisioning: "req_prov",
+  maintenance: "req_maint",
+};
 
 /**
  * The identity a system writer acts under.
@@ -132,6 +161,16 @@ export interface SystemEntityAccessInput {
 const REQUEST_ID_SAFE = /[^A-Za-z0-9]/g;
 
 /**
+ * The request id a system write carries: the origin's prefix, its run or provisioning token reduced
+ * to the characters a request id admits, and a sequence. The one spelling, so a write that goes
+ * through the store directly (the maintenance pass) and one dispatched below read alike in a log.
+ */
+export function systemRequestId(origin: SystemWriteOrigin, sequence: number): string {
+  const token = originToken(origin).replace(REQUEST_ID_SAFE, "").slice(0, 32);
+  return `${ORIGIN_REQUEST_PREFIX[origin.kind]}_${token}_${sequence.toString()}`;
+}
+
+/**
  * Background work's way into the entity layer, **through the handlers a request is served by**.
  *
  * A job that wrote through the raw store would write behind every guard and every effect: the
@@ -171,8 +210,6 @@ export function buildSystemEntityAccess(input: SystemEntityAccessInput): SystemE
       if (actor.roles.length === 0) {
         throw new Error("a system actor needs at least one role: authorization is the manifest's grants");
       }
-      const runToken = originToken(actor.origin).replace(REQUEST_ID_SAFE, "").slice(0, 32);
-      const requestPrefix = actor.origin.kind === "job" ? "req_job" : "req_prov";
       const dispatch = async (
         spec: RouteSpec | undefined,
         label: string,
@@ -221,7 +258,7 @@ export function buildSystemEntityAccess(input: SystemEntityAccessInput): SystemE
         };
         SYSTEM_ORIGINS.set(principal, actor.origin);
         const request: IncomingRequest = {
-          id: `${requestPrefix}_${runToken}_${sequence.toString()}`,
+          id: systemRequestId(actor.origin, sequence),
           receivedAt: at,
           method: spec.method,
           path,

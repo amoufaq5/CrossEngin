@@ -549,6 +549,7 @@ describe("recognitionGlPostingEffect — per-TaxCode GL account", () => {
     netDescription: "Revenue",
     taxDescription: "Tax payable",
     taxLines: { entity: "InvoiceLine", refField: "invoice_id", netField: "line_total", withholdingAccountRef: "wht_receivable" },
+    stampWithholdingField: "withholding_total",
     clock,
   });
   const issue = (store: InMemoryEntityStore, id: string, before: Record<string, unknown>) =>
@@ -2047,6 +2048,8 @@ describe("recognitionGlPostingEffect — where withholding posts", () => {
     readonly sale: boolean;
     readonly codes?: { control?: string; net?: string; tax?: string; withholding?: string };
     readonly jurisdictions?: Record<string, string>;
+    /** False: the deployment records the withholding on no field (the document does not declare it). */
+    readonly stamp?: boolean;
   }) {
     return recognitionGlPostingEffect({
       entity: opts.sale ? "Invoice" : "Bill",
@@ -2063,6 +2066,7 @@ describe("recognitionGlPostingEffect — where withholding posts", () => {
       taxLines: opts.sale
         ? { entity: "InvoiceLine", refField: "invoice_id", netField: "line_total", withholdingAccountRef: "wht_receivable" }
         : { entity: "BillLine", refField: "bill_id", netField: "amount", withholdingAccountRef: "wht_payable" },
+      ...(opts.stamp === false ? {} : { stampWithholdingField: "withholding_total" }),
       ...(opts.codes !== undefined ? { resolveAccountCodes: async () => opts.codes ?? {} } : {}),
       ...(opts.jurisdictions !== undefined ? { resolveJurisdictionAccounts: async () => opts.jurisdictions ?? {} } : {}),
       clock,
@@ -2254,5 +2258,248 @@ describe("recognitionGlPostingEffect — where withholding posts", () => {
     const note = await document(store, true, {}, { document_type: "credit_note" });
     await recognise(recognition({ sale: true, codes: SALE_CODES }), store, note, true);
     expect(await balances(store)).toEqual({ acc_ar: -105, acc_whtr: -5, acc_rev: 100, acc_out: 10 });
+  });
+
+  /** A bill of 100: one line of `lines` nets each, every line under its own code. */
+  async function bill(
+    store: InMemoryEntityStore,
+    lines: readonly { readonly net: number; readonly code: Record<string, unknown> }[],
+  ): Promise<EntityRecord> {
+    const total = lines.reduce((s, l) => s + l.net, 0);
+    const doc = await store.create(TENANT, "Bill", {
+      bill_number: "BILL-W",
+      state: "draft",
+      subtotal: total,
+      tax_total: 0,
+      total,
+    });
+    let n = 0;
+    for (const l of lines) {
+      n += 1;
+      const code = await store.create(TENANT, "TaxCode", { id: `code_${n}`, code: `WHT-${n}`, kind: "withholding", ...l.code });
+      await store.create(TENANT, "BillLine", { bill_id: String(doc.id), amount: l.net, tax_code_id: String(code.id) });
+    }
+    return doc;
+  }
+
+  it("stamps a bill's withholding and credits AP net of it", async () => {
+    const store = new InMemoryEntityStore();
+    await chart(store);
+    const doc = await bill(store, [{ net: 100, code: { rate_pct: 10 } }]);
+    await recognise(recognition({ sale: false, codes: PURCHASE_CODES }), store, doc, false);
+    expect(await balances(store)).toEqual({ acc_ap: -90, acc_whtp: -10, acc_exp: 100 });
+    const ap = (await store.list(TENANT, "JournalLine")).find((l) => l.ledger_account_id === "acc_ap")!;
+    expect(Number(ap.credit)).toBe(90);
+    expect(Number((await store.get(TENANT, "Bill", String(doc.id)))!.withholding_total)).toBe(10);
+  });
+
+  it("refuses, writing nothing, a withholding it has no field to record", async () => {
+    // The control line would post net of the withholding while every reader of what is owed takes
+    // the total less a field nothing stamped — a bill that could never settle.
+    const store = new InMemoryEntityStore();
+    await chart(store);
+    const doc = await bill(store, [{ net: 100, code: { rate_pct: 10 } }]);
+    const refused = await recognise(recognition({ sale: false, codes: PURCHASE_CODES, stamp: false }), store, doc, false).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(refused).toMatchObject({ name: "PostingRefused", status: 409, error: "withholding_unrecorded" });
+    expect((refused as Error).message).toContain("declare withholding_total on Bill");
+    expect(await store.list(TENANT, "JournalEntry")).toEqual([]);
+    expect(await store.list(TENANT, "JournalLine")).toEqual([]);
+    expect((await store.get(TENANT, "Bill", String(doc.id)))!.withholding_total).toBeUndefined();
+  });
+
+  it("posts a bill with no withholding whether or not it has a field to record one in", async () => {
+    // The refusal is about withholding that would go unrecorded, not about the field's absence.
+    const store = new InMemoryEntityStore();
+    await chart(store);
+    await store.create(TENANT, "TaxCode", { id: "vat", code: "VAT10", rate_pct: 10, kind: "vat" });
+    const doc = await store.create(TENANT, "Bill", { bill_number: "BILL-V", state: "draft", subtotal: 100, tax_total: 10, total: 110 });
+    await store.create(TENANT, "BillLine", { bill_id: String(doc.id), amount: 100, tax_code_id: "vat" });
+    await recognise(recognition({ sale: false, codes: PURCHASE_CODES, stamp: false }), store, doc, false);
+    expect(await balances(store)).toEqual({ acc_ap: -110, acc_exp: 100, acc_in: 10 });
+  });
+
+  it("stamps the sum of two withholding codes, one posting to its own account", async () => {
+    const store = new InMemoryEntityStore();
+    await chart(store);
+    await store.create(TENANT, "LedgerAccount", { id: "acc_own", account_code: "2215" });
+    const doc = await bill(store, [
+      { net: 60, code: { rate_pct: 10 } },
+      { net: 40, code: { rate_pct: 5, gl_account_code: "2215" } },
+    ]);
+    await recognise(recognition({ sale: false, codes: PURCHASE_CODES }), store, doc, false);
+    const lines = await store.list(TENANT, "JournalLine");
+    const withheld = lines.filter((l) => String(l.description).startsWith("Withholding ("));
+    expect(withheld.map((l) => [l.ledger_account_id, Number(l.credit)]).sort()).toEqual([
+      ["acc_own", 2],
+      ["acc_whtp", 6],
+    ]);
+    expect(Number((await store.get(TENANT, "Bill", String(doc.id)))!.withholding_total)).toBe(8);
+    expect((await balances(store)).acc_ap).toBe(-92);
+  });
+
+  it("stamps nothing when the withholding rounds to zero, though it has a field to stamp", async () => {
+    const store = new InMemoryEntityStore();
+    await chart(store);
+    // 0.04 at 10% is 0.004, which is no cent.
+    const doc = await bill(store, [{ net: 0.04, code: { rate_pct: 10 } }]);
+    await recognise(recognition({ sale: false, codes: PURCHASE_CODES }), store, doc, false);
+    expect(await balances(store)).toEqual({ acc_ap: -0.04, acc_exp: 0.04 });
+    expect((await store.get(TENANT, "Bill", String(doc.id)))!.withholding_total).toBeUndefined();
+  });
+
+  it("does not refuse a withholding that rounds to zero when it has no field to record it", async () => {
+    const store = new InMemoryEntityStore();
+    await chart(store);
+    const doc = await bill(store, [{ net: 0.04, code: { rate_pct: 10 } }]);
+    await recognise(recognition({ sale: false, codes: PURCHASE_CODES, stamp: false }), store, doc, false);
+    expect(await balances(store)).toEqual({ acc_ap: -0.04, acc_exp: 0.04 });
+  });
+
+  it("overwrites a stored withholding the entry does not net out, with 0 where none was withheld", async () => {
+    // A key a client could write before ADR-0421: left in place, every reader of what is owed would
+    // subtract it, and a value equal to the total would read as nothing owed.
+    const store = new InMemoryEntityStore();
+    await chart(store);
+    await store.create(TENANT, "TaxCode", { id: "vat", code: "VAT10", rate_pct: 10, kind: "vat" });
+    const doc = await store.create(TENANT, "Bill", {
+      bill_number: "BILL-L",
+      state: "draft",
+      subtotal: 100,
+      tax_total: 10,
+      total: 110,
+      withholding_total: 110,
+    });
+    await store.create(TENANT, "BillLine", { bill_id: String(doc.id), amount: 100, tax_code_id: "vat" });
+    await recognise(recognition({ sale: false, codes: PURCHASE_CODES }), store, doc, false);
+    expect(await balances(store)).toEqual({ acc_ap: -110, acc_exp: 100, acc_in: 10 });
+    expect(Number((await store.get(TENANT, "Bill", String(doc.id)))!.withholding_total)).toBe(0);
+  });
+
+  it("overwrites a stored withholding that disagrees with the one the entry netted out", async () => {
+    const store = new InMemoryEntityStore();
+    await chart(store);
+    const doc = await bill(store, [{ net: 100, code: { rate_pct: 10 } }]);
+    await store.update(TENANT, "Bill", String(doc.id), { withholding_total: 99 });
+    const legacy = (await store.get(TENANT, "Bill", String(doc.id)))!;
+    await recognise(recognition({ sale: false, codes: PURCHASE_CODES }), store, legacy, false);
+    expect(Number((await store.get(TENANT, "Bill", String(doc.id)))!.withholding_total)).toBe(10);
+  });
+});
+
+describe("bill withholding — what is owed is the total less the stamped withholding", () => {
+  const apply = paymentApplicationEffect({
+    documentEntity: "Bill",
+    refField: "bill_id",
+    settleableStates: ["approved", "overdue"],
+    withholdingField: "withholding_total",
+    refundedState: "refunded",
+    reopenState: "approved",
+    clock,
+  });
+
+  async function approvedBill(store: InMemoryEntityStore): Promise<string> {
+    const doc = await store.create(TENANT, "Bill", { bill_number: "BILL-P", state: "approved", total: 100, withholding_total: 10 });
+    return String(doc.id);
+  }
+  async function complete(store: InMemoryEntityStore, billId: string, amount: number): Promise<string> {
+    const pay = await store.create(TENANT, "Payment", { bill_id: billId, direction: "outbound", amount, state: "completed" });
+    await apply({
+      operation: "transition",
+      entity: "Payment",
+      tenantId: TENANT,
+      id: String(pay.id),
+      before: { state: "pending" },
+      after: { ...(await store.get(TENANT, "Payment", String(pay.id)))! },
+      store,
+    });
+    return String(pay.id);
+  }
+  async function refund(store: InMemoryEntityStore, paymentId: string): Promise<void> {
+    const before = (await store.get(TENANT, "Payment", paymentId))!;
+    const after = await store.update(TENANT, "Payment", paymentId, { state: "refunded" });
+    await apply({ operation: "transition", entity: "Payment", tenantId: TENANT, id: paymentId, before, after: after!, store });
+  }
+  const state = async (store: InMemoryEntityStore, id: string): Promise<unknown> =>
+    (await store.get(TENANT, "Bill", id))!.state;
+
+  it("settles at the net, and not before", async () => {
+    const store = new InMemoryEntityStore();
+    const id = await approvedBill(store);
+    await complete(store, id, 89.99);
+    expect(await state(store, id)).toBe("approved");
+    await complete(store, id, 0.01);
+    expect(await state(store, id)).toBe("paid");
+    expect(typeof (await store.get(TENANT, "Bill", id))!.paid_at).toBe("string");
+  });
+
+  it("stays settled while what remains covers the net, and reopens when it does not", async () => {
+    const store = new InMemoryEntityStore();
+    const id = await approvedBill(store);
+    const ninety = await complete(store, id, 90);
+    const five = await complete(store, id, 5);
+    expect(await state(store, id)).toBe("paid");
+    await refund(store, five);
+    expect(await state(store, id)).toBe("paid");
+    await refund(store, ninety);
+    expect(await state(store, id)).toBe("approved");
+    // Cleared: the in-memory store keeps an assigned null as no key at all.
+    expect((await store.get(TENANT, "Bill", id))!.paid_at ?? null).toBeNull();
+  });
+
+  it("revalues an open foreign bill on what is owed, not on its gross total", async () => {
+    const store = new InMemoryEntityStore();
+    const usd = await store.create(TENANT, "Currency", { code: "USD", name: "US Dollar" });
+    const eur = await store.create(TENANT, "Currency", { code: "EUR", name: "Euro" });
+    await store.create(TENANT, "ExchangeRate", {
+      from_currency_id: String(eur.id),
+      to_currency_id: String(usd.id),
+      rate: 1.2,
+      rate_date: "2026-06-29",
+    });
+    await store.create(TENANT, "Bill", {
+      bill_number: "BILL-FX",
+      state: "approved",
+      total: 100,
+      withholding_total: 10,
+      currency: "EUR",
+      booking_rate: 1.1,
+    });
+    const period = await store.create(TENANT, "FiscalPeriod", { status: "closing", end_date: "2026-06-30", name: "2026-06" });
+    const revalue = async (withholdingField: string | undefined): Promise<number> => {
+      await unrealizedFxRevaluationEffect({
+        functionalCurrency: "USD",
+        clock,
+        documents: [
+          {
+            entity: "Bill",
+            openStates: ["approved", "overdue"],
+            paymentRefField: "bill_id",
+            side: "ap",
+            ...(withholdingField !== undefined ? { withholdingField } : {}),
+          },
+        ],
+      })({
+        operation: "transition",
+        entity: "FiscalPeriod",
+        tenantId: TENANT,
+        id: String(period.id),
+        before: { status: "closing" },
+        after: { status: "closed", end_date: "2026-06-30", name: "2026-06" },
+        store,
+      });
+      const ap = (await store.list(TENANT, "JournalLine")).find(
+        (l) => l.description === "Unrealized FX revaluation — AP EUR",
+      )!;
+      const credit = Number(ap.functional_credit);
+      for (const l of await store.list(TENANT, "JournalLine")) await store.remove(TENANT, "JournalLine", String(l.id));
+      for (const e of await store.list(TENANT, "JournalEntry")) await store.remove(TENANT, "JournalEntry", String(e.id));
+      return credit;
+    };
+    // 90 open × (1.2 − 1.1) = 9; reading the gross would revalue 100 and credit AP 10.
+    expect(await revalue("withholding_total")).toBeCloseTo(9, 6);
+    expect(await revalue(undefined)).toBeCloseTo(10, 6);
   });
 });

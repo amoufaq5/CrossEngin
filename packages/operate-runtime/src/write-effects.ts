@@ -1416,7 +1416,12 @@ export interface RecognitionGlConfig {
    * document-level split when the line-derived net+tax doesn't reconcile to total.
    */
   readonly taxLines?: RecognitionTaxLinesConfig;
-  /** When set, the computed withholding total is stamped onto this document field after posting. */
+  /**
+   * The document field recognition records its withholding on. The control line is posted net of
+   * withholding, and every reader of what is owed (settlement, refund-reopen, FX revaluation, the
+   * coverage guard, aging) subtracts this field from the total — so it is not informational. Unset
+   * while a line carries withholding, recognition refuses `withholding_unrecorded`.
+   */
   readonly stampWithholdingField?: string;
   /** Resolves the tenant's per-jurisdiction default tax accounts (jurisdiction → account_code). */
   readonly resolveJurisdictionAccounts?: (tenantId: string) => Promise<Record<string, string>>;
@@ -1795,6 +1800,17 @@ export function recognitionGlPostingEffect(config: RecognitionGlConfig): WriteEf
               `a ${c.entity} line carries reverse-charge tax and this posting has no account to self-assess it to`,
             );
           }
+          // The control line below is posted net of withholding, while every reader of what is owed
+          // takes the document's total less the stamped field — so with nowhere to stamp it, the
+          // readers would treat a net balance as gross and the document could never settle.
+          if (withholdingUnits > 0n && config.stampWithholdingField === undefined) {
+            throw new PostingRefused(
+              409,
+              "withholding_unrecorded",
+              `a ${c.entity} line carries withholding and this deployment records it on no field of ${c.entity};` +
+                ` declare withholding_total on ${c.entity}`,
+            );
+          }
         } else if (determination.kind === "determined") {
           // Without a jurisdiction the document total is authoritative and a split that does not
           // reconcile degrades to one untaxed net line. With one, the platform has determined the
@@ -1860,7 +1876,7 @@ export function recognitionGlPostingEffect(config: RecognitionGlConfig): WriteEf
           const own = group.accountCode !== null && group.accountCode.length > 0 ? await resolveCode(group.accountCode) : null;
           planned.push({
             account: own ?? withholdingAccount,
-            description: `Withholding (${group.label})`,
+            description: withholdingLineDescription(group.label),
             side: controlSide,
             units: groupUnits,
           });
@@ -1911,15 +1927,34 @@ export function recognitionGlPostingEffect(config: RecognitionGlConfig): WriteEf
       await input.store.create(input.tenantId, c.lineEntity, line);
     }
 
-    // Stamp the withholding total back onto the document (informational + prefills a WHT
-    // certificate's amount). Direct store write — bypasses guards/effects, no recursion.
-    if (config.stampWithholdingField !== undefined && withholdingUnits > 0n) {
+    // Stamp the withholding this entry netted out of the control line: it is the figure every
+    // reader of what is owed subtracts from the total. Authoritative, so a value already on the
+    // document that disagrees — a key a client could write before ADR-0421 — is overwritten,
+    // with 0 if need be; an absent field already reads as 0 and gains no write. Direct store
+    // write — bypasses guards/effects, no recursion.
+    const stampField = config.stampWithholdingField;
+    const storedStamp = stampField === undefined ? undefined : doc[stampField];
+    if (
+      stampField !== undefined &&
+      (withholdingUnits > 0n ||
+        (storedStamp !== undefined && storedStamp !== null && moneyUnits(storedStamp) !== withholdingUnits))
+    ) {
       await input.store.update(input.tenantId, c.entity, docId, {
-        [config.stampWithholdingField]: unitsToNumber(withholdingUnits),
+        [stampField]: unitsToNumber(withholdingUnits),
         updated_at: nowIso,
       });
     }
   };
+}
+
+/**
+ * What a recognition entry's withholding line is labelled with. Exported, with its prefix, because a
+ * maintenance reader finding those lines in a stored entry must use the spelling this effect wrote.
+ */
+export const WITHHOLDING_LINE_DESCRIPTION_PREFIX = "Withholding (";
+
+export function withholdingLineDescription(codeLabel: string): string {
+  return `${WITHHOLDING_LINE_DESCRIPTION_PREFIX}${codeLabel})`;
 }
 
 export interface PaymentSettlementGlConfig {

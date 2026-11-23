@@ -94,6 +94,7 @@ import { MIN_FAX_SUPPRESSION_THRESHOLD } from "@crossengin/notification-provider
 import { DEFAULT_UNREAD_SCAN_LIMIT, MAX_UNREAD_SCAN_LIMIT } from "./read-state-routes.js";
 import { parseRequestBodyLimit, parseRouteBodyLimits } from "./request-body-limit.js";
 import type { RekeyOptions } from "./rekey.js";
+import type { BillWithholdingBackfillOptions } from "./bill-withholding-backfill.js";
 import { REPLAY_SUBSYSTEMS, type ReplaySubsystem } from "./replay.js";
 import {
   GatewayExecutionCaptureConfigSchema,
@@ -3439,6 +3440,7 @@ Subcommands (each takes --help):
   verify-chain         Verify the audit chain's links, signatures and anchors
   replay               Re-derive each subsystem's projections from its log and report drift
   rekey                Move one tenant's at-rest column key to a fresh random data key
+  backfill-bill-withholding  Stamp legacy bills' withholding from their posted -GL entries
   set-credential       Set a user's login password (the bootstrap path; no mail channel)
   ai-pseudonym-lookup  Name the tenant an AI provider's report means by its ctp_ pseudonym
 
@@ -4410,6 +4412,165 @@ export function parseRekeyArgs(argv: readonly string[]): RekeyOptions {
     help,
   };
 }
+
+/**
+ * Parses the argv *after* the `backfill-bill-withholding` token.
+ *
+ * `--store` and the scope have **no default**. Both decide which rows the pass examines, and a wrong
+ * one does not fail: the document store's table and the column store's tables are both present on a
+ * deployment that has switched, so the wrong store answers "no bill to stamp" having read the wrong
+ * rows (ADR-0328's rule — silence must not decide what a maintenance pass covers).
+ */
+export function parseBillWithholdingBackfillArgs(argv: readonly string[]): BillWithholdingBackfillOptions {
+  let pack: string | null = null;
+  let manifestPath: string | null = null;
+  let store: "pg" | "pg-columns" | null = null;
+  let schema: string | null = null;
+  let tenantId: string | null = null;
+  let allTenants = false;
+  let plan = false;
+  let auditChainConfig: string | null = null;
+  let format: "human" | "json" = "human";
+  let help = false;
+
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === undefined) continue;
+    const next = argv[i + 1];
+    const consumed = (): number => (isInline(arg) ? 0 : 1);
+    if (arg === "--help" || arg === "-h") {
+      help = true;
+    } else if (arg === "--pack" || arg.startsWith("--pack=")) {
+      pack = takeValue(arg, next, "--pack");
+      i += consumed();
+    } else if (arg === "--manifest" || arg.startsWith("--manifest=")) {
+      manifestPath = takeValue(arg, next, "--manifest");
+      i += consumed();
+    } else if (arg === "--store" || arg.startsWith("--store=")) {
+      const raw = takeValue(arg, next, "--store");
+      if (raw !== "pg" && raw !== "pg-columns") {
+        throw new CliUsageError(`invalid --store: ${raw} (pg|pg-columns; the in-memory store holds no legacy bill)`);
+      }
+      store = raw;
+      i += consumed();
+    } else if (arg === "--schema" || arg.startsWith("--schema=")) {
+      schema = takeValue(arg, next, "--schema");
+      i += consumed();
+    } else if (arg === "--tenant" || arg.startsWith("--tenant=")) {
+      tenantId = takeValue(arg, next, "--tenant");
+      i += consumed();
+    } else if (arg === "--all-tenants") {
+      allTenants = true;
+    } else if (arg === "--plan") {
+      plan = true;
+    } else if (arg === "--audit-chain-config" || arg.startsWith("--audit-chain-config=")) {
+      auditChainConfig = takeValue(arg, next, "--audit-chain-config");
+      i += consumed();
+    } else if (arg === "--format" || arg.startsWith("--format=")) {
+      const raw = takeValue(arg, next, "--format");
+      if (raw !== "human" && raw !== "json") {
+        throw new CliUsageError(`invalid --format: ${raw} (human|json)`);
+      }
+      format = raw;
+      i += consumed();
+    } else {
+      throw new CliUsageError(`unknown argument: ${arg}`);
+    }
+  }
+
+  if (!help) {
+    if (pack === null && manifestPath === null) {
+      throw new CliUsageError("one of --pack or --manifest is required: the pack the serving API runs");
+    }
+    if (pack !== null && manifestPath !== null) {
+      throw new CliUsageError("--pack and --manifest are mutually exclusive");
+    }
+    if (store === null) {
+      throw new CliUsageError("backfill-bill-withholding requires --store pg|pg-columns: the store the API serves from");
+    }
+    if (tenantId === null && !allTenants) {
+      throw new CliUsageError("backfill-bill-withholding requires exactly one of --tenant <uuid> or --all-tenants");
+    }
+    if (tenantId !== null && allTenants) {
+      throw new CliUsageError("--tenant and --all-tenants are mutually exclusive");
+    }
+    if (tenantId !== null && !TENANT_ID_RE.test(tenantId)) {
+      throw new CliUsageError(`invalid --tenant: ${tenantId}`);
+    }
+  }
+
+  return {
+    pack,
+    manifestPath,
+    store: store ?? "pg",
+    schema,
+    tenantId,
+    allTenants,
+    plan,
+    auditChainConfig,
+    format,
+    help,
+  };
+}
+
+export const billWithholdingBackfillHelpText = `operate-server backfill-bill-withholding — stamp legacy bills' withholding from their posted -GL entries
+
+Usage:
+  operate-server backfill-bill-withholding --pack <name> --store pg|pg-columns --tenant <uuid> [--plan] [options]
+  operate-server backfill-bill-withholding --pack <name> --store pg|pg-columns --all-tenants [--plan] [options]
+
+Why: bill recognition has always posted accounts payable net of withholding, and a bill approved
+before the server stamped withholding_total records the withheld amount nowhere, so a bill paid at
+the net never settles. The field is server-owned, so no client and no transition can supply it.
+This pass reads each approved, overdue or paid bill's posted <bill_number>-GL entry and stamps
+withholding_total = total - the accounts-payable control line, accepted only when that equals the
+sum of the entry's "Withholding (...)" lines. Amounts are read in the bill's own currency (debit and
+credit, never the functional columns), and lines are matched by description, never by account: an
+older server posted uncoded withholding to the input-tax account.
+
+Each bill is stamped in its own transaction under its row lock, with one meta.audit_log row in the
+same transaction; if the row cannot be written the stamp rolls back. A refused bill is named with
+the reason and the pass goes on. A bill already carrying the same figure is left alone, so re-running
+is safe and catches bills approved while the upgrade rolled out. It never settles a bill: it reports
+whether completed payments now cover what is owed, and mark_paid then does the rest.
+
+Bills whose withholding was entered by a manual journal carry no "Withholding (...)" lines and are
+left alone (reported as nothing to stamp, never stamped with a guess). So is a bill whose total is
+zero, for which recognition posted nothing.
+
+A payment completed while the pass runs is judged against the unstamped bill, because payment
+application does not wait on the pass's row lock; re-run to re-check the coverage of bills paid
+meanwhile.
+
+Required:
+  --pack <name>            Built-in vertical pack the API serves: ${BUILTIN_PACK_NAMES.join(", ")}
+  --manifest <file>        ...or a resolved manifest JSON document (exactly one of the two)
+  --store pg|pg-columns    The store the API serves from (no default: the wrong store reads the
+                           wrong rows and reports nothing to stamp)
+  --tenant <uuid>          One tenant, or
+  --all-tenants            every tenant in meta.tenants that is active, suspended or archived
+
+Options:
+  --plan                   Report what would be stamped and write nothing
+  --schema <name>          The --schema the API runs with (default: meta for the document store,
+                           public for the column store, meta for the audit trail)
+  --audit-chain-config <file>  The API's chain file, if it uses one; otherwise AUDIT_CHAIN_SIGNING_KEY
+                           anchors the audit rows. With neither they are written unanchored and the
+                           report says so
+  --format human|json      Output format (default human)
+
+Run it as the role the API serves as (crossengin_app): every read and write sets the bill's tenant
+context. On --store pg-columns, run 'operate-server column-schema' as the owner first, or this
+refuses schema_not_provisioned; a pack whose Bill, JournalEntry, JournalLine or Payment carries an
+at-rest-encrypted column is refused encrypted_column_unsupported. A tenant serving its own activated manifest is refused rather
+than read through the deployment's pack: those tenants are NOT covered by this pass, their legacy
+bills stay unstamped, and they are refused on every run. Postgres: standard PG* env vars.
+
+Exit: 0 when nothing was refused (a plan or a clean pass, including a re-run with nothing left to
+do); 1 when the run, a tenant or any bill was refused, which includes every --all-tenants run on a
+deployment with a tenant serving its own manifest (a --tenant run reports only the tenant it names);
+2 on a usage error.
+`;
 
 /**
  * Parses the argv *after* the `set-credential` token.

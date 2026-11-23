@@ -8,6 +8,7 @@ import {
   INVOICE_ENTITY,
   INVOICE_LINE_ENTITY,
 } from "./entities.js";
+import { BILL_ENTITY } from "./entities-finance.js";
 
 describe("ERP_CORE_ENTITIES", () => {
   it("each entity parses against EntitySchema", () => {
@@ -57,5 +58,17 @@ describe("Account.country is a country_code", () => {
   it("supports country code field type", () => {
     const f = ACCOUNT_ENTITY.fields.find((f) => f.name === "country");
     expect(f?.type.kind).toBe("country_code");
+  });
+});
+
+describe("Bill carries the fields its effects stamp", () => {
+  it("declares withholding_total at the precision of its total, and paid_at", () => {
+    // Recognition credits AP net of withholding and stamps the amount here; settlement and aging
+    // subtract it. Undeclared, the stamp is a JSONB key on one store and dropped on the other.
+    const field = (n: string) => BILL_ENTITY.fields.find((f) => f.name === n);
+    expect(field("withholding_total")?.type).toEqual(field("total")?.type);
+    expect(field("withholding_total")?.required).toBeUndefined();
+    expect(field("withholding_total")?.default).toBeUndefined();
+    expect(field("paid_at")?.type).toEqual({ kind: "datetime" });
   });
 });

@@ -789,6 +789,22 @@ function postingPeriodsOf(manifest: Manifest): Record<string, never> | undefined
   return ["start_date", "end_date", "status"].every((f) => fields.has(f)) ? {} : undefined;
 }
 
+/**
+ * Whether the entity resolves to a field of this name. An effect that stamps a field the entity
+ * does not declare writes a JSONB key on `--store pg` and nothing at all on `--store pg-columns`,
+ * so a stamp is wired only where the served table has the column.
+ */
+function declaresField(manifest: Manifest, entityName: string, field: string): boolean {
+  const entity = (manifest.entities ?? []).find((e) => e.name === entityName);
+  return entity !== undefined && resolvedFields(entity, manifest.traits ?? []).some((f) => f.name === field);
+}
+
+/**
+ * The control-line description the bill recognition entry carries. Exported because a maintenance
+ * reader identifying that line in a stored entry must use the spelling the effect wrote.
+ */
+export const BILL_CONTROL_DESCRIPTION = "Bill — accounts payable";
+
 function isStamped(stamps: readonly EffectStamp[], entity: string, field: string): boolean {
   return stamps.some((s) => s.entity === entity && s.field === field);
 }
@@ -831,8 +847,27 @@ function defaultWriteEffectsWithStamps(
   const hasTaxCodes = names.has("TaxCode");
   // Exactly the condition under which recognition stamps `withholding_total` below, and so the one
   // under which the field is a server fact rather than a figure the caller typed: only then may
-  // what is owed be read as total less it.
-  const invoiceWithholdingStamped = names.has("Invoice") && hasGl && hasTaxCodes && names.has("InvoiceLine");
+  // what is owed be read as total less it. One constant per document drives the stamp, the stamp
+  // list, settlement, refund-reopen, FX revaluation and (through `isStamped`) the coverage guard and
+  // aging, so none of them can read the control as net while another reads it as gross. Where the
+  // document carries withholding and does not declare the field, recognition refuses
+  // `withholding_unrecorded` rather than posting a net control with nowhere to record the
+  // difference: on `--store pg-columns` the stamp would be dropped and the document could never
+  // settle. That is a deliberate change on `--store pg` too, where the stamp used to land as an
+  // undeclared JSONB key and an Invoice override omitting the field still settled — such a
+  // manifest now refuses to send a withheld invoice, so both stores answer one way.
+  const invoiceWithholdingStamped =
+    names.has("Invoice") &&
+    hasGl &&
+    hasTaxCodes &&
+    names.has("InvoiceLine") &&
+    declaresField(manifest, "Invoice", STAMPED_WITHHOLDING_FIELD);
+  const billWithholdingStamped =
+    names.has("Bill") &&
+    hasGl &&
+    hasTaxCodes &&
+    names.has("BillLine") &&
+    declaresField(manifest, "Bill", STAMPED_WITHHOLDING_FIELD);
   // Tax determination from the tenant's declared jurisdiction and its rules, where the manifest
   // declares both and there is a settings store for the tenant to declare the jurisdiction in.
   const taxDetermination = (
@@ -885,7 +920,7 @@ function defaultWriteEffectsWithStamps(
     effects.push(
       invoiceVoidCreditNoteEffect({
         ...(names.has("InvoiceLine") ? { lineEntity: "InvoiceLine" } : {}),
-        ...(hasGl && hasTaxCodes && names.has("InvoiceLine") ? { withholdingField: STAMPED_WITHHOLDING_FIELD } : {}),
+        ...(invoiceWithholdingStamped ? { withholdingField: STAMPED_WITHHOLDING_FIELD } : {}),
         ...clockOpt,
       }),
     );
@@ -919,7 +954,7 @@ function defaultWriteEffectsWithStamps(
                   withholdingAccountRef: "wht_receivable",
                   ...taxDetermination("sales", "issue_date"),
                 },
-                stampWithholdingField: STAMPED_WITHHOLDING_FIELD,
+                ...(invoiceWithholdingStamped ? { stampWithholdingField: STAMPED_WITHHOLDING_FIELD } : {}),
                 ...jurisdictionResolver,
               }
             : {}),
@@ -945,10 +980,7 @@ function defaultWriteEffectsWithStamps(
           })),
         }),
       );
-      // The recognition effect above stamps the withholding total only when it is given tax lines.
-      if (hasTaxCodes && names.has("InvoiceLine")) {
-        stamps.push({ entity: "Invoice", field: STAMPED_WITHHOLDING_FIELD });
-      }
+      if (invoiceWithholdingStamped) stamps.push({ entity: "Invoice", field: STAMPED_WITHHOLDING_FIELD });
       // Capture the booking rate at issue so period-close revaluation is exact.
       if (hasFx) {
         effects.push(
@@ -979,7 +1011,7 @@ function defaultWriteEffectsWithStamps(
         controlAccountRef: "accounts_payable",
         netAccountRef: "expense",
         taxAccountRef: "tax_input",
-        controlDescription: "Bill — accounts payable",
+        controlDescription: BILL_CONTROL_DESCRIPTION,
         netDescription: "Bill — expense",
         taxDescription: "Bill — input tax",
         ...(hasTaxCodes && names.has("BillLine")
@@ -992,6 +1024,7 @@ function defaultWriteEffectsWithStamps(
                 withholdingAccountRef: "wht_payable",
                 ...taxDetermination("purchase", "bill_date"),
               },
+              ...(billWithholdingStamped ? { stampWithholdingField: STAMPED_WITHHOLDING_FIELD } : {}),
               ...jurisdictionResolver,
             }
           : {}),
@@ -1005,6 +1038,7 @@ function defaultWriteEffectsWithStamps(
         })),
       }),
     );
+    if (billWithholdingStamped) stamps.push({ entity: "Bill", field: STAMPED_WITHHOLDING_FIELD });
     // A bill voided after approval reverses the entry its approval posted.
     effects.push(
       postingReversalEffect({
@@ -1090,6 +1124,7 @@ function defaultWriteEffectsWithStamps(
         refField: "bill_id",
         settleableStates: ["approved", "overdue"],
         paidAtField: STAMPED_PAID_AT_FIELD,
+        ...(billWithholdingStamped ? { withholdingField: STAMPED_WITHHOLDING_FIELD } : {}),
         refundedState: "refunded",
         reopenState: "approved",
         ...clockOpt,
@@ -1128,7 +1163,15 @@ function defaultWriteEffectsWithStamps(
           ]
         : []),
       ...(names.has("Bill")
-        ? [{ entity: "Bill", openStates: ["approved", "overdue"], paymentRefField: "bill_id", side: "ap" as const }]
+        ? [
+            {
+              entity: "Bill",
+              openStates: ["approved", "overdue"],
+              paymentRefField: "bill_id",
+              side: "ap" as const,
+              ...(billWithholdingStamped ? { withholdingField: STAMPED_WITHHOLDING_FIELD } : {}),
+            },
+          ]
         : []),
     ];
     effects.push(
@@ -1623,6 +1666,9 @@ export function compileOperateServer(
       openStates: ["approved", "overdue"],
       paymentRefField: "bill_id",
       numberField: "bill_number",
+      ...(isStamped(effectWiring.stamps, "Bill", STAMPED_WITHHOLDING_FIELD)
+        ? { withholdingField: STAMPED_WITHHOLDING_FIELD }
+        : {}),
     };
   }
   if (Object.keys(agingSections).length > 0) {

@@ -316,10 +316,12 @@ that fits: `erp_admin`, `erp_accountant`, `controller`, `ap_clerk`, `sales_manag
 
    Withholding: tax a customer withholds from an invoice is debited to 1310, and moved to 1320 when
    its WHT certificate is confirmed; tax the workspace withholds from a supplier's bill is credited
-   to 2210. A tax code that names its own `gl_account_code` posts there instead. **A bill with
-   withholding cannot be settled yet**: nothing records the withheld amount on the bill, so paying the
-   supplier the net leaves the bill open and paying the gross leaves accounts payable in debit. Until
-   that lands, enter purchase-side withholding by manual journal entry (ADR-0465).
+   to 2210. A tax code that names its own `gl_account_code` posts there instead. Approving a bill
+   records what was withheld on the bill (`withholding_total`), and the bill is owed and settles at
+   the net: pay the supplier the total less the withholding. Paying the gross also marks it paid, but
+   leaves accounts payable in debit by the withheld amount and nothing reports that, so do not.
+   **Paying the withheld tax to the authority posts nothing**: record it as a manual journal entry
+   (debit 2210, credit cash), never as a `Payment`, which would post to accounts payable (ADR-0466).
 
    Only **unset** settings are filled, and an existing account with a chart code is never changed.
    On a workspace that already had accounts — run through the button later — a setting is pointed at

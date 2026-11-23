@@ -21,6 +21,7 @@ import {
   admissionBlocks,
   admissionBlocksValues,
   admissionRemedy,
+  columnKeyRefFor,
   createNodePgConnection,
   formatCheckAdmissionSurvey,
   UNBOUNDED_POOL_SETTINGS,
@@ -289,6 +290,25 @@ import {
 import { randomUUID } from "node:crypto";
 import { renderDigest } from "./digest-template.js";
 import { memberFromItem } from "./digest-assembler.js";
+import {
+  backfillRefusedAnything,
+  backfillTenantBills,
+  billWithholdingStampedFor,
+  type BackfillRunRefusal,
+  type BillWithholdingBackfillOptions,
+  type BillWithholdingBackfillReport,
+  type TenantBackfillReport,
+} from "./bill-withholding-backfill.js";
+import {
+  decimalFieldIndexFromManifest,
+  systemRequestId,
+  temporalFieldIndexFromManifest,
+  withDatetimeWireType,
+  withDecimalWireType,
+  type TransactionalEntityStore,
+} from "@crossengin/operate-runtime";
+import { columnPlansForManifest, verifyColumnSchema } from "@crossengin/operate-runtime-pg";
+import { resolvedClassifiedFields } from "@crossengin/kernel";
 import { DIGEST_TEMPLATE_ID, digestLocale } from "./digest-assembly.js";
 import { parseNotificationPolicy, type NotificationPolicy } from "./delivery-throttle.js";
 import { JwksRefreshPoller, RemoteJwksProvider } from "./jwks.js";
@@ -7571,5 +7591,239 @@ export async function runRekey(
     };
   } finally {
     await conn.close();
+  }
+}
+
+/** The entities the backfill reads or writes, so a pg-columns check asks about nothing else. */
+const BACKFILL_ENTITIES = ["Bill", "JournalEntry", "JournalLine", "Payment"] as const;
+
+/**
+ * Tenant statuses the backfill walks under `--all-tenants`. A `deleted` tenant's records are gone;
+ * a `pending_deletion` one is about to be, and stamping a bill whose erasure is queued is a write
+ * nobody needs. The other three can still pay a bill, so their stamp matters.
+ */
+const BACKFILL_TENANT_STATUSES = ["active", "suspended", "archived"] as const;
+
+/**
+ * The key reference the backfill's column store is built with: the raising one-argument form, over a
+ * setting nothing sets. The store asks a key **resolver** once per operation whenever any entity of the
+ * manifest encrypts a column, which on an encrypting pack is every operation on Bill too; a reference
+ * instead of a resolver asks nothing, and an encrypted column this pass does read would raise
+ * `unrecognized configuration parameter` rather than decrypt or write NULL. `backfillColumnStore`
+ * refuses such a manifest before the store exists, so this is the backstop and not the rule.
+ */
+const BACKFILL_NO_COLUMN_KEY_REF = columnKeyRefFor("app.backfill_reads_no_encrypted_column");
+
+/**
+ * The column store the backfill reads through, or the reason it cannot build one. Exported so the
+ * construction is tested against an encrypting pack without a database.
+ */
+export function backfillColumnStore(
+  conn: PgConnection,
+  manifest: Manifest,
+  schema: string | null,
+):
+  | { readonly kind: "store"; readonly store: ColumnMappedEntityStore }
+  | { readonly kind: "refused"; readonly detail: string } {
+  const plans = columnPlansForManifest(manifest, { schema: schema ?? COLUMN_STORE_DEFAULT_SCHEMA });
+  const encrypted = [...plans]
+    .filter(([entity]) => (BACKFILL_ENTITIES as readonly string[]).includes(entity))
+    .flatMap(([entity, plan]) => plan.columns.filter((c) => c.encryptAtRest).map((c) => `${entity}.${c.field}`));
+  if (encrypted.length > 0) {
+    return {
+      kind: "refused",
+      detail:
+        `${encrypted.join(", ")} ${encrypted.length === 1 ? "is" : "are"} encrypted at rest, and this pass` +
+        " reads those entities without a column key; it was written for packs whose bills and journal" +
+        " carry no encrypted column",
+    };
+  }
+  return {
+    kind: "store",
+    store: new ColumnMappedEntityStore(conn, manifest, {
+      ...(schema !== null ? { schema } : {}),
+      encryptionKeyRef: BACKFILL_NO_COLUMN_KEY_REF,
+    }),
+  };
+}
+
+/**
+ * The runner behind `backfill-bill-withholding`: builds the store the API serves from, as the role
+ * the API serves as, and stamps each tenant's legacy bills through `backfillTenantBills`.
+ *
+ * Nothing here writes outside that function, and it writes only `withholding_total` and
+ * `updated_at` plus its audit row (and that row's chain entry when anchored), per bill, in one
+ * transaction each. The store is built without `ensureSchema` or
+ * `ensureUniqueIndexes`, because a maintenance pass must not apply DDL the serving process or the
+ * owner's one-shot owns; on `--store pg-columns` the schema is verified for the four entities this
+ * reads, and a shortfall refuses the run by name rather than failing on the first bill.
+ */
+export async function runBillWithholdingBackfill(
+  options: BillWithholdingBackfillOptions,
+  connect: () => PgConnection = () => createNodePgConnection(parsePgEnvConfig()),
+): Promise<BillWithholdingBackfillReport> {
+  const schemaOpt = options.schema !== null ? { schema: options.schema } : {};
+  const manifest =
+    options.manifestPath !== null
+      ? loadManifestFromJson(await readFile(options.manifestPath, "utf8"))
+      : await loadBuiltinPack(options.pack ?? "");
+  const runId = randomUUID();
+  const refused = (
+    reason: BackfillRunRefusal,
+    detail: string,
+    anchored: boolean,
+  ): BillWithholdingBackfillReport => ({
+    runId,
+    plan: options.plan,
+    store: options.store,
+    anchored,
+    refusal: { reason, detail },
+    tenants: [],
+    ok: false,
+  });
+  if (!billWithholdingStampedFor(manifest)) {
+    return refused(
+      "not_stamped_here",
+      "this manifest's Bill declares no withholding_total, or bill recognition does not stamp it, so the" +
+        " serving API would neither read nor keep the figure",
+      false,
+    );
+  }
+  const auditChain = resolveAuditChain({
+    env: process.env,
+    file: options.auditChainConfig !== null ? await loadAuditChainFile(options.auditChainConfig) : null,
+  });
+  if (auditChain.kind === "refused") throw new Error(formatAuditChain(auditChain));
+
+  const ambient = new AmbientTransactions();
+  const pooled = connect();
+  try {
+    const conn = ambient.wrap(pooled);
+    let base: TransactionalEntityStore;
+    if (options.store === "pg-columns") {
+      const plans = columnPlansForManifest(manifest, {
+        schema: options.schema ?? COLUMN_STORE_DEFAULT_SCHEMA,
+      });
+      const wanted = new Map(
+        [...plans].filter(([entity]) => (BACKFILL_ENTITIES as readonly string[]).includes(entity)),
+      );
+      // The search wrapper and pgcrypto serve requests this pass never issues.
+      const shortfalls = (await verifyColumnSchema(conn, wanted, [])).filter(
+        (s) => s.kind !== "search_function_absent" && s.kind !== "extension_absent",
+      );
+      if (shortfalls.length > 0) {
+        const shown = shortfalls.slice(0, 8).map((s) => `${s.kind} ${s.object}`);
+        return refused(
+          "schema_not_provisioned",
+          `${shortfalls.length} shortfall(s): ${shown.join("; ")} — run 'operate-server column-schema'` +
+            " as the schema's owner, then run this as the serving role",
+          auditChain.kind === "resolved",
+        );
+      }
+      const built = backfillColumnStore(conn, manifest, options.schema);
+      if (built.kind === "refused") {
+        return refused("encrypted_column_unsupported", built.detail, auditChain.kind === "resolved");
+      }
+      base = built.store;
+    } else {
+      base = new PostgresEntityStore(conn, { ...schemaOpt, manifest });
+    }
+    const store = withDatetimeWireType(
+      withDecimalWireType(base, decimalFieldIndexFromManifest(manifest)),
+      temporalFieldIndexFromManifest(manifest),
+    );
+
+    const emitter = new PostgresAuditEmitter(conn, {
+      ...schemaOpt,
+      ...(auditChain.kind === "resolved"
+        ? { chain: auditChainStore(conn, auditChain.material.config) }
+        : {}),
+    });
+    const auditor = buildEntityAuditRecorder({
+      sink: emitter,
+      currentTransaction: () => ambient.current(),
+      onRefused: (event, reason) =>
+        console.error(
+          `[backfill] audit row for Bill ${event.recordId ?? "?"} (tenant ${event.tenantId}) could not` +
+            ` be written: ${reason} — the stamp was rolled back`,
+        ),
+    });
+
+    const tenantIds =
+      options.tenantId !== null
+        ? [options.tenantId]
+        : await new PostgresTenantSource(conn, {
+            ...schemaOpt,
+            statuses: BACKFILL_TENANT_STATUSES,
+          }).activeTenantIds();
+    const ownManifests = new PostgresTenantManifestStore(conn, schemaOpt);
+    const bill = (manifest.entities ?? []).find((e) => e.name === "Bill");
+    const classified =
+      bill === undefined
+        ? []
+        : resolvedClassifiedFields(bill, manifest.traits ?? []).map((f) => ({
+            name: f.field,
+            classification: f.classification,
+          }));
+    const paymentEntity = (manifest.entities ?? []).some((e) => e.name === "Payment") ? "Payment" : null;
+    const origin = { kind: "maintenance", operation: "bill_withholding_backfill", runId } as const;
+    let n = 0;
+    const tenants: TenantBackfillReport[] = [];
+    for (const tenantId of tenantIds) {
+      // A tenant serving its own activated manifest may declare a different Bill, or have its records
+      // in its own schema; reading it through the deployment's pack would answer the wrong rows.
+      let own: Record<string, unknown> | null;
+      try {
+        own = await ownManifests.activeManifestFor(tenantId);
+      } catch (err) {
+        tenants.push({
+          tenantId,
+          refusal: {
+            reason: "tenant_manifest_unreadable",
+            detail: err instanceof Error ? err.name : "unknown error",
+          },
+          bills: [],
+        });
+        continue;
+      }
+      if (own !== null) {
+        tenants.push({
+          tenantId,
+          refusal: {
+            reason: "tenant_manifest_unsupported",
+            detail: "this tenant serves its own activated manifest",
+          },
+          bills: [],
+        });
+        continue;
+      }
+      tenants.push(
+        await backfillTenantBills({
+          store,
+          tenantId,
+          plan: options.plan,
+          auditor,
+          origin,
+          classified,
+          paymentEntity,
+          now: () => new Date(),
+          newRequestId: () => {
+            n += 1;
+            return systemRequestId(origin, n);
+          },
+        }),
+      );
+    }
+    return {
+      runId,
+      plan: options.plan,
+      store: options.store,
+      anchored: auditChain.kind === "resolved",
+      refusal: null,
+      tenants,
+      ok: !backfillRefusedAnything(null, tenants),
+    };
+  } finally {
+    await pooled.close();
   }
 }

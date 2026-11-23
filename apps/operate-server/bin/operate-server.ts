@@ -31,6 +31,7 @@ import {
   runColumnSchema,
   runDocumentIndexes,
   runPruneLinks,
+  runBillWithholdingBackfill,
   runRekey,
   runReplay,
   runVerifyChain,
@@ -44,6 +45,7 @@ import { installProcessLifecycle } from "../src/process-lifecycle.js";
 const SHUTDOWN_DRAIN_ALLOWANCE_MS = 2_000;
 import { formatRekeyColumnKeys, formatRekeyResult, formatRekeySurvey, formatRewrapKek } from "../src/rekey.js";
 import { formatSetCredentialReport, runSetCredential } from "../src/set-credential.js";
+import { billWithholdingBackfillCommand } from "../src/bill-withholding-backfill-command.js";
 import {
   aiPseudonymLookupHelpText,
   formatAiPseudonymLookupReport,
@@ -356,6 +358,13 @@ async function main(): Promise<number> {
   }
   if (argv[0] === "rekey") {
     return runRekeyCommand(argv.slice(1));
+  }
+  if (argv[0] === "backfill-bill-withholding") {
+    return billWithholdingBackfillCommand(argv.slice(1), {
+      run: (options) => runBillWithholdingBackfill(options),
+      stdout: (text) => process.stdout.write(text),
+      stderr: (text) => process.stderr.write(text),
+    });
   }
   if (argv[0] === "verify-chain") {
     return runVerify(argv.slice(1));

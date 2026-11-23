@@ -147,15 +147,17 @@ describe("the write surface over resolved erp-core", () => {
   });
 
   it("derives the effect-stamped fields from the effects compile wires, and nothing else", () => {
-    // Measured, not chosen: three fields across two documents, each one an `input.store.update` an
-    // effect issues against the document that triggered it — and one a goods receipt advances on
-    // the order line it receives, which both the receipt and the three-way match read back.
+    // Measured, not chosen: seven stamps. Six are three fields on each of the two documents, each
+    // one an `input.store.update` an effect issues against the document that triggered it; the
+    // seventh is the one a goods receipt advances on the order line it receives, which both the
+    // receipt and the three-way match read back.
     const stamps = defaultEffectStamps(CORE)
       .map((s) => `${s.entity}.${s.field}`)
       .sort();
     expect(stamps).toEqual([
       "Bill.booking_rate",
       "Bill.paid_at",
+      "Bill.withholding_total",
       "Invoice.booking_rate",
       "Invoice.paid_at",
       "Invoice.withholding_total",
@@ -831,5 +833,16 @@ describe("the UI schema", () => {
     // Without the surfaces the field stays an input, which is the control.
     const bare = buildUiSchema(CORE, new Date("2026-06-03T00:00:00Z")).entities.find((e) => e.name === "Invoice")!.fields;
     expect(bare.find((f) => f.name === "booking_rate")?.readOnly).toBeUndefined();
+  });
+
+  it("shows a bill's stamped withholding and settlement date read-only", () => {
+    const surfaces = buildWriteSurfaces(CORE, defaultEffectStamps(CORE));
+    const fields = buildUiSchema(CORE, new Date("2026-06-03T00:00:00Z"), surfaces).entities.find(
+      (e) => e.name === "Bill",
+    )!.fields;
+    const ro = (n: string) => fields.find((f) => f.name === n)?.readOnly;
+    expect(ro("withholding_total")).toBe(true);
+    expect(ro("paid_at")).toBe(true);
+    expect(ro("total")).toBeUndefined();
   });
 });

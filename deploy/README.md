@@ -991,6 +991,63 @@ debited — correct it by manual journal.
 strict, so an older binary reading a row that carries `whtPayableAccountCode` refuses the whole
 document and reads every finance setting as empty. Remove the key before rolling back.
 
+### Upgrading to bill withholding settlement (ADR-0466)
+
+`Bill` gains two fields, `withholding_total` (stamped when a bill with withholding is approved) and
+`paid_at`. A bill is now owed, aged, revalued and settled at its total less the withholding, so
+paying the supplier the net settles it.
+
+- **On `--store pg-columns`, add the columns before the API boots as `crossengin_app`.** The
+  compose file has no step for it, so run `column-schema` once, as the database owner, before the
+  upgraded API starts; otherwise the boot refuses, naming the missing column. `--store pg` needs
+  nothing.
+
+  ```sh
+  docker compose run --rm --no-deps \
+    -e PGUSER="$(grep '^POSTGRES_USER=' .env | cut -d= -f2-)" \
+    -e PGPASSWORD="$(grep '^POSTGRES_PASSWORD=' .env | cut -d= -f2-)" \
+    api node apps/operate-server/dist/bin/operate-server.js \
+    column-schema --pack erp-core --grant-to crossengin_app
+  ```
+
+  `run` rather than `exec`, because the API container is the one refusing to start.
+- **Bills approved before the upgrade carry no stamp**, so they still cannot settle at the net. Stamp
+  them from their own posted ledger entry:
+
+  ```sh
+  docker compose exec api node apps/operate-server/dist/bin/operate-server.js \
+    backfill-bill-withholding --pack erp-core --store pg --all-tenants --plan
+  docker compose exec api node apps/operate-server/dist/bin/operate-server.js \
+    backfill-bill-withholding --pack erp-core --store pg --all-tenants
+  ```
+
+  Use the pack and store the API serves (`OPERATE_PACK`, and `--store pg-columns` if that is it). `--plan` writes nothing. The run takes
+  the withheld amount from the bill's `<bill_number>-GL` entry (never from today's tax rates), stamps
+  it under the bill's row lock with one audit row, refuses a bill whose entry does not add up by name
+  and carries on, and reports which bills are now covered by what was paid. It never marks a bill
+  paid: an already-paid-at-the-net bill reads `now_covered`, and `mark_paid` will now accept it.
+  A bill already carrying a figure its entry does not support (a key a client wrote into the
+  document before the field was server-owned) is overwritten with the ledger's figure, and the report
+  and the audit row name what was replaced. It exits 1 if any bill or tenant was refused; a re-run
+  writes nothing it has already stamped. A tenant serving its own activated manifest is refused on
+  every run.
+- **Bills whose withholding you entered by manual journal**, as `GO-LIVE.md` advised before this
+  change, carry no withholding line in their `-GL` entry, so the backfill leaves them unstamped and
+  they are still owed the gross: such a bill cannot be marked paid and stays in the AP aging at the
+  withheld amount. Nothing in this release stamps them, because the field is server-owned and an
+  approved bill is locked, and re-entering one is not clean either: voiding a bill that has payments
+  applied is refused `document_partly_settled` until they are refunded, so you would refund the
+  supplier payment, void, re-enter the bill and pay again, and reverse your manual journal. List
+  such bills before upgrading. `--allow-uncovered-settlement` lets them be marked paid, but it turns
+  the settlement check off for every document, not just these (ADR-0466 open question 8).
+- **A tenant's own manifest whose `Bill` (or `Invoice`) does not declare `withholding_total`** now
+  refuses approving a withheld bill (or sending a withheld invoice) `409 withholding_unrecorded`.
+  For a bill this replaces a posting that could never settle (accounts payable credited at the net
+  while every reader owed the gross). For an invoice it is stricter than before on `--store pg`,
+  where the stamp used to land as an undeclared key and the invoice settled at the net; on
+  `--store pg-columns` the stamp was dropped and such an invoice could never settle. Declare the
+  field on the override to keep sending withheld invoices.
+
 ### Before an upgrade that changes the schema
 
 - **Take a dump, because there is no down-migration.** That is a property of how `migrate` works

@@ -3,7 +3,7 @@ import { buildIncomingRequest, type HandlerOutput } from "@crossengin/api-gatewa
 import { buildErpCorePack } from "@crossengin/pack-erp-core";
 import { describe, expect, it } from "vitest";
 
-import { compileOperateServer, type CompiledOperateServer } from "./compile.js";
+import { compileOperateServer, defaultEffectStamps, type CompiledOperateServer } from "./compile.js";
 import { routeFromSpec } from "./operations.js";
 import { InMemoryEntityStore, type EntityRecord } from "./store.js";
 
@@ -32,10 +32,10 @@ interface Harness {
   entries(): Promise<readonly EntityRecord[]>;
 }
 
-function harness(today = "2026-06-15"): Harness {
+function harness(today = "2026-06-15", served = manifest): Harness {
   const store = new InMemoryEntityStore();
   const clock = { now: () => new Date(`${today}T12:00:00.000Z`) };
-  const server = compileOperateServer(manifest, {
+  const server = compileOperateServer(served, {
     store,
     clock,
     principalRoles: (p) => ({ primaryRole: p?.grantedScopes[0] ?? "anonymous" }),
@@ -333,6 +333,119 @@ describe("withholding is not owed by the payer", () => {
   });
 });
 
+async function agingAp(h: Harness): Promise<{ totalOpen: number; documents: { number: string; open: number }[] }> {
+  const out = await h.call("meta.aging.read");
+  if (out.kind !== "json") throw new Error("aging");
+  return (out.body as { sections: { ap: { totalOpen: number; documents: { number: string; open: number }[] } } }).sections.ap;
+}
+
+/** A bill of 100 on one line under WHT10, approved: AP credit 90, withholding payable credit 10. */
+async function withheldBill(h: Harness, approve = true, extra: Record<string, unknown> = {}): Promise<string> {
+  const wht = await taxCode(h, "WHT10", "10.000", "withholding");
+  const bill = await h.ok("bill.create", {
+    body: {
+      vendor_id: ACCOUNT, bill_date: "2026-06-15", due_date: "2026-07-15", subtotal: "100.00", tax_total: "0.00", total: "100.00",
+      ...extra,
+    },
+  });
+  const id = String(bill["id"]);
+  await h.ok("billLine.create", {
+    body: { bill_id: id, description: "x", unit_price: "100.00", amount: "100.00", tax_code_id: wht },
+  });
+  if (approve) await h.ok("bill.approve", { params: { id } });
+  return id;
+}
+
+describe("withholding is not owed to the vendor", () => {
+  it("approval stamps the withheld amount on the bill", async () => {
+    const h = harness();
+    const bill = await withheldBill(h);
+    expect(Number((await h.store.get(TENANT, "Bill", bill))?.["withholding_total"])).toBe(10);
+  });
+
+  it("a payment of the total less withholding settles the bill and clears AP", async () => {
+    const h = harness();
+    const bill = await withheldBill(h);
+    await payment(h, { direction: "outbound", bill_id: bill, amount: "90.00" });
+    const after = await h.store.get(TENANT, "Bill", bill);
+    expect(after?.["state"]).toBe("paid");
+    expect(typeof after?.["paid_at"]).toBe("string");
+    expect((await h.balances()).get("accounts_payable")).toBe(0);
+  });
+
+  it("a payment short of it leaves the bill open, mark_paid is refused for the real remainder, and the rest settles it", async () => {
+    const h = harness();
+    const bill = await withheldBill(h);
+    await payment(h, { direction: "outbound", bill_id: bill, amount: "45.00" });
+    expect((await h.store.get(TENANT, "Bill", bill))?.["state"]).toBe("approved");
+    expect((await agingAp(h)).totalOpen).toBe(45);
+    const out = await h.call("bill.mark_paid", { params: { id: bill } });
+    expect(out.kind === "json" ? out.status : 0).toBe(422);
+    expect(JSON.stringify(out.kind === "json" ? out.body : null)).toContain("45.00 of 90.00");
+    await payment(h, { direction: "outbound", bill_id: bill, amount: "45.00" });
+    expect((await h.store.get(TENANT, "Bill", bill))?.["state"]).toBe("paid");
+    expect((await h.balances()).get("accounts_payable")).toBe(0);
+  });
+
+  it("a known gap: paying the gross settles the bill and leaves AP in debit by the withholding, unreported", async () => {
+    // Pinned as current behaviour, not as the rule: coverage is `applied >= owed`, so an overpayment
+    // settles and nothing names the 10 the vendor was paid that belongs to the authority. The
+    // invoice side has the same shape.
+    const h = harness();
+    const bill = await withheldBill(h);
+    await payment(h, { direction: "outbound", bill_id: bill, amount: "100.00" });
+    expect((await h.store.get(TENANT, "Bill", bill))?.["state"]).toBe("paid");
+    expect((await h.balances()).get("accounts_payable")).toBe(10);
+  });
+
+  it("refuses a client write of the stamped withholding on create and on update", async () => {
+    const h = harness();
+    const created = await h.call("bill.create", {
+      body: {
+        vendor_id: ACCOUNT, bill_date: "2026-06-15", due_date: "2026-07-15", subtotal: "100.00", tax_total: "0.00",
+        total: "100.00", withholding_total: "10.00",
+      },
+    });
+    expect(created.kind === "json" ? [created.status, (created.body as { error: string }).error] : null).toEqual([
+      422,
+      "field_server_owned",
+    ]);
+    const bill = await withheldBill(h, false);
+    const patched = await h.call("bill.update", { params: { id: bill }, body: { withholding_total: "100.00" } });
+    expect(patched.kind === "json" ? [patched.status, (patched.body as { error: string }).error] : null).toEqual([
+      422,
+      "field_server_owned",
+    ]);
+  });
+
+  it("a deployment whose Bill does not declare the field refuses a withheld approval and writes nothing", async () => {
+    const undeclared = {
+      ...manifest,
+      entities: (manifest.entities ?? []).map((e) =>
+        e.name === "Bill" ? { ...e, fields: e.fields.filter((f) => f.name !== "withholding_total") } : e,
+      ),
+    };
+    const h = harness("2026-06-15", undeclared);
+    expect(defaultEffectStamps(undeclared).some((s) => s.entity === "Bill" && s.field === "withholding_total")).toBe(false);
+    const bill = await withheldBill(h, false);
+    const out = await h.call("bill.approve", { params: { id: bill } });
+    expect(out.kind === "json" ? [out.status, (out.body as { error: string }).error] : null).toEqual([
+      409,
+      "withholding_unrecorded",
+    ]);
+    expect((await h.store.get(TENANT, "Bill", bill))?.["state"]).toBe("draft");
+    expect(await h.entries()).toEqual([]);
+    expect(await h.store.list(TENANT, "JournalLine")).toEqual([]);
+  });
+
+  it("voiding an unpaid withheld bill returns the withholding payable to zero", async () => {
+    const h = harness();
+    const bill = await withheldBill(h);
+    await h.ok("bill.void", { params: { id: bill } });
+    expect(Object.fromEntries(await h.balances())).toEqual({ accounts_payable: 0, wht_payable: 0, expense: 0 });
+  });
+});
+
 describe("leaving the state a posting stands in reverses the posting", () => {
   async function approvedBill(h: Harness): Promise<string> {
     const bill = await h.ok("bill.create", {
@@ -564,6 +677,20 @@ describe("the unrealized FX revaluation reverses itself and posts once per perio
     }
     expect((await h.entries()).filter((e) => String(e["entry_number"]).includes("FXREVAL")).length).toBe(2);
     expect(await unrealizedIn(h, "2026-06-01", "2026-06-30")).toBe(-10);
+  });
+
+  it("revalues an open withheld foreign bill on the 90 owed, not on its gross 100", async () => {
+    const h = harness();
+    const usd = await h.ok("currency.create", { body: { code: "USD", name: "US Dollar", decimal_places: 2 } });
+    const eur = await h.ok("currency.create", { body: { code: "EUR", name: "Euro", decimal_places: 2 } });
+    await h.ok("exchangeRate.create", { body: { from_currency_id: eur["id"], to_currency_id: usd["id"], rate_date: "2026-06-01", rate: "1.1000000000" } });
+    await h.ok("exchangeRate.create", { body: { from_currency_id: eur["id"], to_currency_id: usd["id"], rate_date: "2026-06-30", rate: "1.2000000000" } });
+    const bill = await withheldBill(h, true, { currency: "EUR", bill_date: "2026-06-05" });
+    expect(Number((await h.store.get(TENANT, "Bill", bill))?.["withholding_total"])).toBe(10);
+    const ids = await periods(h, [{ name: "2026-06", start: "2026-06-01", end: "2026-06-30" }]);
+    await h.ok("fiscalPeriod.close", { params: { id: ids.get("2026-06")! } });
+    // A liability of EUR 90 moving from 1.1 to 1.2 is a loss of 9.00; on the gross it would be 10.00.
+    expect(await unrealizedIn(h, "2026-06-01", "2026-06-30")).toBe(9);
   });
 
   it("a re-close after the rate moved posts only the difference, and reverses it", async () => {

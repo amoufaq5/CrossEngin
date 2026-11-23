@@ -1360,12 +1360,15 @@ describe("federated identity is not documented as a path that cannot be followed
   it("every documented serve command carries the login, and its document the two secrets", () => {
     // The managed-cloud guide's command omitted `--credential-login` while its troubleshooting
     // sent the reader to `/login`: a form that refused every password, because the route it posts
-    // to was not mounted. A serve command is a fenced `operate-server.js` invocation with `--pack`.
+    // to was not mounted. A serve command is a fenced `operate-server.js` invocation with `--pack`
+    // and no subcommand token after the script: `column-schema --pack …` and
+    // `backfill-bill-withholding --pack …` are maintenance runs, which mount no login.
     let commands = 0;
     for (const { doc, src } of docs) {
       for (const block of fencedBlocks(src)) {
         const joined = block.replace(/\\\n\s*/g, " ");
         if (!/operate-server\.js\b[^\n]*--pack\b/.test(joined)) continue;
+        if (/operate-server\.js\s+[a-z][a-z-]*/.test(joined)) continue;
         commands += 1;
         for (const flag of ["--credential-login", "--jwt-issuer", "--jwt-audience"]) {
           expect(joined, `${doc}: a serve command without ${flag}`).toContain(flag);

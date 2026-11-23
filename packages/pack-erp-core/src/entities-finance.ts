@@ -184,6 +184,13 @@ export const BILL_ENTITY: Entity = {
     { name: "tax_total", type: { kind: "decimal", precision: 16, scale: 2, min: 0 }, required: true, default: { kind: "literal", value: 0 } },
     { name: "total", type: { kind: "decimal", precision: 16, scale: 2, min: 0 }, required: true, default: { kind: "literal", value: 0 } },
     { name: "currency", type: { kind: "text", maxLength: 3 }, required: true, default: { kind: "literal", value: "USD" } },
+    // Tax this business withholds from the vendor at recognition (credited to the
+    // withholding-payable account; not part of `total`). Stamped by the recognition effect
+    // from the lines' withholding TaxCodes; settlement and AP aging subtract it from `total`.
+    // The same precision as `total`, because the stamp is written without validation.
+    { name: "withholding_total", type: { kind: "decimal", precision: 16, scale: 2, min: 0 } },
+    // Stamped by payment application when payments first cover the bill.
+    { name: "paid_at", type: { kind: "datetime" } },
     // Foreign→functional rate captured at approval; period-close revaluation compares the
     // period-end rate against this (absent → treated as 1).
     { name: "booking_rate", type: { kind: "decimal", precision: 20, scale: 10, min: 0 } },

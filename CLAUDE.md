@@ -10296,6 +10296,17 @@ Two constraints worth knowing before suggesting a host:
   section). Live on PG 16 as `crossengin_app` on both stores: 21 accounts, 18 settings, idempotent
   rerun, opt-out, refusal under `--job-actor-role erp_viewer`, the first invoice debiting 1100, and a
   withheld bill crediting 2210.
+- **A withheld bill settles at the net** (ADR-0466). `Bill` declares `withholding_total` and
+  `paid_at`; approval stamps the withholding, and payment application, the coverage guard, AP aging
+  and FX revaluation owe `total − withholding`. The stamp and every reader are wired by one condition
+  per document, which includes *the document declares the field*, and a document whose lines carry
+  withholding it cannot record is refused `409 withholding_unrecorded` before anything is written.
+  Bills approved before the upgrade are stamped from their own `-GL` entry by
+  `operate-server backfill-bill-withholding` (document currency, lines matched by description and
+  never by account, one audit row per stamp, `--plan` read-only, exit 1 on any refusal); on
+  `pg-columns` run `column-schema` first. Remitting 2210 to the authority still posts nothing (a
+  manual journal, never a `Payment`; ADR-0466 open question 1), and a gross payment still leaves AP
+  in debit, unreported. Live on PG 16 as `crossengin_app` on both stores.
 
 ## What's actually left
 
@@ -16046,7 +16057,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 459 records; 380 Accepted, 79 Proposed (the
+title or status change cannot drift. 460 records; 381 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

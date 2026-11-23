@@ -7,13 +7,13 @@ import {
   buildIncomingRequest,
   type OpaqueTokenLookup,
 } from "@crossengin/api-gateway-runtime";
-import { resolvedClassifiedFields } from "@crossengin/kernel/ddl";
+import { resolvedClassifiedFields, resolvedFields } from "@crossengin/kernel/ddl";
 import { resolveManifest, type Manifest, type ManifestRegistry } from "@crossengin/kernel/manifest";
 import { ERP_CORE_PACK_SLUG, buildErpCorePack } from "@crossengin/pack-erp-core";
 import { buildErpRetailPack } from "@crossengin/pack-erp-retail";
 import { describe, expect, it } from "vitest";
 
-import { buildOperateGateway, compileOperateServer } from "./compile.js";
+import { buildOperateGateway, compileOperateServer, defaultEffectStamps } from "./compile.js";
 import { InMemoryEntityStore } from "./store.js";
 import { buildClassifiedFieldIndex } from "./write-mask.js";
 
@@ -1738,5 +1738,41 @@ describe("compileOperateServer — an unset lifecycle state is the initial state
     const edited = await callOperation(compiled, "claim.update", { id }, { title: "t2" });
     expect(edited.status).toBe(200);
     expect(edited.body["title"]).toBe("t2");
+  });
+});
+
+describe("the withholding stamp is wired exactly where the document declares the field", () => {
+  const CORE = buildErpCorePack();
+  const withoutField = (entity: string): Manifest => ({
+    ...CORE,
+    entities: (CORE.entities ?? []).map((e) =>
+      e.name === entity ? { ...e, fields: e.fields.filter((f) => f.name !== "withholding_total") } : e,
+    ),
+  });
+  const stamped = (m: Manifest): readonly string[] =>
+    defaultEffectStamps(m)
+      .filter((s) => s.field === "withholding_total")
+      .map((s) => s.entity)
+      .sort();
+
+  it("stamps both documents on erp-core, which declares the field on both", () => {
+    expect(stamped(CORE)).toEqual(["Bill", "Invoice"]);
+  });
+
+  it("drops only the document that does not declare it", () => {
+    // A stamp on an undeclared field is a JSONB key on `--store pg` and nothing on `--store
+    // pg-columns`, so listing it would make the field read as a server fact it is not.
+    expect(stamped(withoutField("Bill"))).toEqual(["Invoice"]);
+    expect(stamped(withoutField("Invoice"))).toEqual(["Bill"]);
+  });
+
+  it("stamps no field an entity does not resolve to", () => {
+    const entities = new Map((CORE.entities ?? []).map((e) => [e.name, e]));
+    for (const s of defaultEffectStamps(CORE)) {
+      const entity = entities.get(s.entity);
+      expect(entity, s.entity).toBeDefined();
+      const names = resolvedFields(entity!, CORE.traits ?? []).map((f) => f.name);
+      expect(names, `${s.entity}.${s.field}`).toContain(s.field);
+    }
   });
 });

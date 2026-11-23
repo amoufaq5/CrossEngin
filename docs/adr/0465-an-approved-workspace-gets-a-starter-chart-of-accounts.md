@@ -219,11 +219,9 @@ and refunds mirror the posted entry line by line (ADR-0429), so they follow.
 
 ## Open questions
 
-1. **Bill withholding cannot settle.** Nothing records the withheld amount on a bill (only invoices
-   stamp `withholding_total`). Paying the supplier the net leaves the bill open; paying the gross
-   leaves accounts payable in debit. Nothing posts the remittance of 2210 to the authority either.
-   `GO-LIVE.md` says so, and the remedy is a stamped field on `Bill` plus the payment application,
-   aging and FX documents reading it.
+1. ~~**Bill withholding cannot settle.**~~ — **closed by ADR-0466**: `Bill` stamps
+   `withholding_total` at approval and every reader owes the net; legacy bills are stamped by
+   `operate-server backfill-bill-withholding`. The remittance of 2210 is ADR-0466's open question 1.
 2. **The WHT reconciliation report counts void invoices and credit notes**, which copy
    `withholding_total`, so it can disagree with 1310 now that 1310 is posted to.
 3. **A matching type is not a matching account.** On a tenant with its own numbering, an existing

@@ -8,6 +8,7 @@ import {
   type ChildRemovers,
   type EntityWriteAuditEvent,
   type EntityWriteAuditor,
+  type SystemWriteOrigin,
 } from "@crossengin/operate-runtime";
 
 import { auditActor, auditEntry, type ChildDetachmentRows } from "./audit-log-store.js";
@@ -181,11 +182,19 @@ export function entityAuditEntry(
 function reasonOf(event: EntityWriteAuditEvent): string | null {
   const act = event.detail === null ? null : `${event.action}:${event.detail}`;
   if (event.origin === undefined) return act;
-  const by =
-    event.origin.kind === "job"
-      ? `job:${event.origin.jobId} run:${event.origin.runId}`
-      : `provisioning:${event.origin.operation} id:${event.origin.provisioningId}`;
+  const by = originReason(event.origin);
   return act === null ? by : `${by} ${act}`;
+}
+
+function originReason(origin: SystemWriteOrigin): string {
+  switch (origin.kind) {
+    case "job":
+      return `job:${origin.jobId} run:${origin.runId}`;
+    case "provisioning":
+      return `provisioning:${origin.operation} id:${origin.provisioningId}`;
+    case "maintenance":
+      return `maintenance:${origin.operation} run:${origin.runId}`;
+  }
 }
 
 class NoAmbientTransaction extends Error {

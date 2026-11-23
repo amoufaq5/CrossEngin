@@ -8,7 +8,7 @@ import { compileOperateServer } from "./compile.js";
 import type { EntityWriteAuditEvent } from "./entity-audit.js";
 import { ReadCeilingExceeded } from "./list-drain.js";
 import { InMemoryEntityStore } from "./store.js";
-import { systemWriteOriginOf, type SystemActor } from "./system-writer.js";
+import { systemRequestId, systemWriteOriginOf, type SystemActor } from "./system-writer.js";
 
 const TENANT = "11111111-1111-4111-8111-111111111111";
 const OTHER = "22222222-2222-4222-8222-222222222222";
@@ -174,6 +174,44 @@ describe("buildSystemEntityAccess — a background write runs the request pipeli
     expect(seen).toHaveLength(1);
     expect(seen[0]?.requestId).toMatch(/^req_prov_areq01HX9_[0-9]+$/);
     expect(seen[0]?.origin).toEqual(origin);
+  });
+
+  it("mints a req_maint_ request id for a maintenance write, carrying the run id", async () => {
+    const { compiled } = setup();
+    const origin = { kind: "maintenance", operation: "bill_withholding_backfill", runId: "bwb-42" } as const;
+    const seen: { requestId: string; origin: unknown }[] = [];
+    const recording: Handler = (input) => {
+      seen.push({ requestId: input.request.id, origin: systemWriteOriginOf(input.principal) });
+      return { kind: "json", status: 201, body: { id: "rec_1" } };
+    };
+    compiled.handlers.register("ledgerAccount.create", recording);
+    const access = compiled.systemEntityAccess.forTenant(TENANT, { roles: ["erp_admin"], origin });
+    await access.create("LedgerAccount", { account_code: "1000", name: "Cash", account_type: "asset" });
+    expect(seen[0]?.requestId).toMatch(/^req_maint_bwb42_[0-9]+$/);
+    expect(seen[0]?.origin).toEqual(origin);
+  });
+
+  it("spells a store-direct write's request id exactly as a dispatch would", async () => {
+    const { compiled } = setup();
+    const origin = { kind: "maintenance", operation: "bill_withholding_backfill", runId: "bwb-42" } as const;
+    const ids: string[] = [];
+    compiled.handlers.register("ledgerAccount.create", (input) => {
+      ids.push(input.request.id);
+      return { kind: "json", status: 201, body: { id: "rec_1" } };
+    });
+    const access = compiled.systemEntityAccess.forTenant(TENANT, { roles: ["erp_admin"], origin });
+    await access.create("LedgerAccount", { account_code: "1000", name: "Cash", account_type: "asset" });
+    expect(ids).toEqual([systemRequestId(origin, 1)]);
+    expect(systemRequestId(origin, 7)).toBe("req_maint_bwb42_7");
+  });
+
+  it("refuses a maintenance dispatch that writes a server-owned field, so such a correction goes through the store", async () => {
+    const { compiled } = setup();
+    const origin = { kind: "maintenance", operation: "bill_withholding_backfill", runId: "bwb-42" } as const;
+    const access = compiled.systemEntityAccess.forTenant(TENANT, { roles: ["erp_admin"], origin });
+    const r = await access.update("Bill", "rec_any", { withholding_total: "10.00" });
+    expect(r).toMatchObject({ kind: "refused", status: 422 });
+    expect(JSON.stringify(r)).toContain("field_server_owned");
   });
 
   it("still mints a req_job_ request id for a job write, carrying the run id", async () => {

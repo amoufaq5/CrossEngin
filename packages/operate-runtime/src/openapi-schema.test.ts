@@ -212,8 +212,9 @@ describe("entitySchemas over the real erp-core pack", () => {
 
   it("describes the RESOLVED field set, which is a third wider than the entity's own", () => {
     // ADR-0361's class, and the whole correctness question for this module. Measured: 51 of 51
-    // entities differ, 427 own fields against 631 resolved (426 and 630 until
-    // `BillLine.purchase_order_line_id`) — 204 outside the narrow aperture,
+    // entities differ, 429 own fields against 633 resolved (426 and 630 until
+    // `BillLine.purchase_order_line_id`, 427 and 631 until `Bill.withholding_total` and
+    // `Bill.paid_at`) — 204 outside the narrow aperture,
     // exactly 51 x 4 because every entity is `auditable`. The sibling artifact `ui-schema.ts` reads
     // the narrow set, which is why `created_at`/`updated_at` appear in no view; measured through the
     // real create handler they ARE in the response body.
@@ -227,8 +228,8 @@ describe("entitySchemas over the real erp-core pack", () => {
         entitySchemas(e, traits, null, surfaceOf(e)).response.properties ?? {},
       ).length;
     }
-    expect(own).toBe(427);
-    expect(resolved).toBe(631);
+    expect(own).toBe(429);
+    expect(resolved).toBe(633);
     // One `id` added per entity, and nothing dropped.
     expect(props).toBe(resolved + entities.length);
   });
@@ -329,6 +330,16 @@ describe("entitySchemas over the real erp-core pack", () => {
     // The control: an ordinary declared field is on both.
     expect(v.create.properties?.["total"]).toBeDefined();
     expect(v.update.properties?.["total"]).toBeDefined();
+  });
+
+  it("describes a bill's stamped withholding and settlement date in responses and in no request", () => {
+    const v = entitySchemas(entity("Bill"), traits, null, surfaceOf(entity("Bill")));
+    for (const owned of ["withholding_total", "paid_at", "booking_rate"]) {
+      expect(v.response.properties?.[owned], owned).toBeDefined();
+      expect(v.create.properties?.[owned], owned).toBeUndefined();
+      expect(v.update.properties?.[owned], owned).toBeUndefined();
+    }
+    expect(v.create.properties?.["total"]).toBeDefined();
   });
 
   it("publishes a lifecycle state field as the server enforces it, not as a free enum", () => {
