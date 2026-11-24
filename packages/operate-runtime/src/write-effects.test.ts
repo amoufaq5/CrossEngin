@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import { DEFAULT_DRAIN_PAGE_SIZE, isReadCeilingExceeded, ReadCeilingExceeded } from "./list-drain.js";
 import { settlementCoverageGuard } from "./write-guards.js";
+import { PostingRefused } from "./posting-period.js";
+import type { FinanceSettings, TenantSettings } from "./settings.js";
+import type { TaxRemittanceWiring } from "./tax-remittance.js";
 import { InMemoryEntityStore, ReferenceNotFound, type EntityRecord, type EntityStore } from "./store.js";
 import {
   bookingRateStampEffect,
@@ -13,6 +16,10 @@ import {
   paymentSettlementGlPostingEffect,
   recognitionGlPostingEffect,
   runWriteEffects,
+  taxRemittanceGlPostingEffect,
+  taxRemittanceReversalCheckEffect,
+  taxRemittanceStampClearEffect,
+  taxReturnFilingCheckEffect,
   unrealizedFxRevaluationEffect,
   whtCertificateClearingEffect,
   type WriteEffectInput,
@@ -2501,5 +2508,373 @@ describe("bill withholding — what is owed is the total less the stamped withho
     // 90 open × (1.2 − 1.1) = 9; reading the gross would revalue 100 and credit AP 10.
     expect(await revalue("withholding_total")).toBeCloseTo(9, 6);
     expect(await revalue(undefined)).toBeCloseTo(10, 6);
+  });
+});
+
+// ---- Tax remittance: every refusal comes before the first write (ADR-0467) -----------------
+
+/** Records every write once armed, so a refusal can be shown to have preceded the first one. */
+class WriteRecordingStore extends InMemoryEntityStore {
+  armed = false;
+  readonly writes: string[] = [];
+  override create(tenantId: string, entity: string, data: EntityRecord): Promise<EntityRecord> {
+    if (this.armed) this.writes.push(`create ${entity}`);
+    return super.create(tenantId, entity, data);
+  }
+  override update(tenantId: string, entity: string, id: string, patch: EntityRecord): Promise<EntityRecord | null> {
+    if (this.armed) this.writes.push(`update ${entity}`);
+    return super.update(tenantId, entity, id, patch);
+  }
+}
+
+const REMIT_WIRING: TaxRemittanceWiring = { entity: "TaxReturn", stateField: "state", reverseTransition: "reverse_payment" };
+
+function remitSettings(finance: Partial<FinanceSettings> = {}, currency: string | null = "USD"): TenantSettings {
+  return {
+    ...(currency !== null ? { defaults: { currency } } : {}),
+    finance: {
+      taxPayableAccountCode: "2200",
+      taxInputAccountCode: "1400",
+      cashAccountCode: "1000",
+      whtPayableAccountCode: "2210",
+      taxRemittancePosting: "on_mark_paid",
+      ...finance,
+    },
+  };
+}
+
+async function remitFixture(opts: { readonly lines?: ReadonlyArray<{ role: "output" | "input" | "wht"; d: number; c: number; currency?: string; fd?: number; fc?: number; entryState?: string }> } = {}) {
+  const store = new WriteRecordingStore();
+  const ids: Record<string, string> = {};
+  for (const [role, code] of [["output", "2200"], ["input", "1400"], ["cash", "1000"], ["wht", "2210"]] as const) {
+    ids[role] = String((await store.create(TENANT, "LedgerAccount", { account_code: code }))["id"]);
+  }
+  const lines = opts.lines ?? [
+    { role: "output", d: 0, c: 1000 },
+    { role: "input", d: 300, c: 0 },
+  ];
+  for (const [i, l] of lines.entries()) {
+    const e = await store.create(TENANT, "JournalEntry", { entry_number: `SEED-${i}`, state: l.entryState ?? "posted" });
+    await store.create(TENANT, "JournalLine", {
+      journal_entry_id: String(e["id"]),
+      ledger_account_id: ids[l.role],
+      currency: l.currency ?? "USD",
+      debit: l.d,
+      credit: l.c,
+      functional_debit: l.fd ?? (l.currency === undefined ? l.d : 0),
+      functional_credit: l.fc ?? (l.currency === undefined ? l.c : 0),
+    });
+  }
+  const filed: EntityRecord = {
+    return_number: "TR-9",
+    state: "filed",
+    return_type: "vat",
+    jurisdiction_id: "jur-1",
+    period_start: "2026-01-01",
+    period_end: "2026-03-31",
+    output_tax: 1000,
+    input_tax: 300,
+    net_payable: 700,
+    currency: "USD",
+  };
+  const tr = await store.create(TENANT, "TaxReturn", filed);
+  return { store, ids, returnId: String(tr["id"]), filed: tr };
+}
+
+function payInput(store: EntityStore, id: string, before: EntityRecord, changes: EntityRecord = {}): WriteEffectInput {
+  const merged = { ...before, ...changes };
+  return { operation: "transition", entity: "TaxReturn", tenantId: TENANT, id, before: merged, after: { ...merged, state: "paid" }, store };
+}
+
+async function refusalOf(run: Promise<void>): Promise<PostingRefused> {
+  try {
+    await run;
+  } catch (e) {
+    if (e instanceof PostingRefused) return e;
+    throw e;
+  }
+  throw new Error("expected a refusal");
+}
+
+describe("taxRemittanceGlPostingEffect", () => {
+  const settled = (settings: TenantSettings) => ({ get: () => Promise.resolve(settings) });
+
+  it("posts the entry, its lines and the stamp, dated by the clock", async () => {
+    const { store, ids, returnId, filed } = await remitFixture();
+    const effect = taxRemittanceGlPostingEffect({ wiring: REMIT_WIRING, settingsStore: settled(remitSettings()), clock });
+    store.armed = true;
+    await effect(payInput(store, returnId, filed));
+    expect(store.writes).toEqual([
+      "create JournalEntry",
+      "create JournalLine",
+      "create JournalLine",
+      "create JournalLine",
+      "update TaxReturn",
+    ]);
+    const entry = (await store.listPage(TENANT, "JournalEntry", { limit: 10, cursor: null, sort: [], filters: [{ field: "entry_number", op: "eq", value: "TR-9-REMIT-1" }] })).records[0]!;
+    expect(entry["entry_date"]).toBe("2026-06-21");
+    expect(entry["currency"]).toBeUndefined();
+    const lines = (await store.listPage(TENANT, "JournalLine", { limit: 10, cursor: null, sort: [], filters: [{ field: "journal_entry_id", op: "eq", value: String(entry["id"]) }] })).records;
+    expect(lines.map((l) => [l["ledger_account_id"], l["debit"], l["credit"]])).toEqual([
+      [ids["output"], 1000, 0],
+      [ids["input"], 0, 300],
+      [ids["cash"], 0, 700],
+    ]);
+    const stamped = await store.get(TENANT, "TaxReturn", returnId);
+    expect(stamped?.["remitted_at"]).toBe("2026-06-21T00:00:00.000Z");
+    expect(stamped?.["remittance_count"]).toBe(1);
+  });
+
+  it("writes nothing in manual_journal mode or with no settings store", async () => {
+    const { store, returnId, filed } = await remitFixture();
+    store.armed = true;
+    await taxRemittanceGlPostingEffect({
+      wiring: REMIT_WIRING,
+      settingsStore: settled(remitSettings({ taxRemittancePosting: "manual_journal" })),
+    })(payInput(store, returnId, filed, { net_payable: 1 }));
+    await taxRemittanceGlPostingEffect({ wiring: REMIT_WIRING })(payInput(store, returnId, filed, { net_payable: 1 }));
+    expect(store.writes).toEqual([]);
+  });
+
+  it.each<[string, TenantSettings, EntityRecord, string]>([
+    ["figures that disagree", remitSettings(), { net_payable: 650 }, "tax_return_figures_disagree"],
+    ["no functional currency", remitSettings({}, null), {}, "functional_currency_undeclared"],
+    ["a foreign-currency return", remitSettings(), { currency: "EUR" }, "tax_return_currency_not_functional"],
+    ["an unresolved account", remitSettings({ taxInputAccountCode: "nope" }), {}, "tax_remittance_account_unresolved"],
+    ["jurisdiction routing", remitSettings({ taxAccountsByJurisdiction: { x: "2201" } }), {}, "tax_remittance_routing_unsupported"],
+    ["more than the ledger holds", remitSettings(), { output_tax: 1001, net_payable: 701 }, "tax_remittance_exceeds_ledger"],
+    ["more input tax than the ledger holds", remitSettings(), { input_tax: 301, net_payable: 699 }, "tax_remittance_exceeds_ledger"],
+  ])("refuses %s before any write", async (_n, settings, changes, code) => {
+    const { store, returnId, filed } = await remitFixture();
+    store.armed = true;
+    const r = await refusalOf(taxRemittanceGlPostingEffect({ wiring: REMIT_WIRING, settingsStore: settled(settings) })(payInput(store, returnId, filed, changes)));
+    expect(r.error).toBe(code);
+    expect(store.writes).toEqual([]);
+  });
+
+  it("refuses a tax code routing a VAT return's tax to its own account, and ignores a withholding code for it", async () => {
+    const { store, returnId, filed } = await remitFixture();
+    const effect = taxRemittanceGlPostingEffect({ wiring: REMIT_WIRING, settingsStore: settled(remitSettings()), taxCodes: true });
+    await store.create(TENANT, "TaxCode", { code: "WHT", kind: "withholding", gl_account_code: "2299" });
+    store.armed = true;
+    // A withholding code's account matters only to a withholding return.
+    await effect(payInput(store, returnId, filed));
+    expect(store.writes[0]).toBe("create JournalEntry");
+    const fresh = await remitFixture();
+    await fresh.store.create(TENANT, "TaxCode", { code: "S", kind: "standard", gl_account_code: "2201" });
+    fresh.store.armed = true;
+    const r = await refusalOf(effect(payInput(fresh.store, fresh.returnId, fresh.filed)));
+    expect(r.error).toBe("tax_remittance_routing_unsupported");
+    expect(fresh.store.writes).toEqual([]);
+  });
+
+  it("refuses a withholding return when a withholding code names another account, and posts when it names the default", async () => {
+    const effect = taxRemittanceGlPostingEffect({ wiring: REMIT_WIRING, settingsStore: settled(remitSettings()), taxCodes: true });
+    const withholding = { return_type: "withholding", output_tax: 0, input_tax: 0, net_payable: 100 };
+    const routed = await remitFixture({ lines: [{ role: "wht", d: 0, c: 500 }] });
+    await routed.store.create(TENANT, "TaxCode", { code: "WHT", kind: "withholding", gl_account_code: "2299" });
+    routed.store.armed = true;
+    const r = await refusalOf(effect(payInput(routed.store, routed.returnId, routed.filed, withholding)));
+    expect(r.error).toBe("tax_remittance_routing_unsupported");
+    expect(routed.store.writes).toEqual([]);
+
+    const own = await remitFixture({ lines: [{ role: "wht", d: 0, c: 500 }] });
+    await own.store.create(TENANT, "TaxCode", { code: "WHT", kind: "withholding", gl_account_code: "2210" });
+    // A regular code's account is no withholding return's concern.
+    await own.store.create(TENANT, "TaxCode", { code: "S", kind: "standard", gl_account_code: "2201" });
+    own.store.armed = true;
+    await effect(payInput(own.store, own.returnId, own.filed, withholding));
+    expect(own.store.writes[0]).toBe("create JournalEntry");
+  });
+
+  it("stamps a nil return with no entry number, so no earlier payment's number survives it", async () => {
+    const { store, returnId, filed } = await remitFixture();
+    await store.update(TENANT, "TaxReturn", returnId, { remittance_entry_number: "TR-9-REMIT-1" });
+    const nil = { output_tax: 0, input_tax: 0, net_payable: 0, remittance_entry_number: "TR-9-REMIT-1" };
+    await taxRemittanceGlPostingEffect({ wiring: REMIT_WIRING, settingsStore: settled(remitSettings()), clock })(
+      payInput(store, returnId, filed, nil),
+    );
+    const paid = await store.get(TENANT, "TaxReturn", returnId);
+    expect(paid?.["remitted_at"]).toBe("2026-06-21T00:00:00.000Z");
+    expect(paid?.["remittance_entry_number"] ?? null).toBeNull();
+  });
+
+  it("locks every bounded tax account, in id order, before reading any balance", async () => {
+    const { store, ids, returnId, filed } = await remitFixture();
+    const events: string[] = [];
+    const getLocked = store.getLocked.bind(store);
+    store.getLocked = (t, entity, id, lock) => {
+      events.push(`lock ${entity}${entity === "LedgerAccount" ? ` ${id}` : ""} ${lock}`);
+      return getLocked(t, entity, id, lock);
+    };
+    const listPage = store.listPage.bind(store);
+    store.listPage = (t, entity, q) => {
+      if (entity === "JournalLine") events.push("read JournalLine");
+      return listPage(t, entity, q);
+    };
+    await taxRemittanceGlPostingEffect({ wiring: REMIT_WIRING, settingsStore: settled(remitSettings()) })(
+      payInput(store, returnId, filed),
+    );
+    const bounded = [ids["output"]!, ids["input"]!].sort();
+    const firstRead = events.indexOf("read JournalLine");
+    expect(events.slice(0, firstRead)).toEqual([
+      "lock TaxJurisdiction exclusive",
+      ...bounded.map((id) => `lock LedgerAccount ${id} exclusive`),
+    ]);
+    // The cash account carries no bound and is not locked.
+    expect(events).not.toContain(`lock LedgerAccount ${ids["cash"]!} exclusive`);
+  });
+
+  it("counts a reversed entry's lines and not a draft entry's", async () => {
+    const reversed = await remitFixture({ lines: [{ role: "output", d: 0, c: 1000, entryState: "reversed" }, { role: "input", d: 300, c: 0 }] });
+    await taxRemittanceGlPostingEffect({ wiring: REMIT_WIRING, settingsStore: settled(remitSettings()) })(
+      payInput(reversed.store, reversed.returnId, reversed.filed),
+    );
+    const draft = await remitFixture({ lines: [{ role: "output", d: 0, c: 1000, entryState: "draft" }, { role: "input", d: 300, c: 0 }] });
+    draft.store.armed = true;
+    const r = await refusalOf(
+      taxRemittanceGlPostingEffect({ wiring: REMIT_WIRING, settingsStore: settled(remitSettings()) })(payInput(draft.store, draft.returnId, draft.filed)),
+    );
+    expect(r.error).toBe("tax_remittance_exceeds_ledger");
+    expect(draft.store.writes).toEqual([]);
+  });
+
+  it("reads a foreign line at its functional amounts and refuses one that has none", async () => {
+    const converted = await remitFixture({ lines: [{ role: "output", d: 0, c: 900, currency: "EUR", fc: 1000 }, { role: "input", d: 300, c: 0 }] });
+    await taxRemittanceGlPostingEffect({ wiring: REMIT_WIRING, settingsStore: settled(remitSettings()) })(
+      payInput(converted.store, converted.returnId, converted.filed),
+    );
+    const bare = await remitFixture({ lines: [{ role: "output", d: 0, c: 1000 }, { role: "output", d: 0, c: 5, currency: "EUR", fc: 0 }, { role: "input", d: 300, c: 0 }] });
+    bare.store.armed = true;
+    const r = await refusalOf(
+      taxRemittanceGlPostingEffect({ wiring: REMIT_WIRING, settingsStore: settled(remitSettings()) })(payInput(bare.store, bare.returnId, bare.filed)),
+    );
+    expect(r.error).toBe("tax_ledger_unconverted");
+    expect(bare.store.writes).toEqual([]);
+  });
+
+  it("refuses an overlapping return, and a taken entry number, before any write", async () => {
+    const overlap = await remitFixture();
+    await overlap.store.create(TENANT, "TaxReturn", { ...overlap.filed, id: undefined, return_number: "TR-8", state: "amended", period_start: "2026-03-31", period_end: "2026-06-30" });
+    overlap.store.armed = true;
+    const o = await refusalOf(
+      taxRemittanceGlPostingEffect({ wiring: REMIT_WIRING, settingsStore: settled(remitSettings()) })(payInput(overlap.store, overlap.returnId, overlap.filed)),
+    );
+    expect(o.error).toBe("tax_return_period_overlaps");
+    expect(overlap.store.writes).toEqual([]);
+
+    const taken = await remitFixture();
+    await taken.store.create(TENANT, "JournalEntry", { entry_number: "TR-9-REMIT-4", state: "posted" });
+    taken.store.armed = true;
+    const t = await refusalOf(
+      taxRemittanceGlPostingEffect({ wiring: REMIT_WIRING, settingsStore: settled(remitSettings()) })(
+        payInput(taken.store, taken.returnId, taken.filed, { remittance_count: 3 }),
+      ),
+    );
+    expect(t.error).toBe("tax_remittance_number_taken");
+    expect(taken.store.writes).toEqual([]);
+  });
+
+  it("ignores a draft or ready return's period, which has declared nothing yet", async () => {
+    const f = await remitFixture();
+    await f.store.create(TENANT, "TaxReturn", { ...f.filed, id: undefined, return_number: "TR-8", state: "ready" });
+    await taxRemittanceGlPostingEffect({ wiring: REMIT_WIRING, settingsStore: settled(remitSettings()) })(payInput(f.store, f.returnId, f.filed));
+    expect((await f.store.get(TENANT, "TaxReturn", f.returnId))?.["remittance_entry_number"]).toBe("TR-9-REMIT-1");
+  });
+
+  it("refuses posting into a closed period before any write", async () => {
+    const { store, returnId, filed } = await remitFixture();
+    await store.create(TENANT, "FiscalPeriod", { start_date: "2026-06-01", end_date: "2026-06-30", status: "closed" });
+    store.armed = true;
+    const r = await refusalOf(
+      taxRemittanceGlPostingEffect({ wiring: REMIT_WIRING, settingsStore: settled(remitSettings()), periods: {}, clock })(payInput(store, returnId, filed)),
+    );
+    expect(r.error).toBe("period_locked");
+    expect(store.writes).toEqual([]);
+  });
+
+  it("treats a remittance_count that is not a count as a fault rather than a refusal", async () => {
+    const { store, returnId, filed } = await remitFixture();
+    store.armed = true;
+    const run = taxRemittanceGlPostingEffect({ wiring: REMIT_WIRING, settingsStore: settled(remitSettings()) })(
+      payInput(store, returnId, filed, { remittance_count: "two" }),
+    );
+    await expect(run).rejects.toThrow(/not a count/);
+    await expect(run).rejects.not.toBeInstanceOf(PostingRefused);
+    expect(store.writes).toEqual([]);
+  });
+});
+
+describe("the reverse_payment effects", () => {
+  const settled = (settings: TenantSettings) => ({ get: () => Promise.resolve(settings) });
+  const reverseInput = (store: EntityStore, id: string, record: EntityRecord): WriteEffectInput => ({
+    operation: "transition",
+    entity: "TaxReturn",
+    tenantId: TENANT,
+    id,
+    before: { ...record, state: "paid" },
+    after: { ...record, state: "filed" },
+    store,
+  });
+
+  it("refuses, in on_mark_paid mode, a return paid with nothing posted or stamped here", async () => {
+    const { store, returnId, filed } = await remitFixture();
+    const check = taxRemittanceReversalCheckEffect({ wiring: REMIT_WIRING, settingsStore: settled(remitSettings()) });
+    const r = await refusalOf(check(reverseInput(store, returnId, filed)));
+    expect(r.error).toBe("tax_remittance_paid_outside_posting");
+    // Controls: a nil return's stamp, and manual_journal mode, both let it reverse.
+    await check(reverseInput(store, returnId, { ...filed, remitted_at: "2026-06-01T00:00:00.000Z" }));
+    await taxRemittanceReversalCheckEffect({
+      wiring: REMIT_WIRING,
+      settingsStore: settled(remitSettings({ taxRemittancePosting: "manual_journal" })),
+    })(reverseInput(store, returnId, filed));
+  });
+
+  it("clears the entry number with the stamp, and does so on an unstamped return too", async () => {
+    const { store, returnId, filed } = await remitFixture();
+    await store.update(TENANT, "TaxReturn", returnId, { remittance_entry_number: "TR-9-REMIT-1", remittance_count: 1 });
+    const clear = taxRemittanceStampClearEffect({ wiring: REMIT_WIRING, clock });
+    await clear(reverseInput(store, returnId, { ...filed, remittance_entry_number: "TR-9-REMIT-1" }));
+    const cleared = await store.get(TENANT, "TaxReturn", returnId);
+    expect(cleared?.["remittance_entry_number"] ?? null).toBeNull();
+    expect(cleared?.["remitted_at"] ?? null).toBeNull();
+    expect(cleared?.["remittance_count"]).toBe(1);
+  });
+});
+
+describe("taxReturnFilingCheckEffect", () => {
+  const settings = { get: () => Promise.resolve(remitSettings()) };
+
+  it("refuses filing a return whose figures cannot post", async () => {
+    const { store, returnId, filed } = await remitFixture();
+    const before = { ...filed, state: "ready", net_payable: 650 };
+    const r = await refusalOf(
+      taxReturnFilingCheckEffect({ wiring: REMIT_WIRING, settingsStore: settings })({
+        operation: "transition",
+        entity: "TaxReturn",
+        tenantId: TENANT,
+        id: returnId,
+        before,
+        after: { ...before, state: "filed" },
+        store,
+      }),
+    );
+    expect(r.error).toBe("tax_return_figures_disagree");
+  });
+
+  it("does not ask an undone payment's return to pass what a new filing would", async () => {
+    const { store, returnId, filed } = await remitFixture();
+    const before = { ...filed, state: "paid", net_payable: 650 };
+    store.armed = true;
+    await taxReturnFilingCheckEffect({ wiring: REMIT_WIRING, settingsStore: settings })({
+      operation: "transition",
+      entity: "TaxReturn",
+      tenantId: TENANT,
+      id: returnId,
+      before,
+      after: { ...before, state: "filed" },
+      store,
+    });
+    expect(store.writes).toEqual([]);
   });
 });

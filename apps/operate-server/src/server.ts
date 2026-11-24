@@ -43,6 +43,7 @@ import {
   type SequenceAllocator,
   type SettingsStore,
   type SystemEntityAccess,
+  type TaxRemittanceWiring,
   type WriteEffect,
   type WriteMaskMode,
 } from "@crossengin/operate-runtime";
@@ -237,6 +238,11 @@ export class OperateHttpServer {
    */
   get systemEntityAccess(): SystemEntityAccess {
     return this.gateway.systemEntityAccess;
+  }
+
+  /** The tax-remittance wiring this server's manifest compiled to (ADR-0467), for the same reason. */
+  get taxRemittance(): TaxRemittanceWiring | null {
+    return this.gateway.taxRemittance;
   }
 
   /**

@@ -9,7 +9,10 @@ import {
   FinanceSettingsSchema,
   InMemorySettingsStore,
   mergeUnsetFinanceAccountCodes,
+  functionalCurrencyOf,
   sequenceSpecResolver,
+  TAX_REMITTANCE_POSTING_MODES,
+  taxRemittancePostingMode,
   TenantSettingsSchema,
   type FinanceAccountCodeKey,
 } from "./settings.js";
@@ -345,5 +348,74 @@ describe("InMemorySettingsStore.fillUnsetFinanceAccountCodes", () => {
     expect(await store.get("t1")).toEqual(EMPTY_TENANT_SETTINGS);
     await store.fillUnsetFinanceAccountCodes("t1", { apAccountCode: "2000" });
     expect(await store.get("t2")).toEqual(EMPTY_TENANT_SETTINGS);
+  });
+});
+
+describe("the tax remittance posting mode", () => {
+  it("is one of two modes, read from finance settings, and absent means manual_journal", () => {
+    expect(TAX_REMITTANCE_POSTING_MODES).toEqual(["manual_journal", "on_mark_paid"]);
+    expect(taxRemittancePostingMode(undefined)).toBe("manual_journal");
+    expect(taxRemittancePostingMode({})).toBe("manual_journal");
+    expect(taxRemittancePostingMode({ taxRemittancePosting: "manual_journal" })).toBe("manual_journal");
+    expect(taxRemittancePostingMode({ taxRemittancePosting: "on_mark_paid" })).toBe("on_mark_paid");
+  });
+
+  it("is accepted by the schema and refused out of the enum", () => {
+    expect(FinanceSettingsSchema.safeParse({ taxRemittancePosting: "on_mark_paid" }).success).toBe(true);
+    expect(FinanceSettingsSchema.safeParse({ taxRemittancePosting: "always" }).success).toBe(false);
+  });
+
+  it("is not an account-code setting, so the starter chart need name no account for it", () => {
+    expect(FINANCE_ACCOUNT_CODE_KEYS).not.toContain("taxRemittancePosting");
+  });
+
+  it("reads the functional currency from defaults, upper-cased, blank as none", () => {
+    expect(functionalCurrencyOf({ defaults: { currency: "usd" } })).toBe("USD");
+    expect(functionalCurrencyOf({ defaults: { currency: "   " } })).toBeNull();
+    expect(functionalCurrencyOf(EMPTY_TENANT_SETTINGS)).toBeNull();
+  });
+});
+
+describe("mergeUnsetFinanceAccountCodes and the remittance posting mode", () => {
+  const withCurrency = TenantSettingsSchema.parse({ defaults: { currency: "USD" } });
+
+  it("fills a requested mode where it is unset and the tenant declares a currency", () => {
+    const out = mergeUnsetFinanceAccountCodes(withCurrency, { cashAccountCode: "1000", taxRemittancePosting: "on_mark_paid" });
+    expect(out.filled).toEqual(["cashAccountCode", "taxRemittancePosting"]);
+    expect(out.settings.finance?.taxRemittancePosting).toBe("on_mark_paid");
+    // The mode is not an account code, so it never appears among the codes in effect.
+    expect(out.inEffect).toEqual({ cashAccountCode: "1000" });
+  });
+
+  it("fills the mode alone, so a store writes the row for it when every code is already set", () => {
+    const out = mergeUnsetFinanceAccountCodes(withCurrency, { taxRemittancePosting: "on_mark_paid" });
+    expect(out.filled).toEqual(["taxRemittancePosting"]);
+    expect(out.settings).not.toBe(withCurrency);
+  });
+
+  it("never replaces a mode an admin chose", () => {
+    const settings = TenantSettingsSchema.parse({ defaults: { currency: "USD" }, finance: { taxRemittancePosting: "manual_journal" } });
+    const out = mergeUnsetFinanceAccountCodes(settings, { taxRemittancePosting: "on_mark_paid" });
+    expect(out.filled).toEqual([]);
+    expect(out.settings).toBe(settings);
+  });
+
+  it("leaves the mode unset for a tenant with no currency", () => {
+    const out = mergeUnsetFinanceAccountCodes(EMPTY_TENANT_SETTINGS, { taxRemittancePosting: "on_mark_paid" });
+    expect(out.filled).toEqual([]);
+    expect(out.settings.finance?.taxRemittancePosting).toBeUndefined();
+  });
+
+  it("writes nothing about the mode when none is requested", () => {
+    const out = mergeUnsetFinanceAccountCodes(withCurrency, { cashAccountCode: "1000" });
+    expect(out.settings.finance?.taxRemittancePosting).toBeUndefined();
+  });
+
+  it("stores a filled mode through the in-memory filler", async () => {
+    const store = new InMemorySettingsStore();
+    await store.put("t1", { defaults: { currency: "EUR" }, finance: { cashAccountCode: "1000" } });
+    const out = await store.fillUnsetFinanceAccountCodes("t1", { cashAccountCode: "9", taxRemittancePosting: "on_mark_paid" });
+    expect(out).toEqual({ filled: ["taxRemittancePosting"], inEffect: { cashAccountCode: "1000" } });
+    expect((await store.get("t1")).finance).toEqual({ cashAccountCode: "1000", taxRemittancePosting: "on_mark_paid" });
   });
 });

@@ -17,6 +17,12 @@ import {
   type PostingPeriodConfig,
 } from "./posting-period.js";
 import type { EntityRecord, EntityStore, ListFilter } from "./store.js";
+import {
+  TAX_REMITTANCE_ENTRY_INFIX,
+  TAX_REMITTANCE_REFUSALS,
+  TAX_REMITTANCE_REVERSAL_SUFFIX,
+  type TaxRemittanceWiring,
+} from "./tax-remittance.js";
 
 /** A write the guard is asked to vet, just before it is persisted. */
 export interface WriteGuardInput {
@@ -1024,14 +1030,15 @@ const COVERAGE_FALLBACKS = {
  * exists, which is the pair where a divergence is worst: a survey naming a document as guarded when
  * no guard was built is a falsely-true control.
  *
- * `TaxReturn` is deliberately **absent**, not an entry with a weaker predicate. Measured on
- * resolved `erp-core`, it has no `total` field (its money columns are `output_tax`, `input_tax` and
- * `net_payable`), no `paid_at`, and `Payment` carries `invoice_id` and `bill_id` and nothing
- * naming it — so the coverage predicate is inexpressible for it in all three of its operands.
- * Adding it with `totalField: "net_payable"` and no reference would make `applied` structurally 0
- * and refuse every filing a tenant ever pays; adding it with `totalField: "total"` would make
- * `num(undefined)` zero and pass every write while reading as a control (ADR-0337's falsely-true
- * direction). The survey names it as uncovered instead, with the reason.
+ * `TaxReturn` is deliberately **absent**, not an entry with a weaker predicate: it is not settled by
+ * payments at all. It settles through its own posting (ADR-0467) — in `on_mark_paid` mode
+ * `mark_paid` posts the remittance and stamps the return — and in `manual_journal` mode `mark_paid`
+ * is a status the manual journal must accompany. Nothing a coverage predicate could read applies
+ * either way: it has no `total` (its money columns are `output_tax`, `input_tax` and
+ * `net_payable`), no `paid_at`, and `Payment` carries nothing naming it, so `totalField:
+ * "net_payable"` would make `applied` structurally 0 and refuse every filing ever paid, and
+ * `totalField: "total"` would make `num(undefined)` zero and pass every write while reading as a
+ * control (ADR-0337's falsely-true direction).
  */
 export const SETTLEMENT_COVERAGE_DOCUMENTS: readonly SettlementCoverageConfig[] = [
   {
@@ -1231,4 +1238,84 @@ export function settlementCoverageGuard(config: SettlementCoverageConfig): Write
         ` still owed: ${c.remedy ?? "record the remaining payment"}`,
     };
   };
+}
+
+/**
+ * Refuses `JournalEntry` `posted → reversed` on an entry a **paid** tax return names as its
+ * remittance (ADR-0467). Reversing it there would leave the return reading `paid` against a reversed
+ * posting — the document-versus-ledger divergence ADR-0391 closed for invoices. The return's own
+ * `reverse_payment` reverses the entry and moves the return together, so that is the remedy; once
+ * the return is no longer paid, the entry may be reversed directly.
+ *
+ * The entry's own reversal from `reverse_payment` is written through the store and passes no guard,
+ * so this cannot refuse the remedy it names.
+ *
+ * It also refuses reversing that reversal — `<return>-REMIT-<n>-REV` while the return exists, in any
+ * state. A `-REV-REV` re-applies the remittance with the return reading `filed` (or posts it a second
+ * time beside a later `-REMIT-(n+1)`), which is the same divergence from the other side. The return
+ * is matched by its number, because `reverse_payment` clears its `remittance_entry_number`; the
+ * remedy is the return's `mark_paid`, which posts a new numbered entry.
+ */
+export function taxRemittanceJournalReverseGuard(config: { readonly wiring: TaxRemittanceWiring }): WriteGuard {
+  const returnState = config.wiring.stateField;
+  return async (input) => {
+    if (input.entity !== "JournalEntry") return null;
+    if (input.operation !== "update" && input.operation !== "transition") return null;
+    if (input.before?.["state"] !== "posted" || input.after["state"] !== "reversed") return null;
+    const number = input.after["entry_number"];
+    if (typeof number !== "string" || number.length === 0) return null;
+    const returnNumber = remittanceReversalReturnNumber(number);
+    if (returnNumber !== null) {
+      let found = false;
+      await drainList(
+        input.store,
+        input.tenantId,
+        config.wiring.entity,
+        { sort: [], filters: [{ field: "return_number", op: "eq", value: returnNumber }] },
+        // One row answers; more than one is more of the same answer.
+        { ceiling: 1 },
+        (rows) => {
+          for (const r of rows) if (r["return_number"] === returnNumber) found = true;
+        },
+      );
+      if (found) {
+        const r = TAX_REMITTANCE_REFUSALS.tax_remittance_reinstate_via_return;
+        return { status: r.status, error: "tax_remittance_reinstate_via_return", detail: r.detail };
+      }
+      return null;
+    }
+    let paid = false;
+    const outcome = await drainList(
+      input.store,
+      input.tenantId,
+      config.wiring.entity,
+      { sort: [], filters: [{ field: "remittance_entry_number", op: "eq", value: number }] },
+      // The number is the return's own and its next is always new, so more than one is a fault.
+      { ceiling: 2 },
+      (rows) => {
+        for (const r of rows) if (r["remittance_entry_number"] === number && r[returnState] === "paid") paid = true;
+      },
+    );
+    if (paid) {
+      const r = TAX_REMITTANCE_REFUSALS.tax_remittance_reverse_via_return;
+      return { status: r.status, error: "tax_remittance_reverse_via_return", detail: r.detail };
+    }
+    if (!outcome.complete) {
+      return {
+        status: 409,
+        error: "posting_ambiguous",
+        detail: "more than one tax return names this journal entry as its remittance, so whether one is paid is not established",
+      };
+    }
+    return null;
+  };
+}
+
+/** `TAX-1` from `TAX-1-REMIT-3-REV`, the shape a remittance reversal is numbered by; otherwise null. */
+function remittanceReversalReturnNumber(entryNumber: string): string | null {
+  if (!entryNumber.endsWith(TAX_REMITTANCE_REVERSAL_SUFFIX)) return null;
+  const reversed = entryNumber.slice(0, -TAX_REMITTANCE_REVERSAL_SUFFIX.length);
+  const at = reversed.lastIndexOf(TAX_REMITTANCE_ENTRY_INFIX);
+  if (at <= 0 || !/^\d+$/.test(reversed.slice(at + TAX_REMITTANCE_ENTRY_INFIX.length))) return null;
+  return reversed.slice(0, at);
 }

@@ -212,9 +212,10 @@ describe("entitySchemas over the real erp-core pack", () => {
 
   it("describes the RESOLVED field set, which is a third wider than the entity's own", () => {
     // ADR-0361's class, and the whole correctness question for this module. Measured: 51 of 51
-    // entities differ, 429 own fields against 633 resolved (426 and 630 until
+    // entities differ, 433 own fields against 637 resolved (426 and 630 until
     // `BillLine.purchase_order_line_id`, 427 and 631 until `Bill.withholding_total` and
-    // `Bill.paid_at`) — 204 outside the narrow aperture,
+    // `Bill.paid_at`, 429 and 633 until TaxReturn's `credit_disposition` and its three remittance
+    // stamps) — 204 outside the narrow aperture,
     // exactly 51 x 4 because every entity is `auditable`. The sibling artifact `ui-schema.ts` reads
     // the narrow set, which is why `created_at`/`updated_at` appear in no view; measured through the
     // real create handler they ARE in the response body.
@@ -228,8 +229,8 @@ describe("entitySchemas over the real erp-core pack", () => {
         entitySchemas(e, traits, null, surfaceOf(e)).response.properties ?? {},
       ).length;
     }
-    expect(own).toBe(429);
-    expect(resolved).toBe(633);
+    expect(own).toBe(433);
+    expect(resolved).toBe(637);
     // One `id` added per entity, and nothing dropped.
     expect(props).toBe(resolved + entities.length);
   });
@@ -340,6 +341,17 @@ describe("entitySchemas over the real erp-core pack", () => {
       expect(v.update.properties?.[owned], owned).toBeUndefined();
     }
     expect(v.create.properties?.["total"]).toBeDefined();
+  });
+
+  it("describes a tax return's remittance stamps in responses and in no request, and its credit disposition in both", () => {
+    const v = entitySchemas(entity("TaxReturn"), traits, null, surfaceOf(entity("TaxReturn")));
+    for (const owned of ["remitted_at", "remittance_entry_number", "remittance_count"]) {
+      expect(v.response.properties?.[owned], owned).toBeDefined();
+      expect(v.create.properties?.[owned], owned).toBeUndefined();
+      expect(v.update.properties?.[owned], owned).toBeUndefined();
+    }
+    expect(v.create.properties?.["credit_disposition"]).toBeDefined();
+    expect(v.update.properties?.["credit_disposition"]).toBeDefined();
   });
 
   it("publishes a lifecycle state field as the server enforces it, not as a free enum", () => {

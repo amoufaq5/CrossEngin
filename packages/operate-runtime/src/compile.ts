@@ -66,6 +66,7 @@ import {
   postedEntryImmutabilityGuard,
   SETTLEMENT_COVERAGE_DOCUMENTS,
   settlementCoverageGuard,
+  taxRemittanceJournalReverseGuard,
   type WriteGuard,
 } from "./write-guards.js";
 import {
@@ -77,6 +78,11 @@ import {
   postingReversalEffect,
   paymentSettlementGlPostingEffect,
   recognitionGlPostingEffect,
+  taxRemittanceGlPostingEffect,
+  taxRemittanceReversalCheckEffect,
+  taxRemittanceReversalEffect,
+  taxRemittanceStampClearEffect,
+  taxReturnFilingCheckEffect,
   unrealizedFxRevaluationEffect,
   whtCertificateClearingEffect,
   type PostingFxConfig,
@@ -117,6 +123,7 @@ import { withEntitlement, withRecordLimit, type EntitlementResolver } from "./en
 import type { SettingsStore, TenantSettings } from "./settings.js";
 import { transactionSettingsScope } from "./settings-snapshot.js";
 import type { TaxDeterminationConfig } from "./tax-determination.js";
+import { TAX_RETURN_REMITTANCE_FIELDS, taxRemittanceWiring, type TaxRemittanceWiring } from "./tax-remittance.js";
 import { operationId, type CrudOperation } from "./slugs.js";
 import type { EntityStore } from "./store.js";
 import { temporalFieldIndexFromManifest, withDatetimeWireType } from "./datetime-store.js";
@@ -543,7 +550,7 @@ function defaultWriteGuards(
     );
   }
   // Filed tax returns are submitted to authorities: once filed/paid they can't be
-  // edited or deleted (correct via the amend transition).
+  // edited or deleted (correct via the amend transition, or a paid one via reverse_payment).
   if (names.has("TaxReturn")) {
     guards.push(
       lockedDocumentGuard({
@@ -551,10 +558,17 @@ function defaultWriteGuards(
         lockedStates: ["filed", "paid"],
         lockedError: "tax_return_locked",
         noun: "filed tax return",
-        hintByState: correctionHints(manifest, "TaxReturn", ["filed", "paid"], { amend: "amend it instead" }),
+        nounByState: { paid: "paid tax return" },
+        hintByState: correctionHints(manifest, "TaxReturn", ["filed", "paid"], {
+          amend: "amend it instead",
+          reverse_payment: "reverse the payment instead",
+        }),
       }),
     );
   }
+  // A paid return's remittance entry is reversed by the return, so the two move together.
+  const remittance = taxRemittanceWiring(manifest);
+  if (remittance !== null) guards.push(taxRemittanceJournalReverseGuard({ wiring: remittance }));
   // A committed sales order is a customer commitment: once it leaves draft it
   // can't be edited or deleted out of band (cancel via the lifecycle instead).
   // States span the core (confirmed→…→closed) and retail (placed/returned) lifecycles.
@@ -1232,6 +1246,29 @@ function defaultWriteEffectsWithStamps(
       }),
     );
   }
+  // Tax remittance (ADR-0467): wired only where the manifest declares every field the posting reads
+  // and stamps, and posting only for a tenant that set `finance.taxRemittancePosting: on_mark_paid`.
+  // In order: the filing check, the posting on `paid`, and on `reverse_payment` the already-reversed
+  // refusal before the reversal it guards, then the stamp clear.
+  const remittance = taxRemittanceWiring(manifest);
+  if (remittance !== null) {
+    const remittanceConfig = {
+      wiring: remittance,
+      ...(settingsStore !== undefined ? { settingsStore } : {}),
+      taxCodes: hasTaxCodes,
+      ...clockOpt,
+      ...periodsOpt,
+    };
+    // `reverse_payment` is part of the wiring, so a posted remittance always has its undo.
+    effects.push(
+      taxReturnFilingCheckEffect(remittanceConfig),
+      taxRemittanceGlPostingEffect(remittanceConfig),
+      taxRemittanceReversalCheckEffect(remittanceConfig),
+      taxRemittanceReversalEffect(remittanceConfig),
+      taxRemittanceStampClearEffect(remittanceConfig),
+    );
+    for (const field of TAX_RETURN_REMITTANCE_FIELDS.stamps) stamps.push({ entity: "TaxReturn", field });
+  }
   if (names.has("WhtCertificate") && hasGl) {
     effects.push(
       whtCertificateClearingEffect({
@@ -1384,6 +1421,12 @@ export interface CompiledOperateServer {
    * `system-writer.ts`.
    */
   readonly systemEntityAccess: SystemEntityAccess;
+  /**
+   * The tax-remittance wiring this compile built its effects from (ADR-0467), or `null` when the
+   * manifest cannot post one — exposed so a caller deciding a tenant's posting mode asks the
+   * manifest that tenant is actually served by.
+   */
+  readonly taxRemittance: TaxRemittanceWiring | null;
 }
 
 /** One mounted report route, as built. See {@link CompiledOperateServer.reportSurfaces}. */
@@ -1781,6 +1824,7 @@ export function compileOperateServer(
       store,
       ...(options.clock !== undefined ? { clock: options.clock } : {}),
     }),
+    taxRemittance: taxRemittanceWiring(manifest),
   };
 }
 

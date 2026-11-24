@@ -29,6 +29,14 @@ const DATE_FORMATS = ["", "YYYY-MM-DD", "DD/MM/YYYY", "MM/DD/YYYY", "DD.MM.YYYY"
 const NUMBER_FORMATS = ["", "1,234.56", "1.234,56", "1 234,56", "1234.56"];
 const ACCOUNTING_STANDARDS = ["", "ifrs", "us_gaap", "local_gaap"];
 const ROUNDING_MODES = ["", "half_up", "half_even", "down", "up"];
+// "" leaves the setting unset, which the server reads as manual_journal.
+const TAX_REMITTANCE_POSTING_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
+  // Unset reads as manual journal. Only a new workspace's approval fills it (ADR-0467); the console's
+  // starter-chart run on an existing workspace leaves it unset.
+  { value: "", label: "unset (manual journal)" },
+  { value: "manual_journal", label: "manual journal" },
+  { value: "on_mark_paid", label: "post on mark paid" },
+];
 const MONTHS = [
   "January", "February", "March", "April", "May", "June",
   "July", "August", "September", "October", "November", "December",
@@ -226,7 +234,12 @@ export default function SettingsPage() {
               <AccountCodePicker label="WHT receivable code" value={finance.whtReceivableAccountCode ?? ""} onChange={(v) => setD(setFinance, "whtReceivableAccountCode", v)} />
               <AccountCodePicker label="WHT payable code" value={finance.whtPayableAccountCode ?? ""} onChange={(v) => setD(setFinance, "whtPayableAccountCode", v)} />
               <AccountCodePicker label="Tax recoverable code" value={finance.taxRecoverableAccountCode ?? ""} onChange={(v) => setD(setFinance, "taxRecoverableAccountCode", v)} />
+              <Select label="Tax return remittance" value={finance.taxRemittancePosting ?? ""} onChange={(v) => setD(setFinance, "taxRemittancePosting", v)}
+                options={TAX_REMITTANCE_POSTING_OPTIONS} />
             </div>
+            <p className="mt-3 text-xs text-ink-faint">
+              Tax return remittance: with &quot;post on mark paid&quot;, marking a tax return paid posts its remittance from the return&apos;s figures — output tax debited to tax payable, input tax credited to input tax, the net to cash (a withholding return clears WHT payable) — and a return the books, the currency or the account codes cannot serve is refused rather than posted. With manual journal (the default) marking a return paid posts nothing, and the remittance is a journal entry you write yourself. Before switching an existing workspace to posting, mark paid every filed or amended return whose remittance you already journalled, or reverse those journals, or the remittance is posted twice.
+            </p>
             <p className="mt-3 text-xs text-ink-faint">
               Account codes map to your chart of accounts (LedgerAccount): invoice issue posts AR / revenue / tax-payable; bill approval posts expense / input-tax / AP, with tax withheld from the supplier credited to WHT-payable; a completed payment settles cash against AR/AP, booking any cash-vs-balance gap to FX gain/loss. Tax a customer withheld from an invoice is debited to WHT-receivable, and confirming its WHT certificate reclasses it to tax-recoverable. A tax code that names its own GL account overrides the withholding codes. Inventory, COGS, GRNI, inventory-variance and the two depreciation codes are not on this form: set them through PUT /v1/admin/settings (a save here keeps them).
             </p>
@@ -431,6 +444,7 @@ const FORM_FINANCE_KEYS: ReadonlySet<string> = new Set([
   "whtPayableAccountCode",
   "taxRecoverableAccountCode",
   "taxAccountsByJurisdiction",
+  "taxRemittancePosting",
 ]);
 
 function unmanagedFinance(loaded: unknown): Record<string, unknown> {
@@ -464,6 +478,9 @@ function buildFinance(f: StrMap): Record<string, unknown> {
   if (f.whtReceivableAccountCode?.trim()) out.whtReceivableAccountCode = f.whtReceivableAccountCode.trim();
   if (f.whtPayableAccountCode?.trim()) out.whtPayableAccountCode = f.whtPayableAccountCode.trim();
   if (f.taxRecoverableAccountCode?.trim()) out.taxRecoverableAccountCode = f.taxRecoverableAccountCode.trim();
+  if (f.taxRemittancePosting === "manual_journal" || f.taxRemittancePosting === "on_mark_paid") {
+    out.taxRemittancePosting = f.taxRemittancePosting;
+  }
   return out;
 }
 

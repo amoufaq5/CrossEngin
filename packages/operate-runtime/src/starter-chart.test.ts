@@ -12,6 +12,7 @@ import {
   InMemorySettingsStore,
   type FinanceAccountCodeFiller,
   type FinanceAccountCodeKey,
+  type SettingsStore,
 } from "./settings.js";
 import {
   ensureStarterChart,
@@ -22,8 +23,10 @@ import {
   STARTER_CHART_ENTITY,
   STARTER_CHART_OUTCOMES,
   STARTER_CHART_VERSION,
+  STARTER_REMITTANCE_POSTING_OUTCOMES,
   type StarterChartReport,
 } from "./starter-chart.js";
+import type { TaxRemittanceWiring } from "./tax-remittance.js";
 import type { EntityRecord } from "./store.js";
 import { InMemoryEntityStore } from "./store.js";
 import type {
@@ -77,11 +80,17 @@ interface FakeOptions {
   readonly beforeRead?: (index: number, rows: EntityRecord[]) => void;
   /** Fields the fake's created rows carry beyond the body. */
   readonly createdExtras?: Readonly<Record<string, unknown>>;
+  /** Tax returns the tenant holds, answered by a TaxReturn read's state in-filter. */
+  readonly taxReturns?: readonly EntityRecord[];
+  readonly taxReturnReadError?: Error;
+  /** Whether the deployment serves a TaxReturn create; default true. */
+  readonly servesTaxReturn?: boolean;
 }
 
 function fakeAccess(options: FakeOptions = {}) {
   const bodies: Record<string, unknown>[] = [];
   const reads: SystemReadQuery[] = [];
+  const taxReturnReads: { query: SystemReadQuery; ceiling: number }[] = [];
   const tenants: string[] = [];
   const actors: SystemActor[] = [];
   const rows: EntityRecord[] = [...(options.seed ?? [])];
@@ -101,7 +110,15 @@ function fakeAccess(options: FakeOptions = {}) {
     update: () => Promise.reject(new Error("the starter chart must not update")),
     transition: () => Promise.reject(new Error("the starter chart must not transition")),
     read: () => Promise.reject(new Error("the starter chart reads with readAll")),
-    readAll(entity, query) {
+    readAll(entity, query, bounds) {
+      if (entity === "TaxReturn") {
+        taxReturnReads.push({ query, ceiling: bounds.ceiling });
+        if (options.taxReturnReadError !== undefined) return Promise.reject(options.taxReturnReadError);
+        const filter = query.filters?.[0];
+        const wanted = new Set(Array.isArray(filter?.value) ? filter.value.map(String) : []);
+        const field = filter?.field ?? "";
+        return Promise.resolve((options.taxReturns ?? []).filter((r) => wanted.has(String(r[field]))));
+      }
       expect(entity).toBe(STARTER_CHART_ENTITY);
       const index = readIndex;
       readIndex += 1;
@@ -115,25 +132,45 @@ function fakeAccess(options: FakeOptions = {}) {
     },
   });
   const access: SystemEntityAccess = {
-    serves: (entity, operation) => (options.serves ?? true) && entity === STARTER_CHART_ENTITY && operation === "create",
+    serves: (entity, operation) =>
+      operation === "create" &&
+      ((entity === STARTER_CHART_ENTITY && (options.serves ?? true)) ||
+        (entity === "TaxReturn" && (options.servesTaxReturn ?? true))),
     forTenant(tenantId, actor) {
       tenants.push(tenantId);
       actors.push(actor);
       return tenantAccess(tenantId);
     },
   };
-  return { access, bodies, reads, tenants, actors, rows };
+  return { access, bodies, reads, taxReturnReads, tenants, actors, rows };
 }
 
 function refusal(status: number, error: string): SystemWriteResult {
   return { kind: "refused", status, error, detail: null, operationId: "ledgerAccount.create" };
 }
 
+type ChartSettings = FinanceAccountCodeFiller & Pick<SettingsStore, "get">;
+
+/** A filler double with an empty settings document to read. */
+function filler(fill: FinanceAccountCodeFiller["fillUnsetFinanceAccountCodes"]): ChartSettings {
+  return { fillUnsetFinanceAccountCodes: fill, get: () => Promise.resolve({}) };
+}
+
 async function run(
   fake: ReturnType<typeof fakeAccess>,
-  settings: FinanceAccountCodeFiller = new InMemorySettingsStore(),
+  settings: ChartSettings = new InMemorySettingsStore(),
+  taxRemittance?: TaxRemittanceWiring | null,
+  requestRemittancePosting = true,
 ): Promise<StarterChartReport> {
-  return ensureStarterChart({ access: fake.access, tenantId: TENANT, actor: ACTOR, settings, updatedBy: null });
+  return ensureStarterChart({
+    access: fake.access,
+    tenantId: TENANT,
+    actor: ACTOR,
+    settings,
+    updatedBy: null,
+    requestRemittancePosting,
+    ...(taxRemittance !== undefined ? { taxRemittance } : {}),
+  });
 }
 
 describe("the starter chart", () => {
@@ -199,6 +236,7 @@ describe("ensureStarterChart", () => {
       existing: [],
       refused: [],
       settingsFilled: [...FINANCE_ACCOUNT_CODE_KEYS],
+      remittancePosting: "skipped_unwired",
       settingsSkipped: [],
       settingsDangling: [],
     });
@@ -357,12 +395,13 @@ describe("ensureStarterChart", () => {
   it("does nothing at all when the deployment serves no LedgerAccount create", async () => {
     const fake = fakeAccess({ serves: false });
     let asked = false;
-    const report = await run(fake, {
-      fillUnsetFinanceAccountCodes: () => {
+    const report = await run(
+      fake,
+      filler(() => {
         asked = true;
         return Promise.resolve({ filled: [], inEffect: {} });
-      },
-    });
+      }),
+    );
     expect(report).toEqual({
       outcome: "not_served",
       version: STARTER_CHART_VERSION,
@@ -370,6 +409,7 @@ describe("ensureStarterChart", () => {
       existing: [],
       refused: [],
       settingsFilled: [],
+      remittancePosting: null,
       settingsSkipped: [],
       settingsDangling: null,
     });
@@ -442,13 +482,11 @@ describe("ensureStarterChart", () => {
   });
 
   it("is not complete while any finance setting is unset, even with nothing skipped", async () => {
-    const settings: FinanceAccountCodeFiller = {
-      fillUnsetFinanceAccountCodes: (_t, codes) => {
-        const inEffect = { ...codes };
-        delete inEffect.cashAccountCode;
-        return Promise.resolve({ filled: Object.keys(inEffect) as FinanceAccountCodeKey[], inEffect });
-      },
-    };
+    const settings = filler((_t, codes) => {
+      const inEffect: Partial<Record<FinanceAccountCodeKey, string>> = { ...codes };
+      delete inEffect.cashAccountCode;
+      return Promise.resolve({ filled: Object.keys(inEffect) as FinanceAccountCodeKey[], inEffect });
+    });
     const report = await run(fakeAccess(), settings);
     expect(report.refused).toEqual([]);
     expect(report.settingsSkipped).toEqual([]);
@@ -472,7 +510,10 @@ describe("ensureStarterChart", () => {
       }
     }
     const fake = fakeAccess({ seed: [account("1000")], results: { "1100": refusal(403, "forbidden") } });
-    const report = await run(fake, { fillUnsetFinanceAccountCodes: () => Promise.reject(new SettingsRowUnreadable()) });
+    const report = await run(
+      fake,
+      filler(() => Promise.reject(new SettingsRowUnreadable())),
+    );
     expect(report.outcome).toBe("settings_unwritten");
     expect(report.settingsError).toBe("SettingsRowUnreadable");
     expect(report.existing).toEqual(["1000"]);
@@ -566,7 +607,14 @@ describe("ensureStarterChart", () => {
       clock: { now: () => new Date("2026-03-01T01:00:00.000Z") },
     });
     const settings = new InMemorySettingsStore();
-    const input = { access: compiled.systemEntityAccess, tenantId: TENANT, actor: ACTOR, settings, updatedBy: null };
+    const input = {
+      access: compiled.systemEntityAccess,
+      tenantId: TENANT,
+      actor: ACTOR,
+      settings,
+      updatedBy: null,
+      requestRemittancePosting: true,
+    };
     const first = await ensureStarterChart(input);
     expect(first).toMatchObject({ outcome: "complete", refused: [], settingsSkipped: [], settingsDangling: [] });
     expect(first.created).toEqual(CODES);
@@ -578,5 +626,233 @@ describe("ensureStarterChart", () => {
     const second = await ensureStarterChart(input);
     expect(second).toMatchObject({ outcome: "complete", created: [], settingsFilled: [], settingsSkipped: [] });
     expect(second.existing).toEqual(CODES);
+  });
+
+  describe("the tax remittance posting mode (ADR-0467)", () => {
+    const WIRING: TaxRemittanceWiring = { entity: "TaxReturn", stateField: "state", reverseTransition: "reverse_payment" };
+
+    async function storeWith(document: Parameters<InMemorySettingsStore["put"]>[1]): Promise<InMemorySettingsStore> {
+      const settings = new InMemorySettingsStore();
+      await settings.put(TENANT, document);
+      return settings;
+    }
+
+    it("declares exactly the outcomes it reaches", () => {
+      expect([...STARTER_REMITTANCE_POSTING_OUTCOMES].sort()).toEqual(
+        [
+          "already_set",
+          "filled",
+          "skipped_existing_tenant",
+          "skipped_functional_currency_undeclared",
+          "skipped_returns_outstanding",
+          "skipped_unwired",
+        ].sort(),
+      );
+    });
+
+    it("filled: a new workspace with a currency and no filed return gets on_mark_paid", async () => {
+      const settings = await storeWith({ defaults: { currency: "USD" } });
+      const fake = fakeAccess();
+      const report = await run(fake, settings, WIRING);
+      expect(report.remittancePosting).toBe("filled");
+      expect(report.outcome).toBe("complete");
+      expect((await settings.get(TENANT)).finance?.taxRemittancePosting).toBe("on_mark_paid");
+      // The mode is reported beside the account codes, never among them.
+      expect(report.settingsFilled).toEqual([...FINANCE_ACCOUNT_CODE_KEYS]);
+      expect(fake.taxReturnReads).toEqual([
+        { query: { filters: [{ field: "state", op: "in", value: ["filed", "amended", "paid"] }] }, ceiling: 1000 },
+      ]);
+    });
+
+    it("filled: on a tenant whose every code is already set, the mode alone is written", async () => {
+      const settings = new InMemorySettingsStore();
+      await run(fakeAccess(), settings);
+      await settings.put(TENANT, { ...(await settings.get(TENANT)), defaults: { currency: "USD" } });
+      const report = await run(fakeAccess({ seed: STARTER_CHART.map((a) => account(a.code)) }), settings, WIRING);
+      expect(report.settingsFilled).toEqual([]);
+      expect(report.remittancePosting).toBe("filled");
+      expect((await settings.get(TENANT)).finance?.taxRemittancePosting).toBe("on_mark_paid");
+    });
+
+    it("already_set: a mode an admin chose is kept, and no return is read", async () => {
+      const settings = await storeWith({ defaults: { currency: "USD" }, finance: { taxRemittancePosting: "manual_journal" } });
+      const fake = fakeAccess();
+      const report = await run(fake, settings, WIRING);
+      expect(report.remittancePosting).toBe("already_set");
+      expect((await settings.get(TENANT)).finance?.taxRemittancePosting).toBe("manual_journal");
+      expect(fake.taxReturnReads).toEqual([]);
+    });
+
+    it("skipped_returns_outstanding: a filed or amended return withholds the mode", async () => {
+      for (const state of ["filed", "amended"]) {
+        const settings = await storeWith({ defaults: { currency: "USD" } });
+        const report = await run(fakeAccess({ taxReturns: [{ id: "rec_tr1", state }] }), settings, WIRING);
+        expect(report.remittancePosting).toBe("skipped_returns_outstanding");
+        expect((await settings.get(TENANT)).finance?.taxRemittancePosting).toBeUndefined();
+        // The account codes are still filled: the skip is about the mode alone.
+        expect(report.outcome).toBe("complete");
+      }
+    });
+
+    it("skipped_returns_outstanding: more returns than the read's ceiling is the same answer", async () => {
+      const settings = await storeWith({ defaults: { currency: "USD" } });
+      const fake = fakeAccess({ taxReturnReadError: new ReadCeilingExceeded("TaxReturn", 1, "x") });
+      expect((await run(fake, settings, WIRING)).remittancePosting).toBe("skipped_returns_outstanding");
+    });
+
+    it("control: a draft or ready return, or a paid one whose remittance was recorded here, does not withhold the mode", async () => {
+      const settings = await storeWith({ defaults: { currency: "USD" } });
+      const returns = [
+        { id: "rec_tr0", state: "draft" },
+        { id: "rec_tr1", state: "ready" },
+        { id: "rec_tr2", state: "paid", remitted_at: "2026-02-01T00:00:00.000Z" },
+      ];
+      expect((await run(fakeAccess({ taxReturns: returns }), settings, WIRING)).remittancePosting).toBe("filled");
+    });
+
+    it("skipped_returns_outstanding: a paid return with no remittance recorded here was journalled by hand", async () => {
+      const settings = await storeWith({ defaults: { currency: "USD" } });
+      const fake = fakeAccess({ taxReturns: [{ id: "rec_tr1", state: "paid" }] });
+      expect((await run(fake, settings, WIRING)).remittancePosting).toBe("skipped_returns_outstanding");
+      expect((await settings.get(TENANT)).finance?.taxRemittancePosting).toBeUndefined();
+    });
+
+    it("skipped_existing_tenant: a run the caller did not mark as a new workspace never switches posting on", async () => {
+      const settings = await storeWith({ defaults: { currency: "USD" } });
+      const fake = fakeAccess();
+      const report = await run(fake, settings, WIRING, false);
+      expect(report.remittancePosting).toBe("skipped_existing_tenant");
+      expect(report.outcome).toBe("complete");
+      expect((await settings.get(TENANT)).finance?.taxRemittancePosting).toBeUndefined();
+      expect(fake.taxReturnReads).toEqual([]);
+      // A mode an admin chose is still reported as chosen.
+      const chosen = await storeWith({ defaults: { currency: "USD" }, finance: { taxRemittancePosting: "manual_journal" } });
+      expect((await run(fakeAccess(), chosen, WIRING, false)).remittancePosting).toBe("already_set");
+    });
+
+    it("skipped_functional_currency_undeclared: no defaults.currency, and no return is read", async () => {
+      const settings = new InMemorySettingsStore();
+      const fake = fakeAccess();
+      const report = await run(fake, settings, WIRING);
+      expect(report.remittancePosting).toBe("skipped_functional_currency_undeclared");
+      expect((await settings.get(TENANT)).finance?.taxRemittancePosting).toBeUndefined();
+      expect(fake.taxReturnReads).toEqual([]);
+    });
+
+    it("skipped_unwired: no wiring, or a deployment serving no TaxReturn, leaves the mode alone", async () => {
+      const unwired = await storeWith({ defaults: { currency: "USD" } });
+      const fake = fakeAccess();
+      expect((await run(fake, unwired)).remittancePosting).toBe("skipped_unwired");
+      expect((await run(fake, unwired, null)).remittancePosting).toBe("skipped_unwired");
+      expect(fake.taxReturnReads).toEqual([]);
+      const notServed = await storeWith({ defaults: { currency: "USD" } });
+      expect((await run(fakeAccess({ servesTaxReturn: false }), notServed, WIRING)).remittancePosting).toBe(
+        "skipped_unwired",
+      );
+      expect((await unwired.get(TENANT)).finance?.taxRemittancePosting).toBeUndefined();
+    });
+
+    it("filters on the lifecycle's own state field", async () => {
+      const settings = await storeWith({ defaults: { currency: "USD" } });
+      const fake = fakeAccess({ taxReturns: [{ id: "rec_tr1", status: "filed" }] });
+      const report = await run(fake, settings, { ...WIRING, stateField: "status" });
+      expect(report.remittancePosting).toBe("skipped_returns_outstanding");
+      expect(fake.taxReturnReads[0]?.query.filters?.[0]?.field).toBe("status");
+    });
+
+    it("reads back why the lock left a requested mode, rather than guessing", async () => {
+      // Unset with a currency when read first; set by an admin before the lock.
+      let reads = 0;
+      const settings: ChartSettings = {
+        fillUnsetFinanceAccountCodes: (_t, codes) => {
+          const { taxRemittancePosting: _mode, ...accountCodes } = codes;
+          return Promise.resolve({ filled: Object.keys(accountCodes) as FinanceAccountCodeKey[], inEffect: accountCodes });
+        },
+        get: () => {
+          reads += 1;
+          return Promise.resolve(
+            reads === 1
+              ? { defaults: { currency: "USD" } }
+              : { defaults: { currency: "USD" }, finance: { taxRemittancePosting: "manual_journal" as const } },
+          );
+        },
+      };
+      expect((await run(fakeAccess(), settings, WIRING)).remittancePosting).toBe("already_set");
+      reads = 0;
+      settings.get = () => {
+        reads += 1;
+        return Promise.resolve(reads === 1 ? { defaults: { currency: "USD" } } : {});
+      };
+      expect((await run(fakeAccess(), settings, WIRING)).remittancePosting).toBe("skipped_functional_currency_undeclared");
+    });
+
+    it("asks the fill for the mode exactly when the decision is to request it", async () => {
+      const requests: unknown[] = [];
+      const recording = (document: Awaited<ReturnType<SettingsStore["get"]>>): ChartSettings => ({
+        fillUnsetFinanceAccountCodes: (_t, codes) => {
+          requests.push(codes.taxRemittancePosting);
+          return Promise.resolve({ filled: [], inEffect: {} });
+        },
+        get: () => Promise.resolve(document),
+      });
+      await run(fakeAccess(), recording({ defaults: { currency: "USD" } }), WIRING);
+      await run(fakeAccess({ taxReturns: [{ id: "r", state: "filed" }] }), recording({ defaults: { currency: "USD" } }), WIRING);
+      await run(fakeAccess(), recording({}), WIRING);
+      expect(requests).toEqual(["on_mark_paid", undefined, undefined]);
+    });
+
+    it("lets a failing TaxReturn read propagate rather than reporting it as a settings failure", async () => {
+      const settings = await storeWith({ defaults: { currency: "USD" } });
+      const fake = fakeAccess({ taxReturnReadError: new Error("connection reset") });
+      await expect(run(fake, settings, WIRING)).rejects.toThrow("connection reset");
+      expect((await settings.get(TENANT)).finance).toBeUndefined();
+    });
+
+    it("reports a failing settings read as settings_unwritten with no mode decided", async () => {
+      class SettingsRowUnreadable extends Error {
+        constructor() {
+          super("unreadable");
+          this.name = "SettingsRowUnreadable";
+        }
+      }
+      const settings: ChartSettings = {
+        fillUnsetFinanceAccountCodes: () => Promise.resolve({ filled: [], inEffect: {} }),
+        get: () => Promise.reject(new SettingsRowUnreadable()),
+      };
+      const report = await run(fakeAccess(), settings, WIRING);
+      expect(report.outcome).toBe("settings_unwritten");
+      expect(report.settingsError).toBe("SettingsRowUnreadable");
+      expect(report.remittancePosting).toBeNull();
+    });
+
+    it("works through erp-core's real handlers and store: filled, then withheld for an outstanding return", async () => {
+      const store = new InMemoryEntityStore();
+      const compiled = compileOperateServer(buildErpCorePack(), {
+        store,
+        principalRoles: (p: ResolvedPrincipal | null) => ({
+          primaryRole: p?.grantedScopes[0] ?? "anonymous",
+          secondaryRoles: p?.grantedScopes.slice(1) ?? [],
+        }),
+        clock: { now: () => new Date("2026-03-01T01:00:00.000Z") },
+      });
+      const fresh = await storeWith({ defaults: { currency: "USD" } });
+      const input = {
+        access: compiled.systemEntityAccess,
+        actor: ACTOR,
+        updatedBy: null,
+        taxRemittance: WIRING,
+        requestRemittancePosting: true,
+      };
+      const first = await ensureStarterChart({ ...input, tenantId: TENANT, settings: fresh });
+      expect(first.remittancePosting).toBe("filled");
+
+      const OTHER = "22222222-2222-4222-8222-222222222222";
+      await store.create(OTHER, "TaxReturn", { id: "rec_tr_filed", return_number: "TAX-1", state: "filed" });
+      const withReturn = new InMemorySettingsStore();
+      await withReturn.put(OTHER, { defaults: { currency: "USD" } });
+      const second = await ensureStarterChart({ ...input, tenantId: OTHER, settings: withReturn });
+      expect(second.remittancePosting).toBe("skipped_returns_outstanding");
+      expect((await withReturn.get(OTHER)).finance?.taxRemittancePosting).toBeUndefined();
+    });
   });
 });

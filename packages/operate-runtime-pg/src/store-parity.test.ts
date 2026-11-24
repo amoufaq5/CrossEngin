@@ -2,12 +2,19 @@ import type { PgConnection } from "@crossengin/kernel-pg";
 import type { Manifest } from "@crossengin/kernel/manifest";
 import {
   FIELD_LIST_VALUE_TYPES,
+  InMemoryEntityStore,
   LIST_VALUE_TYPES,
   encodeKeyset,
+  taxRemittanceGlPostingEffect,
+  taxRemittanceReversalEffect,
+  taxRemittanceStampClearEffect,
+  taxRemittanceWiring,
+  type EntityRecord,
   listValueTypesForManifest,
   type ListQuery,
   type ListValueType,
 } from "@crossengin/operate-runtime";
+import { buildErpCorePack } from "@crossengin/pack-erp-core";
 import type { Entity, PrimitiveFieldType } from "@crossengin/types/meta-schema";
 import { describe, expect, it } from "vitest";
 
@@ -314,6 +321,126 @@ describe("the two Postgres stores agree about what a JSONB-typed field stores", 
         const columnValue: unknown = JSON.parse(colInsert.params[2] as string);
         expect(columnValue).toEqual(value);
         expect(document[field]).toEqual(value);
+      }
+    }
+  });
+});
+
+/**
+ * A key a write effect sends that the entity does not declare is kept by the document store and
+ * dropped by the column store, so a remittance posted on `--store pg` and on `--store pg-columns`
+ * would read back differently — an entry with a currency on one and none on the other, or a return
+ * whose stamp survives on one. So every key the remittance effects write is asserted to be a planned
+ * column of the entity it is written to, which is what makes the two stores hold the same entry,
+ * lines and stamps (ADR-0467).
+ */
+describe("the two Postgres stores hold the same tax remittance", () => {
+  const CORE = buildErpCorePack();
+  const PLANS = columnPlansForManifest(CORE, { schema: "public" });
+  const WIRING = taxRemittanceWiring(CORE)!;
+  const T = "11111111-1111-1111-1111-111111111111";
+
+  class Recording extends InMemoryEntityStore {
+    readonly written: { entity: string; keys: readonly string[] }[] = [];
+    armed = false;
+    override create(tenantId: string, entity: string, data: EntityRecord): Promise<EntityRecord> {
+      if (this.armed) this.written.push({ entity, keys: Object.keys(data) });
+      return super.create(tenantId, entity, data);
+    }
+    override update(tenantId: string, entity: string, id: string, patch: EntityRecord): Promise<EntityRecord | null> {
+      if (this.armed) this.written.push({ entity, keys: Object.keys(patch) });
+      return super.update(tenantId, entity, id, patch);
+    }
+  }
+
+  it("writes only keys the column store plans as columns, for the posting, its reversal and the stamp clear", async () => {
+    const store = new Recording();
+    const ids: Record<string, string> = {};
+    for (const code of ["2200", "1400", "1000"]) {
+      ids[code] = String((await store.create(T, "LedgerAccount", { account_code: code }))["id"]);
+    }
+    const seed = await store.create(T, "JournalEntry", { entry_number: "SEED", state: "posted" });
+    for (const [code, d, c] of [["2200", 0, 1000], ["1400", 300, 0]] as const) {
+      await store.create(T, "JournalLine", {
+        journal_entry_id: String(seed["id"]),
+        ledger_account_id: ids[code],
+        currency: "USD",
+        debit: d,
+        credit: c,
+        functional_debit: d,
+        functional_credit: c,
+      });
+    }
+    const filed = await store.create(T, "TaxReturn", {
+      return_number: "TR-1",
+      state: "filed",
+      return_type: "vat",
+      jurisdiction_id: "jur-1",
+      period_start: "2026-01-01",
+      period_end: "2026-03-31",
+      output_tax: 1000,
+      input_tax: 300,
+      net_payable: 700,
+      currency: "USD",
+      updated_by: "00000000-0000-4000-8000-0000000000aa",
+    });
+    const id = String(filed["id"]);
+    const settings = {
+      get: () =>
+        Promise.resolve({
+          defaults: { currency: "USD" },
+          finance: {
+            taxPayableAccountCode: "2200",
+            taxInputAccountCode: "1400",
+            cashAccountCode: "1000",
+            taxRemittancePosting: "on_mark_paid" as const,
+          },
+        }),
+    };
+    store.armed = true;
+    await taxRemittanceGlPostingEffect({ wiring: WIRING, settingsStore: settings })({
+      operation: "transition",
+      entity: "TaxReturn",
+      tenantId: T,
+      id,
+      before: filed,
+      after: { ...filed, state: "paid" },
+      store,
+    });
+    // The effect stamps the return; the handler, not run here, is what moves its state.
+    const paid = { ...(await store.get(T, "TaxReturn", id))!, state: "paid" };
+    const reverse = {
+      operation: "transition" as const,
+      entity: "TaxReturn",
+      tenantId: T,
+      id,
+      before: paid,
+      after: { ...paid, state: "filed" },
+      store,
+    };
+    await taxRemittanceReversalEffect({ wiring: WIRING })(reverse);
+    await taxRemittanceStampClearEffect({ wiring: WIRING })(reverse);
+
+    // The posting, its three lines and the stamp; the reversal entry, its three lines and the
+    // original entry's state; the cleared stamp.
+    expect(store.written.map((w) => w.entity)).toEqual([
+      "JournalEntry",
+      "JournalLine",
+      "JournalLine",
+      "JournalLine",
+      "TaxReturn",
+      "JournalEntry",
+      "JournalLine",
+      "JournalLine",
+      "JournalLine",
+      "JournalEntry",
+      "TaxReturn",
+    ]);
+    for (const w of store.written) {
+      const planned = new Set((PLANS.get(w.entity)?.columns ?? []).map((c) => c.field));
+      for (const key of w.keys) {
+        if (key === "id") continue;
+        expect(planned.has(key), `${w.entity}.${key} is a column`).toBe(true);
       }
     }
   });

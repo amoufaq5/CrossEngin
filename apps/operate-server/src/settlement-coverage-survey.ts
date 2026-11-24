@@ -6,9 +6,10 @@
  *
  * Measured on resolved `erp-core`, the shipped `--pack` default, **three** lifecycle transitions
  * reach the settled state — `Invoice.mark_paid` (from `sent`/`overdue`), `Bill.mark_paid` (from
- * `approved`/`overdue`) and `TaxReturn.mark_paid` (from `filed`) — and **no** write effect
- * `compile.ts` wires triggers on it at all: every `triggerState` is `sent` or `approved`, and
- * `settleableStates` are the states a document is settled *from*. The two `slas` entries beside
+ * `approved`/`overdue`) and `TaxReturn.mark_paid` (from `filed`) — and before ADR-0467 **no** write
+ * effect `compile.ts` wired triggered on it at all: every `triggerState` was `sent` or `approved`,
+ * and `settleableStates` are the states a document is settled *from*. The tax remittance posting is
+ * now the one effect on that edge, and it is `TaxReturn`'s alone. The two `slas` entries beside
  * those transitions drive nothing (`slas` has one reader in the workspace, a validator). The other
  * six packs declare **none** of their own and inherit these three through `meta.extends`, which is
  * what bounds the whole subject to one pack.
@@ -23,16 +24,18 @@
  *
  * ## Why a survey and not only a guard
  *
- * Because one of the three cannot be guarded, and an operator told nothing would reasonably read
- * the guard as covering every document that can be marked settled. `TaxReturn` has no `total`
- * field, and `Payment` declares no reference to it — so both operands of `total − applied` are
- * missing and the predicate is inexpressible rather than unwritten. Inventing one would be worse
- * than leaving it: `totalField: "total"` makes `num(undefined)` zero, so every write passes and the
- * guard reads as a control that is checking nothing (ADR-0337's falsely-true direction).
+ * Because not every settleable document is settled by a payment, and an operator told nothing would
+ * reasonably read the guard as covering every document that can be marked settled. A coverage guard
+ * needs both operands of `total − applied` — a total on the document and a `Payment` reference to it
+ * — and each is **derived from the manifest** here rather than asserted, so an entity that gains or
+ * loses one changes its report without this file being edited.
  *
- * Both of those facts are **derived from the manifest** here rather than asserted, so a pack that
- * later gives `TaxReturn` a total and a payment reference stops being reported without this file
- * being edited — and an entity that loses one starts being reported.
+ * `TaxReturn` is the one document that has neither, and it is not reported for lacking them
+ * (ADR-0467): a return is not settled by a payment at all but by its own remittance posting on
+ * `mark_paid`, so naming the Payment-reference remedy for it would send an operator to build the
+ * route ADR-0467 measured and refused (a `Payment` posts to accounts payable and clears no tax
+ * account). Whether that posting is wired is `taxRemittanceWiring`, imported rather than restated,
+ * so this report and the effect gate are two readers of one predicate.
  *
  * ## Reported, never refusing, and said either way
  *
@@ -47,7 +50,12 @@ import { resolvedFields } from "@crossengin/kernel/ddl";
 import {
   SETTLED_DOCUMENT_STATE,
   SETTLEMENT_COVERAGE_DOCUMENTS,
+  TAX_REMITTANCE_POSTING_MODES,
+  taxRemittanceUnwiredReasons,
+  taxRemittanceWiring,
   type SettlementCoverageConfig,
+  type TaxRemittancePostingMode,
+  type TaxRemittanceWiring,
 } from "@crossengin/operate-runtime";
 
 type LifecycleWorkflow = Extract<
@@ -70,6 +78,17 @@ const PAYMENT_ENTITY = "Payment";
 
 /** The field the coverage predicate reads as the amount owed, matching the guard's default. */
 const TOTAL_FIELD = "total";
+
+/**
+ * The document settled by its own posting rather than by payments. Typed off the wiring's own
+ * `entity`, so renaming it there is a compile error here rather than a survey that stops matching.
+ */
+const OWN_POSTING_ENTITY: TaxRemittanceWiring["entity"] = "TaxReturn";
+
+/** The tenant setting that switches the posting on, and its two values, as the server spells them. */
+const POSTING_SETTING = "finance.taxRemittancePosting";
+const DEFAULT_POSTING_MODE: TaxRemittancePostingMode = TAX_REMITTANCE_POSTING_MODES[0];
+const POSTING_ON_MODE: TaxRemittancePostingMode = TAX_REMITTANCE_POSTING_MODES[1];
 
 /**
  * How many documents a group names before it summarises the rest.
@@ -153,6 +172,23 @@ export const SETTLEMENT_COVERAGE_GAPS = {
       "an entry naming the entity and its payment reference field would cover it; that declaration" +
       " is in @crossengin/operate-runtime rather than in this deployment's manifest",
   },
+  /**
+   * `TaxReturn` settles through its own remittance posting (ADR-0467) and this manifest does not
+   * carry everything that posting reads, so `mark_paid` posts nothing for every tenant whatever
+   * their `finance.taxRemittancePosting` says. The reasons are per manifest and travel on the
+   * document; the remedy here is the one sentence true of all of them.
+   *
+   * Last, because it is the only gap that belongs to a different mechanism: the four operand and
+   * declaration gaps above are about payment coverage and are never reported for this document.
+   */
+  tax_remittance_unwired: {
+    gap:
+      "the return settles through its own remittance posting on mark_paid, and this manifest lacks" +
+      " what that posting reads, so mark_paid posts nothing",
+    remedy:
+      "declare what the reasons name, or post each remittance as a manual journal entry beside" +
+      " mark_paid — never as a Payment, which posts to accounts payable and clears no tax account",
+  },
 } as const;
 
 export type SettlementCoverageGap = keyof typeof SETTLEMENT_COVERAGE_GAPS;
@@ -169,16 +205,30 @@ export const SETTLEMENT_COVERAGE_GAP_ORDER: readonly SettlementCoverageGap[] = O
   SETTLEMENT_COVERAGE_GAPS,
 ) as SettlementCoverageGap[];
 
+/**
+ * The mechanism that keeps a settleable document's status and the ledger in agreement. Fixed by the
+ * entity, not by whether it is in force: an unguarded `Invoice` is still settled by payment
+ * coverage, and `gaps` says why that coverage is absent.
+ */
+export const SETTLEMENT_MECHANISMS = ["payment_coverage", "own_posting"] as const;
+export type SettlementMechanism = (typeof SETTLEMENT_MECHANISMS)[number];
+
 /** One document whose lifecycle can reach the settled state, and what covers it. */
 export interface SettleableDocument {
   readonly entity: string;
   /** The transitions that reach the settled state, by name — what an operator would click. */
   readonly transitions: readonly string[];
+  readonly mechanism: SettlementMechanism;
   /**
-   * Every gap that holds, in {@link SETTLEMENT_COVERAGE_GAP_ORDER}. Empty means guarded.
+   * For `own_posting`, why the posting is not wired — `taxRemittanceUnwiredReasons`, verbatim and
+   * `[]` when it is. Always `[]` for `payment_coverage`, whose gaps are the vocabulary above.
+   */
+  readonly unwiredReasons: readonly string[];
+  /**
+   * Every gap that holds, in {@link SETTLEMENT_COVERAGE_GAP_ORDER}. Empty means covered.
    *
-   * A **list** and deliberately not one ranked `reason` beside a `covered` boolean: `TaxReturn`
-   * satisfies two of these at once, so picking one would discard a true fact about it, and a
+   * A **list** and deliberately not one ranked `reason` beside a `covered` boolean: a document can
+   * satisfy two of these at once (no total *and* no payment reference), so picking one would discard a true fact about it, and a
    * `reason` plus a `covered` flag is two fields that must agree — the pair this repository has
    * spent several increments on. `covered` is read off `reasons.length === 0` and nowhere stored.
    */
@@ -188,11 +238,11 @@ export interface SettleableDocument {
 export const SETTLEMENT_COVERAGE_VERDICTS = [
   /** No lifecycle transition reaches the settled state, so there is nothing to cover. */
   "no_settleable_documents",
-  /** Every settleable document is guarded. */
+  /** Every settleable document is guarded, or settled by its own wired posting. */
   "all_covered",
-  /** Some are guarded and at least one is not. */
+  /** Some are covered and at least one is not. */
   "partly_covered",
-  /** Settleable documents exist and none of them is guarded. */
+  /** Settleable documents exist and none of them is covered. */
   "none_covered",
 ] as const;
 export type SettlementCoverageVerdict = (typeof SETTLEMENT_COVERAGE_VERDICTS)[number];
@@ -204,8 +254,8 @@ export type SettlementCoverageVerdict = (typeof SETTLEMENT_COVERAGE_VERDICTS)[nu
  * The refusal is in the **guard**, where it belongs: a write that would create the divergence is
  * refused at the moment it is attempted, so there is nothing left for a boot refusal to prevent. A
  * document that *cannot* be guarded is a different thing — it is a capability this deployment does
- * not have, and refusing to serve `erp-core` because `TaxReturn` has no total field would refuse
- * the shipped default over a remedy that is an edit to this repository (ADR-0334's rule, and
+ * not have, and refusing to serve a manifest because a document lacks a total field would refuse
+ * a deployment that works over a remedy that is an edit to this repository (ADR-0334's rule, and
  * `list-surface-survey.ts`' reason for reporting where ADR-0338 refuses).
  *
  * `coverage_disabled` is `true` for the reason the flag exists at all: an uncovered settlement is
@@ -224,6 +274,7 @@ export interface SettlementCoverageReport {
   readonly verdict: SettlementCoverageVerdict;
   /** Every document whose lifecycle reaches the settled state, in manifest workflow order. */
   readonly documents: readonly SettleableDocument[];
+  /** Documents with no gap: guarded by payment coverage, or settled by their own wired posting. */
   readonly coveredCount: number;
   readonly mayServe: boolean;
 }
@@ -301,9 +352,24 @@ export function surveySettlementCoverage(
     }
   }
   const declared = declaredCoverage();
+  // Asked once: the reasons are a property of the manifest, and `[]` exactly when the wiring the
+  // effects gate on is non-null — so this report and the posting cannot disagree.
+  const unwired = taxRemittanceUnwiredReasons(manifest);
 
   const documents: SettleableDocument[] = [];
   for (const [entity, transitions] of settleableEntities(manifest)) {
+    if (entity === OWN_POSTING_ENTITY) {
+      // No coverage gap of any kind, the flag's included: `--allow-uncovered-settlement` disables a
+      // coverage guard, and this document never had one to disable.
+      documents.push({
+        entity,
+        transitions,
+        mechanism: "own_posting",
+        unwiredReasons: unwired,
+        gaps: unwired.length > 0 ? ["tax_remittance_unwired"] : [],
+      });
+      continue;
+    }
     const gaps: SettlementCoverageGap[] = [];
     if (input.allowUncoveredSettlement) gaps.push("coverage_disabled");
     if (payment === undefined) gaps.push("no_payment_entity");
@@ -319,7 +385,7 @@ export function surveySettlementCoverage(
     // Last, and only when nothing else explains it: a declaration gap reported beside a missing
     // operand would send a reader to add an entry that could not work.
     if (gaps.length === 0 && !declared.has(entity)) gaps.push("not_declared");
-    documents.push({ entity, transitions, gaps });
+    documents.push({ entity, transitions, mechanism: "payment_coverage", unwiredReasons: [], gaps });
   }
 
   const coveredCount = documents.filter((d) => d.gaps.length === 0).length;
@@ -346,7 +412,7 @@ function decideVerdict(total: number, covered: number): SettlementCoverageVerdic
 
 /**
  * True when this report deserves a `warn` rather than an `info`: any settleable document is
- * unguarded.
+ * uncovered — an unguarded payment-settled one, or a return whose own posting is unwired.
  *
  * Reads the same list the verdict is computed from, so the level an operator sees and the verdict
  * they read cannot disagree about one deployment — `uniqueEnforcementIsSuspect`' stated reason for
@@ -371,8 +437,8 @@ function nameDocuments(documents: readonly SettleableDocument[]): string {
  * Grouped by gap in `SETTLEMENT_COVERAGE_GAP_ORDER` so the output is stable across boots and
  * diffable between two manifests, and so each remedy is printed once beside the documents it
  * applies to rather than once per document. A document satisfying two gaps appears under both,
- * which is the point of carrying the list: `TaxReturn` is missing both operands and a reader who
- * fixed only one would still not get a guard.
+ * which is the point of carrying the list: a document missing both operands is reported under both,
+ * and a reader who fixed only one would still not get a guard.
  *
  * Entity and transition **names** come from the manifest and are not a disclosure; no record value
  * reaches this module, which has nowhere to put one.
@@ -385,32 +451,102 @@ export function formatSettlementCoverageReport(report: SettlementCoverageReport)
       ` to guarantee or to withhold`
     );
   }
-  const counts = `${report.coveredCount.toString()} of ${report.documents.length.toString()} guarded`;
-  if (report.verdict === "all_covered") {
-    return (
-      `[settlement] settleable documents: ${counts} — a write putting one into` +
-      ` '${SETTLED_DOCUMENT_STATE}' is refused unless completed payments cover its ${TOTAL_FIELD}:` +
-      ` ${nameDocuments(report.documents)}`
+  const covered = report.documents.filter((d) => d.gaps.length === 0);
+  const guarded = covered.filter((d) => d.mechanism === "payment_coverage");
+  const posting = covered.filter((d) => d.mechanism === "own_posting");
+  // Counted per mechanism, never summed: a return settled by its own posting posts nothing for a
+  // tenant left on the default mode, so adding it to the guarded documents would read "3 of 3
+  // covered" on a deployment whose only guarantee is the two payment guards.
+  const paymentDocs = report.documents.filter((d) => d.mechanism === "payment_coverage");
+  const postingDocs = report.documents.filter((d) => d.mechanism === "own_posting");
+  const counts = [
+    ...(paymentDocs.length > 0
+      ? [`${guarded.length.toString()} of ${paymentDocs.length.toString()} payment-settled guarded`]
+      : []),
+    ...(postingDocs.length > 0
+      ? [`${posting.length.toString()} of ${postingDocs.length.toString()} settled by its own posting wired (per tenant)`]
+      : []),
+  ].join("; ");
+  const lines = [`[settlement] settleable documents: ${counts}`];
+  if (guarded.length > 0) {
+    lines.push(
+      `  guarded: ${nameDocuments(guarded)} — a write putting one into '${SETTLED_DOCUMENT_STATE}'` +
+        ` is refused unless completed payments cover its ${TOTAL_FIELD}`,
     );
   }
-
-  const lines = [`[settlement] settleable documents: ${counts}`];
-  const covered = report.documents.filter((d) => d.gaps.length === 0);
-  if (covered.length > 0) lines.push(`  guarded: ${nameDocuments(covered)}`);
+  if (posting.length > 0) {
+    // The per-tenant condition is said here because a boot cannot see it: every tenant that has not
+    // opted in is in the default mode, where nothing posts and a manual journal must accompany the
+    // status change.
+    lines.push(
+      `  settled by its own posting: ${nameDocuments(posting)} — ${OWN_POSTING_ENTITY}.mark_paid` +
+        ` posts the remittance when a tenant sets ${POSTING_SETTING}=${POSTING_ON_MODE}; in the` +
+        ` default ${DEFAULT_POSTING_MODE} mode it posts nothing and a manual journal must accompany it`,
+    );
+  }
   for (const gap of SETTLEMENT_COVERAGE_GAP_ORDER) {
     const group = report.documents.filter((d) => d.gaps.includes(gap));
     if (group.length === 0) continue;
-    lines.push(`  ${group.length.toString()} unguarded (${gap}): ${SETTLEMENT_COVERAGE_GAPS[gap].gap}`);
+    lines.push(`  ${group.length.toString()} uncovered (${gap}): ${SETTLEMENT_COVERAGE_GAPS[gap].gap}`);
     lines.push(`    ${nameDocuments(group)}`);
+    const reasons = [...new Set(group.flatMap((d) => d.unwiredReasons))];
+    if (reasons.length > 0) lines.push(`    reasons: ${reasons.join("; ")}`);
     lines.push(`    remedy: ${SETTLEMENT_COVERAGE_GAPS[gap].remedy}`);
   }
-  // Said once at the end rather than per group, because it is the consequence of being unguarded
-  // whatever the reason, and it is the sentence that makes the finding actionable: the two surfaces
-  // disagree and nothing in this repository reconciles them.
-  lines.push(
-    `  an unguarded document marked '${SETTLED_DOCUMENT_STATE}' while payments fall short leaves` +
-      ` the aging report showing nothing open and the GL control account still carrying the` +
-      ` residual, with nothing reconciling the two`,
-  );
+  // Said once rather than per group, because it is the consequence of an unguarded *payment-settled*
+  // document whatever the reason, and it is the sentence that makes the finding actionable: the two
+  // surfaces disagree and nothing in this repository reconciles them. Not said for an unwired
+  // posting alone, whose consequence is a different one and is in its own gap sentence.
+  if (report.documents.some((d) => d.mechanism === "payment_coverage" && d.gaps.length > 0)) {
+    lines.push(
+      `  an unguarded document marked '${SETTLED_DOCUMENT_STATE}' while payments fall short leaves` +
+        ` the aging report showing nothing open and the GL control account still carrying the` +
+        ` residual, with nothing reconciling the two`,
+    );
+  }
   return lines.join("\n");
+}
+
+/**
+ * The `[tax-remittance]` boot line, said either way: whether this manifest can post a return's
+ * remittance on `mark_paid`, and, when it can, that it does so only for a tenant that opts in.
+ *
+ * The same predicate as the survey and the effect gate, so the three cannot disagree about one
+ * manifest — and the reasons are `taxRemittanceUnwiredReasons`' own sentences rather than a
+ * paraphrase, which is the half that would otherwise drift.
+ */
+export function formatTaxRemittanceWiring(manifest: Manifest): string {
+  if (taxRemittanceWiring(manifest) !== null) {
+    return (
+      `[tax-remittance] wired: ${OWN_POSTING_ENTITY}.mark_paid posts when a tenant sets` +
+      ` ${POSTING_SETTING}=${POSTING_ON_MODE} (default ${DEFAULT_POSTING_MODE})`
+    );
+  }
+  return `[tax-remittance] unwired: ${taxRemittanceUnwiredReasons(manifest).join("; ")}`;
+}
+
+/**
+ * Whether the line deserves a `warn`: the manifest declares a `TaxReturn` and the posting is
+ * unwired, so marking one paid posts nothing for every tenant whatever their setting says. A manifest
+ * with no `TaxReturn` at all has nothing to warn about, and its line is informational.
+ */
+export function taxRemittanceWiringIsSuspect(manifest: Manifest): boolean {
+  return (
+    (manifest.entities ?? []).some((e) => e.name === OWN_POSTING_ENTITY) &&
+    taxRemittanceWiring(manifest) === null
+  );
+}
+
+/**
+ * The per-tenant line, or `null` when there is nothing to say: only a tenant's own activated
+ * manifest that declares a `TaxReturn` and cannot post its remittance. Silent otherwise, which is
+ * `formatTenantManifestSurvey`'s rule — the fact that the check ran is said once, at boot, and a
+ * clean line per tenant per activation is the noise that gets filtered out with the findings.
+ */
+export function formatTenantTaxRemittanceWiring(tenantId: string, manifest: Manifest): string | null {
+  if (!taxRemittanceWiringIsSuspect(manifest)) return null;
+  return formatTaxRemittanceWiring(manifest).replace(
+    "[tax-remittance] ",
+    `[tax-remittance] tenant ${tenantId}: `,
+  );
 }

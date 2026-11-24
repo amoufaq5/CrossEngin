@@ -77,6 +77,8 @@ async function harness(manifest: Manifest, settings?: TenantSettings) {
       actor: provisioningActor(roles),
       settings: settingsStore,
       updatedBy: OPERATOR,
+      taxRemittance: compiled.taxRemittance,
+      requestRemittancePosting: true,
     });
   const rowsOf = (entity: string): Promise<EntityRecord[]> =>
     store.listPage(TENANT, entity, { limit: 500, cursor: null, sort: [], filters: [] }).then((p) => [...p.records]);
@@ -98,6 +100,10 @@ describe.each(BUILTIN_PACK_NAMES.map((p) => [p]))("the starter chart on %s", (pa
     expect(report.refused).toEqual([]);
     expect([...report.settingsFilled].sort()).toEqual(SETTING_KEYS);
     expect(report.settingsFilled).toHaveLength(18);
+    // Every built-in pack carries TaxReturn's reverse_payment, so the wiring is real on each and the
+    // decision gets as far as the currency check, which this harness's settings do not satisfy
+    // (ADR-0467). An unwired pack would stop one step earlier, at `skipped_unwired`.
+    expect(report.remittancePosting).toBe("skipped_functional_currency_undeclared");
     expect(report.settingsSkipped).toEqual([]);
     expect(report.settingsDangling).toEqual([]);
     expect(report.settingsError).toBeUndefined();

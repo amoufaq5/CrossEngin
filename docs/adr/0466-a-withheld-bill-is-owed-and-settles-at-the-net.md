@@ -166,6 +166,12 @@ approving under the previous build; the database state is the same except for th
    covers `TaxReturn`, ADR-0391), and whether certificates the workspace issues to suppliers are
    modelled (`WhtCertificate` is customer-side only). Until then, record a remittance as a manual
    journal entry, never as a `Payment`.
+
+   **Closed by ADR-0467.** The figures are typed and bounded by each tax account's balance, cash
+   moves through an effect on `mark_paid`, settlement coverage does not cover `TaxReturn`, and
+   supplier certificates stay out of scope. The instruction above now reads: in `on_mark_paid` mode,
+   `mark_paid` posts the remittance; in `manual_journal` mode (a tenant's default), or for the cases
+   the posting refuses, a manual journal still applies; never as a `Payment`.
 2. **A gross payment leaves AP in debit, unreported**, on bills and invoices alike:
    `settlementIsCovered` is `applied ≥ owed`.
 3. **A transition's response body is the record before its effects ran**, so `approve`'s response

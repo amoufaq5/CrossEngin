@@ -474,7 +474,13 @@ interface Harness {
   readonly acts: string[];
   readonly creations: TenantCreationEvent[];
   readonly contexts: string[];
-  readonly charts: { tenantId: string; provisioningId: string; principalId: string; committed: boolean }[];
+  readonly charts: {
+    tenantId: string;
+    provisioningId: string;
+    principalId: string;
+    newWorkspace: boolean;
+    committed: boolean;
+  }[];
   committed: boolean;
 }
 
@@ -485,6 +491,7 @@ const CHART_REPORT: StarterChartReport = {
   existing: [],
   refused: [],
   settingsFilled: ["cashAccountCode", "arAccountCode"],
+  remittancePosting: "filled",
   settingsSkipped: [],
   settingsDangling: [],
 };
@@ -951,7 +958,10 @@ describe("approve", () => {
       const h = harness();
       const out = await approve(h, { password: PASSWORD });
       expect(out.status).toBe(201);
-      expect(h.charts).toEqual([{ tenantId: TENANT, provisioningId: REQ, principalId: OPERATOR, committed: true }]);
+      // A new workspace, so the chart may switch tax remittance posting on (ADR-0467).
+      expect(h.charts).toEqual([
+        { tenantId: TENANT, provisioningId: REQ, principalId: OPERATOR, newWorkspace: true, committed: true },
+      ]);
       // Last, and only once: strictly after the decision row landed.
       expect(h.acts.indexOf(`starterChart:${TENANT}`)).toBe(h.acts.indexOf("markApproved") + 1);
       expect(h.acts.filter((a) => a.startsWith("starterChart:"))).toHaveLength(1);

@@ -202,9 +202,34 @@ export interface StarterChartReport {
   }>;
   /** `null` when the check could not run, which is not the same as having found none. */
   readonly settingsDangling: ReadonlyArray<{ readonly key: string; readonly code: string }> | null;
+  /**
+   * What the run did about `finance.taxRemittancePosting` (ADR-0467). Optional because a server
+   * that predates that ADR sends nothing; `null` means nothing was decided.
+   */
+  readonly remittancePosting?: StarterRemittancePosting | null;
   /** The error's name when the settings could not be written. */
   readonly settingsError?: string;
 }
+
+export type StarterRemittancePosting =
+  | "filled"
+  | "already_set"
+  | "skipped_existing_tenant"
+  | "skipped_returns_outstanding"
+  | "skipped_functional_currency_undeclared"
+  | "skipped_unwired";
+
+const REMITTANCE_POSTING_SENTENCE: Record<StarterRemittancePosting, string> = {
+  filled: "Tax returns now post their remittance when marked paid.",
+  already_set: "Tax remittance posting was already chosen and was left as it is.",
+  skipped_existing_tenant:
+    "Tax remittance posting was left unchanged: this is not a new workspace, so its admin chooses it in Settings.",
+  skipped_returns_outstanding:
+    "Tax remittance posting was left unchanged: a return is already filed or paid outside a posting, so its remittance may have been journalled by hand.",
+  skipped_functional_currency_undeclared:
+    "Tax remittance posting was left unchanged: the workspace has no default currency.",
+  skipped_unwired: "Tax remittance posting is not available on this deployment.",
+};
 
 export type StarterChartOutcome =
   | "complete"
@@ -254,6 +279,10 @@ export function describeStarterChart(report: StarterChartReport): StarterChartDe
       ? ["Whether every finance setting names an existing account could not be checked."]
       : report.settingsDangling.map((d) => `${d.key} names account ${d.code}, which does not exist.`);
   const inPlace = report.created.length + report.existing.length;
+  const remittance =
+    report.remittancePosting === undefined || report.remittancePosting === null
+      ? []
+      : [REMITTANCE_POSTING_SENTENCE[report.remittancePosting]];
 
   switch (report.outcome) {
     case "complete":
@@ -261,7 +290,7 @@ export function describeStarterChart(report: StarterChartReport): StarterChartDe
         complete: true,
         headline: `${inPlace} ledger accounts in place, finance settings set.`,
         counts,
-        details: [],
+        details: remittance,
       };
     case "partial":
       return {
@@ -273,7 +302,7 @@ export function describeStarterChart(report: StarterChartReport): StarterChartDe
               ? `${inPlace} ledger accounts in place; whether every finance setting names an existing account could not be checked.`
               : `${inPlace} ledger accounts in place; some finance settings need a choice.`,
         counts,
-        details: [...refusedLine, ...(allForbidden ? [forbiddenCause] : []), ...skipped, ...dangling],
+        details: [...refusedLine, ...(allForbidden ? [forbiddenCause] : []), ...skipped, ...dangling, ...remittance],
       };
     case "refused":
       return {

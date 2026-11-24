@@ -1,7 +1,11 @@
 import { resolveManifest, type Manifest, type ManifestRegistry } from "@crossengin/kernel/manifest";
 import { ERP_CORE_PACK_SLUG, buildErpCorePack } from "@crossengin/pack-erp-core";
 import { buildErpConstructionPack } from "@crossengin/pack-erp-construction";
-import { SETTLEMENT_COVERAGE_DOCUMENTS } from "@crossengin/operate-runtime";
+import {
+  SETTLEMENT_COVERAGE_DOCUMENTS,
+  taxRemittanceUnwiredReasons,
+  taxRemittanceWiring,
+} from "@crossengin/operate-runtime";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -12,14 +16,31 @@ import {
   SETTLEMENT_COVERAGE_MAY_SERVE,
   SETTLEMENT_COVERAGE_VERDICTS,
   formatSettlementCoverageReport,
+  formatTaxRemittanceWiring,
+  formatTenantTaxRemittanceWiring,
   settlementCoverageIsSuspect,
   surveySettlementCoverage,
+  taxRemittanceWiringIsSuspect,
   type SettlementCoverageGap,
 } from "./settlement-coverage-survey.js";
 
 const core = buildErpCorePack();
 const guarded = surveySettlementCoverage(core, { allowUncoveredSettlement: false });
 const hatched = surveySettlementCoverage(core, { allowUncoveredSettlement: true });
+
+/** Resolved erp-core with one remittance stamp removed from TaxReturn, so the posting is unwired. */
+function coreWithoutStamp(field = "remittance_count"): Manifest {
+  const m = structuredClone(core);
+  const tr = (m.entities ?? []).find((e) => e.name === "TaxReturn");
+  if (tr === undefined) throw new Error("erp-core declares no TaxReturn");
+  (tr as { fields: { name: string }[] }).fields = tr.fields.filter((f) => f.name !== field);
+  return m;
+}
+const unwiredCore = coreWithoutStamp();
+const unwired = surveySettlementCoverage(unwiredCore, { allowUncoveredSettlement: false });
+
+/** The Payment-reference remedy, which ADR-0467 says must never be offered for a tax return. */
+const PAYMENT_REFERENCE_REMEDY = SETTLEMENT_COVERAGE_GAPS.no_payment_reference.remedy;
 
 function gapsFor(
   report: ReturnType<typeof surveySettlementCoverage>,
@@ -40,35 +61,87 @@ describe("surveySettlementCoverage — resolved erp-core", () => {
     for (const doc of guarded.documents) expect(doc.transitions).toEqual(["mark_paid"]);
   });
 
-  it("covers Invoice and Bill and reports TaxReturn for BOTH missing operands", () => {
+  it("guards Invoice and Bill and settles TaxReturn by its own posting (ADR-0467)", () => {
     expect(gapsFor(guarded, "Invoice")).toEqual([]);
     expect(gapsFor(guarded, "Bill")).toEqual([]);
-    // Both, in the declared order, rather than one ranked reason: TaxReturn satisfies two at once
-    // and a reader who fixed only the total would still not get a guard.
-    expect(gapsFor(guarded, "TaxReturn")).toEqual(["no_total_field", "no_payment_reference"]);
-    expect(guarded.verdict).toBe("partly_covered");
-    expect(guarded.coveredCount).toBe(2);
-    expect(settlementCoverageIsSuspect(guarded)).toBe(true);
-  });
-
-  it("reports every document unguarded under the flag, and keeps the operand gaps", () => {
-    expect(gapsFor(hatched, "Invoice")).toEqual(["coverage_disabled"]);
-    expect(gapsFor(hatched, "TaxReturn")).toEqual([
-      "coverage_disabled",
-      "no_total_field",
-      "no_payment_reference",
+    // Not `no_total_field` + `no_payment_reference`, which is what it read before: a return is not
+    // settled by a payment, so neither operand is a gap and their remedies would send an operator to
+    // build the Payment route ADR-0467 refused.
+    expect(gapsFor(guarded, "TaxReturn")).toEqual([]);
+    expect(guarded.documents.map((d) => [d.entity, d.mechanism])).toEqual([
+      ["Invoice", "payment_coverage"],
+      ["Bill", "payment_coverage"],
+      ["TaxReturn", "own_posting"],
     ]);
-    expect(hatched.verdict).toBe("none_covered");
-    expect(hatched.coveredCount).toBe(0);
+    expect(guarded.verdict).toBe("all_covered");
+    expect(guarded.coveredCount).toBe(3);
+    expect(settlementCoverageIsSuspect(guarded)).toBe(false);
   });
 
-  it("agrees with the runtime's own declaration about which documents are covered", () => {
+  it("disables the coverage guards under the flag and leaves the return's own posting alone", () => {
+    // The flag turns off a coverage guard; the return never had one, so it gains no gap.
+    expect(gapsFor(hatched, "Invoice")).toEqual(["coverage_disabled"]);
+    expect(gapsFor(hatched, "Bill")).toEqual(["coverage_disabled"]);
+    expect(gapsFor(hatched, "TaxReturn")).toEqual([]);
+    expect(hatched.verdict).toBe("partly_covered");
+    expect(hatched.coveredCount).toBe(1);
+  });
+
+  it("agrees with the runtime's own declaration about which documents are guarded", () => {
     // The cross-rule join: two hand-written lists would be ADR-0288's maintained list, and here the
     // two halves are the guards that exist and the sentence claiming they exist — the pair where a
-    // divergence is a falsely-true control.
+    // divergence is a falsely-true control. Over the payment-settled documents only: the return is
+    // covered by the posting, and by design is in no coverage declaration.
     const declared = new Set(SETTLEMENT_COVERAGE_DOCUMENTS.map((d) => d.entity));
-    for (const doc of guarded.documents) {
+    expect(declared.has("TaxReturn")).toBe(false);
+    for (const doc of guarded.documents.filter((d) => d.mechanism === "payment_coverage")) {
       expect(doc.gaps.length === 0, doc.entity).toBe(declared.has(doc.entity));
+    }
+  });
+});
+
+describe("surveySettlementCoverage — the return's own posting, one predicate with the effect gate", () => {
+  it("reports the posting unwired, with the runtime's own reasons, when a stamp is missing", () => {
+    expect(taxRemittanceWiring(unwiredCore)).toBeNull();
+    expect(gapsFor(unwired, "TaxReturn")).toEqual(["tax_remittance_unwired"]);
+    const doc = unwired.documents.find((d) => d.entity === "TaxReturn");
+    expect(doc?.unwiredReasons).toEqual(taxRemittanceUnwiredReasons(unwiredCore));
+    expect(doc?.unwiredReasons).toContain("TaxReturn declares no field 'remittance_count'");
+    expect(unwired.verdict).toBe("partly_covered");
+    expect(settlementCoverageIsSuspect(unwired)).toBe(true);
+  });
+
+  it("agrees with taxRemittanceWiring over every stamp and required field removed one at a time", () => {
+    // Not a fixture agreeing with itself: each removal is asked of both readers, so a survey that
+    // decided wiring by its own list would disagree with the gate on the first field it forgot.
+    const fields = [
+      "remitted_at",
+      "remittance_entry_number",
+      "remittance_count",
+      "credit_disposition",
+      "net_payable",
+      "period_end",
+    ];
+    for (const field of fields) {
+      const m = coreWithoutStamp(field);
+      const report = surveySettlementCoverage(m, { allowUncoveredSettlement: false });
+      expect(gapsFor(report, "TaxReturn").length === 0, field).toBe(taxRemittanceWiring(m) !== null);
+      expect(gapsFor(report, "TaxReturn"), field).toEqual(["tax_remittance_unwired"]);
+    }
+  });
+
+  it("never offers the Payment-reference remedy for a tax return, wired or not", () => {
+    for (const report of [guarded, hatched, unwired]) {
+      const doc = report.documents.find((d) => d.entity === "TaxReturn");
+      expect(doc?.gaps ?? []).not.toContain("no_payment_reference");
+      expect(doc?.gaps ?? []).not.toContain("no_total_field");
+      expect(formatSettlementCoverageReport(report)).not.toContain(PAYMENT_REFERENCE_REMEDY);
+    }
+  });
+
+  it("carries no reasons on a payment-settled document", () => {
+    for (const doc of hatched.documents.filter((d) => d.mechanism === "payment_coverage")) {
+      expect(doc.unwiredReasons, doc.entity).toEqual([]);
     }
   });
 });
@@ -87,7 +160,9 @@ describe("surveySettlementCoverage — the other six packs inherit core's three"
     const resolved = await resolveManifest(buildErpConstructionPack(), { registry });
     const report = surveySettlementCoverage(resolved, { allowUncoveredSettlement: false });
     expect(report.documents.map((d) => d.entity).sort()).toEqual(["Bill", "Invoice", "TaxReturn"]);
-    expect(report.coveredCount).toBe(2);
+    // All three, the return through its own posting: the overlay inherits the remittance fields.
+    expect(report.coveredCount).toBe(3);
+    expect(taxRemittanceWiring(resolved)).not.toBeNull();
   });
 });
 
@@ -241,16 +316,20 @@ describe("the verdict map and the gap vocabulary", () => {
       "no_total_field",
       "no_payment_reference",
       "not_declared",
+      "tax_remittance_unwired",
     ]);
   });
 
   it("gives every gap a sentence and a remedy, and no gap is unreachable", () => {
     // Both directions: a gap with no remedy cannot be reported, and a gap no input produces would
-    // be a modelled value with no producer. The five inputs above cover four; `not_declared` is
-    // covered by its own test, so the union below is the producer census.
+    // be a modelled value with no producer. The shipped pack produces only the flag's and the
+    // unwired posting's gaps now that the return is no longer reported for missing operands; the
+    // four the fixture tests above produce are added by name, so the union is the producer census.
     const produced = new Set<SettlementCoverageGap>();
-    for (const r of [guarded, hatched]) for (const d of r.documents) for (const g of d.gaps) produced.add(g);
+    for (const r of [guarded, hatched, unwired]) for (const d of r.documents) for (const g of d.gaps) produced.add(g);
     produced.add("no_payment_entity");
+    produced.add("no_total_field");
+    produced.add("no_payment_reference");
     produced.add("not_declared");
     for (const gap of SETTLEMENT_COVERAGE_GAP_ORDER) {
       expect(SETTLEMENT_COVERAGE_GAPS[gap].gap, gap).toBeTruthy();
@@ -274,15 +353,36 @@ describe("formatSettlementCoverageReport", () => {
     expect(line).toContain("no coverage");
   });
 
-  it("names the counts, the guarded documents, each gap and its remedy", () => {
+  it("names the guarded documents and the one settled by its own posting, with the tenant condition", () => {
     const line = formatSettlementCoverageReport(guarded);
-    expect(line).toContain("2 of 3 guarded");
-    expect(line).toContain("Invoice (mark_paid)");
-    expect(line).toContain("TaxReturn (mark_paid)");
-    expect(line).toContain("no_total_field");
+    // Per mechanism: the return is not counted among the guarded documents (ADR-0467).
+    expect(line).toContain("2 of 2 payment-settled guarded; 1 of 1 settled by its own posting wired (per tenant)");
+    expect(line).not.toContain("3 of 3");
+    expect(line).toContain("guarded: Invoice (mark_paid), Bill (mark_paid)");
+    expect(line).toContain("settled by its own posting: TaxReturn (mark_paid)");
+    // The per-tenant condition the boot cannot see, in the server's spelling of the setting.
+    expect(line).toContain("finance.taxRemittancePosting=on_mark_paid");
+    expect(line).toContain("default manual_journal mode it posts nothing");
+    // Nothing is uncovered, so neither a remedy nor the divergence consequence is printed.
+    expect(line).not.toContain("remedy:");
+    expect(line).not.toContain("aging report showing nothing open");
+  });
+
+  it("names each gap and its remedy, and the payment consequence only for a payment document", () => {
+    const line = formatSettlementCoverageReport(hatched);
+    // The wired return does not lift the headline: no payment-settled document is guarded.
+    expect(line).toContain("0 of 2 payment-settled guarded; 1 of 1 settled by its own posting wired (per tenant)");
+    expect(line).toContain("2 uncovered (coverage_disabled)");
     expect(line).toContain("remedy:");
-    // The consequence, said once at the end: it is what makes the finding actionable.
     expect(line).toContain("aging report showing nothing open");
+  });
+
+  it("prints an unwired posting's reasons and its remedy, and not the payment consequence", () => {
+    const line = formatSettlementCoverageReport(unwired);
+    expect(line).toContain("1 uncovered (tax_remittance_unwired)");
+    expect(line).toContain("reasons: TaxReturn declares no field 'remittance_count'");
+    expect(line).toContain(SETTLEMENT_COVERAGE_GAPS.tax_remittance_unwired.remedy);
+    expect(line).not.toContain("aging report showing nothing open");
   });
 
   it("names the flag in the remedy an operator would act on, and nowhere else", () => {
@@ -297,13 +397,45 @@ describe("formatSettlementCoverageReport", () => {
       documents: Array.from({ length: COVERAGE_DOCUMENT_LIMIT + 3 }, (_, i) => ({
         entity: `E${i.toString()}`,
         transitions: ["mark_paid"],
+        mechanism: "payment_coverage" as const,
+        unwiredReasons: [],
         gaps: ["not_declared" as SettlementCoverageGap],
       })),
       coveredCount: 0,
       verdict: "none_covered" as const,
     };
     const line = formatSettlementCoverageReport(many);
-    expect(line).toContain(`0 of ${(COVERAGE_DOCUMENT_LIMIT + 3).toString()} guarded`);
+    expect(line).toContain(`0 of ${(COVERAGE_DOCUMENT_LIMIT + 3).toString()} payment-settled guarded`);
     expect(line).toContain("(+3 more)");
+  });
+});
+
+describe("the [tax-remittance] boot line", () => {
+  it("says the posting is wired, and that it posts only for a tenant that opts in", () => {
+    expect(formatTaxRemittanceWiring(core)).toBe(
+      "[tax-remittance] wired: TaxReturn.mark_paid posts when a tenant sets" +
+        " finance.taxRemittancePosting=on_mark_paid (default manual_journal)",
+    );
+    expect(taxRemittanceWiringIsSuspect(core)).toBe(false);
+  });
+
+  it("names the runtime's reasons when unwired, and warns only when a TaxReturn exists", () => {
+    const line = formatTaxRemittanceWiring(unwiredCore);
+    expect(line).toBe(`[tax-remittance] unwired: ${taxRemittanceUnwiredReasons(unwiredCore).join("; ")}`);
+    expect(taxRemittanceWiringIsSuspect(unwiredCore)).toBe(true);
+    // A manifest with no TaxReturn is unwired too and says so, but has nothing to warn about.
+    const none = { ...core, entities: (core.entities ?? []).filter((e) => e.name !== "TaxReturn") } as Manifest;
+    expect(formatTaxRemittanceWiring(none)).toContain("the manifest declares no TaxReturn entity");
+    expect(taxRemittanceWiringIsSuspect(none)).toBe(false);
+  });
+
+  it("prints a per-tenant line only for an unwired manifest that has a TaxReturn", () => {
+    const tenant = "6a0f7c2e-0000-4000-8000-000000000001";
+    expect(formatTenantTaxRemittanceWiring(tenant, core)).toBeNull();
+    const none = { ...core, entities: (core.entities ?? []).filter((e) => e.name !== "TaxReturn") } as Manifest;
+    expect(formatTenantTaxRemittanceWiring(tenant, none)).toBeNull();
+    expect(formatTenantTaxRemittanceWiring(tenant, unwiredCore)).toBe(
+      `[tax-remittance] tenant ${tenant}: unwired: ${taxRemittanceUnwiredReasons(unwiredCore).join("; ")}`,
+    );
   });
 });

@@ -19,6 +19,7 @@ import {
   SETTLEMENT_COVERAGE_DOCUMENTS,
   settlementCoverageGuard,
   settlementIsCovered,
+  taxRemittanceJournalReverseGuard,
   type WriteGuardInput,
   type WriteGuardResult,
 } from "./write-guards.js";
@@ -1236,5 +1237,57 @@ describe("currencyPrecisionGuard", () => {
 
   it("reads no other entity", async () => {
     expect(await guard({ ...input("create", 3), entity: "Invoice" })).toBeNull();
+  });
+});
+
+describe("taxRemittanceJournalReverseGuard", () => {
+  const guard = taxRemittanceJournalReverseGuard({
+    wiring: { entity: "TaxReturn", stateField: "state", reverseTransition: "reverse_payment" },
+  });
+  const entry = { id: "je1", entry_number: "TR-1-REMIT-1", state: "posted" };
+  const reverse = (store: InMemoryEntityStore, op: "update" | "transition" = "transition"): WriteGuardInput => ({
+    operation: op,
+    entity: "JournalEntry",
+    tenantId: TENANT,
+    id: "je1",
+    before: entry,
+    after: { ...entry, state: "reversed" },
+    store,
+  });
+
+  it("refuses reversing a paid return's remittance entry, by transition or by update", async () => {
+    const store = new InMemoryEntityStore();
+    await store.create(TENANT, "TaxReturn", { return_number: "TR-1", state: "paid", remittance_entry_number: "TR-1-REMIT-1" });
+    for (const op of ["transition", "update"] as const) {
+      expect(await guard(reverse(store, op))).toEqual({
+        status: 409,
+        error: "tax_remittance_reverse_via_return",
+        detail: "this entry is a paid tax return's remittance; reverse it with the return's reverse_payment transition",
+      });
+    }
+  });
+
+  it("lets the entry be reversed once its return is no longer paid, and leaves other entries alone", async () => {
+    const store = new InMemoryEntityStore();
+    await store.create(TENANT, "TaxReturn", { return_number: "TR-1", state: "filed", remittance_entry_number: "TR-1-REMIT-1" });
+    expect(await guard(reverse(store))).toBeNull();
+    // A return naming another entry does not lock this one.
+    await store.create(TENANT, "TaxReturn", { return_number: "TR-2", state: "paid", remittance_entry_number: "TR-2-REMIT-1" });
+    expect(await guard(reverse(store))).toBeNull();
+  });
+
+  it("refuses when more than one return names the entry and none of the first two is paid", async () => {
+    const store = new InMemoryEntityStore();
+    for (const n of ["TR-1", "TR-1b", "TR-1c"]) {
+      await store.create(TENANT, "TaxReturn", { return_number: n, state: "filed", remittance_entry_number: "TR-1-REMIT-1" });
+    }
+    expect((await guard(reverse(store)))?.error).toBe("posting_ambiguous");
+  });
+
+  it("asks nothing of a write that does not take an entry from posted to reversed", async () => {
+    const store = new InMemoryEntityStore();
+    await store.create(TENANT, "TaxReturn", { return_number: "TR-1", state: "paid", remittance_entry_number: "TR-1-REMIT-1" });
+    expect(await guard({ ...reverse(store), after: { ...entry, memo: "x" } })).toBeNull();
+    expect(await guard({ ...reverse(store), entity: "TaxReturn" })).toBeNull();
   });
 });

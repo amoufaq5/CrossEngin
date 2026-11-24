@@ -219,6 +219,22 @@ export const TAX_RETURN_ENTITY: Entity = {
     },
     { name: "filed_at", type: { kind: "datetime" } },
     { name: "filing_reference", type: { kind: "text", maxLength: 120 } },
+    // The three money figures above are what `mark_paid` posts (ADR-0467), and their meaning depends
+    // on `return_type`: for vat, gst and consumption_tax `net_payable = output_tax - input_tax`; for
+    // sales_tax `input_tax` is 0 and `net_payable = output_tax`; for withholding the amount is
+    // `net_payable` alone and both other figures must be 0. A negative `net_payable` is a refund or a
+    // carried-forward credit, and `credit_disposition` says which — so it is the caller's and has no
+    // default, because guessing it would post a refund nobody received or strand a credit.
+    {
+      name: "credit_disposition",
+      type: { kind: "enum", values: ["refund_received", "carried_forward"] },
+    },
+    // The remittance stamps are written by the posting effect, not the caller. `remittance_count` is
+    // absent until the first remittance and read as 0, so a reversed-and-repaid return numbers its
+    // next entry `-REMIT-(n+1)` rather than reusing a number a reversal already answers for.
+    { name: "remitted_at", type: { kind: "datetime" } },
+    { name: "remittance_entry_number", type: { kind: "text", maxLength: 64 }, indexed: true },
+    { name: "remittance_count", type: { kind: "integer", min: 0 } },
   ],
   indexes: [{ fields: ["jurisdiction_id", "state"] }, { fields: ["fiscal_period_id"] }],
 };

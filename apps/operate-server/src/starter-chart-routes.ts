@@ -27,7 +27,16 @@ import type { TenantRecord } from "./platform-tenants.js";
  */
 export type StarterChartProvisioner = (
   tenantId: string,
-  by: { readonly provisioningId: string; readonly principalId: string },
+  by: {
+    readonly provisioningId: string;
+    readonly principalId: string;
+    /**
+     * True only for an approved access request's new workspace: it alone may be switched to posting
+     * tax remittances (ADR-0467). This route runs on existing tenants, which may be journalling
+     * remittances by hand, so it passes false and the switch stays the tenant admin's.
+     */
+    readonly newWorkspace: boolean;
+  },
 ) => Promise<StarterChartReport>;
 
 export const STARTER_CHART_PROVISIONED_OPERATION = "platform.starter_chart_provisioned";
@@ -110,7 +119,11 @@ function buildProvisionHandler(ctx: StarterChartRoutesContext): Handler {
       });
     }
     try {
-      const report = await ctx.provision(tenant.id, { provisioningId, principalId: principal.principalId });
+      const report = await ctx.provision(tenant.id, {
+        provisioningId,
+        principalId: principal.principalId,
+        newWorkspace: false,
+      });
       return json(200, { tenantId: tenant.id, provisioningId, starterChart: report });
     } catch (err) {
       const error = err instanceof Error ? err.name : "unknown";

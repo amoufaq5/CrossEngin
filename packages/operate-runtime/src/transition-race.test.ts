@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 
 import { compileOperateServer, type CompiledOperateServer } from "./compile.js";
 import { routeFromSpec } from "./operations.js";
+import { InMemorySettingsStore } from "./settings.js";
 import { InMemoryEntityStore, type EntityRecord } from "./store.js";
 import type { WriteEffect } from "./write-effects.js";
 
@@ -384,5 +385,114 @@ describe("a lock-guarded entity with no lifecycle", () => {
     expect([confirm.status, del.status]).toEqual([200, 409]);
     expect(bodyOf(del)["error"]).toBe("state_changed");
     expect((await store.get(TENANT, "WhtCertificate", id))?.["state"]).toBe("confirmed");
+  });
+});
+
+describe("a tax return's remittance under concurrency (ADR-0467)", () => {
+  async function remittingServer(store: InMemoryEntityStore): Promise<CompiledOperateServer> {
+    const settingsStore = new InMemorySettingsStore();
+    await settingsStore.put(TENANT, {
+      defaults: { currency: "USD" },
+      finance: {
+        taxPayableAccountCode: "2200",
+        taxInputAccountCode: "1400",
+        cashAccountCode: "1000",
+        taxRemittancePosting: "on_mark_paid",
+      },
+    });
+    const ids: Record<string, string> = {};
+    for (const code of ["2200", "1400", "1000"]) {
+      ids[code] = String((await store.create(TENANT, "LedgerAccount", { account_code: code }))["id"]);
+    }
+    const seed = await store.create(TENANT, "JournalEntry", { entry_number: "SEED", state: "posted" });
+    for (const [code, debit, credit] of [["2200", 0, 1000], ["1400", 300, 0]] as const) {
+      await store.create(TENANT, "JournalLine", {
+        journal_entry_id: String(seed["id"]),
+        ledger_account_id: ids[code],
+        currency: "USD",
+        debit,
+        credit,
+        functional_debit: debit,
+        functional_credit: credit,
+      });
+    }
+    await store.create(TENANT, "TaxJurisdiction", { id: "jur-1", name: "Home" });
+    return compileOperateServer(buildErpCorePack(), { store, settingsStore, principalRoles });
+  }
+
+  const taxReturn = (overrides: EntityRecord): EntityRecord => ({
+    return_number: "TR-1",
+    state: "filed",
+    return_type: "vat",
+    jurisdiction_id: "jur-1",
+    period_start: "2026-01-01",
+    period_end: "2026-03-31",
+    output_tax: 1000,
+    input_tax: 300,
+    net_payable: 700,
+    currency: "USD",
+    ...overrides,
+  });
+
+  async function remittances(store: InMemoryEntityStore): Promise<readonly EntityRecord[]> {
+    const page = await store.listPage(TENANT, "JournalEntry", { limit: 100, cursor: null, sort: [], filters: [] });
+    return page.records.filter((e) => e["entry_number"] !== "SEED");
+  }
+
+  it("posts one remittance when ten requests mark one return paid at once", async () => {
+    const store = new LocklessBarrierStore();
+    const server = await remittingServer(store);
+    const id = String((await store.create(TENANT, "TaxReturn", taxReturn({})))["id"]);
+
+    store.arm("TaxReturn", 10);
+    const outs = await Promise.all(
+      Array.from({ length: 10 }, () => invoke(server, "taxReturn.mark_paid", { params: { id }, role: "erp_admin" })),
+    );
+    expect(outs.map((o) => o.status).sort()).toEqual([200, ...Array.from({ length: 9 }, () => 409)]);
+    const entries = await remittances(store);
+    expect(entries.map((e) => e["entry_number"])).toEqual(["TR-1-REMIT-1"]);
+    expect((await store.get(TENANT, "TaxReturn", id))?.["remittance_count"]).toBe(1);
+  });
+
+  it("files exactly one of two overlapping returns filed at once", async () => {
+    // The jurisdiction row is locked before the overlap read, so the second filing reads the first's
+    // outcome. Statuses only: the in-memory store's rollback restores a snapshot of every record, so
+    // the refused filing's rollback can undo the other's write — a property of the test store, not
+    // of a transaction.
+    const store = new BarrierStore();
+    const server = await remittingServer(store);
+    const a = String((await store.create(TENANT, "TaxReturn", taxReturn({ state: "ready" })))["id"]);
+    const b = String(
+      (await store.create(TENANT, "TaxReturn", taxReturn({ return_number: "TR-2", state: "ready", period_start: "2026-03-01", period_end: "2026-05-31" })))["id"],
+    );
+
+    store.arm("TaxReturn", 2);
+    const [x, y] = await Promise.all([
+      invoke(server, "taxReturn.file", { params: { id: a }, role: "erp_admin" }),
+      invoke(server, "taxReturn.file", { params: { id: b }, role: "erp_admin" }),
+    ]);
+    expect([x.status, y.status].sort()).toEqual([200, 409]);
+    expect(bodyOf(x.status === 409 ? x : y)["error"]).toBe("tax_return_period_overlaps");
+  });
+
+  it("bounds two returns for different jurisdictions against one account, so together they cannot clear more than it holds", async () => {
+    // The books hold 1000 of output tax; each return clears 700 of it. The jurisdictions differ, so
+    // nothing but the account lock serialises the two. The barrier sits on the jurisdiction read,
+    // which each takes before the balance, so both have passed it before either reads the account.
+    // Statuses only, for the rollback reason the test above gives.
+    const store = new BarrierStore();
+    const server = await remittingServer(store);
+    await store.create(TENANT, "TaxJurisdiction", { id: "jur-2", name: "Away" });
+    const vat = { input_tax: 0, output_tax: 700, net_payable: 700 };
+    const a = String((await store.create(TENANT, "TaxReturn", taxReturn(vat)))["id"]);
+    const b = String((await store.create(TENANT, "TaxReturn", taxReturn({ ...vat, return_number: "TR-2", jurisdiction_id: "jur-2" })))["id"]);
+
+    store.arm("TaxJurisdiction", 2);
+    const [x, y] = await Promise.all([
+      invoke(server, "taxReturn.mark_paid", { params: { id: a }, role: "erp_admin" }),
+      invoke(server, "taxReturn.mark_paid", { params: { id: b }, role: "erp_admin" }),
+    ]);
+    expect([x.status, y.status].sort()).toEqual([200, 409]);
+    expect(bodyOf(x.status === 409 ? x : y)["error"]).toBe("tax_remittance_exceeds_ledger");
   });
 });

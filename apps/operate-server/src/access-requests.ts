@@ -1046,7 +1046,7 @@ async function provisionChart(
   principalId: string,
 ): Promise<StarterChartAnswer> {
   try {
-    return await ctx.provisionStarterChart(tenantId, { provisioningId: requestId, principalId });
+    return await ctx.provisionStarterChart(tenantId, { provisioningId: requestId, principalId, newWorkspace: true });
   } catch (err) {
     // The error's name and never its message: a driver message can quote a value.
     const error = err instanceof Error ? err.name : "unknown";

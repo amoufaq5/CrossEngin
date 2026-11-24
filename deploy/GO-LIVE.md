@@ -320,8 +320,46 @@ that fits: `erp_admin`, `erp_accountant`, `controller`, `ap_clerk`, `sales_manag
    records what was withheld on the bill (`withholding_total`), and the bill is owed and settles at
    the net: pay the supplier the total less the withholding. Paying the gross also marks it paid, but
    leaves accounts payable in debit by the withheld amount and nothing reports that, so do not.
-   **Paying the withheld tax to the authority posts nothing**: record it as a manual journal entry
-   (debit 2210, credit cash), never as a `Payment`, which would post to accounts payable (ADR-0466).
+   **Paying tax to the authority is a tax return, never a `Payment`** (a `Payment` posts to accounts
+   payable and clears no tax account). Create a tax return (a `TaxReturn` record) with its
+   `return_type`, jurisdiction, fiscal period, `period_start`/`period_end`, the three figures and
+   the currency (it defaults to `USD`; set it to the workspace's default currency), then take it
+   through the transitions `mark_ready` → `file` → `mark_paid` (ADR-0467). What `mark_paid` does depends on
+   **Settings → Finance & tax → Tax return remittance**:
+
+   - **post on mark paid** (`finance.taxRemittancePosting = on_mark_paid`; a new workspace approved
+     with the starter chart after ADR-0467 starts here when it has a default currency, while the
+     *Create starter chart of accounts* button on an existing workspace leaves the setting alone): marking the
+     return paid posts one entry, numbered `<return_number>-REMIT-1` and dated today:
+
+     | Return | Figures | Entry |
+     | --- | --- | --- |
+     | VAT, GST, consumption tax, net ≥ 0 | net = output − input | debit 2200 output · credit 1300 input · credit 1000 net |
+     | the same, net < 0, `credit_disposition: refund_received` | | debit 2200 output · debit 1000 refund · credit 1300 input |
+     | the same, net < 0, `credit_disposition: carried_forward` | | debit 2200 output · credit 1300 output (the rest of the credit stays in 1300) |
+     | sales tax | input 0, net = output | debit 2200 · credit 1000 |
+     | withholding | output 0, input 0 | debit 2210 net · credit 1000 net |
+
+     A return the figures, the books, the currency or the account settings cannot serve is refused
+     with the return left as it was. At `file` (and `refile`) the return is checked for figures that
+     do not add up (422), a currency other than the default and a period overlapping another filed,
+     amended or paid return of its type and jurisdiction (409); so edit it and file again. At
+     `mark_paid` those are checked again, together with a return that clears more than a tax account
+     holds, an unset account code and a tenant that routes tax by jurisdiction or tax code (409); so
+     `amend` it, correct it and `refile`. `deploy/README.md` (*Upgrading to tax remittance posting*)
+     lists the refusals and their remedies. `reverse_payment` undoes a remittance recorded in error:
+     it posts the mirror entry and returns the return to `filed`, and marking it paid again posts
+     `-REMIT-2`. A return marked paid before the workspace switched to posting was remitted by manual
+     journal, so `reverse_payment` refuses it (`tax_remittance_paid_outside_posting`) until the
+     workspace is back on manual journal. A further payment for a period already paid is a manual
+     journal entry.
+   - **manual journal** (the default, and the setting every workspace created before ADR-0467 keeps
+     until its admin changes it): marking the return paid posts nothing. Record the remittance as a
+     manual journal entry — debit 2210 and credit cash for withholding; for VAT, debit 2200, credit
+     1300 and credit cash — and mark the return paid beside it. Before switching such a workspace to
+     posting, mark paid every filed or amended return you have already journalled, or reverse those
+     journals, or the remittance is posted twice. Returns already paid are not posted again by the
+     switch, but correcting one later means switching back to manual journal first (above).
 
    Only **unset** settings are filled, and an existing account with a chart code is never changed.
    On a workspace that already had accounts — run through the button later — a setting is pointed at

@@ -47,6 +47,15 @@ export type OperationalDefaults = z.infer<typeof OperationalDefaultsSchema>;
 export const ACCOUNTING_STANDARDS = ["ifrs", "us_gaap", "local_gaap"] as const;
 export const ROUNDING_MODES = ["half_up", "half_even", "down", "up"] as const;
 
+/**
+ * What `TaxReturn.mark_paid` does to the ledger (ADR-0467). `manual_journal` posts nothing — the
+ * remittance is a journal entry the tenant writes by hand, which is what ADR-0466 told operators to
+ * do — and `on_mark_paid` posts it. Per tenant and opt-in, because switching an existing tenant on
+ * silently would post every remittance it had already journalled a second time.
+ */
+export const TAX_REMITTANCE_POSTING_MODES = ["manual_journal", "on_mark_paid"] as const;
+export type TaxRemittancePostingMode = (typeof TAX_REMITTANCE_POSTING_MODES)[number];
+
 /** Finance & tax posture an admin sets per tenant (drives accounting + tax behavior). */
 export const FinanceSettingsSchema = z
   .object({
@@ -112,10 +121,17 @@ export const FinanceSettingsSchema = z
      * specific) and the document default tax account (least specific) in recognition.
      */
     taxAccountsByJurisdiction: z.record(z.string().max(120), z.string().max(32)).optional(),
+    /** Whether marking a tax return paid posts its remittance; absent is `manual_journal`. */
+    taxRemittancePosting: z.enum(TAX_REMITTANCE_POSTING_MODES).optional(),
   })
   .strict();
 
 export type FinanceSettings = z.infer<typeof FinanceSettingsSchema>;
+
+/** The tenant's remittance posting mode: absent is `manual_journal`, today's behaviour. */
+export function taxRemittancePostingMode(finance: FinanceSettings | undefined): TaxRemittancePostingMode {
+  return finance?.taxRemittancePosting ?? "manual_journal";
+}
 
 /**
  * Per-tenant audit-chain sampling/filter policy an admin can set without a redeploy — read live and
@@ -226,21 +242,42 @@ export const FINANCE_ACCOUNT_CODE_KEYS: readonly FinanceAccountCodeKey[] = Objec
 ).filter((k): k is FinanceAccountCodeKey => k.endsWith("AccountCode"));
 
 /**
+ * What a provisioning asks to fill: account codes, and optionally the remittance posting mode. One
+ * request, so both land in the one locked read-modify-write the settings store already performs.
+ */
+export type FinanceSettingsFillRequest = Readonly<Partial<Record<FinanceAccountCodeKey, string>>> & {
+  readonly taxRemittancePosting?: TaxRemittancePostingMode;
+};
+
+/** A finance key a fill can write. */
+export type FinanceSettingFillKey = FinanceAccountCodeKey | "taxRemittancePosting";
+
+/**
  * `settings` with each given account code written into `finance` **only where that key is unset**,
  * and which keys that filled. An account code an admin already chose is never replaced: the
  * provisioning that calls this is filling a gap, not deciding the tenant's books for it.
+ *
+ * A requested `taxRemittancePosting` is written only where it is unset **and** the tenant declares
+ * `defaults.currency` — decided here, under the store's lock, because a remittance posted for a
+ * tenant with no functional currency would be refused on every return anyway, and a mode the store
+ * read as unset a moment before must not overwrite one an admin chose since.
  */
 export function mergeUnsetFinanceAccountCodes(
   settings: TenantSettings,
-  codes: Readonly<Partial<Record<FinanceAccountCodeKey, string>>>,
+  codes: FinanceSettingsFillRequest,
 ): FinanceAccountCodeFill & { readonly settings: TenantSettings } {
   const finance: Record<string, unknown> = { ...(settings.finance ?? {}) };
-  const filled: FinanceAccountCodeKey[] = [];
+  const filled: FinanceSettingFillKey[] = [];
   for (const key of FINANCE_ACCOUNT_CODE_KEYS) {
     const code = codes[key];
     if (code === undefined || financeAccountCodeIsSet(finance[key])) continue;
     finance[key] = code;
     filled.push(key);
+  }
+  const mode = codes.taxRemittancePosting;
+  if (mode !== undefined && finance["taxRemittancePosting"] === undefined && functionalCurrencyOf(settings) !== null) {
+    finance["taxRemittancePosting"] = mode;
+    filled.push("taxRemittancePosting");
   }
   const merged = filled.length === 0 ? settings : TenantSettingsSchema.parse({ ...settings, finance });
   return { settings: merged, filled, inEffect: financeAccountCodesOf(merged) };
@@ -252,6 +289,12 @@ export function mergeUnsetFinanceAccountCodes(
  */
 export function financeAccountCodeIsSet(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
+}
+
+/** The tenant's functional currency, or null when `defaults.currency` is unset or blank. */
+export function functionalCurrencyOf(settings: TenantSettings): string | null {
+  const currency = settings.defaults?.currency;
+  return typeof currency === "string" && currency.trim().length > 0 ? currency.trim().toUpperCase() : null;
 }
 
 /** The finance account codes a settings document sets, blank ones omitted. */
@@ -269,7 +312,8 @@ export function financeAccountCodesOf(
 
 /** What a fill did, and every finance account code in effect once it had. */
 export interface FinanceAccountCodeFill {
-  readonly filled: readonly FinanceAccountCodeKey[];
+  /** Includes `taxRemittancePosting` when a requested mode was written, so a store writes the row for it alone. */
+  readonly filled: readonly FinanceSettingFillKey[];
   /**
    * Every set account code after the fill, including ones an admin chose. The caller checks these
    * name an account: a code chosen by hand for an account nobody created leaves the first invoice
@@ -285,14 +329,15 @@ export interface SettingsStore {
 }
 
 /**
- * Writes finance account codes into keys that are unset, as one read-modify-write the store makes
- * atomic, and answers which keys it filled. A get-then-put by the caller would replace a code an
+ * Writes finance account codes — and a requested remittance posting mode, under the rule
+ * {@link mergeUnsetFinanceAccountCodes} applies — into keys that are unset, as one
+ * read-modify-write the store makes atomic, and answers which keys it filled. A get-then-put by the caller would replace a code an
  * admin set between the two.
  */
 export interface FinanceAccountCodeFiller {
   fillUnsetFinanceAccountCodes(
     tenantId: string,
-    codes: Readonly<Partial<Record<FinanceAccountCodeKey, string>>>,
+    codes: FinanceSettingsFillRequest,
     updatedBy: string | null,
   ): Promise<FinanceAccountCodeFill>;
 }
@@ -310,10 +355,7 @@ export class InMemorySettingsStore implements SettingsStore, FinanceAccountCodeF
     return Promise.resolve(parsed);
   }
 
-  fillUnsetFinanceAccountCodes(
-    tenantId: string,
-    codes: Readonly<Partial<Record<FinanceAccountCodeKey, string>>>,
-  ): Promise<FinanceAccountCodeFill> {
+  fillUnsetFinanceAccountCodes(tenantId: string, codes: FinanceSettingsFillRequest): Promise<FinanceAccountCodeFill> {
     const merged = mergeUnsetFinanceAccountCodes(this.byTenant.get(tenantId) ?? EMPTY_TENANT_SETTINGS, codes);
     if (merged.filled.length > 0) this.byTenant.set(tenantId, merged.settings);
     return Promise.resolve({ filled: merged.filled, inEffect: merged.inEffect });

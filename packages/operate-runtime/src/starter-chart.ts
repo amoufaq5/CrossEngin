@@ -1,9 +1,14 @@
 import {
   FINANCE_ACCOUNT_CODE_KEYS,
+  functionalCurrencyOf,
   type FinanceAccountCodeFill,
   type FinanceAccountCodeFiller,
   type FinanceAccountCodeKey,
+  type FinanceSettingsFillRequest,
+  type SettingsStore,
+  type TenantSettings,
 } from "./settings.js";
+import type { TaxRemittanceWiring } from "./tax-remittance.js";
 import type { EntityRecord } from "./store.js";
 import type { SystemActor, SystemEntityAccess, SystemWriteResult } from "./system-writer.js";
 import { ReadCeilingExceeded } from "./list-drain.js";
@@ -154,6 +159,34 @@ export const STARTER_CHART_OUTCOMES = [
 ] as const;
 export type StarterChartOutcome = (typeof STARTER_CHART_OUTCOMES)[number];
 
+/**
+ * What the run did about `finance.taxRemittancePosting` (ADR-0467). A new workspace gets
+ * `on_mark_paid`, because it has no manually journalled remittances a posting would duplicate; the
+ * skips are the cases where that reasoning does not hold or the posting could not serve the tenant.
+ * - `filled`: this run set it to `on_mark_paid`.
+ * - `already_set`: an admin (or an earlier run) chose a mode, which is never replaced.
+ * - `skipped_existing_tenant`: the caller did not ask for the mode, because this run is not a new
+ *   workspace's first provisioning (the console's starter-chart route on a tenant already serving).
+ *   An existing tenant may be journalling its remittances by hand as ADR-0466 told it to, so only
+ *   its admin may switch posting on.
+ * - `skipped_returns_outstanding`: a return is already `filed` or `amended`, or `paid` with no
+ *   remittance recorded here, so its remittance may have been journalled by hand; posting it again
+ *   on `mark_paid` would count it twice.
+ * - `skipped_functional_currency_undeclared`: no `defaults.currency`, so every remittance would be
+ *   refused `functional_currency_undeclared` anyway.
+ * - `skipped_unwired`: this deployment's manifest cannot post a remittance, so the mode would govern
+ *   nothing.
+ */
+export const STARTER_REMITTANCE_POSTING_OUTCOMES = [
+  "filled",
+  "already_set",
+  "skipped_existing_tenant",
+  "skipped_returns_outstanding",
+  "skipped_functional_currency_undeclared",
+  "skipped_unwired",
+] as const;
+export type StarterRemittancePosting = (typeof STARTER_REMITTANCE_POSTING_OUTCOMES)[number];
+
 export interface StarterChartReport {
   readonly outcome: StarterChartOutcome;
   readonly version: string;
@@ -168,6 +201,11 @@ export interface StarterChartReport {
    * the honest "set the finance account codes" refusal into one whose remedy reads as already done.
    */
   readonly settingsFilled: readonly FinanceAccountCodeKey[];
+  /**
+   * `null` when the run ended before the settings write, so nothing was decided about the mode — or
+   * when a requested mode was not written and the read-back saying why failed.
+   */
+  readonly remittancePosting: StarterRemittancePosting | null;
   /** Unset settings this run left unset, with why. */
   readonly settingsSkipped: readonly StarterSettingSkip[];
   /**
@@ -183,10 +221,32 @@ export interface EnsureStarterChartInput {
   readonly access: SystemEntityAccess;
   readonly tenantId: string;
   readonly actor: SystemActor;
-  readonly settings: FinanceAccountCodeFiller;
+  /** `get` reads the currency and the mode the posting decision turns on; the fill is the one write. */
+  readonly settings: FinanceAccountCodeFiller & Pick<SettingsStore, "get">;
   /** Recorded as the settings row's `updated_by`: the operator whose act caused this. */
   readonly updatedBy: string | null;
+  /**
+   * This deployment's remittance wiring (`taxRemittanceWiring(manifest)`); absent or `null` leaves
+   * the mode unset and reports `skipped_unwired`, because the drain for outstanding returns needs the
+   * lifecycle's state field and a mode on a manifest that cannot post governs nothing.
+   */
+  readonly taxRemittance?: TaxRemittanceWiring | null;
+  /**
+   * Whether this run may set `on_mark_paid`: true only for a new workspace's first provisioning (an
+   * approved access request), false for a run on an existing tenant, which reports
+   * `skipped_existing_tenant`. Required, because the safe answer depends on the caller and a default
+   * either way would be wrong for one of the two.
+   */
+  readonly requestRemittancePosting: boolean;
 }
+
+/**
+ * Returns past this are read as outstanding rather than counted: a tenant that has paid this many
+ * is not a new workspace. Paid returns are read too, since one paid with no remittance stamped here
+ * was remitted by a manual journal.
+ */
+const OUTSTANDING_RETURN_READ_CEILING = 1000;
+const OUTSTANDING_RETURN_STATES = ["filed", "amended", "paid"] as const;
 
 /** More rows than this for the chart's codes means duplicates on a store that does not enforce uniqueness. */
 const EXISTING_READ_CEILING = 1000;
@@ -215,6 +275,7 @@ export async function ensureStarterChart(input: EnsureStarterChartInput): Promis
     existing: [],
     refused: [],
     settingsFilled: [],
+    remittancePosting: null,
     settingsSkipped: [],
     settingsDangling: null,
   };
@@ -272,18 +333,49 @@ export async function ensureStarterChart(input: EnsureStarterChartInput): Promis
     else skipped.push({ key, code: account.code, reason });
   }
 
+  const settingsUnwritten = (err: unknown): StarterChartReport => ({
+    ...empty,
+    outcome: "settings_unwritten",
+    created,
+    existing: sortCodes(existing),
+    refused,
+    settingsError: err instanceof Error ? err.name : "unknown",
+  });
+
+  // The settings read and the fill are the settings arm; the read of outstanding returns sits
+  // between them and outside it, so a failing entity read is not reported as a settings failure.
+  const wiring = input.taxRemittance ?? null;
+  let decision: StarterRemittancePosting | "requested" = "skipped_unwired";
+  if (wiring !== null && input.access.serves(wiring.entity, "create")) {
+    try {
+      decision = remittancePostingFromSettings(await input.settings.get(input.tenantId));
+    } catch (err) {
+      return settingsUnwritten(err);
+    }
+    if (decision === "requested" && !input.requestRemittancePosting) decision = "skipped_existing_tenant";
+    if (decision === "requested" && (await returnsOutstanding(access, wiring))) {
+      decision = "skipped_returns_outstanding";
+    }
+  }
+
   let fill: FinanceAccountCodeFill;
   try {
-    fill = await input.settings.fillUnsetFinanceAccountCodes(input.tenantId, codes, input.updatedBy);
+    const request: FinanceSettingsFillRequest =
+      decision === "requested" ? { ...codes, taxRemittancePosting: "on_mark_paid" } : codes;
+    fill = await input.settings.fillUnsetFinanceAccountCodes(input.tenantId, request, input.updatedBy);
   } catch (err) {
-    return {
-      ...empty,
-      outcome: "settings_unwritten",
-      created,
-      existing: sortCodes(existing),
-      refused,
-      settingsError: err instanceof Error ? err.name : "unknown",
-    };
+    return settingsUnwritten(err);
+  }
+  let remittancePosting: StarterRemittancePosting | null =
+    decision !== "requested" ? decision : fill.filled.includes("taxRemittancePosting") ? "filled" : null;
+  if (decision === "requested" && remittancePosting === null) {
+    // The fill committed, so a failure to read back why it left the mode is not a settings failure:
+    // the mode stays undecided in the report rather than the whole write reading as lost.
+    try {
+      remittancePosting = remittancePostingRefusedAtLock(await input.settings.get(input.tenantId));
+    } catch {
+      remittancePosting = null;
+    }
   }
   // A skipped key an admin has since set is no longer this run's to report.
   const settingsSkipped = skipped.filter((s) => fill.inEffect[s.key] === undefined);
@@ -307,13 +399,55 @@ export async function ensureStarterChart(input: EnsureStarterChartInput): Promis
     created,
     existing: sortCodes(existing),
     refused,
-    settingsFilled: fill.filled,
+    settingsFilled: fill.filled.filter((key): key is FinanceAccountCodeKey => key !== "taxRemittancePosting"),
+    remittancePosting,
     settingsSkipped,
     settingsDangling,
   };
 }
 
 type TenantAccess = ReturnType<SystemEntityAccess["forTenant"]>;
+
+/**
+ * Whether to ask the fill for `on_mark_paid`, as far as the settings say. Read before the fill so a
+ * tenant whose mode is chosen, or that has no currency, is answered without reading its returns; the
+ * fill re-checks both under the store's lock, since an admin may change either in between.
+ */
+function remittancePostingFromSettings(settings: TenantSettings): StarterRemittancePosting | "requested" {
+  if (settings.finance?.taxRemittancePosting !== undefined) return "already_set";
+  if (functionalCurrencyOf(settings) === null) return "skipped_functional_currency_undeclared";
+  return "requested";
+}
+
+async function returnsOutstanding(access: TenantAccess, wiring: TaxRemittanceWiring): Promise<boolean> {
+  try {
+    const rows = await access.readAll(
+      wiring.entity,
+      { filters: [{ field: wiring.stateField, op: "in", value: [...OUTSTANDING_RETURN_STATES] }] },
+      { ceiling: OUTSTANDING_RETURN_READ_CEILING, computing: "the tax returns already filed" },
+    );
+    return rows.some((r) => {
+      if (r[wiring.stateField] !== "paid") return true;
+      const stamped = r["remitted_at"];
+      return stamped === undefined || stamped === null || stamped === "";
+    });
+  } catch (err) {
+    // More rows than the ceiling is more outstanding returns, which is the same answer.
+    if (err instanceof ReadCeilingExceeded) return true;
+    throw err;
+  }
+}
+
+/**
+ * Why a requested mode was not written: the lock saw it set, or saw no currency. Read back rather
+ * than inferred, so the report names the cause the tenant can act on. Both clear between the lock
+ * and this read only if an admin set and then removed them; that reads as `already_set`, the answer
+ * that claims nothing about the tenant's books.
+ */
+function remittancePostingRefusedAtLock(settings: TenantSettings): StarterRemittancePosting {
+  if (settings.finance?.taxRemittancePosting !== undefined) return "already_set";
+  return functionalCurrencyOf(settings) === null ? "skipped_functional_currency_undeclared" : "already_set";
+}
 
 /** The tenant's accounts carrying these codes, grouped by code. */
 async function readByCode(

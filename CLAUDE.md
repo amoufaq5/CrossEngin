@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 147 meta-schema tables, 24,179 tests**, all green, no
+**87 packages + 3 apps, 147 meta-schema tables, 24,581 tests**, all green, no
 type errors — and since ADR-0382 that is **checked by CI and a pre-commit hook** rather than only
 when someone runs the sweep by hand. The test figure moves every increment, so re-derive it from a
 sweep rather than quoting this line: `pnpm -r test` and sum the `Tests N passed` lines (88 packages
@@ -10304,9 +10304,19 @@ Two constraints worth knowing before suggesting a host:
   Bills approved before the upgrade are stamped from their own `-GL` entry by
   `operate-server backfill-bill-withholding` (document currency, lines matched by description and
   never by account, one audit row per stamp, `--plan` read-only, exit 1 on any refusal); on
-  `pg-columns` run `column-schema` first. Remitting 2210 to the authority still posts nothing (a
-  manual journal, never a `Payment`; ADR-0466 open question 1), and a gross payment still leaves AP
-  in debit, unreported. Live on PG 16 as `crossengin_app` on both stores.
+  `pg-columns` run `column-schema` first. Remitting 2210 to the authority is never a `Payment`
+  (ADR-0466 open question 1, closed by ADR-0467), and a gross payment still leaves AP in debit,
+  unreported. Live on PG 16 as `crossengin_app` on both stores.
+- **A tax return marked paid can post its remittance** (ADR-0467), per tenant and off by default:
+  `finance.taxRemittancePosting = on_mark_paid` makes `TaxReturn.mark_paid` post one
+  `<return_number>-REMIT-n` entry from the return's typed figures, bounded by each tax account's
+  current balance (read under a lock on those `LedgerAccount` rows), and `reverse_payment` mirrors it.
+  Absent or `manual_journal` posts nothing, which is how every return behaved before. Only an approved
+  access request's new workspace is switched on by the starter chart; the console's starter-chart
+  run on an existing workspace reports `skipped_existing_tenant`. The wiring requires the stamp fields
+  and a `reverse_payment` transition, so a posted remittance always has its undo; the deployment
+  documents carry every refusal and its remedy. Live on PG 16 as `crossengin_app` on both stores,
+  31 checks each, including two jurisdictions racing one tax account's balance (one 200, one 409).
 
 ## What's actually left
 
@@ -14954,6 +14964,23 @@ land with or before it.
     populated with values no validation saw. `store-parity.test.ts` sends only declared fields, which
     is why the divergence was never compared. Refusing an unknown key is not free (a client sending
     an extra key works today — ADR-0338's premise), so the choice is 422, strip, or report.
+20. **An outbound `Payment` naming an invoice settles it while posting to accounts payable**
+    (measured while scoping ADR-0467, against the real `erp-core` pack and the shared effect and guard
+    logic). `foldCompletedPayments` sums `amount` per reference field and never reads `direction`,
+    and no guard relates the direction to the reference. So an outbound payment of 100 naming a sent
+    invoice of 100 posts `AP D100 / cash C100` and the invoice becomes `paid`: AR keeps 100 in debit,
+    AP takes 100 in debit, and AR aging drops the invoice. Reachable by the payment writers
+    on the shipped pack, and the entry balances, so no guard, replayer or integrity proof can see it
+    (ADR-0378's class). The fix is a guard keyed on the pair (an inbound payment may name only an
+    invoice, an outbound one only a bill), and it changes what a working deployment accepts.
+21. **One `Payment` naming both an invoice and a bill settles both while posting once** (measured
+    beside item 20). An inbound payment of 100 carrying `invoice_id` and `bill_id` posts one
+    `cash D100 / AR C100` entry and both documents become `paid`, because the fold is per reference
+    field and nothing limits a payment to one reference. The bill is then `paid` with AP uncleared,
+    which is register P0.6b's divergence reached through a settlement rather than a hand-marked
+    edge. Negative amounts are counted by every fold too, since `Payment.amount`'s `min: 0` is
+    enforced by nothing. The fix is a guard refusing a payment that names more than one document,
+    with the same cost to a working deployment as item 20.
 
 ### P3 — debt and stale documentation
 
@@ -16057,7 +16084,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 460 records; 381 Accepted, 79 Proposed (the
+title or status change cannot drift. 461 records; 382 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

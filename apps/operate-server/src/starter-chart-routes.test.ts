@@ -21,6 +21,7 @@ const REPORT: StarterChartReport = {
   existing: ["1100"],
   refused: [],
   settingsFilled: ["cashAccountCode"],
+  remittancePosting: "skipped_existing_tenant",
   settingsSkipped: [],
   settingsDangling: [],
 };
@@ -46,7 +47,7 @@ interface Harness {
   readonly ctx: StarterChartRoutesContext;
   readonly acts: string[];
   readonly records: StarterChartProvisioningEvent[];
-  readonly provisions: { tenantId: string; provisioningId: string; principalId: string }[];
+  readonly provisions: { tenantId: string; provisioningId: string; principalId: string; newWorkspace: boolean }[];
 }
 
 function harness(opts: {
@@ -197,7 +198,10 @@ describe("the starter-chart route", () => {
         at: AT,
       },
     ]);
-    expect(h.provisions).toEqual([{ tenantId: TENANT, provisioningId: PROVISIONING, principalId: OPERATOR }]);
+    // An existing tenant: the console's run never switches its remittance posting on (ADR-0467).
+    expect(h.provisions).toEqual([
+      { tenantId: TENANT, provisioningId: PROVISIONING, principalId: OPERATOR, newWorkspace: false },
+    ]);
   });
 
   it("answers the report with the tenant and the provisioning id", async () => {

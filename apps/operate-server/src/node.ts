@@ -214,7 +214,10 @@ import {
 } from "./rekey.js";
 import {
   formatSettlementCoverageReport,
+  formatTaxRemittanceWiring,
+  formatTenantTaxRemittanceWiring,
   settlementCoverageIsSuspect,
+  taxRemittanceWiringIsSuspect,
   surveySettlementCoverage,
 } from "./settlement-coverage-survey.js";
 import {
@@ -462,7 +465,12 @@ import {
   type DeletionCapabilities,
   type TenantLifecycleState,
 } from "@crossengin/tenant-lifecycle";
-import type { ExtraGatewayRoute, WriteMaskMode } from "@crossengin/operate-runtime";
+import type {
+  ExtraGatewayRoute,
+  SystemEntityAccess,
+  TaxRemittanceWiring,
+  WriteMaskMode,
+} from "@crossengin/operate-runtime";
 import {
   PACK_INSTALL_EFFECT,
   buildMarketplaceAdminRoutes,
@@ -1553,9 +1561,8 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // Said either way, including when nothing is settleable, because the whole defect was a silence —
   // the aging report drops a document that is not open while the GL keeps its residual, and neither
   // surface says so. Reports and never refuses: the refusal is in the guard, where a write that
-  // would create that divergence meets it, and a document that *cannot* be guarded (`TaxReturn` has
-  // no `total` and no `Payment` reference, so both operands are missing) is a capability this
-  // deployment lacks rather than a misconfiguration an operator could clear.
+  // would create that divergence meets it. `TaxReturn` is not payment-settled at all — it settles
+  // through its own remittance posting (ADR-0467), and the survey reports that posting's wiring.
   const settlementCoverage = surveySettlementCoverage(manifest, {
     allowUncoveredSettlement: options.allowUncoveredSettlement,
   });
@@ -1564,6 +1571,15 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     console.warn(settlementLine);
   } else {
     console.info(settlementLine);
+  }
+  // Whether marking a tax return paid can post its remittance, said either way (ADR-0467). The
+  // per-tenant mode is invisible here, so the wired line names it rather than claiming the posting
+  // happens: a tenant that has not set it is in `manual_journal`, where nothing posts.
+  const taxRemittanceLine = formatTaxRemittanceWiring(manifest);
+  if (taxRemittanceWiringIsSuspect(manifest)) {
+    console.warn(taxRemittanceLine);
+  } else {
+    console.info(taxRemittanceLine);
   }
   // Who may read and write each sensitive class. One declaration, both directions: the same policy
   // object reaches the response-redaction registry and the write mask, because `privilegedForClass`
@@ -2317,12 +2333,14 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     }
   };
   const provisionStarterChartNow: StarterChartProvisioner = async (tenantId, by) => {
-    const resolved = await resolveJobAccess(tenantId);
+    const resolved = await resolveTenantServing(tenantId);
     if (resolved.kind === "unavailable") {
       const err = new Error(resolved.reason);
       err.name = "TenantGatewayUnavailable";
       throw err;
     }
+    // The wiring of the manifest that serves this tenant, so the posting mode is decided by the
+    // manifest the tenant's returns will be posted under (ADR-0467); only a new workspace may get it.
     return ensureStarterChart({
       access: resolved.access,
       tenantId,
@@ -2332,6 +2350,8 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       },
       settings: settingsStore,
       updatedBy: by.principalId,
+      taxRemittance: resolved.taxRemittance,
+      requestRemittancePosting: by.newWorkspace,
     });
   };
   // Platform super-admin: the /v1/platform routes manage the meta.tenants registry (list/create/suspend/
@@ -5416,17 +5436,29 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // The access is resolved **per run**, because a tenant serving its own activated manifest is
   // served by its own compiled gateway (ADR-0314): writing that tenant's rows through the
   // deployment's would apply another manifest's grants and guards to them.
-  const resolveJobAccess: JobAccessResolver = async (tenantId) => {
+  const resolveTenantServing = async (
+    tenantId: string,
+  ): Promise<
+    | { readonly kind: "access"; readonly access: SystemEntityAccess; readonly taxRemittance: TaxRemittanceWiring | null }
+    | { readonly kind: "unavailable"; readonly reason: string; readonly retryable: boolean }
+  > => {
     const cache = gatewayCache;
-    if (cache === null) return { kind: "access", access: gateway.systemEntityAccess };
+    const boot = { kind: "access", access: gateway.systemEntityAccess, taxRemittance: gateway.taxRemittance } as const;
+    if (cache === null) return boot;
     const resolved = await cache.serverFor(tenantId);
-    if (resolved.kind === "server") return { kind: "access", access: resolved.server.systemEntityAccess };
-    if (resolved.kind === "none") return { kind: "access", access: gateway.systemEntityAccess };
+    if (resolved.kind === "server") {
+      return { kind: "access", access: resolved.server.systemEntityAccess, taxRemittance: resolved.server.taxRemittance };
+    }
+    if (resolved.kind === "none") return boot;
     return {
       kind: "unavailable",
       reason: `this tenant's own activated manifest cannot be served (${resolved.reason}), so no job writes for it`,
       retryable: resolved.reason === "unknown",
     };
+  };
+  const resolveJobAccess: JobAccessResolver = async (tenantId) => {
+    const resolved = await resolveTenantServing(tenantId);
+    return resolved.kind === "access" ? { kind: "access", access: resolved.access } : resolved;
   };
   const JOB_HANDLER_PROVIDERS: readonly JobHandlerProvider[] = buildErpJobProviders({
     coverage: erpJobs,
@@ -6440,6 +6472,10 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
               if (reading.level === "warn") console.warn(line);
               else console.info(line);
             }
+            // The tenant's own manifest, which is what this gateway's effects gate on — the boot
+            // line answered for the deployment's. Silent unless it has a TaxReturn and cannot post.
+            const remittance = formatTenantTaxRemittanceWiring(tenantId, served);
+            if (remittance !== null) console.warn(remittance);
           },
           defaultScheme: options.defaultScheme,
         }).httpServer;

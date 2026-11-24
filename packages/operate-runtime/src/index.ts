@@ -44,6 +44,7 @@ export * from "./maker-checker.js";
 export * from "./entity-audit.js";
 export * from "./system-writer.js";
 export * from "./starter-chart.js";
+export * from "./tax-remittance.js";
 
 export * from "./aging.js";
 export * from "./aging-handler.js";

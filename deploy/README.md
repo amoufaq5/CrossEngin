@@ -1048,6 +1048,71 @@ paying the supplier the net settles it.
   `--store pg-columns` the stamp was dropped and such an invoice could never settle. Declare the
   field on the override to keep sending withheld invoices.
 
+### Upgrading to tax remittance posting (ADR-0467)
+
+`TaxReturn` gains four fields — `credit_disposition`, which the preparer sets, and three the server
+stamps (`remitted_at`, `remittance_entry_number`, `remittance_count`) — and a `reverse_payment`
+transition from `paid` back to `filed`. Marking a return paid can now post its remittance
+(debit tax payable, credit input tax, credit cash; a withholding return debits WHT payable), but
+**only for a tenant that turns it on**. A tenant's own manifest gets the posting only when its
+`TaxReturn` declares those fields and a `reverse_payment` transition from `paid` to `filed`, so a
+posted remittance always has its undo; the `[tax-remittance]` boot line says which it is.
+
+- **On `--store pg-columns`, add the columns before the API boots as `crossengin_app`**: run
+  `column-schema` once as the database owner, exactly as for ADR-0466 above (four new columns and
+  an index on `remittance_entry_number`). `--store pg` needs nothing.
+- **Nothing changes for an existing tenant until its admin sets the mode.** The setting is
+  `finance.taxRemittancePosting` (Settings → Finance & tax → Tax return remittance, or
+  `PUT /v1/admin/settings`): absent or `manual_journal` posts nothing, which is how every return
+  behaved before; `on_mark_paid` posts. Only a **new** workspace, created by approving an access
+  request, can get `on_mark_paid` without its admin: the approval's starter chart sets it when the
+  workspace declares a default currency and holds no filed or amended return and no paid return
+  without a recorded remittance. The console's *Create starter chart of accounts* on an existing
+  workspace never sets it (`remittancePosting: skipped_existing_tenant`), because that workspace
+  may be journalling its remittances by hand. Either report says which (`remittancePosting`).
+- **Before switching an existing tenant to `on_mark_paid`**, deal with every return in `filed` or
+  `amended` whose remittance you already posted by manual journal, as `GO-LIVE.md` advised before
+  this change: either mark it paid first, while the mode is still `manual_journal` (which posts
+  nothing), or reverse that manual journal. Otherwise marking it paid posts the remittance a second
+  time. Returns already `paid` are not affected: switching the mode posts nothing for them.
+- **The return's currency must be the tenant's default currency.** `TaxReturn.currency` defaults to
+  `USD`, so a tenant whose `defaults.currency` is anything else must set `currency` on each return,
+  or marking it paid is refused `409 tax_return_currency_not_functional`. A tenant with no default
+  currency is refused `409 functional_currency_undeclared` until one is set.
+- **What a refusal means.** Every refusal is raised before anything is written, so the return stays
+  where it was. In `on_mark_paid` mode the figure, currency and overlap checks run when the return
+  is **filed** (`file`, `refile`) as well as when it is marked paid, so most refusals arrive while
+  the return can still be corrected. Refused at `file`, edit the return and file it again; refused
+  at `mark_paid`, `amend` it, correct it and `refile`.
+
+  | Code | Status | Remedy |
+  | --- | --- | --- |
+  | `tax_return_figures_invalid`, `tax_return_figures_disagree`, `tax_return_withholding_negative`, `tax_return_period_invalid` | 422 | Correct the return's figures or period. For VAT, GST and consumption tax `net_payable = output_tax − input_tax`; for sales tax `input_tax` is 0; for withholding the amount is `net_payable` and the other two are 0. |
+  | `tax_return_type_unsupported` | 422 | This `return_type` has no remittance posting. Keep the tenant on `manual_journal` while such a return is filed and paid, and record its remittance by manual journal. |
+  | `tax_return_credit_disposition_required` / `_unexpected` | 422 | A return whose `net_payable` is negative needs `credit_disposition` (`refund_received` or `carried_forward`); any other return must not carry one. |
+  | `tax_return_period_overlaps` | 409 | Another filed, amended or paid return of the same type for the same jurisdiction covers part of this period. A supplementary payment for a paid period is a manual journal. |
+  | `functional_currency_undeclared`, `tax_return_currency_not_functional` | 409 | See the currency bullet above. |
+  | `tax_remittance_account_unresolved` | 409 | Set the `finance.*` account code the message names to an account that exists. |
+  | `tax_remittance_routing_unsupported` | 409 | The tenant routes tax by jurisdiction (`taxAccountsByJurisdiction`) or by tax code (`gl_account_code`), which one remittance cannot clear per account. Keep this tenant on `manual_journal`. |
+  | `tax_remittance_exceeds_ledger` | 409 | The return clears more from a tax account than it holds: check the figures against the books, or post what is missing first. |
+  | `tax_ledger_unconverted` | 409 | A foreign-currency line on a tax account has no functional amount; correct it by manual journal. |
+  | `tax_remittance_number_taken` | 409 | Another journal entry already carries the return's next `-REMIT-n` number (usually a manual journal numbered like one). Delete that entry if it is still a draft; a posted entry keeps its number, so instead switch the tenant to `manual_journal`, mark the return paid, and journal its remittance by hand. |
+  | `posting_ambiguous` | 409 | More than one journal entry carries the remittance's number, or more than one return names one entry, so which is meant is not established. Delete the duplicate drafts, or renumber them while they are drafts, before trying again. |
+  | `tax_remittance_already_reversed` | 409 | On `reverse_payment`: the return's remittance entry is already reversed. The journal entry's own `reverse` is refused for a paid return's entry, so this means the entry was reversed outside this server. No route moves such a return out of `paid`; record any correction by manual journal. |
+  | `tax_remittance_reverse_via_return` | 409 | Reverse a posted remittance with the return's `reverse_payment`, not with the journal entry's own `reverse`. |
+  | `tax_remittance_reinstate_via_return` | 409 | That entry reverses a return's remittance. Record the payment again with the return's `mark_paid`, which posts a new remittance entry, rather than reversing the reversal. |
+  | `tax_remittance_paid_outside_posting` | 409 | On `reverse_payment`: the return was marked paid with nothing posted here, so its remittance was a manual journal. Switch the tenant to `manual_journal`, reverse the return, and reverse that journal by hand. |
+  | `period_locked` | 422 | The remittance posts into today's fiscal period, and that period is closed or locked. Reopen it, or mark the return paid once an open period covers today. |
+  | `read_ceiling_exceeded` | 500 | A read the posting depends on (overlapping returns, tax codes, or a tax account's lines) exceeded its bound, so nothing was written. No setting raises the bound; keep this tenant on `manual_journal`. |
+
+- **`reverse_payment` corrects a remittance recorded in error**: it posts the mirror entry
+  (`…-REMIT-1-REV`), clears `remitted_at` and `remittance_entry_number`, and leaves the return
+  `filed`, so the next `mark_paid` posts `…-REMIT-2`. A real additional payment for a period already
+  paid is still a manual journal.
+- **Rolling the binary back is not safe for settings**, for the reason given under ADR-0465: an
+  older binary refuses a finance document carrying `taxRemittancePosting` and reads every finance
+  setting as empty. Remove the key before rolling back.
+
 ### Before an upgrade that changes the schema
 
 - **Take a dump, because there is no down-migration.** That is a property of how `migrate` works

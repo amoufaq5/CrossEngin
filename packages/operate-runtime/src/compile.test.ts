@@ -14,7 +14,10 @@ import { buildErpRetailPack } from "@crossengin/pack-erp-retail";
 import { describe, expect, it } from "vitest";
 
 import { buildOperateGateway, compileOperateServer, defaultEffectStamps } from "./compile.js";
-import { InMemoryEntityStore } from "./store.js";
+import { isApproveClassTransition } from "./maker-checker.js";
+import { InMemorySettingsStore, type FinanceSettings, type OperationalDefaults } from "./settings.js";
+import { InMemoryEntityStore, type EntityRecord } from "./store.js";
+import { TAX_REMITTANCE_REFUSALS, taxRemittanceWiring } from "./tax-remittance.js";
 import { buildClassifiedFieldIndex } from "./write-mask.js";
 
 // Classification redaction used to be keyed off `[<camel>.list, <camel>.read]`, so every write
@@ -1042,18 +1045,12 @@ describe("compileOperateServer — settlement coverage is wired for the real pac
     expect((await store.get(COVERAGE_TENANT, "Invoice", id))?.["state"]).toBe("paid");
   });
 
-  it("serves TaxReturn.mark_paid, whose coverage predicate has neither operand", async () => {
-    // `TaxReturn` declares no `total` field and `Payment` carries no reference to it, so both
-    // operands of `total - applied` are missing and it is deliberately left out of
-    // `SETTLEMENT_COVERAGE_DOCUMENTS` rather than guarded weakly.
-    //
-    // What this 200 establishes is only that the filing is **servable** — it deliberately does not
-    // distinguish *no guard was built* from *a guard was built and checks nothing*, and measured,
-    // it cannot: adding `TaxReturn` to the declaration leaves this whole file green, because
-    // `num(undefined)` is 0 so the guard finds every filing covered. The two facts that case rests
-    // on are pinned where they are separable — `write-guards.test.ts` shows such a guard returning
-    // null for a genuinely owed filing, and asserts the declaration does not name it — and the
-    // boot survey reports it as unguarded with both missing operands.
+  it("serves TaxReturn.mark_paid in the default manual_journal mode, and posts nothing", async () => {
+    // `TaxReturn` declares no `total` and `Payment` carries no reference to it, so it is left out of
+    // `SETTLEMENT_COVERAGE_DOCUMENTS`: it settles through its own posting (ADR-0467). With no settings
+    // store every tenant reads as `manual_journal`, so the transition is a status change and the
+    // remittance is the manual journal that has to accompany it — a posting here as well would
+    // remit the return twice.
     const { store, compiled } = coverageServer();
     const tr = await store.create(COVERAGE_TENANT, "TaxReturn", {
       return_number: "TR-1",
@@ -1063,6 +1060,12 @@ describe("compileOperateServer — settlement coverage is wired for the real pac
     });
     const r = await callOperation(compiled, "taxReturn.mark_paid", { id: String(tr["id"]) }, null);
     expect(r.status).toBe(200);
+    const after = await store.get(COVERAGE_TENANT, "TaxReturn", String(tr["id"]));
+    expect(after?.["state"]).toBe("paid");
+    expect(after?.["remitted_at"]).toBeUndefined();
+    expect(after?.["remittance_entry_number"]).toBeUndefined();
+    const entries = await store.listPage(COVERAGE_TENANT, "JournalEntry", { limit: 10, cursor: null, sort: [], filters: [] });
+    expect(entries.records).toEqual([]);
   });
 
   it("builds no coverage guard for a manifest with an Invoice and no Payment entity", async () => {
@@ -1774,5 +1777,416 @@ describe("the withholding stamp is wired exactly where the document declares the
       const names = resolvedFields(entity!, CORE.traits ?? []).map((f) => f.name);
       expect(names, `${s.entity}.${s.field}`).toContain(s.field);
     }
+  });
+});
+
+// ---- The tax remittance a TaxReturn posts on `mark_paid` (ADR-0467) -------------------------
+
+const REMIT_CODES = { output: "2200", input: "1400", cash: "1000", wht: "2210" } as const;
+type RemitRole = keyof typeof REMIT_CODES;
+const JURISDICTION = "jur-1";
+
+async function remittanceServer(
+  opts: {
+    readonly mode?: "manual_journal" | "on_mark_paid";
+    readonly finance?: Partial<FinanceSettings>;
+    readonly defaults?: OperationalDefaults;
+    readonly manifest?: Manifest;
+  } = {},
+) {
+  const store = new InMemoryEntityStore();
+  const settingsStore = new InMemorySettingsStore();
+  await settingsStore.put(COVERAGE_TENANT, {
+    defaults: opts.defaults ?? { currency: "USD" },
+    finance: {
+      taxPayableAccountCode: REMIT_CODES.output,
+      taxInputAccountCode: REMIT_CODES.input,
+      cashAccountCode: REMIT_CODES.cash,
+      whtPayableAccountCode: REMIT_CODES.wht,
+      ...(opts.mode !== undefined ? { taxRemittancePosting: opts.mode } : {}),
+      ...(opts.finance ?? {}),
+    },
+  });
+  const compiled = compileOperateServer(opts.manifest ?? buildErpCorePack(), {
+    store,
+    settingsStore,
+    principalRoles: () => ({ primaryRole: "erp_admin" }),
+  });
+  const accounts = {} as Record<RemitRole, string>;
+  for (const role of Object.keys(REMIT_CODES) as RemitRole[]) {
+    const a = await store.create(COVERAGE_TENANT, "LedgerAccount", { account_code: REMIT_CODES[role], name: role });
+    accounts[role] = String(a["id"]);
+  }
+  await store.create(COVERAGE_TENANT, "TaxJurisdiction", { id: JURISDICTION, name: "Home" });
+  // The tax the books already hold: 1000 of output tax and 300 of input tax, 200 withheld.
+  const seed = await store.create(COVERAGE_TENANT, "JournalEntry", { entry_number: "SEED-1", state: "posted" });
+  const seedLine = (account: string, debit: number, credit: number) =>
+    store.create(COVERAGE_TENANT, "JournalLine", {
+      journal_entry_id: String(seed["id"]),
+      ledger_account_id: account,
+      currency: "USD",
+      debit,
+      credit,
+      functional_debit: debit,
+      functional_credit: credit,
+    });
+  await seedLine(accounts.output, 0, 1000);
+  await seedLine(accounts.input, 300, 0);
+  await seedLine(accounts.wht, 0, 200);
+  return { store, settingsStore, compiled, accounts };
+}
+
+async function seedReturn(store: InMemoryEntityStore, overrides: EntityRecord = {}): Promise<string> {
+  const tr = await store.create(COVERAGE_TENANT, "TaxReturn", {
+    return_number: "TR-1",
+    state: "filed",
+    return_type: "vat",
+    jurisdiction_id: JURISDICTION,
+    fiscal_period_id: "fp-1",
+    period_start: "2026-01-01",
+    period_end: "2026-03-31",
+    output_tax: 1000,
+    input_tax: 300,
+    net_payable: 700,
+    currency: "USD",
+    ...overrides,
+  });
+  return String(tr["id"]);
+}
+
+async function all(store: InMemoryEntityStore, entity: string): Promise<readonly EntityRecord[]> {
+  return (await store.listPage(COVERAGE_TENANT, entity, { limit: 500, cursor: null, sort: [], filters: [] })).records;
+}
+
+async function remittanceEntries(store: InMemoryEntityStore): Promise<readonly EntityRecord[]> {
+  return (await all(store, "JournalEntry")).filter((e) => e["entry_number"] !== "SEED-1");
+}
+
+/** An entry's lines as `role side amount`, in posting order, with the functional amounts asserted equal. */
+async function legsOf(
+  store: InMemoryEntityStore,
+  entryId: string,
+  accounts: Record<RemitRole, string>,
+): Promise<string[]> {
+  const byId = new Map(Object.entries(accounts).map(([role, id]) => [id, role]));
+  const lines = (await all(store, "JournalLine")).filter((l) => l["journal_entry_id"] === entryId);
+  return lines.map((l) => {
+    expect(Number(l["functional_debit"])).toBe(Number(l["debit"]));
+    expect(Number(l["functional_credit"])).toBe(Number(l["credit"]));
+    expect(Number(l["fx_rate"])).toBe(1);
+    expect(l["currency"]).toBe("USD");
+    const d = Number(l["debit"]);
+    const c = Number(l["credit"]);
+    return `${byId.get(String(l["ledger_account_id"])) ?? "?"} ${d > 0 ? `Dr ${d}` : `Cr ${c}`}`;
+  });
+}
+
+describe("compileOperateServer — a tax return's remittance (ADR-0467)", () => {
+  it("is wired for erp-core, whose TaxReturn carries every field and stamp the posting needs", () => {
+    const wiring = taxRemittanceWiring(buildErpCorePack());
+    expect(wiring).toEqual({ entity: "TaxReturn", stateField: "state", reverseTransition: "reverse_payment" });
+    // `reverse_payment` undoes a recorded fact rather than committing the business to one, so it is
+    // not approve-class: the person who marked the return paid in error may be the one who undoes it.
+    expect(isApproveClassTransition("TaxReturn", "reverse_payment")).toBe(false);
+    expect(isApproveClassTransition("TaxReturn", "mark_paid")).toBe(true);
+  });
+
+  it("posts nothing in manual_journal mode even with a settings store and every account set", async () => {
+    const { store, compiled } = await remittanceServer({ mode: "manual_journal" });
+    const id = await seedReturn(store);
+    const r = await callOperation(compiled, "taxReturn.mark_paid", { id }, null);
+    expect(r.status).toBe(200);
+    expect(await remittanceEntries(store)).toEqual([]);
+    expect((await store.get(COVERAGE_TENANT, "TaxReturn", id))?.["remitted_at"]).toBeUndefined();
+  });
+
+  it("posts a VAT return's remittance and stamps the return in on_mark_paid mode", async () => {
+    const { store, compiled, accounts } = await remittanceServer({ mode: "on_mark_paid" });
+    const id = await seedReturn(store);
+    const r = await callOperation(compiled, "taxReturn.mark_paid", { id }, null);
+    expect(r.status).toBe(200);
+    const entries = await remittanceEntries(store);
+    expect(entries).toHaveLength(1);
+    const entry = entries[0]!;
+    expect(entry["entry_number"]).toBe("TR-1-REMIT-1");
+    expect(entry["source"]).toBe("system");
+    expect(entry["state"]).toBe("posted");
+    // JournalEntry declares no currency: a header key the manifest does not declare is kept by the
+    // document store and dropped by the column store, so it would differ between them.
+    const declared = new Set(
+      resolvedFields((buildErpCorePack().entities ?? []).find((e) => e.name === "JournalEntry")!, []).map((f) => f.name),
+    );
+    for (const key of Object.keys(entry)) {
+      if (key === "id") continue;
+      expect(declared.has(key), `JournalEntry.${key} is declared`).toBe(true);
+    }
+    expect(await legsOf(store, String(entry["id"]), accounts)).toEqual(["output Dr 1000", "input Cr 300", "cash Cr 700"]);
+    const after = await store.get(COVERAGE_TENANT, "TaxReturn", id);
+    expect(after?.["state"]).toBe("paid");
+    expect(typeof after?.["remitted_at"]).toBe("string");
+    expect(after?.["remittance_entry_number"]).toBe("TR-1-REMIT-1");
+    expect(Number(after?.["remittance_count"])).toBe(1);
+  });
+
+  it.each([
+    [
+      "a refund received",
+      { output_tax: 100, input_tax: 300, net_payable: -200, credit_disposition: "refund_received" },
+      ["output Dr 100", "cash Dr 200", "input Cr 300"],
+    ],
+    [
+      "a credit carried forward",
+      { output_tax: 100, input_tax: 300, net_payable: -200, credit_disposition: "carried_forward" },
+      ["output Dr 100", "input Cr 100"],
+    ],
+    ["a sales-tax return", { return_type: "sales_tax", output_tax: 500, input_tax: 0, net_payable: 500 }, ["output Dr 500", "cash Cr 500"]],
+    [
+      "a withholding return",
+      { return_type: "withholding", output_tax: 0, input_tax: 0, net_payable: 150 },
+      ["wht Dr 150", "cash Cr 150"],
+    ],
+  ])("posts %s", async (_name, figures, legs) => {
+    const { store, compiled, accounts } = await remittanceServer({ mode: "on_mark_paid" });
+    const id = await seedReturn(store, figures);
+    const r = await callOperation(compiled, "taxReturn.mark_paid", { id }, null);
+    expect(r.status).toBe(200);
+    const [entry] = await remittanceEntries(store);
+    expect(await legsOf(store, String(entry!["id"]), accounts)).toEqual(legs);
+  });
+
+  it("stamps a nil return without posting an entry, and reverses it without one", async () => {
+    const { store, compiled } = await remittanceServer({ mode: "on_mark_paid" });
+    const id = await seedReturn(store, { output_tax: 0, input_tax: 0, net_payable: 0 });
+    expect((await callOperation(compiled, "taxReturn.mark_paid", { id }, null)).status).toBe(200);
+    expect(await remittanceEntries(store)).toEqual([]);
+    const paid = await store.get(COVERAGE_TENANT, "TaxReturn", id);
+    expect(typeof paid?.["remitted_at"]).toBe("string");
+    expect(paid?.["remittance_entry_number"] ?? null).toBeNull();
+    expect(paid?.["remittance_count"]).toBeUndefined();
+    expect((await callOperation(compiled, "taxReturn.reverse_payment", { id }, null)).status).toBe(200);
+    expect(await remittanceEntries(store)).toEqual([]);
+    // A cleared stamp reads back absent: a null field is absent on every store (ADR-0443).
+    expect((await store.get(COVERAGE_TENANT, "TaxReturn", id))?.["remitted_at"] ?? null).toBeNull();
+  });
+
+  it("reverses the remittance with reverse_payment and numbers the next one -REMIT-2", async () => {
+    const { store, compiled, accounts } = await remittanceServer({ mode: "on_mark_paid" });
+    const id = await seedReturn(store);
+    expect((await callOperation(compiled, "taxReturn.mark_paid", { id }, null)).status).toBe(200);
+    expect((await callOperation(compiled, "taxReturn.reverse_payment", { id }, null)).status).toBe(200);
+    const byNumber = new Map((await remittanceEntries(store)).map((e) => [String(e["entry_number"]), e]));
+    expect([...byNumber.keys()].sort()).toEqual(["TR-1-REMIT-1", "TR-1-REMIT-1-REV"]);
+    expect(byNumber.get("TR-1-REMIT-1")?.["state"]).toBe("reversed");
+    expect(await legsOf(store, String(byNumber.get("TR-1-REMIT-1-REV")!["id"]), accounts)).toEqual([
+      "output Cr 1000",
+      "input Dr 300",
+      "cash Dr 700",
+    ]);
+    const filed = await store.get(COVERAGE_TENANT, "TaxReturn", id);
+    expect(filed?.["state"]).toBe("filed");
+    expect(filed?.["remitted_at"] ?? null).toBeNull();
+    // The number names the current payment's entry and goes with it; the count stays, so the next
+    // payment cannot reuse the reversed entry's number.
+    expect(filed?.["remittance_entry_number"] ?? null).toBeNull();
+    expect(Number(filed?.["remittance_count"])).toBe(1);
+
+    expect((await callOperation(compiled, "taxReturn.mark_paid", { id }, null)).status).toBe(200);
+    const again = await store.get(COVERAGE_TENANT, "TaxReturn", id);
+    expect(again?.["remittance_entry_number"]).toBe("TR-1-REMIT-2");
+    expect(Number(again?.["remittance_count"])).toBe(2);
+    expect((await remittanceEntries(store)).map((e) => e["entry_number"]).sort()).toEqual([
+      "TR-1-REMIT-1",
+      "TR-1-REMIT-1-REV",
+      "TR-1-REMIT-2",
+    ]);
+  });
+
+  it("never strands a return in paid: a nil re-payment after a reversal can be reversed again", async () => {
+    const { store, compiled } = await remittanceServer({ mode: "on_mark_paid" });
+    const id = await seedReturn(store);
+    for (const op of ["mark_paid", "reverse_payment", "amend"]) {
+      expect((await callOperation(compiled, `taxReturn.${op}`, { id }, null)).status, op).toBe(200);
+    }
+    const nil = await callOperation(compiled, "taxReturn.update", { id }, { output_tax: 0, input_tax: 0, net_payable: 0 });
+    expect(nil.status).toBe(200);
+    for (const op of ["refile", "mark_paid"]) {
+      expect((await callOperation(compiled, `taxReturn.${op}`, { id }, null)).status, op).toBe(200);
+    }
+    expect((await store.get(COVERAGE_TENANT, "TaxReturn", id))?.["remittance_entry_number"] ?? null).toBeNull();
+    const reversed = await callOperation(compiled, "taxReturn.reverse_payment", { id }, null);
+    expect(reversed.status).toBe(200);
+    expect((await store.get(COVERAGE_TENANT, "TaxReturn", id))?.["state"]).toBe("filed");
+  });
+
+  it("never strands a return in paid: a manual-mode re-payment after a reversal can be reversed again", async () => {
+    const { store, settingsStore, compiled } = await remittanceServer({ mode: "on_mark_paid" });
+    const id = await seedReturn(store);
+    for (const op of ["mark_paid", "reverse_payment"]) {
+      expect((await callOperation(compiled, `taxReturn.${op}`, { id }, null)).status, op).toBe(200);
+    }
+    const settings = await settingsStore.get(COVERAGE_TENANT);
+    await settingsStore.put(COVERAGE_TENANT, { ...settings, finance: { ...settings.finance, taxRemittancePosting: "manual_journal" } });
+    expect((await callOperation(compiled, "taxReturn.mark_paid", { id }, null)).status).toBe(200);
+    const reversed = await callOperation(compiled, "taxReturn.reverse_payment", { id }, null);
+    expect(reversed.status).toBe(200);
+    expect((await store.get(COVERAGE_TENANT, "TaxReturn", id))?.["state"]).toBe("filed");
+  });
+
+  it("refuses reverse_payment, in on_mark_paid mode, on a return paid with nothing posted here", async () => {
+    // Paid before the upgrade or in manual_journal mode: a manual journal remitted it, so a reversal
+    // here undoes nothing and the next mark_paid would post the same period a second time.
+    const { store, settingsStore, compiled } = await remittanceServer({ mode: "on_mark_paid" });
+    const id = await seedReturn(store, { state: "paid" });
+    const refused = await callOperation(compiled, "taxReturn.reverse_payment", { id }, null);
+    expect(refused.status).toBe(409);
+    expect(refused.body["error"]).toBe("tax_remittance_paid_outside_posting");
+    expect((await store.get(COVERAGE_TENANT, "TaxReturn", id))?.["state"]).toBe("paid");
+    expect(await remittanceEntries(store)).toEqual([]);
+    // The named remedy works: in manual_journal mode the return reverses.
+    const settings = await settingsStore.get(COVERAGE_TENANT);
+    await settingsStore.put(COVERAGE_TENANT, { ...settings, finance: { ...settings.finance, taxRemittancePosting: "manual_journal" } });
+    expect((await callOperation(compiled, "taxReturn.reverse_payment", { id }, null)).status).toBe(200);
+  });
+
+  it("refuses reversing a remittance's reversal, which would re-apply it with the return reading filed", async () => {
+    const { store, compiled } = await remittanceServer({ mode: "on_mark_paid" });
+    const id = await seedReturn(store);
+    for (const op of ["mark_paid", "reverse_payment"]) {
+      expect((await callOperation(compiled, `taxReturn.${op}`, { id }, null)).status, op).toBe(200);
+    }
+    const rev = (await remittanceEntries(store)).find((e) => e["entry_number"] === "TR-1-REMIT-1-REV")!;
+    const refused = await callOperation(compiled, "journalEntry.reverse", { id: String(rev["id"]) }, null);
+    expect(refused.status).toBe(409);
+    expect(refused.body["error"]).toBe("tax_remittance_reinstate_via_return");
+    expect((await remittanceEntries(store)).map((e) => e["entry_number"]).sort()).toEqual([
+      "TR-1-REMIT-1",
+      "TR-1-REMIT-1-REV",
+    ]);
+    // Control: a -REV entry whose prefix names no tax return is an ordinary reversal.
+    const other = await store.create(COVERAGE_TENANT, "JournalEntry", { entry_number: "TR-9-REMIT-1-REV", state: "posted" });
+    expect((await callOperation(compiled, "journalEntry.reverse", { id: String(other["id"]) }, null)).status).toBe(200);
+  });
+
+  it("refuses reverse_payment when the remittance entry was already reversed elsewhere", async () => {
+    const { store, compiled } = await remittanceServer({ mode: "on_mark_paid" });
+    const id = await seedReturn(store);
+    expect((await callOperation(compiled, "taxReturn.mark_paid", { id }, null)).status).toBe(200);
+    const [entry] = await remittanceEntries(store);
+    await store.update(COVERAGE_TENANT, "JournalEntry", String(entry!["id"]), { state: "reversed" });
+    const r = await callOperation(compiled, "taxReturn.reverse_payment", { id }, null);
+    expect(r.status).toBe(409);
+    expect(r.body["error"]).toBe("tax_remittance_already_reversed");
+    expect((await store.get(COVERAGE_TENANT, "TaxReturn", id))?.["state"]).toBe("paid");
+  });
+
+  it("refuses reversing a paid return's remittance entry directly, and allows it once the return is not paid", async () => {
+    const { store, compiled } = await remittanceServer({ mode: "on_mark_paid" });
+    const id = await seedReturn(store);
+    expect((await callOperation(compiled, "taxReturn.mark_paid", { id }, null)).status).toBe(200);
+    const [entry] = await remittanceEntries(store);
+    const entryId = String(entry!["id"]);
+    const refused = await callOperation(compiled, "journalEntry.reverse", { id: entryId }, null);
+    expect(refused.status).toBe(409);
+    expect(refused.body["error"]).toBe("tax_remittance_reverse_via_return");
+    expect((await store.get(COVERAGE_TENANT, "JournalEntry", entryId))?.["state"]).toBe("posted");
+    await store.update(COVERAGE_TENANT, "TaxReturn", id, { state: "filed" });
+    const allowed = await callOperation(compiled, "journalEntry.reverse", { id: entryId }, null);
+    expect(allowed.status).toBe(200);
+  });
+
+  it("names a paid return and its correction when an edit is refused", async () => {
+    const { store, compiled } = await remittanceServer({ mode: "on_mark_paid" });
+    const id = await seedReturn(store);
+    expect((await callOperation(compiled, "taxReturn.mark_paid", { id }, null)).status).toBe(200);
+    const r = await callOperation(compiled, "taxReturn.update", { id }, { output_tax: 900 });
+    expect(r.status).toBe(422);
+    expect(r.body["error"]).toBe("tax_return_locked");
+    expect(r.body["detail"]).toContain("paid tax return");
+    expect(r.body["detail"]).toContain("reverse the payment instead");
+  });
+
+  it("refuses a return whose declaration cannot post when it is filed, but only in on_mark_paid mode", async () => {
+    for (const [mode, status] of [["on_mark_paid", 422], ["manual_journal", 200]] as const) {
+      const { store, compiled } = await remittanceServer({ mode });
+      const id = await seedReturn(store, { state: "ready", net_payable: 650 });
+      const r = await callOperation(compiled, "taxReturn.file", { id }, null);
+      expect(r.status, mode).toBe(status);
+      if (status === 422) expect(r.body["error"]).toBe("tax_return_figures_disagree");
+    }
+  });
+
+  it.each<[string, Parameters<typeof remittanceServer>[0], EntityRecord, string, number]>([
+    ["figures that disagree", {}, { net_payable: 650 }, "tax_return_figures_disagree", 422],
+    ["no functional currency", { defaults: {} }, {}, "functional_currency_undeclared", 409],
+    ["a foreign-currency return", {}, { currency: "EUR" }, "tax_return_currency_not_functional", 409],
+    ["an unset cash account", { finance: { cashAccountCode: "" } }, {}, "tax_remittance_account_unresolved", 409],
+    ["tax routed by jurisdiction", { finance: { taxAccountsByJurisdiction: { home: "2201" } } }, {}, "tax_remittance_routing_unsupported", 409],
+    ["more output tax than the books hold", {}, { output_tax: 2000, net_payable: 1700 }, "tax_remittance_exceeds_ledger", 409],
+  ])("refuses %s and writes nothing", async (_name, server, figures, code, status) => {
+    const { store, compiled } = await remittanceServer({ mode: "on_mark_paid", ...server });
+    const id = await seedReturn(store, figures);
+    const r = await callOperation(compiled, "taxReturn.mark_paid", { id }, null);
+    expect(r.status).toBe(status);
+    expect(r.body["error"]).toBe(code);
+    expect(await remittanceEntries(store)).toEqual([]);
+    const after = await store.get(COVERAGE_TENANT, "TaxReturn", id);
+    expect(after?.["state"]).toBe("filed");
+    expect(after?.["remitted_at"]).toBeUndefined();
+  });
+
+  it("names the setting an unresolved account comes from, and nothing the record carries", async () => {
+    const { store, compiled } = await remittanceServer({ mode: "on_mark_paid", finance: { cashAccountCode: "9999" } });
+    const id = await seedReturn(store);
+    const r = await callOperation(compiled, "taxReturn.mark_paid", { id }, null);
+    expect(r.body["detail"]).toBe(
+      `${TAX_REMITTANCE_REFUSALS.tax_remittance_account_unresolved.detail}: set finance.cashAccountCode`,
+    );
+  });
+
+  it("refuses when a tax code routes tax to an account of its own", async () => {
+    const { store, compiled } = await remittanceServer({ mode: "on_mark_paid" });
+    await store.create(COVERAGE_TENANT, "TaxCode", { code: "VAT20", kind: "standard", gl_account_code: "2299" });
+    const id = await seedReturn(store);
+    const r = await callOperation(compiled, "taxReturn.mark_paid", { id }, null);
+    expect(r.status).toBe(409);
+    expect(r.body["error"]).toBe("tax_remittance_routing_unsupported");
+    expect(await remittanceEntries(store)).toEqual([]);
+  });
+
+  it("refuses a second return of the same type and jurisdiction whose period overlaps a paid one", async () => {
+    const { store, compiled } = await remittanceServer({ mode: "on_mark_paid" });
+    await seedReturn(store, { return_number: "TR-0", state: "paid", period_start: "2026-03-01", period_end: "2026-05-31" });
+    const id = await seedReturn(store);
+    const r = await callOperation(compiled, "taxReturn.mark_paid", { id }, null);
+    expect(r.status).toBe(409);
+    expect(r.body["error"]).toBe("tax_return_period_overlaps");
+    // A return of another type holds its own period, so the same months are not an overlap.
+    const other = await seedReturn(store, { return_number: "TR-2", return_type: "withholding", output_tax: 0, input_tax: 0, net_payable: 10 });
+    expect((await callOperation(compiled, "taxReturn.mark_paid", { id: other }, null)).status).toBe(200);
+  });
+
+  it("refuses when a journal entry already carries the next remittance number", async () => {
+    const { store, compiled } = await remittanceServer({ mode: "on_mark_paid" });
+    await store.create(COVERAGE_TENANT, "JournalEntry", { entry_number: "TR-1-REMIT-1", state: "posted" });
+    const id = await seedReturn(store);
+    const r = await callOperation(compiled, "taxReturn.mark_paid", { id }, null);
+    expect(r.status).toBe(409);
+    expect(r.body["error"]).toBe("tax_remittance_number_taken");
+  });
+
+  it("is not wired, posts nothing and stamps nothing for a manifest whose TaxReturn lacks a stamp field", async () => {
+    const core = buildErpCorePack();
+    const manifest: Manifest = {
+      ...core,
+      entities: (core.entities ?? []).map((e) =>
+        e.name === "TaxReturn" ? { ...e, fields: e.fields.filter((f) => f.name !== "remitted_at") } : e,
+      ),
+    };
+    expect(taxRemittanceWiring(manifest)).toBeNull();
+    expect(defaultEffectStamps(manifest).filter((s) => s.entity === "TaxReturn")).toEqual([]);
+    const { store, compiled } = await remittanceServer({ mode: "on_mark_paid", manifest });
+    const id = await seedReturn(store, { net_payable: 650 });
+    expect((await callOperation(compiled, "taxReturn.mark_paid", { id }, null)).status).toBe(200);
+    expect(await remittanceEntries(store)).toEqual([]);
   });
 });

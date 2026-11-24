@@ -197,18 +197,27 @@ export const MAINTENANCE_ORDER_LIFECYCLE = lifecycle(
   ],
 );
 
+/**
+ * `paid` is not terminal, because a remittance recorded in error has to be undone: since
+ * `mark_paid` posts the remittance (ADR-0467), a terminal `paid` would leave a wrong entry with no
+ * edge back, and the kernel refuses any transition out of a terminal state. `reverse_payment` is the
+ * one way out of `paid`, and it lands in `filed` so the corrected figures go through `amend` and
+ * `refile` like any other correction. Nothing here is terminal now; the lifecycle's only rule is
+ * that every state stays reachable from `draft`.
+ */
 export const TAX_RETURN_LIFECYCLE = lifecycle(
   "TaxReturn",
   "state",
   "draft",
   ["draft", "ready", "filed", "paid", "amended"],
-  ["paid"],
+  [],
   [
     { name: "mark_ready", from: "draft", to: "ready" },
     { name: "file", from: "ready", to: "filed" },
     { name: "mark_paid", from: "filed", to: "paid" },
     { name: "amend", from: "filed", to: "amended" },
     { name: "refile", from: "amended", to: "filed" },
+    { name: "reverse_payment", from: "paid", to: "filed" },
   ],
 );
 
@@ -261,6 +270,6 @@ export const ERP_EXT_TRANSITIONS: Readonly<Record<string, readonly string[]>> = 
   Timesheet: ["submit", "approve", "reject"],
   FixedAsset: ["send_to_maintenance", "return_to_service", "retire", "dispose"],
   MaintenanceOrder: ["schedule", "start", "complete", "cancel"],
-  TaxReturn: ["mark_ready", "file", "mark_paid", "amend", "refile"],
+  TaxReturn: ["mark_ready", "file", "mark_paid", "amend", "refile", "reverse_payment"],
   FiscalPeriod: ["start_close", "close", "reopen", "lock"],
 };

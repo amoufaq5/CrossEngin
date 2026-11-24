@@ -147,10 +147,11 @@ describe("the write surface over resolved erp-core", () => {
   });
 
   it("derives the effect-stamped fields from the effects compile wires, and nothing else", () => {
-    // Measured, not chosen: seven stamps. Six are three fields on each of the two documents, each
+    // Measured, not chosen: ten stamps. Six are three fields on each of the two documents, each
     // one an `input.store.update` an effect issues against the document that triggered it; the
     // seventh is the one a goods receipt advances on the order line it receives, which both the
-    // receipt and the three-way match read back.
+    // receipt and the three-way match read back; and three are the tax remittance's on the return
+    // it posts for (ADR-0467). `credit_disposition` is the caller's and is not among them.
     const stamps = defaultEffectStamps(CORE)
       .map((s) => `${s.entity}.${s.field}`)
       .sort();
@@ -162,7 +163,25 @@ describe("the write surface over resolved erp-core", () => {
       "Invoice.paid_at",
       "Invoice.withholding_total",
       "PurchaseOrderLine.received_quantity",
+      "TaxReturn.remittance_count",
+      "TaxReturn.remittance_entry_number",
+      "TaxReturn.remitted_at",
     ]);
+  });
+
+  it("refuses the remittance stamps on a tax return's create and update, and admits its disposition", () => {
+    const taxReturn = surfaces.get("TaxReturn")!;
+    for (const field of ["remitted_at", "remittance_entry_number", "remittance_count"]) {
+      for (const op of ["create", "update"] as const) {
+        expect(writeSurfaceRefusal(taxReturn, ["output_tax", field], op), `${field} ${op}`).toEqual({
+          kind: "server_owned",
+          field,
+          reason: "effect_stamp",
+        });
+      }
+    }
+    expect(writeSurfaceRefusal(taxReturn, ["credit_disposition", "net_payable"], "create")).toBeNull();
+    expect(writeSurfaceRefusal(taxReturn, ["credit_disposition"], "update")).toBeNull();
   });
 
   it("answers both operations for every class, admitting only the two import paths on create", () => {

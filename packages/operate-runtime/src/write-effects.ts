@@ -12,8 +12,23 @@ import {
   unitsToNumber,
 } from "./money.js";
 import { postingPeriodFor, PostingRefused, type PostingPeriodConfig } from "./posting-period.js";
+import { functionalCurrencyOf, taxRemittancePostingMode, type SettingsStore, type TenantSettings } from "./settings.js";
 import { determineDocumentTax, type DocumentTaxDetermination, type TaxDeterminationConfig } from "./tax-determination.js";
-import type { EntityRecord } from "./store.js";
+import {
+  isTaxRemittanceRefusal,
+  planTaxRemittance,
+  TAX_REMITTANCE_ACCOUNT_SETTINGS,
+  TAX_REMITTANCE_REFUSALS,
+  TAX_REMITTANCE_REVERSAL_SUFFIX,
+  taxRemittanceAccountUnresolvedDetail,
+  taxRemittanceEntryNumber,
+  type TaxRemittancePlan,
+  type TaxRemittanceRefusalCode,
+  type TaxRemittanceRole,
+  type TaxRemittanceShape,
+  type TaxRemittanceWiring,
+} from "./tax-remittance.js";
+import type { EntityRecord, ListFilter } from "./store.js";
 import {
   amountOwed,
   readAppliedPayments,
@@ -3115,5 +3130,476 @@ export function whtCertificateClearingEffect(config: WhtCertificateClearingConfi
     for (const line of convertedLines(base, planned, rate)) {
       await input.store.create(input.tenantId, c.lineEntity, line);
     }
+  };
+}
+
+// ---- Tax remittance on `TaxReturn → paid` (ADR-0467) ------------------------------------------
+
+export interface TaxRemittanceEffectConfig {
+  readonly wiring: TaxRemittanceWiring;
+  /**
+   * The tenant's settings, which must be the write's snapshot resolver (`settingsScope.store`) and
+   * never a pooled store: a settings read inside the write transaction deadlocked the pool
+   * (ADR-0422). Absent, every tenant reads as `manual_journal`, so nothing posts and nothing new
+   * refuses.
+   */
+  readonly settingsStore?: Pick<SettingsStore, "get">;
+  /** Whether the manifest declares `TaxCode`, whose per-code accounts a remittance cannot clear. */
+  readonly taxCodes?: boolean;
+  readonly periods?: PostingPeriodConfig;
+  readonly clock?: { now(): Date };
+}
+
+const TAX_RETURN = "TaxReturn";
+const TAX_RETURN_FILED = "filed";
+const TAX_RETURN_PAID = "paid";
+/** The states a return holds a period in: a draft or ready return has declared nothing yet. */
+const TAX_RETURN_PERIOD_HOLDING_STATES = ["filed", "amended", "paid"] as const;
+export const TAX_RETURN_OVERLAP_CEILING = 1_000;
+export const TAX_CODE_ROUTING_CEILING = 10_000;
+/** One tax account's whole history; past it the balance cannot be read and posting mode is refused. */
+export const TAX_REMITTANCE_BALANCE_LINE_CEILING = 200_000;
+const ENTRY_ID_CHUNK = 500;
+const LEDGER_ACCOUNT_LOOKUP = { ledgerAccountEntity: "LedgerAccount", accountCodeField: "account_code" } as const;
+
+const TAX_REMITTANCE_LINE_DESCRIPTIONS: Readonly<Record<TaxRemittanceRole, string>> = {
+  output: "Tax remittance — output tax",
+  input: "Tax remittance — input tax",
+  withholding: "Tax remittance — tax withheld",
+  cash: "Tax remittance — cash",
+};
+
+function refuseRemittance(code: TaxRemittanceRefusalCode, detail?: string): never {
+  const r = TAX_REMITTANCE_REFUSALS[code];
+  throw new PostingRefused(r.status, code, detail ?? r.detail);
+}
+
+/** The tenant's settings, or null when posting mode is not `on_mark_paid` — the only gate a tenant has. */
+async function remittingSettings(c: TaxRemittanceEffectConfig, tenantId: string): Promise<TenantSettings | null> {
+  if (c.settingsStore === undefined) return null;
+  const settings = await c.settingsStore.get(tenantId);
+  return taxRemittancePostingMode(settings.finance) === "on_mark_paid" ? settings : null;
+}
+
+/** The state edge between two states, by prior state; a create has none and so is never one. */
+function movesBetween(input: WriteEffectInput, stateField: string, from: string, to: string): boolean {
+  if (input.operation !== "update" && input.operation !== "transition") return false;
+  return input.before?.[stateField] === from && input.after[stateField] === to;
+}
+
+/**
+ * Refuses a return whose `[period_start, period_end]` overlaps another of the same type for the same
+ * jurisdiction that has already declared its period, so one stretch of tax is never remitted twice.
+ *
+ * The jurisdiction row is locked first (`FOR NO KEY UPDATE`, which a referencing write's
+ * `FOR KEY SHARE` does not conflict with), always after the return's own row, so two overlapping
+ * returns filed at once serialise here and the second reads the first's committed state.
+ */
+async function refuseOverlappingReturn(
+  input: WriteEffectInput,
+  stateField: string,
+  record: EntityRecord,
+  start: string,
+  end: string,
+): Promise<void> {
+  const jurisdiction = record["jurisdiction_id"];
+  const returnType = record["return_type"];
+  if (typeof jurisdiction === "string" && jurisdiction.length > 0) {
+    await input.store.getLocked(input.tenantId, "TaxJurisdiction", jurisdiction, "exclusive");
+  }
+  const filters: ListFilter[] = [
+    { field: "return_type", op: "eq", value: String(returnType) },
+    { field: stateField, op: "in", value: [...TAX_RETURN_PERIOD_HOLDING_STATES] },
+  ];
+  if (typeof jurisdiction === "string" && jurisdiction.length > 0) {
+    filters.push({ field: "jurisdiction_id", op: "eq", value: jurisdiction });
+  }
+  let overlaps = false;
+  const outcome = await drainList(
+    input.store,
+    input.tenantId,
+    TAX_RETURN,
+    { sort: [], filters },
+    { ceiling: TAX_RETURN_OVERLAP_CEILING },
+    (rows) => {
+      for (const other of rows) {
+        if (String(other["id"]) === input.id) continue;
+        if (other["jurisdiction_id"] !== jurisdiction || other["return_type"] !== returnType) continue;
+        const state = other[stateField];
+        if (typeof state !== "string" || !(TAX_RETURN_PERIOD_HOLDING_STATES as readonly string[]).includes(state)) {
+          continue;
+        }
+        const s = typeof other["period_start"] === "string" ? (other["period_start"] as string).slice(0, 10) : null;
+        const e = typeof other["period_end"] === "string" ? (other["period_end"] as string).slice(0, 10) : null;
+        // A period that cannot be read is taken to overlap: it may cover anything.
+        if (s === null || e === null || (s <= end && start <= e)) overlaps = true;
+      }
+    },
+  );
+  if (!outcome.complete) {
+    throw new ReadCeilingExceeded(TAX_RETURN, TAX_RETURN_OVERLAP_CEILING, "whether this return overlaps another");
+  }
+  if (overlaps) refuseRemittance("tax_return_period_overlaps");
+}
+
+/**
+ * The checks a return's own declaration must pass before it can post: its figures, its period, its
+ * currency against the tenant's functional one, and no other return covering the same period. Run
+ * when the return is filed and again when it is marked paid, since the mode, the settings and other
+ * returns can all have changed in between.
+ */
+async function checkRemittableReturn(
+  input: WriteEffectInput,
+  stateField: string,
+  settings: TenantSettings,
+): Promise<{ readonly plan: TaxRemittancePlan; readonly functional: string }> {
+  const record = input.after;
+  const planned = planTaxRemittance(record);
+  if (isTaxRemittanceRefusal(planned)) refuseRemittance(planned.refusal);
+  const functional = functionalCurrencyOf(settings);
+  if (functional === null) refuseRemittance("functional_currency_undeclared");
+  const currency = typeof record["currency"] === "string" ? (record["currency"] as string).trim().toUpperCase() : "";
+  if (currency !== functional) refuseRemittance("tax_return_currency_not_functional");
+  // The planner has already refused a period that is not two real dates in order.
+  const start = String(record["period_start"]).slice(0, 10);
+  const end = String(record["period_end"]).slice(0, 10);
+  await refuseOverlappingReturn(input, stateField, record, start, end);
+  return { plan: planned, functional };
+}
+
+/**
+ * Refuses a tenant whose tax reaches accounts other than the settings' defaults, because the return
+ * declares one figure per role and could not say how much of it sits in each account. Checked
+ * against the configuration as it is now; tax routed by a mapping since removed is not visible here.
+ */
+async function refuseRoutedTax(
+  input: WriteEffectInput,
+  c: TaxRemittanceEffectConfig,
+  shape: TaxRemittanceShape,
+  settings: TenantSettings,
+): Promise<void> {
+  const finance = settings.finance ?? {};
+  if (Object.keys(finance.taxAccountsByJurisdiction ?? {}).length > 0) {
+    refuseRemittance("tax_remittance_routing_unsupported");
+  }
+  if (c.taxCodes !== true) return;
+  const wht = (finance.whtPayableAccountCode ?? "").trim();
+  let routed = false;
+  const outcome = await drainList(
+    input.store,
+    input.tenantId,
+    "TaxCode",
+    { sort: [], filters: [] },
+    { ceiling: TAX_CODE_ROUTING_CEILING },
+    (rows) => {
+      for (const code of rows) {
+        const gl = typeof code["gl_account_code"] === "string" ? (code["gl_account_code"] as string).trim() : "";
+        if (gl === "") continue;
+        const withholding = code["kind"] === "withholding";
+        if (shape === "withholding" ? withholding && gl !== wht : !withholding) routed = true;
+      }
+    },
+  );
+  if (!outcome.complete) {
+    throw new ReadCeilingExceeded("TaxCode", TAX_CODE_ROUTING_CEILING, "whether this tenant routes tax by code");
+  }
+  if (routed) refuseRemittance("tax_remittance_routing_unsupported");
+}
+
+/**
+ * One ledger account's balance, debits less credits in functional units, over its posted and
+ * reversed entries (a reversed entry stands, beside the reversal that answers it). A line in the
+ * functional currency is read at its transaction amounts and any other line at its functional ones;
+ * a foreign line moving an amount with no functional amount cannot be read and refuses.
+ */
+async function ledgerAccountBalance(input: WriteEffectInput, accountId: string, functional: string): Promise<bigint> {
+  const lines: { readonly entryId: string; readonly units: bigint; readonly unconverted: boolean }[] = [];
+  const read = await drainList(
+    input.store,
+    input.tenantId,
+    "JournalLine",
+    { sort: [], filters: [{ field: "ledger_account_id", op: "eq", value: accountId }] },
+    { ceiling: TAX_REMITTANCE_BALANCE_LINE_CEILING },
+    (rows) => {
+      for (const line of rows) {
+        if (String(line["ledger_account_id"] ?? "") !== accountId) continue;
+        const raw = typeof line["currency"] === "string" ? (line["currency"] as string).trim().toUpperCase() : "";
+        const own = raw === "" || raw === functional;
+        const amounts = lineCents(line);
+        const units = own ? amounts.d - amounts.c : amounts.fd - amounts.fc;
+        const unconverted = !own && (amounts.d !== 0n || amounts.c !== 0n) && amounts.fd === 0n && amounts.fc === 0n;
+        lines.push({ entryId: String(line["journal_entry_id"] ?? ""), units, unconverted });
+      }
+    },
+  );
+  if (!read.complete) {
+    throw new ReadCeilingExceeded("JournalLine", TAX_REMITTANCE_BALANCE_LINE_CEILING, "a tax account's balance");
+  }
+  const entryIds = [...new Set(lines.map((l) => l.entryId))];
+  const standing = new Set<string>();
+  for (let i = 0; i < entryIds.length; i += ENTRY_ID_CHUNK) {
+    const chunk = entryIds.slice(i, i + ENTRY_ID_CHUNK);
+    const entries = await drainList(
+      input.store,
+      input.tenantId,
+      DEFAULTS.entryEntity,
+      {
+        sort: [],
+        filters: [
+          { field: "id", op: "in", value: chunk },
+          { field: DEFAULTS.stateField, op: "in", value: [DEFAULTS.postedState, DEFAULTS.reversedState] },
+        ],
+      },
+      { ceiling: ENTRY_ID_CHUNK },
+      (rows) => {
+        for (const entry of rows) {
+          const state = entry[DEFAULTS.stateField];
+          if (state === DEFAULTS.postedState || state === DEFAULTS.reversedState) standing.add(String(entry["id"]));
+        }
+      },
+    );
+    if (!entries.complete) {
+      throw new ReadCeilingExceeded(DEFAULTS.entryEntity, ENTRY_ID_CHUNK, "a tax account's balance");
+    }
+  }
+  let balance = 0n;
+  for (const line of lines) {
+    if (!standing.has(line.entryId)) continue;
+    if (line.unconverted) refuseRemittance("tax_ledger_unconverted");
+    balance += line.units;
+  }
+  return balance;
+}
+
+/**
+ * Refuses a return that clears more from a tax account than the account holds on its normal side.
+ * Netted per account, so two roles a tenant pointed at one account are bounded together; the cash
+ * leg is the money that moved and has no bound.
+ *
+ * Each bounded account is locked (`FOR NO KEY UPDATE`) before any balance is read, in id order and
+ * after the return and its jurisdiction, so two remittances clearing one account serialise and the
+ * second reads the first's committed lines. Without it two returns for different jurisdictions —
+ * which share the default accounts, since routed tax is refused — both pass against one balance and
+ * together clear more than it holds. An ordinary posting's `FOR KEY SHARE` on the account does not
+ * conflict, and a concurrent manual journal is not serialised by this.
+ */
+async function refuseBeyondLedger(
+  input: WriteEffectInput,
+  plan: TaxRemittancePlan,
+  accounts: ReadonlyMap<TaxRemittanceRole, string>,
+  functional: string,
+): Promise<void> {
+  const movement = new Map<string, bigint>();
+  for (const leg of plan.legs) {
+    if (leg.role === "cash") continue;
+    const account = accounts.get(leg.role)!;
+    movement.set(account, (movement.get(account) ?? 0n) + (leg.side === "debit" ? leg.units : -leg.units));
+  }
+  const bounded = [...movement].filter(([, moved]) => moved !== 0n).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  for (const [account] of bounded) {
+    await input.store.getLocked(input.tenantId, LEDGER_ACCOUNT_LOOKUP.ledgerAccountEntity, account, "exclusive");
+  }
+  for (const [account, moved] of bounded) {
+    const balance = await ledgerAccountBalance(input, account, functional);
+    // A debit clears a credit balance and a credit clears a debit one.
+    const held = moved > 0n ? -balance : balance;
+    const cleared = moved > 0n ? moved : -moved;
+    if (cleared > held) refuseRemittance("tax_remittance_exceeds_ledger");
+  }
+}
+
+/** The stored remittance count: absent is none yet; anything but a non-negative integer is a fault. */
+function remittanceCountOf(record: EntityRecord): number {
+  const raw = record["remittance_count"];
+  if (raw === undefined || raw === null) return 0;
+  const n = typeof raw === "number" ? raw : typeof raw === "string" && /^\d+$/.test(raw) ? Number(raw) : Number.NaN;
+  if (!Number.isSafeInteger(n) || n < 0) {
+    throw new Error("a tax return's remittance_count is not a count, so its next entry number cannot be chosen");
+  }
+  return n;
+}
+
+/**
+ * When a tax return is filed (`file`, `refile`) in a tenant posting remittances, refuses one whose
+ * declaration could never post — so the 422 arrives while the return can still be amended, not at
+ * payment. Writes nothing. A return coming back to `filed` by `reverse_payment` is not refiled, and
+ * the checks are not asked of it: an undo must not be refused by what the redo would need.
+ */
+export function taxReturnFilingCheckEffect(config: TaxRemittanceEffectConfig): WriteEffect {
+  const stateField = config.wiring.stateField;
+  return async (input) => {
+    if (input.entity !== TAX_RETURN) return;
+    if (!entersState(input, stateField, TAX_RETURN_FILED)) return;
+    if (input.before?.[stateField] === TAX_RETURN_PAID) return;
+    const settings = await remittingSettings(config, input.tenantId);
+    if (settings === null) return;
+    await checkRemittableReturn(input, stateField, settings);
+  };
+}
+
+/**
+ * On `TaxReturn → paid`, in a tenant whose `finance.taxRemittancePosting` is `on_mark_paid`, posts
+ * the return's declared remittance as one entry and stamps the return with it. The figures are the
+ * caller's, so the rule is to post exactly the declaration, bounded by the books, and to refuse what
+ * cannot be cleared correctly; every read and every refusal comes before the first write.
+ *
+ * In `manual_journal` mode — the default, and what every tenant upgraded from ADR-0466 is in — it
+ * does nothing: those tenants were told to post the remittance as a journal and then mark the return
+ * paid, so posting here as well would remit it twice.
+ */
+export function taxRemittanceGlPostingEffect(config: TaxRemittanceEffectConfig): WriteEffect {
+  const stateField = config.wiring.stateField;
+  return async (input) => {
+    if (input.entity !== TAX_RETURN) return;
+    if (!entersState(input, stateField, TAX_RETURN_PAID)) return;
+    const returnId = input.id;
+    if (returnId === null) return;
+    const settings = await remittingSettings(config, input.tenantId);
+    if (settings === null) return;
+    const { plan, functional } = await checkRemittableReturn(input, stateField, settings);
+    const record = input.after;
+    const nowIso = (config.clock?.now() ?? new Date()).toISOString();
+    const today = nowIso.slice(0, 10);
+
+    // A nil return remits nothing, so there is no entry to number or to reverse later — and the
+    // stamp says so, so no earlier payment's number can be read as this one's.
+    if (plan.legs.length === 0) {
+      await input.store.update(input.tenantId, TAX_RETURN, returnId, {
+        remitted_at: nowIso,
+        remittance_entry_number: null,
+        updated_at: nowIso,
+      });
+      return;
+    }
+
+    const finance = settings.finance ?? {};
+    const accounts = new Map<TaxRemittanceRole, string>();
+    for (const leg of plan.legs) {
+      if (accounts.has(leg.role)) continue;
+      const code = finance[TAX_REMITTANCE_ACCOUNT_SETTINGS[leg.role]];
+      const id = await resolveAccountId(input, LEDGER_ACCOUNT_LOOKUP, typeof code === "string" ? code : undefined);
+      if (id === null) refuseRemittance("tax_remittance_account_unresolved", taxRemittanceAccountUnresolvedDetail(leg.role));
+      accounts.set(leg.role, id);
+    }
+    await refuseRoutedTax(input, config, plan.shape, settings);
+    await refuseBeyondLedger(input, plan, accounts, functional);
+
+    const returnNumber = typeof record["return_number"] === "string" ? (record["return_number"] as string) : returnId;
+    const priorCount = remittanceCountOf(record);
+    const number = taxRemittanceEntryNumber(returnNumber, priorCount);
+    if ((await findEntryByNumber(input, DEFAULTS.entryEntity, number)) !== null) {
+      refuseRemittance("tax_remittance_number_taken");
+    }
+
+    // No `currency` on the header: `JournalEntry` declares none, and an undeclared key is kept by
+    // the document store and dropped by the column store. The lines carry it.
+    const entry = await createPostedEntry(
+      input,
+      DEFAULTS.entryEntity,
+      {
+        entry_number: number,
+        entry_date: today,
+        source: "system",
+        state: DEFAULTS.postedState,
+        memo: `Tax remittance for ${returnNumber}`,
+        posted_at: nowIso,
+        created_at: nowIso,
+        updated_at: nowIso,
+        ...attributedToTrigger(record),
+      },
+      config.periods,
+    );
+    const base = { journal_entry_id: String(entry["id"]), currency: functional, created_at: nowIso, updated_at: nowIso };
+    const planned: PlannedLine[] = plan.legs.map((leg) => ({
+      account: accounts.get(leg.role)!,
+      description: TAX_REMITTANCE_LINE_DESCRIPTIONS[leg.role],
+      side: leg.side,
+      units: leg.units,
+    }));
+    for (const line of convertedLines(base, planned, RATE_ONE)) {
+      await input.store.create(input.tenantId, DEFAULTS.lineEntity, line);
+    }
+    await input.store.update(input.tenantId, TAX_RETURN, returnId, {
+      remitted_at: nowIso,
+      remittance_entry_number: number,
+      remittance_count: priorCount + 1,
+      updated_at: nowIso,
+    });
+  };
+}
+
+/**
+ * On `reverse_payment`, refuses two returns the reversal would get wrong.
+ *
+ * One whose remittance entry was already reversed, which `postingReversalEffect` would otherwise
+ * skip in silence — leaving the return `filed` with nothing having said its posting was undone
+ * elsewhere. Not gated on the mode: a payment posted while the tenant was in `on_mark_paid` is
+ * reversed by its return whatever the setting says now. Only the current payment's entry is read:
+ * the stamp clear empties the number on every reversal, so a stale one cannot reach here.
+ *
+ * And, in `on_mark_paid` mode, one marked paid with nothing posted here and no nil-return stamp —
+ * paid before the upgrade or in `manual_journal` mode, so a manual journal remitted it. Reversing
+ * it here would undo nothing, and its next `mark_paid` would post the same period a second time;
+ * the remedy is to reverse it in `manual_journal` mode, beside reversing that journal by hand.
+ */
+export function taxRemittanceReversalCheckEffect(config: TaxRemittanceEffectConfig): WriteEffect {
+  const stateField = config.wiring.stateField;
+  return async (input) => {
+    if (input.entity !== TAX_RETURN) return;
+    if (!movesBetween(input, stateField, TAX_RETURN_PAID, TAX_RETURN_FILED)) return;
+    const number = input.after["remittance_entry_number"];
+    if (typeof number === "string" && number.length > 0) {
+      const entry = await findEntryByNumber(input, DEFAULTS.entryEntity, number);
+      if (entry !== null && entry[DEFAULTS.stateField] === DEFAULTS.reversedState) {
+        refuseRemittance("tax_remittance_already_reversed");
+      }
+      return;
+    }
+    const stamped = input.after["remitted_at"];
+    if (stamped !== undefined && stamped !== null) return;
+    if ((await remittingSettings(config, input.tenantId)) !== null) refuseRemittance("tax_remittance_paid_outside_posting");
+  };
+}
+
+/** The reversal of a return's remittance entry, which is numbered `<entry>-REV`. */
+export function taxRemittanceReversalEffect(config: Omit<TaxRemittanceEffectConfig, "settingsStore" | "taxCodes">): WriteEffect {
+  return postingReversalEffect({
+    entity: TAX_RETURN,
+    stateField: config.wiring.stateField,
+    fromStates: [TAX_RETURN_PAID],
+    toState: TAX_RETURN_FILED,
+    numberField: "remittance_entry_number",
+    sourceSuffix: "",
+    reversalSuffix: TAX_REMITTANCE_REVERSAL_SUFFIX,
+    sourceLabel: "system",
+    ...(config.periods !== undefined ? { periods: config.periods } : {}),
+    ...(config.clock !== undefined ? { clock: config.clock } : {}),
+  });
+}
+
+/**
+ * After `reverse_payment`, clears `remitted_at` and `remittance_entry_number`, on every return that
+ * leaves `paid` and not only a stamped one. The number names the current payment's entry, so it must
+ * not survive that payment: a later `mark_paid` that posts nothing (a nil return, or `manual_journal`
+ * mode) writes no new one, and a stale number would make the next `reverse_payment` find the
+ * reversed entry and refuse for ever. The count stays — it alone chooses the next `-REMIT-(n+1)`.
+ * Runs last, after the reversal has read the number from `after`.
+ */
+export function taxRemittanceStampClearEffect(config: {
+  readonly wiring: TaxRemittanceWiring;
+  readonly clock?: { now(): Date };
+}): WriteEffect {
+  const stateField = config.wiring.stateField;
+  return async (input) => {
+    if (input.entity !== TAX_RETURN) return;
+    if (!movesBetween(input, stateField, TAX_RETURN_PAID, TAX_RETURN_FILED)) return;
+    const id = input.id;
+    if (id === null) return;
+    const nowIso = (config.clock?.now() ?? new Date()).toISOString();
+    await input.store.update(input.tenantId, TAX_RETURN, id, {
+      remitted_at: null,
+      remittance_entry_number: null,
+      updated_at: nowIso,
+    });
   };
 }

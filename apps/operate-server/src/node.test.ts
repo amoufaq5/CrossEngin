@@ -483,13 +483,45 @@ describe("serve() — the settlement coverage flag reaches both gateways and the
   it("chooses the log level from the report rather than from the flag", () => {
     // `settlementCoverageIsSuspect` reads the same list the verdict is computed from, so the level
     // an operator sees and the verdict they read cannot disagree — and a level keyed on the flag
-    // would print `info` for `TaxReturn`, which is unguarded on every deployment there is.
+    // would print `info` for a document whose guard is absent for another reason, or for a return
+    // whose own remittance posting is unwired (ADR-0467).
     const at = src.indexOf("const settlementLine = formatSettlementCoverageReport");
     expect(at).toBeGreaterThan(-1);
     const after = src.slice(at, at + 300);
     expect(after).toContain("settlementCoverageIsSuspect(settlementCoverage)");
     expect(after).toContain("console.warn(settlementLine)");
     expect(after).toContain("console.info(settlementLine)");
+  });
+});
+
+describe("serve() — the [tax-remittance] line is said at boot and per tenant (ADR-0467)", () => {
+  /**
+   * Text fences, for the reason the block above reads `node.ts` as text: both calls sit inside
+   * `serve()`, which needs a bound port, and whether a line is printed is not a type. The two
+   * readers are the boot manifest and each tenant's own activated manifest — the second is the one
+   * that matters for a tenant whose design drops a remittance field, since the posting gates on the
+   * manifest that gateway serves and not on the deployment's.
+   */
+  const src = readFileSync(resolve(import.meta.dirname, "./node.ts"), "utf8");
+
+  it("prints the boot line either way, at a level chosen by the shared predicate", () => {
+    const at = src.indexOf("const taxRemittanceLine = formatTaxRemittanceWiring(manifest)");
+    expect(at).toBeGreaterThan(-1);
+    const after = src.slice(at, at + 240);
+    expect(after).toContain("taxRemittanceWiringIsSuspect(manifest)");
+    expect(after).toContain("console.warn(taxRemittanceLine)");
+    expect(after).toContain("console.info(taxRemittanceLine)");
+  });
+
+  it("asks each tenant's onSurvey about the manifest that gateway serves", () => {
+    const at = src.indexOf("onSurvey: (report): void => {");
+    expect(at).toBeGreaterThan(-1);
+    // `served`, not `tenantManifest`: under `--store pg-columns` the registry may serve a different
+    // applied manifest than the one just activated, and the effects gate on what is served.
+    const body = src.slice(at, at + 900);
+    expect(body).toContain("formatTenantTaxRemittanceWiring(tenantId, served)");
+    // Exactly one onSurvey: the boot literal must not survey (it would report the boot pack twice).
+    expect([...src.matchAll(/onSurvey: \(report\): void =>/g)]).toHaveLength(1);
   });
 });
 
@@ -1180,5 +1212,30 @@ describe("serve()'s deletion connection", () => {
   it("restores the tenant when the runner rejects a request, through the same mover as the route", () => {
     expect(src).toMatch(/restoreTenantAfterRejection:\s*async/);
     expect(src).toMatch(/const runnerTenantState = buildTenantStateMover\(tenantStore,/);
+  });
+});
+
+describe("serve()'s starter-chart provisioner and tax remittance (ADR-0467)", () => {
+  const src = stripComments(readFileSync(resolve(import.meta.dirname, "./node.ts"), "utf8"));
+  const start = src.indexOf("const provisionStarterChartNow");
+  const call = src.indexOf("ensureStarterChart({", start);
+  const end = src.indexOf("});", call);
+  const body = start >= 0 && call > start && end > call ? src.slice(call, end) : "";
+
+  it("finds the provisioner's ensureStarterChart call", () => {
+    expect(body.length).toBeGreaterThan(0);
+  });
+
+  // Without the wiring the chart can never fill taxRemittancePosting; without the flag a console run
+  // on an existing tenant would switch on postings it may already be journalling by hand.
+  it("passes the serving manifest's wiring and asks for posting only for a new workspace", () => {
+    expect(body).toMatch(/taxRemittance:\s*resolved\.taxRemittance/);
+    expect(body).toMatch(/requestRemittancePosting:\s*by\.newWorkspace/);
+  });
+
+  it("takes the wiring from the tenant's own served gateway, falling back to the boot one", () => {
+    const resolver = src.slice(src.indexOf("const resolveTenantServing"), src.indexOf("const resolveJobAccess"));
+    expect(resolver).toMatch(/taxRemittance:\s*gateway\.taxRemittance/);
+    expect(resolver).toMatch(/taxRemittance:\s*resolved\.server\.taxRemittance/);
   });
 });
