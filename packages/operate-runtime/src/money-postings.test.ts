@@ -34,16 +34,20 @@ interface Harness {
   ok(opId: string, opts?: { params?: Record<string, string>; body?: Record<string, unknown> }): Promise<EntityRecord>;
 }
 
-function harness(opts: { functional?: string } = {}): Harness {
-  const store = new InMemoryEntityStore();
+function harness(
+  opts: { functional?: string; store?: InMemoryEntityStore; settingsStore?: InMemorySettingsStore; unguarded?: boolean } = {},
+): Harness & { readonly settingsStore: InMemorySettingsStore } {
+  const store = opts.store ?? new InMemoryEntityStore();
   const clock = { now: () => new Date("2026-06-15T12:00:00.000Z") };
-  const settingsStore = new InMemorySettingsStore();
+  const settingsStore = opts.settingsStore ?? new InMemorySettingsStore();
   if (opts.functional !== undefined) void settingsStore.put(TENANT, { defaults: { currency: opts.functional } });
   const server = compileOperateServer(manifest, {
     store,
     clock,
     settingsStore,
     principalRoles: (p) => ({ primaryRole: p?.grantedScopes[0] ?? "anonymous" }),
+    // A deployment with no write guards: how a row the allocation guard refuses came to be stored.
+    ...(opts.unguarded === true ? { writeGuards: [] } : {}),
   });
   const call: Harness["call"] = async (opId, o = {}) => {
     const spec =
@@ -72,7 +76,7 @@ function harness(opts: { functional?: string } = {}): Harness {
     }
     return out.body as EntityRecord;
   };
-  return { store, call, ok };
+  return { store, settingsStore, call, ok };
 }
 
 function errorOf(out: HandlerOutput): [number, string] | null {
@@ -467,5 +471,153 @@ describe("H-11: a currency finer than the ledger is refused, not rounded", () =>
     const out = await h.call("currency.update", { params: { id: String(c.id) }, body: { decimal_places: 3 } });
     expect(errorOf(out)).toEqual([422, "currency_precision_unsupported"]);
     await h.ok("currency.update", { params: { id: String(c.id) }, body: { name: "Dinar" } });
+  });
+});
+
+describe("payment allocation against foreign-currency documents (ADR-0468)", () => {
+  async function eurBill(h: Harness, total: string): Promise<string> {
+    const bill = await h.ok("bill.create", {
+      body: { vendor_id: ACCOUNT, currency: "EUR", bill_date: "2026-06-05", due_date: "2026-07-15", subtotal: total, tax_total: "0.00", total },
+    });
+    await h.ok("bill.approve", { params: { id: String(bill["id"]) } });
+    return String(bill["id"]);
+  }
+
+  async function pay(h: Harness, body: Record<string, unknown>): Promise<string> {
+    const p = await h.ok("payment.create", { body });
+    await h.ok("payment.submit", { params: { id: String(p["id"]) } });
+    await h.ok("payment.complete", { params: { id: String(p["id"]) } });
+    return String(p["id"]);
+  }
+
+  it("an outbound payment clears a EUR bill's payable at the bill's booking rate, not today's", async () => {
+    // Booked at 1.1 on 06-05; today (06-15) is 1.3. The settled document's booking rate is found only
+    // through the `settledDocuments` entry whose `settledBy` matches the payment's direction, so
+    // wiring Bill as settled by inbound money would clear AP at 1.3 and leave 20.00 on it.
+    const h = harness();
+    await rates(h, [
+      { date: "2026-06-01", rate: "1.1000000000" },
+      { date: "2026-06-10", rate: "1.3000000000" },
+    ]);
+    const bill = await eurBill(h, "100.00");
+    await pay(h, { currency: "EUR", direction: "outbound", bill_id: bill, amount: "100.00", cash_amount: "120.00" });
+    const balances = await functionalBalances(h);
+    expect(balances["accounts_payable"]).toBe(0n);
+    // Paid 120.00 for a payable carried at 110.00: a realized loss of 10.00.
+    expect(balances["fx_gain_loss"]).toBe(1000n);
+    expect((await balancesIn(h, "EUR"))["accounts_payable"]).toBe(0n);
+    await assertLedgerSound(h);
+  });
+
+  it("a mis-sided payment stored past the guard does not borrow the named document's booking rate", async () => {
+    // An outbound payment naming a EUR invoice clears AP, so the invoice's booking rate (1.1) is not
+    // the rate of the balance cleared; `settledDocumentRate` skips it and the payable is cleared at
+    // today's 1.3 — with cash stated at 130.00, no realized difference at all.
+    const store = new InMemoryEntityStore();
+    const settingsStore = new InMemorySettingsStore();
+    const h = harness({ store, settingsStore });
+    const legacy = harness({ store, settingsStore, unguarded: true });
+    await rates(h, [
+      { date: "2026-06-01", rate: "1.1000000000" },
+      { date: "2026-06-10", rate: "1.3000000000" },
+    ]);
+    const inv = await invoice(h, "100.00", { currency: "EUR" });
+    await h.ok("invoice.send", { params: { id: inv } });
+    await pay(legacy, { currency: "EUR", direction: "outbound", invoice_id: inv, amount: "100.00", cash_amount: "130.00" });
+    const balances = await functionalBalances(h);
+    expect(balances["accounts_payable"]).toBe(13000n);
+    expect(balances["fx_gain_loss"] ?? 0n).toBe(0n);
+    // And it counts toward nothing: the invoice is still open for its whole total.
+    expect((await h.store.get(TENANT, "Invoice", inv))?.["state"]).toBe("sent");
+  });
+
+  it("the close revalues only the open part of a partly paid EUR invoice", async () => {
+    const h = harness();
+    await rates(h, [
+      { date: "2026-06-01", rate: "1.1000000000" },
+      { date: "2026-06-30", rate: "1.2000000000" },
+    ]);
+    const inv = await invoice(h, "100.00", { currency: "EUR" });
+    await h.ok("invoice.send", { params: { id: inv } });
+    await pay(h, { currency: "EUR", direction: "inbound", invoice_id: inv, amount: "40.00" });
+    // EUR 60 open, carried at 66.00 and worth 72.00: 6.00, not the 10.00 of the whole invoice.
+    const lines = await closeJune(h);
+    expect(lines.map((l) => [l["ledger_account_id"], u(l["functional_debit"]) - u(l["functional_credit"])]).sort()).toEqual(
+      [["accounts_receivable", 600n], ["unrealized_fx_gain_loss", -600n]].sort(),
+    );
+    await assertLedgerSound(h);
+  });
+
+  it("the close revalues only the open part of a partly paid EUR bill", async () => {
+    const h = harness();
+    await rates(h, [
+      { date: "2026-06-01", rate: "1.1000000000" },
+      { date: "2026-06-30", rate: "1.2000000000" },
+    ]);
+    const bill = await eurBill(h, "100.00");
+    await pay(h, { currency: "EUR", direction: "outbound", bill_id: bill, amount: "40.00" });
+    const lines = await closeJune(h);
+    expect(lines.map((l) => [l["ledger_account_id"], u(l["functional_debit"]) - u(l["functional_credit"])]).sort()).toEqual(
+      [["accounts_payable", -600n], ["unrealized_fx_gain_loss", 600n]].sort(),
+    );
+    await assertLedgerSound(h);
+  });
+
+  it("a mis-sided completed row counts toward nothing the close revalues", async () => {
+    const h = harness();
+    await rates(h, [
+      { date: "2026-06-01", rate: "1.1000000000" },
+      { date: "2026-06-30", rate: "1.2000000000" },
+    ]);
+    const inv = await invoice(h, "100.00", { currency: "EUR" });
+    await h.ok("invoice.send", { params: { id: inv } });
+    // Written straight to the store: an outbound row naming the invoice, which the posting never
+    // cleared AR for, so the invoice is revalued on its whole total.
+    await h.store.create(TENANT, "Payment", {
+      payment_number: "PAY-LEGACY",
+      method: "bank_transfer",
+      currency: "EUR",
+      direction: "outbound",
+      invoice_id: inv,
+      amount: "30.00",
+      state: "completed",
+    });
+    const lines = await closeJune(h);
+    expect(lines.map((l) => [l["ledger_account_id"], u(l["functional_debit"]) - u(l["functional_credit"])]).sort()).toEqual(
+      [["accounts_receivable", 1000n], ["unrealized_fx_gain_loss", -1000n]].sort(),
+    );
+  });
+
+  it("refuses a payment in another currency than the invoice it names, storing nothing", async () => {
+    const h = harness();
+    await rates(h, [{ date: "2026-06-01", rate: "1.1000000000" }]);
+    const inv = await invoice(h, "100.00", { currency: "EUR" });
+    await h.ok("invoice.send", { params: { id: inv } });
+    const out = await h.call("payment.create", {
+      body: { currency: "USD", direction: "inbound", invoice_id: inv, amount: "100.00" },
+    });
+    expect(errorOf(out)).toEqual([422, "payment_currency_mismatch"]);
+    expect(await h.store.list(TENANT, "Payment")).toEqual([]);
+    // The control: the invoice's own currency posts and settles it.
+    await pay(h, { currency: "EUR", direction: "inbound", invoice_id: inv, amount: "100.00" });
+    expect((await h.store.get(TENANT, "Invoice", inv))?.["state"]).toBe("paid");
+    expect((await balancesIn(h, "EUR"))["accounts_receivable"]).toBe(0n);
+  });
+
+  it("a cross-currency completed row stored before the guard can still be refunded", async () => {
+    const store = new InMemoryEntityStore();
+    const settingsStore = new InMemorySettingsStore();
+    const h = harness({ store, settingsStore });
+    const legacy = harness({ store, settingsStore, unguarded: true });
+    await rates(h, [{ date: "2026-06-01", rate: "1.1000000000" }]);
+    const inv = await invoice(h, "100.00", { currency: "EUR" });
+    await h.ok("invoice.send", { params: { id: inv } });
+    const p = await pay(legacy, { currency: "USD", direction: "inbound", invoice_id: inv, amount: "100.00" });
+    // Counted at face value, which is the defect: the invoice reads paid with its EUR receivable open.
+    expect((await h.store.get(TENANT, "Invoice", inv))?.["state"]).toBe("paid");
+    expect((await balancesIn(h, "EUR"))["accounts_receivable"]).toBe(10000n);
+    await h.ok("payment.refund", { params: { id: p } });
+    expect((await h.store.get(TENANT, "Invoice", inv))?.["state"]).toBe("sent");
+    expect((await balancesIn(h, "USD"))["accounts_receivable"] ?? 0n).toBe(0n);
   });
 });

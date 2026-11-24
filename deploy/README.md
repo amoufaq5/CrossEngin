@@ -1113,6 +1113,117 @@ posted remittance always has its undo; the `[tax-remittance]` boot line says whi
   older binary refuses a finance document carrying `taxRemittancePosting` and reads every finance
   setting as empty. Remove the key before rolling back.
 
+### Upgrading to payment allocation checks (ADR-0468)
+
+A completed payment now counts toward a document, and may name it, only when its amount is
+positive, it names exactly one document, and its direction posts to that document's control
+account: an **inbound** payment settles an invoice (it clears accounts receivable), an **outbound**
+one settles a bill (it clears accounts payable). Before this change a payment could settle a
+document its own posting never touched — an outbound payment naming an invoice marked it paid with
+the receivable still on the ledger — and every such entry balanced, so nothing reported it. There is
+no schema change and no flag; the `[payment-allocation]` boot line says whether the check is
+mounted. `--allow-uncovered-settlement` does not waive it.
+
+- **What is refused** (all `422`, on create, on an update that changes `direction`, `amount`,
+  `currency`, `invoice_id` or `bill_id`, and on `complete`):
+
+  | Code | Means |
+  |---|---|
+  | `payment_names_several_documents` | The payment names both `invoice_id` and `bill_id`. Record a separate payment for each. |
+  | `payment_direction_mismatch` | An outbound payment (or one with no direction) names an invoice, or an inbound one names a bill — or the tenant's `Payment` cannot hold `inbound` at all, so no payment may name an invoice. |
+  | `payment_amount_negative` | The amount is below zero. To take money back, refund the payment it reverses. |
+  | `payment_currency_mismatch` | The payment is in a different currency from the document it names. The settlement posting clears the control account in the *payment's* currency, so a USD payment naming a EUR invoice marked it paid while its EUR receivable stayed open. Record it in the document's currency. |
+
+  On `complete` the sentence ends *"— correct it by an update before completing it"*: a pending
+  payment can still be edited. A zero amount is allowed and posts nothing.
+- **Nothing stored is rewritten.** A completed payment already in one of these shapes stays as it
+  is, and stays locked (`payment_locked`) like any completed payment. It is simply no longer counted
+  toward a document it could not have settled.
+- **Figures on open documents move at upgrade.** The aging report, the settlement coverage check, the
+  bill-void check and the period-close FX revaluation all read the same sum of applied payments, and
+  that sum now leaves out a wrong-direction row, the other side of a row naming both documents, and
+  any negative row. Each open document's outstanding figure now matches what that document's own
+  postings carried: one a wrong-direction or both-documents row was counted against shows **more**
+  outstanding than before, and one a negative row was counted against shows **less**.
+- **A legacy row whose posting hit the other control account now applies to no document.** An
+  outbound payment that named an invoice debited accounts payable, so it shows up as unapplied cash on
+  accounts payable; an inbound one that named a bill credited accounts receivable. Until it is
+  refunded the aging total and the period-close FX revaluation for that control account differ from
+  its ledger balance by its amount — and where such a row sits beside a row naming both documents, a
+  document's aging can move further from the control-account balance rather than closer. The refund
+  in the next bullet closes this too.
+- **A document a negative row held short can now be fully covered and still open.** A document is
+  marked paid only when a payment completes, so an invoice that a stored negative row kept below its
+  total before the upgrade can read `sent` or `overdue` (a bill `approved` or `overdue`) with nothing
+  outstanding. Nothing reopens or closes it automatically, and the overdue job will still move such an
+  invoice to `overdue`. Settle it with `mark_paid`, which the settlement coverage check now admits —
+  on `erp-core` that is the invoice's or bill's ordinary write grant — or leave it for the next
+  payment.
+- **A cross-currency row stored before the upgrade is still counted at face value.** The applied sum
+  cannot see a document's currency, so a completed payment in another currency than the document it
+  names keeps the document paid while its receivable or payable stays open in the document's
+  currency. The remedy is the refund below, as for the other shapes.
+- **A paid foreign-currency document can keep a cent of functional balance.** Each instalment clears
+  the conversion of the running applied total less the conversion before it, which telescopes to
+  exactly what was booked only when every instalment saw the same running total. Where a legacy
+  negative or wrong-direction row sits ahead of an instalment completed before the upgrade, and later
+  instalments complete after it, the functional control account can be left ±0.01 once the document
+  is paid. Clear it with a manual journal.
+- **A document already marked paid by such a row stays paid.** The upgrade does not reopen it. The
+  remedy is to **refund the payment** (which posts the reversal of its settlement entry and reopens
+  every document it was counted against) and **record it again** in the right shape. On `erp-core`
+  the `refund` transition is granted to `erp_admin`, `ap_clerk` and `controller` — **not** to
+  `erp_accountant`, who can create and complete payments — so an accountant who finds one needs one
+  of those roles to undo it.
+- **Paying out a customer's credit balance has no correct payment shape yet.** Refund-and-re-record
+  covers an overpayment and a mis-sided row; it does not cover money returned against a credit note.
+  A credit-note invoice is settled by inbound money like any invoice, so an outbound payment naming
+  it is now refused, an outbound payment naming nothing posts to accounts payable, and an inbound one
+  posts cash in, the opposite of a payout. Record such a payout as a manual journal (accounts
+  receivable debit, cash credit) and leave the credit note open, and refund any payment that was
+  recorded against it the old way.
+
+- **To find the completed payments already in one of these shapes**, run the read-only query for
+  your store as the database owner, from `deploy/`:
+  `docker compose exec db psql -U "$(grep '^POSTGRES_USER=' .env | cut -d= -f2-)" -d "$(grep '^POSTGRES_DB=' .env | cut -d= -f2-)"`
+  (the host shell does not hold those two names, so they are read out of `.env`). Each row is a
+  tenant and a payment to refund and record again; an empty result means there is nothing to do.
+  Both were run against a database holding every shape, written by the previous release, and listed
+  exactly those rows — and nothing once they were refunded.
+
+  `--store pg` (the shipped default):
+
+  ```sql
+  SELECT p.tenant_id, p.record_id, p.document->>'payment_number' AS payment_number
+  FROM meta.operate_entity_records p
+  LEFT JOIN meta.operate_entity_records d
+    ON d.tenant_id = p.tenant_id AND d.entity IN ('Invoice', 'Bill')
+   AND d.record_id = coalesce(nullif(p.document->>'invoice_id', ''), nullif(p.document->>'bill_id', ''))
+  WHERE p.entity = 'Payment' AND p.document->>'state' = 'completed'
+    AND (   (coalesce(p.document->>'invoice_id', '') <> '' AND coalesce(p.document->>'bill_id', '') <> '')
+         OR (coalesce(p.document->>'invoice_id', '') <> '' AND coalesce(p.document->>'direction', '') <> 'inbound')
+         OR (coalesce(p.document->>'bill_id', '') <> '' AND p.document->>'direction' = 'inbound')
+         OR p.document->>'amount' LIKE '-%'
+         OR upper(d.document->>'currency') <> upper(p.document->>'currency'))
+  ORDER BY 1, 3;
+  ```
+
+  `--store pg-columns` (with `--schema` other than `public`, change the three table names):
+
+  ```sql
+  SELECT p.tenant_id, p.id, p.payment_number
+  FROM public.payment p
+  LEFT JOIN public.invoice i ON i.tenant_id = p.tenant_id AND i.id = p.invoice_id
+  LEFT JOIN public.bill b ON b.tenant_id = p.tenant_id AND b.id = p.bill_id
+  WHERE p.state = 'completed'
+    AND (   (p.invoice_id IS NOT NULL AND p.bill_id IS NOT NULL)
+         OR (p.invoice_id IS NOT NULL AND p.direction IS DISTINCT FROM 'inbound')
+         OR (p.bill_id IS NOT NULL AND p.direction = 'inbound')
+         OR p.amount < 0
+         OR upper(coalesce(i.currency, b.currency)) <> upper(p.currency))
+  ORDER BY 1, 3;
+  ```
+
 ### Before an upgrade that changes the schema
 
 - **Take a dump, because there is no down-migration.** That is a property of how `migrate` works

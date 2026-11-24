@@ -57,24 +57,40 @@ interface EntityLike {
   readonly fields?: readonly FieldLike[];
 }
 
+/** One field's rule, as a plan holds it. */
+function ruleOf(f: FieldLike): FieldRule {
+  return {
+    name: f.name,
+    required: f.required === true,
+    kind: f.type?.kind ?? "text",
+    ...(f.type?.values !== undefined ? { enumValues: f.type.values } : {}),
+    ...(f.type?.maxLength !== undefined ? { maxLength: f.type.maxLength } : {}),
+    ...(f.type?.kind === "decimal" && f.type.precision !== undefined && f.type.scale !== undefined
+      ? { decimal: { precision: f.type.precision, scale: f.type.scale } }
+      : {}),
+    serverManaged: f.default?.kind === "sequence",
+  };
+}
+
 /** Derives a per-entity validation plan from the manifest field schemas (keyed by entity name). */
 export function buildValidationPlans(manifest: Manifest): ReadonlyMap<string, EntityValidationPlan> {
   const out = new Map<string, EntityValidationPlan>();
   for (const e of (manifest.entities ?? []) as ReadonlyArray<EntityLike>) {
-    const rules: FieldRule[] = (e.fields ?? []).map((f) => ({
-      name: f.name,
-      required: f.required === true,
-      kind: f.type?.kind ?? "text",
-      ...(f.type?.values !== undefined ? { enumValues: f.type.values } : {}),
-      ...(f.type?.maxLength !== undefined ? { maxLength: f.type.maxLength } : {}),
-      ...(f.type?.kind === "decimal" && f.type.precision !== undefined && f.type.scale !== undefined
-        ? { decimal: { precision: f.type.precision, scale: f.type.scale } }
-        : {}),
-      serverManaged: f.default?.kind === "sequence",
-    }));
-    out.set(e.name, rules);
+    out.set(e.name, (e.fields ?? []).map(ruleOf));
   }
   return out;
+}
+
+/**
+ * Whether a write would be allowed to store `value` in this field — the type check this module
+ * applies to a present, non-empty value. A reader asking *can this field hold X* asks here rather
+ * than inspecting the field's kind, so its answer cannot disagree with what a write accepts: an enum
+ * holds only its values, a `text` field any string within its length, an `integer` no string at all.
+ * Takes the field as the manifest declares it; the cast is the one `buildValidationPlans` makes.
+ */
+export function fieldAdmitsValue(field: { readonly name: string }, value: unknown): boolean {
+  if (isEmpty(value)) return false;
+  return checkType(ruleOf(field as FieldLike), value) === null;
 }
 
 function isEmpty(value: unknown): boolean {

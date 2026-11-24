@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 147 meta-schema tables, 24,581 tests**, all green, no
+**87 packages + 3 apps, 147 meta-schema tables, 24,674 tests**, all green, no
 type errors — and since ADR-0382 that is **checked by CI and a pre-commit hook** rather than only
 when someone runs the sweep by hand. The test figure moves every increment, so re-derive it from a
 sweep rather than quoting this line: `pnpm -r test` and sum the `Tests N passed` lines (88 packages
@@ -10317,6 +10317,18 @@ Two constraints worth knowing before suggesting a host:
   and a `reverse_payment` transition, so a posted remittance always has its undo; the deployment
   documents carry every refusal and its remedy. Live on PG 16 as `crossengin_app` on both stores,
   31 checks each, including two jurisdictions racing one tax account's balance (one 200, one 409).
+- **A payment settles only the document its direction posts to** (ADR-0468), on every deployment
+  with no flag: a payment names at most one of `invoice_id` / `bill_id`, an inbound one only an
+  invoice and an outbound one only a bill, in that document's currency, and never by a negative
+  amount — four 422 refusals from `paymentAllocationGuard`, checked on create, on an update changing
+  an allocation field, and on entering `completed`, and never on refund, which is the only exit for a
+  stored bad row. `foldCompletedPayments` now counts only what the settlement posting cleared
+  (completed, positive, right side), so aging, coverage, FX revaluation and the bill-void check stop
+  disagreeing with the GL. `SETTLEMENT_COVERAGE_DOCUMENTS.settledBy` is the one declaration all of it
+  is derived from. Stored rows are not rewritten: open documents' aging moves toward the GL at
+  upgrade, a document a bad row marked paid stays paid until that row is refunded, and
+  `deploy/README.md` carries a census query per store. Live on PG 16 as `crossengin_app` on both
+  stores.
 
 ## What's actually left
 
@@ -14964,23 +14976,21 @@ land with or before it.
     populated with values no validation saw. `store-parity.test.ts` sends only declared fields, which
     is why the divergence was never compared. Refusing an unknown key is not free (a client sending
     an extra key works today — ADR-0338's premise), so the choice is 422, strip, or report.
-20. **An outbound `Payment` naming an invoice settles it while posting to accounts payable**
-    (measured while scoping ADR-0467, against the real `erp-core` pack and the shared effect and guard
-    logic). `foldCompletedPayments` sums `amount` per reference field and never reads `direction`,
-    and no guard relates the direction to the reference. So an outbound payment of 100 naming a sent
-    invoice of 100 posts `AP D100 / cash C100` and the invoice becomes `paid`: AR keeps 100 in debit,
-    AP takes 100 in debit, and AR aging drops the invoice. Reachable by the payment writers
-    on the shipped pack, and the entry balances, so no guard, replayer or integrity proof can see it
-    (ADR-0378's class). The fix is a guard keyed on the pair (an inbound payment may name only an
-    invoice, an outbound one only a bill), and it changes what a working deployment accepts.
-21. **One `Payment` naming both an invoice and a bill settles both while posting once** (measured
-    beside item 20). An inbound payment of 100 carrying `invoice_id` and `bill_id` posts one
-    `cash D100 / AR C100` entry and both documents become `paid`, because the fold is per reference
-    field and nothing limits a payment to one reference. The bill is then `paid` with AP uncleared,
-    which is register P0.6b's divergence reached through a settlement rather than a hand-marked
-    edge. Negative amounts are counted by every fold too, since `Payment.amount`'s `min: 0` is
-    enforced by nothing. The fix is a guard refusing a payment that names more than one document,
-    with the same cost to a working deployment as item 20.
+20. ~~**An outbound `Payment` naming an invoice settles it while posting to accounts payable**~~ —
+    **closed by ADR-0468**, with the same item 21 below. Measuring every reader found the item named
+    two of **five** shapes: an **inbound payment naming a bill** was a third and is in neither entry
+    (the bill reads `paid` with AP still owed), a **negative amount** was half the defect rather than
+    a footnote (the posting skips amounts ≤ 0 while the fold counted them, so `+60`/`−60` left aging
+    at 100 over GL AR 40 and `+50`/`−50` let a bill void through with AP in debit), and a payment in a
+    **currency other than the document's** was found by review. Only one reader in the workspace
+    interpreted `direction` (the settlement posting), so the fix is a guard *and* a fold that counts
+    exactly what that posting cleared — the guard alone would have left every stored bad row
+    mis-counted by every reader on every later read.
+21. ~~**One `Payment` naming both an invoice and a bill settles both while posting once**~~ —
+    **closed by ADR-0468**, and the case is **implied by item 20's rule** rather than separate: a
+    payment naming both documents names one on the wrong side whatever its direction. It is still
+    refused first and by its own code (`payment_names_several_documents`), because the remedy differs
+    — record two payments rather than flip a direction.
 
 ### P3 — debt and stale documentation
 
@@ -16084,7 +16094,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 461 records; 382 Accepted, 79 Proposed (the
+title or status change cannot drift. 462 records; 383 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

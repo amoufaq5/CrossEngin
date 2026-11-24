@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import { buildAgingHandler, type AgingResponse, type AgingSpec } from "./aging-handler.js";
 import { InMemoryEntityStore, type ListPage, type ListQuery } from "./store.js";
+import { declaredSettlementSpec } from "./write-guards.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 
@@ -25,12 +26,12 @@ function principal(role: string): ResolvedPrincipal {
 }
 
 const sections: Record<string, AgingSpec> = {
-  ar: { entity: "Invoice", openStates: ["sent", "overdue"], paymentRefField: "invoice_id", numberField: "invoice_number" },
+  ar: { entity: "Invoice", openStates: ["sent", "overdue"], payment: declaredSettlementSpec("Invoice"), numberField: "invoice_number" },
 };
 
 const bothSections: Record<string, AgingSpec> = {
   ...sections,
-  ap: { entity: "Bill", openStates: ["approved"], paymentRefField: "bill_id", numberField: "bill_number" },
+  ap: { entity: "Bill", openStates: ["approved"], payment: declaredSettlementSpec("Bill"), numberField: "bill_number" },
 };
 
 const clock = { now: () => new Date("2026-06-21T00:00:00.000Z") };
@@ -133,6 +134,7 @@ async function seedAging(
     await store.create(TENANT, "Payment", {
       id: `pay_${String(i).padStart(5, "0")}`,
       state: "completed",
+      direction: "inbound",
       amount: 1,
       invoice_id: "inv_00000",
     });
@@ -186,12 +188,12 @@ describe("buildAgingHandler — draining both reads", () => {
   it("keeps each section's applied map keyed by that section's own ref field", async () => {
     // A bill and an invoice sharing an id: records are bucketed per (tenant, entity) and a
     // caller-supplied `id` is not stripped, so one shared map keyed by document id would credit the
-    // invoice with the bill's payment. Each section's payments are read off its own
-    // `paymentRefField` in the single pass, so the two never meet.
+    // invoice with the bill's payment. Each section's payments are read off its own reference
+    // field (`payment.refField`) in the single pass, so the two never meet.
     const store = new InMemoryEntityStore();
     await store.create(TENANT, "Invoice", { id: "shared", invoice_number: "INV-S", state: "sent", total: 100, currency: "USD" });
     await store.create(TENANT, "Bill", { id: "shared", bill_number: "BILL-S", state: "approved", total: 100, currency: "USD" });
-    await store.create(TENANT, "Payment", { state: "completed", amount: 40, bill_id: "shared" });
+    await store.create(TENANT, "Payment", { state: "completed", direction: "outbound", amount: 40, bill_id: "shared" });
     const body = bodyOf(await invoke(buildHandler(store, { sections: bothSections })));
     expect(body.sections["ar"]!.documents[0]).toMatchObject({ applied: 0, open: 100 });
     expect(body.sections["ap"]!.documents[0]).toMatchObject({ applied: 40, open: 60 });
@@ -280,7 +282,7 @@ describe("buildAgingHandler — the applied fold is the shared reading (ADR-0391
       total: 100,
       currency: "USD",
     });
-    await store.create(TENANT, "Payment", { state: "completed", amount: 60, invoice_id: 42 });
+    await store.create(TENANT, "Payment", { state: "completed", direction: "inbound", amount: 60, invoice_id: 42 });
     const body = bodyOf(await invoke(buildHandler(store)));
     expect(body.sections["ar"]!.documents[0]).toMatchObject({ applied: 0, open: 100 });
   });
@@ -292,7 +294,7 @@ describe("buildAgingHandler — the applied fold is the shared reading (ADR-0391
     const store = new InMemoryEntityStore();
     await store.create(TENANT, "Invoice", { invoice_number: "INV-B", state: "sent", total: 10, currency: "USD" });
     for (let i = 0; i < 4; i += 1) {
-      await store.create(TENANT, "Payment", { state: "completed", amount: 1, invoice_id: "x" });
+      await store.create(TENANT, "Payment", { state: "completed", direction: "inbound", amount: 1, invoice_id: "x" });
     }
     const body = bodyOf(await invoke(buildHandler(store, { maxRows: 2 })));
     expect(body.complete).toBe(false);

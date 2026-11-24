@@ -48,6 +48,8 @@
 import type { Manifest } from "@crossengin/kernel/manifest";
 import { resolvedFields } from "@crossengin/kernel/ddl";
 import {
+  PAYMENT_DIRECTION,
+  paymentAllocationShape,
   SETTLED_DOCUMENT_STATE,
   SETTLEMENT_COVERAGE_DOCUMENTS,
   TAX_REMITTANCE_POSTING_MODES,
@@ -549,4 +551,65 @@ export function formatTenantTaxRemittanceWiring(tenantId: string, manifest: Mani
     "[tax-remittance] ",
     `[tax-remittance] tenant ${tenantId}: `,
   );
+}
+
+/**
+ * The `[payment-allocation]` boot line, said either way (ADR-0468): whether the guard that keeps a
+ * payment naming at most one document, only one its direction settles and in that document's
+ * currency, and no negative amount is
+ * mounted for this manifest, and over which references.
+ *
+ * Read from `paymentAllocationShape` — the function `defaultWriteGuards` builds the guard from — so
+ * the line and the guard cannot describe two different checks. Not gated on
+ * `--allow-uncovered-settlement`, and neither is the guard: that flag waives coverage of a document's
+ * total, which is a different defect.
+ */
+export function formatPaymentAllocationCheck(manifest: Manifest): string {
+  const shape = paymentAllocationShape(manifest);
+  if (shape === null) {
+    const hasPayment = (manifest.entities ?? []).some((e) => e.name === PAYMENT_ENTITY);
+    return hasPayment
+      ? `[payment-allocation] not mounted: no document a payment settles (${SETTLEMENT_COVERAGE_DOCUMENTS.map((d) => d.entity).join(", ")}) is declared`
+      : `[payment-allocation] not mounted: the manifest declares no ${PAYMENT_ENTITY}`;
+  }
+  if (shape.references.length === 0) {
+    // The references of the documents this manifest declares — not every entry of the declaration,
+    // which would say `Payment` lacks a field it may well declare for a document that is absent.
+    return (
+      `[payment-allocation] mounted: ${PAYMENT_ENTITY} declares no reference to a declared document (` +
+      shape.documents.map((d) => d.refField).join(", ") +
+      "), so only a negative amount is refused"
+    );
+  }
+  const refs = shape.references.map((d) => `${d.refField} (${d.settledBy})`).join(", ");
+  const base = `[payment-allocation] mounted: a payment names at most one of ${refs}, only one its direction settles and in that document's currency, and no negative amount`;
+  if (paymentAllocationCheckIsSuspect(manifest)) {
+    return (
+      `${base}; ${PAYMENT_ENTITY} cannot record an '${PAYMENT_DIRECTION.inboundValue}' ${PAYMENT_DIRECTION.field}, so every` +
+      " payment reads as outbound and a payment naming an invoice is refused"
+    );
+  }
+  return base;
+}
+
+/**
+ * Whether the line deserves a `warn`: a document settled by inbound money is a reference here while
+ * `Payment`'s direction field cannot hold the inbound value (the write validator's answer, through
+ * `paymentAllocationShape`), so every payment reads as outbound and naming it is refused. Where the
+ * ledger is wired the posting would clear the payable for such a payment; the guard does not depend
+ * on that, so neither does this sentence.
+ */
+export function paymentAllocationCheckIsSuspect(manifest: Manifest): boolean {
+  const shape = paymentAllocationShape(manifest);
+  return shape !== null && !shape.directionExpressible && shape.references.some((d) => d.settledBy === "inbound");
+}
+
+/**
+ * The per-tenant line, or `null` when there is nothing to say — `formatTenantTaxRemittanceWiring`'s
+ * rule: the fact that the check ran is said once at boot, and only a tenant's own manifest in the
+ * suspect shape is worth a line per activation.
+ */
+export function formatTenantPaymentAllocationCheck(tenantId: string, manifest: Manifest): string | null {
+  if (!paymentAllocationCheckIsSuspect(manifest)) return null;
+  return formatPaymentAllocationCheck(manifest).replace("[payment-allocation] ", `[payment-allocation] tenant ${tenantId}: `);
 }

@@ -18,7 +18,9 @@ import type { EntityRecord, EntityStore, ListQuery } from "./store.js";
  * of 200 and a correction of −300 (true applied 300) is written **`paid`, with a `paid_at` stamp**,
  * at a cap of 3, and correctly left `sent` at a cap of 99. The document then reads settled and
  * drops out of both the aging report and the FX revaluation's open set, so a live receivable
- * disappears from the books.
+ * disappears from the books. (Since ADR-0468 the fold counts only positive amounts — what the
+ * settlement posting cleared — so that particular row no longer moves the figure; the rule below
+ * did not depend on it and stands.)
  *
  * So the rule here is deliberately blunt and admits no per-site exception: **a prefix is not the
  * set, whatever is in the tail.** Reasoning site by site about whether a dropped term could be

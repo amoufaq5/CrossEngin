@@ -855,6 +855,7 @@ describe("paymentApplicationEffect", () => {
   const effect = paymentApplicationEffect({
     documentEntity: "Invoice",
     refField: "invoice_id",
+    settledBy: "inbound",
     settleableStates: ["sent", "overdue"],
     clock,
   });
@@ -1023,7 +1024,7 @@ describe("unrealizedFxRevaluationEffect", () => {
     const { store, usdId, eurId } = await fxStore();
     await store.create(TENANT, "ExchangeRate", { from_currency_id: eurId, to_currency_id: usdId, rate: 1.1, rate_date: "2026-06-29" });
     const inv = await store.create(TENANT, "Invoice", { invoice_number: "INV-1", state: "sent", total: 1000, currency: "EUR" });
-    await store.create(TENANT, "Payment", { invoice_id: String(inv.id), amount: 400, state: "completed" });
+    await store.create(TENANT, "Payment", { invoice_id: String(inv.id), direction: "inbound", amount: 400, state: "completed" });
     const period = await store.create(TENANT, "FiscalPeriod", { status: "closing", end_date: "2026-06-30", name: "2026-06" });
 
     await effect(closeInput(store, String(period.id)));
@@ -1535,12 +1536,13 @@ describe("paymentApplicationEffect — the whole payment set", () => {
     paymentApplicationEffect({
       documentEntity: "Invoice",
       refField: "invoice_id",
+      settledBy: "inbound",
       settleableStates: ["sent", "overdue"],
       ...(maxPayments === undefined ? {} : { maxPayments }),
       clock,
     });
 
-  /** 400 covered by three payments of 200 and taken back under by a −300 correction. */
+  /** 400 covered by three payments of 200, with a stored −300 row that the posting cleared nothing for. */
   async function correctedInvoice() {
     const store = new InMemoryEntityStore();
     const inv = await store.create(TENANT, "Invoice", { invoice_number: "INV-NEG", state: "sent", total: 400 });
@@ -1566,17 +1568,23 @@ describe("paymentApplicationEffect — the whole payment set", () => {
     store,
   });
 
-  it("leaves the invoice unsettled when a later page's negative correction takes the applied total back under", async () => {
+  it("counts a later page's stored negative row as nothing, because the posting cleared nothing for it", async () => {
+    // Rewritten rather than deleted (ADR-0372's class). This pinned the −300 as taking the applied
+    // total back under 400 — while the settlement posting skips a non-positive amount, so the GL had
+    // cleared 600 of the receivable and the invoice stayed `sent`: the subledger and the ledger
+    // disagreeing, measured as `mark_paid` refused with the receivable already at zero. The fold
+    // counts what the posting cleared now (ADR-0468), so the three 200s settle it on page 2.
     const { store, invId, correctionId, correction } = await correctedInvoice();
     await apply()(complete(pagedAt(store, 2), correctionId, correction));
     const doc = (await store.get(TENANT, "Invoice", invId))!;
-    expect(doc.state).toBe("sent"); // applied 300 of 400
-    expect(doc.paid_at).toBeUndefined();
+    expect(doc.state).toBe("paid"); // applied 600 of 400; the −300 applied nothing
   });
 
   it("refuses rather than settling from a prefix that happens to cover the total", async () => {
     const { store, invId, correctionId, correction } = await correctedInvoice();
-    // A cap of 3 reads the three 200s and not the correction — the measured wrong write.
+    // A cap of 3 reads three of the four rows. The figure would cover the total either way now (a
+    // negative row counts nothing, ADR-0468), and the refusal still stands: a decision from a prefix
+    // is not a decision, `READ_CEILING_EFFECT.effect`.
     await expect(apply(3)(complete(store, correctionId, correction))).rejects.toThrow(ReadCeilingExceeded);
     const doc = (await store.get(TENANT, "Invoice", invId))!;
     expect(doc.state).toBe("sent");
@@ -1595,22 +1603,22 @@ describe("paymentApplicationEffect — the whole payment set", () => {
     expect((await store.get(TENANT, "Invoice", invId))!.state).toBe("paid");
   });
 
-  it("reads past the real default page size, where the first page alone would have settled it", async () => {
+  it("reads past the real default page size, where the first page alone would not have settled it", async () => {
+    // Rewritten from the negative-correction form (a −250 on page 2 that no longer counts). The
+    // property kept is the drain's: a figure from page 1 is not the figure, so 500 × 0.5 (250) on
+    // the first page and 150 × 1 on the second settle 400 only because the second page is read.
     const store = new InMemoryEntityStore();
     const inv = await store.create(TENANT, "Invoice", { invoice_number: "INV-500", state: "sent", total: 400 });
     const invId = String(inv.id);
-    // 599 × 1 covers the total within the first page of 500; the correction is only on the second.
-    for (let i = 0; i < DEFAULT_DRAIN_PAGE_SIZE + 99; i += 1) {
-      await store.create(TENANT, "Payment", { invoice_id: invId, direction: "inbound", amount: 1, state: "completed" });
+    for (let i = 0; i < DEFAULT_DRAIN_PAGE_SIZE; i += 1) {
+      await store.create(TENANT, "Payment", { invoice_id: invId, direction: "inbound", amount: 0.5, state: "completed" });
     }
-    const correction = await store.create(TENANT, "Payment", {
-      invoice_id: invId,
-      direction: "inbound",
-      amount: -250,
-      state: "completed",
-    });
-    await apply()(complete(store, String(correction.id), correction));
-    expect((await store.get(TENANT, "Invoice", invId))!.state).toBe("sent"); // applied 349 of 400
+    let last: Record<string, unknown> = {};
+    for (let i = 0; i < 150; i += 1) {
+      last = await store.create(TENANT, "Payment", { invoice_id: invId, direction: "inbound", amount: 1, state: "completed" });
+    }
+    await apply()(complete(store, String(last.id), last));
+    expect((await store.get(TENANT, "Invoice", invId))!.state).toBe("paid"); // 250 + 150 = 400
   });
 });
 
@@ -1633,7 +1641,7 @@ describe("unrealizedFxRevaluationEffect — the whole payment and document sets"
         currency: "EUR",
       });
       if (withPayments) {
-        await store.create(TENANT, "Payment", { invoice_id: String(inv.id), amount: 500, state: "completed" });
+        await store.create(TENANT, "Payment", { invoice_id: String(inv.id), direction: "inbound", amount: 500, state: "completed" });
       }
     }
     const period = await store.create(TENANT, "FiscalPeriod", { status: "closing", end_date: "2026-06-30", name: "2026-06" });
@@ -1693,8 +1701,8 @@ describe("unrealizedFxRevaluationEffect — the whole payment and document sets"
     const shared = "shared-doc-id";
     await store.create(TENANT, "Invoice", { id: shared, invoice_number: "INV-1", state: "sent", total: 1000, currency: "EUR" });
     await store.create(TENANT, "Bill", { id: shared, bill_number: "BILL-1", state: "approved", total: 1000, currency: "EUR" });
-    await store.create(TENANT, "Payment", { invoice_id: shared, amount: 400, state: "completed" });
-    await store.create(TENANT, "Payment", { bill_id: shared, amount: 900, state: "completed" });
+    await store.create(TENANT, "Payment", { invoice_id: shared, direction: "inbound", amount: 400, state: "completed" });
+    await store.create(TENANT, "Payment", { bill_id: shared, direction: "outbound", amount: 900, state: "completed" });
     const period = await store.create(TENANT, "FiscalPeriod", { status: "closing", end_date: "2026-06-30", name: "2026-06" });
     await unrealizedFxRevaluationEffect({ functionalCurrency: "USD", clock })(close(pagedAt(store, 1), String(period.id)));
     const lines = await store.list(TENANT, "JournalLine");
@@ -1826,10 +1834,11 @@ describe("paymentApplicationEffect — one coverage predicate, two readers", () 
   const effect = paymentApplicationEffect({
     documentEntity: "Invoice",
     refField: "invoice_id",
+    settledBy: "inbound",
     settleableStates: ["sent", "overdue"],
     clock,
   });
-  const guard = settlementCoverageGuard({ entity: "Invoice", refField: "invoice_id" });
+  const guard = settlementCoverageGuard({ entity: "Invoice", refField: "invoice_id", settledBy: "inbound" });
 
   async function settleAttempt(total: number, paid: number) {
     const store = new InMemoryEntityStore();
@@ -1857,6 +1866,7 @@ describe("paymentApplicationEffect — one coverage predicate, two readers", () 
     const inv2 = await fresh.create(TENANT, "Invoice", { invoice_number: "INV-P", state: "sent", total });
     await fresh.create(TENANT, "Payment", {
       invoice_id: String(inv2["id"]),
+      direction: "inbound",
       amount: paid,
       state: "completed",
     });
@@ -1964,7 +1974,7 @@ describe("entersState — a one-step create reaches the state, so the effect fir
     const store = new InMemoryEntityStore();
     const inv = await store.create(TENANT, "Invoice", { invoice_number: "INV-APP", state: "sent", total: 50 });
     const apply = paymentApplicationEffect({
-      refField: "invoice_id", documentEntity: "Invoice", settleableStates: ["sent", "overdue"], clock,
+      refField: "invoice_id", settledBy: "inbound", documentEntity: "Invoice", settleableStates: ["sent", "overdue"], clock,
     });
     const pay = await store.create(TENANT, "Payment", {
       payment_number: "PAY-2", state: "completed", direction: "inbound", amount: 50, invoice_id: String(inv.id),
@@ -2400,6 +2410,7 @@ describe("bill withholding — what is owed is the total less the stamped withho
   const apply = paymentApplicationEffect({
     documentEntity: "Bill",
     refField: "bill_id",
+    settledBy: "outbound",
     settleableStates: ["approved", "overdue"],
     withholdingField: "withholding_total",
     refundedState: "refunded",
@@ -2483,7 +2494,7 @@ describe("bill withholding — what is owed is the total less the stamped withho
           {
             entity: "Bill",
             openStates: ["approved", "overdue"],
-            paymentRefField: "bill_id",
+            payment: { refField: "bill_id", settledBy: "outbound" },
             side: "ap",
             ...(withholdingField !== undefined ? { withholdingField } : {}),
           },

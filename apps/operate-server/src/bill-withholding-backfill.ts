@@ -34,6 +34,7 @@ import {
   APPLIED_PAYMENT_EPSILON,
   BILL_CONTROL_DESCRIPTION,
   WITHHOLDING_LINE_DESCRIPTION_PREFIX,
+  declaredSettlementSpec,
   defaultEffectStamps,
   drainList,
   entityAuditPayloads,
@@ -616,7 +617,9 @@ async function coverageOf(
   amounts: { readonly totalUnits: bigint; readonly withholdingUnits: bigint; readonly state: string },
 ): Promise<BillCoverage> {
   if (input.paymentEntity === null) return classifyCoverage({ ...amounts, applied: 0 });
-  const read = await readAppliedToDocument(tx, input.tenantId, "bill_id", billId, {
+  // The declaration's spec, so this classification counts what the settlement posting cleared on the
+  // payable side and nothing else (ADR-0468).
+  const read = await readAppliedToDocument(tx, input.tenantId, declaredSettlementSpec("Bill"), billId, {
     paymentEntity: input.paymentEntity,
     ceiling: BILL_PAYMENT_CEILING,
   });

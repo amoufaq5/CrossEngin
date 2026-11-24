@@ -213,9 +213,12 @@ import {
   type TenantWriteStatus,
 } from "./rekey.js";
 import {
+  formatPaymentAllocationCheck,
   formatSettlementCoverageReport,
   formatTaxRemittanceWiring,
+  formatTenantPaymentAllocationCheck,
   formatTenantTaxRemittanceWiring,
+  paymentAllocationCheckIsSuspect,
   settlementCoverageIsSuspect,
   taxRemittanceWiringIsSuspect,
   surveySettlementCoverage,
@@ -1571,6 +1574,15 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     console.warn(settlementLine);
   } else {
     console.info(settlementLine);
+  }
+  // Which payments may name which documents, said either way (ADR-0468): the allocation guard is a
+  // property of `Payment`, not of a settleable document, so it is its own line rather than a row of
+  // the coverage survey — read from the shape the guard is built from, so the two cannot disagree.
+  const paymentAllocationLine = formatPaymentAllocationCheck(manifest);
+  if (paymentAllocationCheckIsSuspect(manifest)) {
+    console.warn(paymentAllocationLine);
+  } else {
+    console.info(paymentAllocationLine);
   }
   // Whether marking a tax return paid can post its remittance, said either way (ADR-0467). The
   // per-tenant mode is invisible here, so the wired line names it rather than claiming the posting
@@ -6476,6 +6488,10 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
             // line answered for the deployment's. Silent unless it has a TaxReturn and cannot post.
             const remittance = formatTenantTaxRemittanceWiring(tenantId, served);
             if (remittance !== null) console.warn(remittance);
+            // Likewise the payment-allocation check: silent unless the tenant's own manifest makes
+            // every payment naming an invoice a refusal (ADR-0468).
+            const allocation = formatTenantPaymentAllocationCheck(tenantId, served);
+            if (allocation !== null) console.warn(allocation);
           },
           defaultScheme: options.defaultScheme,
         }).httpServer;

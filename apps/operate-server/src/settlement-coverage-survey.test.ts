@@ -15,9 +15,12 @@ import {
   SETTLEMENT_COVERAGE_GAP_ORDER,
   SETTLEMENT_COVERAGE_MAY_SERVE,
   SETTLEMENT_COVERAGE_VERDICTS,
+  formatPaymentAllocationCheck,
   formatSettlementCoverageReport,
   formatTaxRemittanceWiring,
+  formatTenantPaymentAllocationCheck,
   formatTenantTaxRemittanceWiring,
+  paymentAllocationCheckIsSuspect,
   settlementCoverageIsSuspect,
   surveySettlementCoverage,
   taxRemittanceWiringIsSuspect,
@@ -437,5 +440,136 @@ describe("the [tax-remittance] boot line", () => {
     expect(formatTenantTaxRemittanceWiring(tenant, unwiredCore)).toBe(
       `[tax-remittance] tenant ${tenant}: unwired: ${taxRemittanceUnwiredReasons(unwiredCore).join("; ")}`,
     );
+  });
+});
+
+/** Resolved erp-core whose Payment `direction` is replaced, or removed with `null`. */
+function coreWithDirection(values: string[] | null): Manifest {
+  const m = structuredClone(core);
+  const pay = (m.entities ?? []).find((e) => e.name === "Payment");
+  if (pay === undefined) throw new Error("erp-core declares no Payment");
+  const fields = pay.fields as { name: string; type: unknown }[];
+  (pay as { fields: unknown[] }).fields =
+    values === null
+      ? fields.filter((f) => f.name !== "direction")
+      : fields.map((f) => (f.name === "direction" ? { ...f, type: { kind: "enum", values } } : f));
+  return m;
+}
+
+describe("the [payment-allocation] boot line", () => {
+  const tenant = "6a0f7c2e-0000-4000-8000-000000000001";
+
+  it("says the check is mounted and names both references with the direction each is settled by", () => {
+    expect(formatPaymentAllocationCheck(core)).toBe(
+      "[payment-allocation] mounted: a payment names at most one of invoice_id (inbound), bill_id (outbound)," +
+        " only one its direction settles and in that document's currency, and no negative amount",
+    );
+    expect(paymentAllocationCheckIsSuspect(core)).toBe(false);
+    expect(formatTenantPaymentAllocationCheck(tenant, core)).toBeNull();
+  });
+
+  it("says when it is not mounted, either way", () => {
+    const noPayment = { ...core, entities: (core.entities ?? []).filter((e) => e.name !== "Payment") } as Manifest;
+    expect(formatPaymentAllocationCheck(noPayment)).toBe("[payment-allocation] not mounted: the manifest declares no Payment");
+    const noDocs = {
+      ...core,
+      entities: (core.entities ?? []).filter((e) => e.name !== "Invoice" && e.name !== "Bill"),
+    } as Manifest;
+    expect(formatPaymentAllocationCheck(noDocs)).toBe(
+      `[payment-allocation] not mounted: no document a payment settles (${SETTLEMENT_COVERAGE_DOCUMENTS.map((d) => d.entity).join(", ")}) is declared`,
+    );
+  });
+
+  for (const [label, manifest] of [
+    ["no direction field", coreWithDirection(null)],
+    ["a direction enum without 'inbound'", coreWithDirection(["in", "out"])],
+  ] as const) {
+    it(`warns, at boot and per tenant, for ${label}`, () => {
+      expect(paymentAllocationCheckIsSuspect(manifest)).toBe(true);
+      const line = formatPaymentAllocationCheck(manifest);
+      expect(line).toBe(
+        "[payment-allocation] mounted: a payment names at most one of invoice_id (inbound), bill_id (outbound)," +
+          " only one its direction settles and in that document's currency, and no negative amount; Payment cannot record an 'inbound' direction," +
+          " so every payment reads as outbound and a payment naming an invoice is refused",
+      );
+      // A literal prefix, not the implementation's own `.replace`: if the boot line's prefix drifted
+      // from the needle both sides would stop replacing together and the tenant id would vanish.
+      const prefix = "[payment-allocation] ";
+      expect(line.startsWith(prefix)).toBe(true);
+      const tenantLine = formatTenantPaymentAllocationCheck(tenant, manifest);
+      expect(tenantLine).toBe(`[payment-allocation] tenant ${tenant}: ` + line.slice(prefix.length));
+      expect(tenantLine).toContain(tenant);
+    });
+  }
+
+  it("does not warn for a text direction, which can hold 'inbound'", () => {
+    const m = structuredClone(core);
+    const pay = (m.entities ?? []).find((e) => e.name === "Payment")!;
+    (pay as { fields: unknown[] }).fields = (pay.fields as { name: string }[]).map((f) =>
+      f.name === "direction" ? { ...f, type: { kind: "text" } } : f,
+    );
+    expect(paymentAllocationCheckIsSuspect(m)).toBe(false);
+    expect(formatTenantPaymentAllocationCheck(tenant, m)).toBeNull();
+  });
+
+  it("does not warn when no inbound-settled document is a reference, even with no direction", () => {
+    // No direction and no Invoice: only Bill, settled by outbound money, which every payment reads as.
+    const m = coreWithDirection(null);
+    m.entities = (m.entities ?? [])
+      .filter((e) => e.name !== "Invoice")
+      .map((e) => ({
+        ...e,
+        fields: (e.fields as { name: string; type: { kind: string; target?: string } }[]).filter(
+          (f) => !(f.type.kind === "reference" && f.type.target === "Invoice"),
+        ),
+      })) as typeof m.entities;
+    expect(paymentAllocationCheckIsSuspect(m)).toBe(false);
+    expect(formatTenantPaymentAllocationCheck(tenant, m)).toBeNull();
+    expect(formatPaymentAllocationCheck(m)).toBe(
+      "[payment-allocation] mounted: a payment names at most one of bill_id (outbound), only one its direction settles" +
+        " and in that document's currency, and no negative amount",
+    );
+  });
+
+  it("says only a negative amount is refused when Payment declares no reference to a declared document", () => {
+    const m = structuredClone(core);
+    const pay = (m.entities ?? []).find((e) => e.name === "Payment")!;
+    (pay as { fields: unknown[] }).fields = (pay.fields as { name: string }[]).filter(
+      (f) => f.name !== "invoice_id" && f.name !== "bill_id",
+    );
+    expect(formatPaymentAllocationCheck(m)).toBe(
+      "[payment-allocation] mounted: Payment declares no reference to a declared document (" +
+        SETTLEMENT_COVERAGE_DOCUMENTS.map((d) => d.refField).join(", ") +
+        "), so only a negative amount is refused",
+    );
+    expect(paymentAllocationCheckIsSuspect(m)).toBe(false);
+    expect(formatTenantPaymentAllocationCheck(tenant, m)).toBeNull();
+  });
+
+  it("names only the declared documents' references in that arm, not a field Payment declares for an absent one", () => {
+    // Bill declared, Invoice absent, and Payment keeps a plain-text `invoice_id` and no `bill_id`.
+    const m = structuredClone(core);
+    m.entities = (m.entities ?? [])
+      .filter((e) => e.name !== "Invoice")
+      .map((e) =>
+        e.name !== "Payment"
+          ? {
+              ...e,
+              fields: (e.fields as { name: string; type: { kind: string; target?: string } }[]).filter(
+                (f) => !(f.type.kind === "reference" && f.type.target === "Invoice"),
+              ),
+            }
+          : {
+              ...e,
+              fields: (e.fields as { name: string }[])
+                .filter((f) => f.name !== "bill_id")
+                .map((f) => (f.name === "invoice_id" ? { ...f, type: { kind: "text" } } : f)),
+            },
+      ) as typeof m.entities;
+    const line = formatPaymentAllocationCheck(m);
+    expect(line).toBe(
+      "[payment-allocation] mounted: Payment declares no reference to a declared document (bill_id), so only a negative amount is refused",
+    );
+    expect(line).not.toContain("invoice_id");
   });
 });

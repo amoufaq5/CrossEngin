@@ -1,10 +1,10 @@
 # ADR index
 
-461 records. Generated from the ADR files themselves — regenerate rather than
+462 records. Generated from the ADR files themselves — regenerate rather than
 hand-edit, so a title or status change in an ADR cannot silently drift from this table:
 `python3 docs/adr/generate-index.py`.
 
-- **Accepted:** 382  **Proposed:** 79
+- **Accepted:** 383  **Proposed:** 79
 - ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never written;
   those milestones landed under other numbers. The gap is permanent and intentional.
 - ADR-0046 is the Phase 2 plan; **ADR-0077 is the Phase 3 plan (P1–P8)**. Phase 4 has no
@@ -473,3 +473,4 @@ hand-edit, so a title or status change in an ADR cannot silently drift from this
 | [0465](0465-an-approved-workspace-gets-a-starter-chart-of-accounts.md) | An approved workspace gets a starter chart of accounts, written through the create handler after the approval commits | — | Accepted | 2026-11-23 |
 | [0466](0466-a-withheld-bill-is-owed-and-settles-at-the-net.md) | A withheld bill is owed, aged, revalued and settled at the net, and legacy bills are stamped from their own ledger entry | — | Accepted | 2026-11-23 |
 | [0467](0467-a-tax-return-marked-paid-posts-its-remittance-bounded-by-the-books.md) | A tax return marked paid posts its remittance, typed and bounded by the books, per tenant and opt-in | — | Accepted | 2026-11-24 |
+| [0468](0468-a-payment-settles-only-the-document-its-direction-posts-to.md) | A payment settles only the document its direction posts to, once, in that document's currency, and never by a negative amount | — | Accepted | 2026-11-24 |

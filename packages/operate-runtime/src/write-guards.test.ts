@@ -6,9 +6,14 @@ import {
   amountOwed,
   APPLIED_PAYMENT_EPSILON,
   childParentRefs,
+  declaredSettlementSpec,
   journalPostingGuard,
   LIFECYCLE_STATE_ERRORS,
   lifecycleStateGuard,
+  PAYMENT_DIRECTION,
+  paymentDirectionOf,
+  paymentNamesDocument,
+  settlementDocumentsFor,
   withArticle,
   lockedDocumentGuard,
   postedEntryImmutabilityGuard,
@@ -810,6 +815,10 @@ describe("runWriteGuards", () => {
 
 const DOC = "doc-1";
 
+/** The declaration's specs, never retyped (ADR-0468). */
+const INVOICE_SPEC = declaredSettlementSpec("Invoice");
+const BILL_SPEC = declaredSettlementSpec("Bill");
+
 async function payment(
   store: InMemoryEntityStore,
   row: Record<string, unknown>,
@@ -835,23 +844,46 @@ function coverageInput(
 describe("readAppliedPayments / readAppliedToDocument", () => {
   it("sums only completed payments, and only ones naming the document", async () => {
     const store = new InMemoryEntityStore();
-    await payment(store, { amount: 30, invoice_id: DOC });
-    await payment(store, { amount: 70, invoice_id: DOC, state: "pending" });
-    await payment(store, { amount: 11, invoice_id: "other" });
-    const read = await readAppliedToDocument(store, TENANT, "invoice_id", DOC, { ceiling: 100 });
+    await payment(store, { amount: 30, direction: "inbound", invoice_id: DOC });
+    await payment(store, { amount: 70, direction: "inbound", invoice_id: DOC, state: "pending" });
+    await payment(store, { amount: 11, direction: "inbound", invoice_id: "other" });
+    const read = await readAppliedToDocument(store, TENANT, INVOICE_SPEC, DOC, { ceiling: 100 });
     expect(read).toEqual({ applied: 30, complete: true });
   });
 
-  it("does not stop once the running total crosses a threshold", async () => {
-    // The measured defect the no-early-stop rule exists for: a later page carrying a negative
-    // correction takes the total back under. 1100 payments forces three pages at the 500 default,
-    // so the correction is genuinely on a page after the one that crossed 400.
+  it("does not stop once the running total crosses a threshold: the sum is what a report prints", async () => {
+    // The reason is no longer a negative correction on a later page (ADR-0468: a negative amount
+    // counts nothing now — the test below pins that). It is that the fold returns a sum the aging
+    // report prints, so a read must cover every page. 1100 payments forces three pages at the 500
+    // default, so the total genuinely spans pages after the one that crossed 400.
     const store = new InMemoryEntityStore();
-    for (let i = 0; i < 1099; i += 1) await payment(store, { amount: 1, invoice_id: DOC });
-    await payment(store, { amount: -1000, invoice_id: DOC });
-    const read = await readAppliedToDocument(store, TENANT, "invoice_id", DOC, { ceiling: 5000 });
-    expect(read.applied).toBe(99);
+    for (let i = 0; i < 1100; i += 1) await payment(store, { amount: 1, direction: "inbound", invoice_id: DOC });
+    const read = await readAppliedToDocument(store, TENANT, INVOICE_SPEC, DOC, { ceiling: 5000 });
+    expect(read.applied).toBe(1100);
     expect(read.complete).toBe(true);
+  });
+
+  it("counts a stored negative or mis-sided row as nothing, which is what the posting cleared", async () => {
+    // Rewritten rather than deleted (ADR-0372's class): this used to pin a −1000 correction as
+    // lowering the figure. The settlement posting skips a non-positive amount and clears only the
+    // control side its direction names, so each of these rows moved nothing on this invoice's
+    // receivable — and the fold now agrees.
+    const store = new InMemoryEntityStore();
+    await payment(store, { amount: 100, direction: "inbound", invoice_id: DOC });
+    await payment(store, { amount: -1000, direction: "inbound", invoice_id: DOC });
+    await payment(store, { amount: 0, direction: "inbound", invoice_id: DOC });
+    await payment(store, { amount: 40, direction: "outbound", invoice_id: DOC });
+    await payment(store, { amount: 25, invoice_id: DOC });
+    const read = await readAppliedToDocument(store, TENANT, INVOICE_SPEC, DOC, { ceiling: 100 });
+    expect(read).toEqual({ applied: 100, complete: true });
+  });
+
+  it("counts a row naming two documents only on the side its direction settles", async () => {
+    const store = new InMemoryEntityStore();
+    await payment(store, { amount: 70, direction: "inbound", invoice_id: "i", bill_id: "b" });
+    const read = await readAppliedPayments(store, TENANT, [INVOICE_SPEC, BILL_SPEC], { ceiling: 9 });
+    expect(read.applied[0]!.get("i")).toBe(70);
+    expect(read.applied[1]!.get("b")).toBeUndefined();
   });
 
   it("keeps one map per bucket, so two documents sharing an id never merge", async () => {
@@ -859,8 +891,8 @@ describe("readAppliedPayments / readAppliedToDocument", () => {
     // caller-supplied `id` is not stripped and records are bucketed per (tenant, entity), so a
     // single map keyed by document id would credit the invoice with the bill's money.
     const store = new InMemoryEntityStore();
-    await payment(store, { amount: 40, bill_id: "shared" });
-    const read = await readAppliedPayments(store, TENANT, ["invoice_id", "bill_id"], {
+    await payment(store, { amount: 40, direction: "outbound", bill_id: "shared" });
+    const read = await readAppliedPayments(store, TENANT, [INVOICE_SPEC, BILL_SPEC], {
       ceiling: 100,
     });
     expect(read.applied[0]!.get("shared")).toBeUndefined();
@@ -869,8 +901,8 @@ describe("readAppliedPayments / readAppliedToDocument", () => {
 
   it("answers positionally, one map per requested ref field", async () => {
     const store = new InMemoryEntityStore();
-    await payment(store, { amount: 5, invoice_id: "i" });
-    const read = await readAppliedPayments(store, TENANT, ["bill_id", "invoice_id"], { ceiling: 9 });
+    await payment(store, { amount: 5, direction: "inbound", invoice_id: "i" });
+    const read = await readAppliedPayments(store, TENANT, [BILL_SPEC, INVOICE_SPEC], { ceiling: 9 });
     expect(read.applied).toHaveLength(2);
     expect(read.applied[0]!.size).toBe(0);
     expect(read.applied[1]!.get("i")).toBe(5);
@@ -883,15 +915,15 @@ describe("readAppliedPayments / readAppliedToDocument", () => {
     // record, and the strict form is fail-closed for both readers: `applied` understated makes the
     // guard refuse and the effect decline to settle.
     const store = new InMemoryEntityStore();
-    await payment(store, { amount: 50, invoice_id: 42 });
-    const read = await readAppliedToDocument(store, TENANT, "invoice_id", "42", { ceiling: 100 });
+    await payment(store, { amount: 50, direction: "inbound", invoice_id: 42 });
+    const read = await readAppliedToDocument(store, TENANT, INVOICE_SPEC, "42", { ceiling: 100 });
     expect(read.applied).toBe(0);
   });
 
   it("reports an exceeded ceiling rather than truncating in silence", async () => {
     const store = new InMemoryEntityStore();
-    for (let i = 0; i < 5; i += 1) await payment(store, { amount: 1, invoice_id: DOC });
-    const read = await readAppliedToDocument(store, TENANT, "invoice_id", DOC, { ceiling: 2 });
+    for (let i = 0; i < 5; i += 1) await payment(store, { amount: 1, direction: "inbound", invoice_id: DOC });
+    const read = await readAppliedToDocument(store, TENANT, INVOICE_SPEC, DOC, { ceiling: 2 });
     expect(read.complete).toBe(false);
   });
 });
@@ -920,11 +952,11 @@ describe("settlementIsCovered", () => {
 });
 
 describe("settlementCoverageGuard", () => {
-  const guard = settlementCoverageGuard({ entity: "Invoice", refField: "invoice_id", noun: "an invoice" });
+  const guard = settlementCoverageGuard({ entity: "Invoice", refField: "invoice_id", settledBy: "inbound", noun: "an invoice" });
 
   it("blocks a transition into paid while payments fall short", async () => {
     const store = new InMemoryEntityStore();
-    await payment(store, { amount: 50, invoice_id: DOC });
+    await payment(store, { amount: 50, direction: "inbound", invoice_id: DOC });
     const r = await guard(coverageInput(store, { after: { state: "paid", total: 120 } }));
     expect(r?.status).toBe(422);
     expect(r?.error).toBe("uncovered_settlement");
@@ -937,7 +969,7 @@ describe("settlementCoverageGuard", () => {
 
   it("allows it once completed payments cover the total", async () => {
     const store = new InMemoryEntityStore();
-    await payment(store, { amount: 120, invoice_id: DOC });
+    await payment(store, { amount: 120, direction: "inbound", invoice_id: DOC });
     expect(await guard(coverageInput(store, { after: { state: "paid", total: 120 } }))).toBeNull();
   });
 
@@ -1030,9 +1062,9 @@ describe("settlementCoverageGuard", () => {
   it("blocks lowering the withholding of a settled document, which raises what it owes", async () => {
     // What a payer owes is total less withholding, so dropping the withholding raises the debt as
     // surely as raising the total does — and the total-only comparison saw no change at all.
-    const wht = settlementCoverageGuard({ entity: "Invoice", refField: "invoice_id", withholdingField: "withholding_total" });
+    const wht = settlementCoverageGuard({ entity: "Invoice", refField: "invoice_id", settledBy: "inbound", withholdingField: "withholding_total" });
     const store = new InMemoryEntityStore();
-    await payment(store, { amount: 95, invoice_id: DOC });
+    await payment(store, { amount: 95, direction: "inbound", invoice_id: DOC });
     const settled = { state: "paid", total: 100 };
     const lowered = await wht(
       coverageInput(store, {
@@ -1076,6 +1108,7 @@ describe("settlementCoverageGuard", () => {
     const statusKeyed = settlementCoverageGuard({
       entity: "Invoice",
       refField: "invoice_id",
+      settledBy: "inbound",
       stateField: "status",
     });
     const r = await statusKeyed(coverageInput(store, { after: { status: "paid", total: 120 } }));
@@ -1116,11 +1149,12 @@ describe("settlementCoverageGuard", () => {
   });
 
   it("REFUSES on an exceeded ceiling rather than deciding from a prefix", async () => {
-    // `READ_CEILING_EFFECT.guard` is `refuses`: a decision from a prefix is not a decision, and the
-    // direction is not even bounded, since nothing enforces `Payment.amount`'s `min: 0`.
+    // `READ_CEILING_EFFECT.guard` is `refuses`: a decision from a prefix is not a decision. A
+    // negative amount no longer counts (ADR-0468), so a dropped tail can only understate the figure —
+    // and understating is how a covered document is wrongly refused, so the prefix is still refused.
     const store = new InMemoryEntityStore();
-    for (let i = 0; i < 4; i += 1) await payment(store, { amount: 1000, invoice_id: DOC });
-    const tight = settlementCoverageGuard({ entity: "Invoice", refField: "invoice_id", maxPayments: 2 });
+    for (let i = 0; i < 4; i += 1) await payment(store, { amount: 1000, direction: "inbound", invoice_id: DOC });
+    const tight = settlementCoverageGuard({ entity: "Invoice", refField: "invoice_id", settledBy: "inbound", maxPayments: 2 });
     const r = await tight(coverageInput(store, { after: { state: "paid", total: 120 } }));
     expect(r?.error).toBe("settlement_coverage_unverifiable");
     // Would have been *covered* over the whole set (4000 >= 120), so this is not the shortfall
@@ -1130,8 +1164,8 @@ describe("settlementCoverageGuard", () => {
 
   it("names no remedy for an exceeded ceiling, because maxPayments reaches no flag", async () => {
     const store = new InMemoryEntityStore();
-    for (let i = 0; i < 4; i += 1) await payment(store, { amount: 1, invoice_id: DOC });
-    const tight = settlementCoverageGuard({ entity: "Invoice", refField: "invoice_id", maxPayments: 2 });
+    for (let i = 0; i < 4; i += 1) await payment(store, { amount: 1, direction: "inbound", invoice_id: DOC });
+    const tight = settlementCoverageGuard({ entity: "Invoice", refField: "invoice_id", settledBy: "inbound", maxPayments: 2 });
     const r = await tight(coverageInput(store, { after: { state: "paid", total: 120 } }));
     expect(r?.detail).not.toContain("remedy");
     expect(r?.detail).not.toContain("--");
@@ -1164,7 +1198,7 @@ describe("SETTLEMENT_COVERAGE_DOCUMENTS", () => {
     // mutation leaves `compile.test.ts` entirely green, because a 200 cannot tell *no guard* from
     // *a guard that checks nothing*. The declaration tests below are what catch it.
     const store = new InMemoryEntityStore();
-    const vacuous = settlementCoverageGuard({ entity: "TaxReturn", refField: "tax_return_id" });
+    const vacuous = settlementCoverageGuard({ entity: "TaxReturn", refField: "tax_return_id", settledBy: "outbound" });
     const r = await vacuous({
       operation: "transition",
       entity: "TaxReturn",
@@ -1196,6 +1230,53 @@ describe("SETTLEMENT_COVERAGE_DOCUMENTS", () => {
 
   it("settles on the state the guard and the survey both read", async () => {
     expect(SETTLED_DOCUMENT_STATE).toBe("paid");
+  });
+
+  it("declares which direction settles each document, distinct across entries (ADR-0468)", () => {
+    // One direction per control side: were two entries to share one, a single payment naming both
+    // would be well-directed for both and settle two documents with one posting — the P2.21 defect.
+    const directions = SETTLEMENT_COVERAGE_DOCUMENTS.map((d) => d.settledBy);
+    expect(new Set(directions).size).toBe(directions.length);
+    expect(Object.fromEntries(SETTLEMENT_COVERAGE_DOCUMENTS.map((d) => [d.entity, d.settledBy]))).toEqual({
+      Invoice: "inbound",
+      Bill: "outbound",
+    });
+    // The reference fields are distinct too, so a fold bucket answers for exactly one document.
+    const refs = SETTLEMENT_COVERAGE_DOCUMENTS.map((d) => d.refField);
+    expect(new Set(refs).size).toBe(refs.length);
+  });
+
+  it("filters to the documents a manifest declares, in declaration order", () => {
+    expect(settlementDocumentsFor(new Set(["Bill", "Invoice", "Payment"])).map((d) => d.entity)).toEqual(["Invoice", "Bill"]);
+    expect(settlementDocumentsFor(new Set(["Invoice"])).map((d) => d.entity)).toEqual(["Invoice"]);
+    expect(settlementDocumentsFor(new Set())).toEqual([]);
+    expect(declaredSettlementSpec("Bill")).toEqual({ refField: "bill_id", settledBy: "outbound" });
+    expect(() => declaredSettlementSpec("TaxReturn")).toThrow(/declares no TaxReturn/);
+  });
+});
+
+describe("PAYMENT_DIRECTION / paymentDirectionOf / paymentNamesDocument", () => {
+  it("reads inbound only for the inbound value, and everything else as outbound — the posting's reading", () => {
+    expect(paymentDirectionOf({ direction: "inbound" }, PAYMENT_DIRECTION)).toBe("inbound");
+    expect(paymentDirectionOf({ direction: "outbound" }, PAYMENT_DIRECTION)).toBe("outbound");
+    expect(paymentDirectionOf({}, PAYMENT_DIRECTION)).toBe("outbound");
+    expect(paymentDirectionOf({ direction: "in" }, PAYMENT_DIRECTION)).toBe("outbound");
+    expect(paymentDirectionOf({ direction: "INBOUND" }, PAYMENT_DIRECTION)).toBe("outbound");
+    expect(paymentDirectionOf({ dir: "x" }, { field: "dir", inboundValue: "x" })).toBe("inbound");
+  });
+
+  it("takes the reading as a required argument", () => {
+    // @ts-expect-error — the direction reading has no default, so a caller cannot read a payment by a
+    // spelling it never chose (evaluated by `tsconfig.typecheck.json`; ADR-0307's split).
+    expect(() => paymentDirectionOf({ direction: "inbound" })).toThrow();
+  });
+
+  it("names a document only by a non-empty string", () => {
+    expect(paymentNamesDocument("inv-1")).toBe(true);
+    expect(paymentNamesDocument("")).toBe(false);
+    expect(paymentNamesDocument(42)).toBe(false);
+    expect(paymentNamesDocument(null)).toBe(false);
+    expect(paymentNamesDocument(undefined)).toBe(false);
   });
 });
 

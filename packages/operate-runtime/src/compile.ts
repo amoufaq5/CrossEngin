@@ -64,11 +64,15 @@ import {
   lifecycleStateGuard,
   lockedDocumentGuard,
   postedEntryImmutabilityGuard,
-  SETTLEMENT_COVERAGE_DOCUMENTS,
+  paymentSettlementSpecOf,
   settlementCoverageGuard,
+  settlementDocumentsFor,
   taxRemittanceJournalReverseGuard,
+  type PaymentSettlementSpec,
+  type SettlementCoverageConfig,
   type WriteGuard,
 } from "./write-guards.js";
+import { paymentAllocationGuard, paymentAllocationShape } from "./payment-allocation.js";
 import {
   bookingRateStampEffect,
   creditNoteGlPostingEffect,
@@ -645,6 +649,14 @@ function defaultWriteGuards(
       }),
     );
   }
+  // Payment allocation (ADR-0468): a payment names at most one document, only one its direction
+  // settles, and never carries a negative amount. **Immediately after the lock**, so a write to a
+  // completed or refunded payment answers `payment_locked` — the true and complete answer there —
+  // before this guard reads it. Neither under `allowUncoveredSettlement`, which waives coverage of a
+  // document's total and is a different defect, nor gated on the ledger: the application effects
+  // settle documents with no GL wired, and one payment naming two documents would settle both.
+  const allocation = paymentAllocationShape(manifest);
+  if (allocation !== null) guards.push(paymentAllocationGuard(allocation));
   // No lifecycle in any shipped pack, so its state moves by a plain update and the lifecycle guard
   // does not reach it: `confirmed → draft → confirmed` posted the clearing entry once per arrival.
   // The one move left open is `confirmed → void`, the field's declared forward value, which posts
@@ -720,9 +732,8 @@ function defaultWriteGuards(
   // direction on the one surface built to make the gap legible. Reachable from a tenant's own
   // activated manifest, which is the path this guard is wired into. An entity with no lifecycle
   // keeps the fallback, because a plain `PATCH {"state":…}` is exactly what it is for.
-  if (!allowUncoveredSettlement && names.has("Payment")) {
-    for (const doc of SETTLEMENT_COVERAGE_DOCUMENTS) {
-      if (!names.has(doc.entity)) continue;
+  if (!allowUncoveredSettlement) {
+    for (const doc of paymentSettlementDocuments(manifest)) {
       const stateField = lifecycleStateField(manifest, doc.entity);
       // Withholding reduces what is owed only where an effect stamps it: a caller-written figure —
       // a manifest with no tax codes, or a deployment passing its own effects — would otherwise let
@@ -808,6 +819,70 @@ function postingPeriodsOf(manifest: Manifest): Record<string, never> | undefined
  * does not declare writes a JSONB key on `--store pg` and nothing at all on `--store pg-columns`,
  * so a stamp is wired only where the served table has the column.
  */
+/**
+ * The documents a manifest's payments settle: `SETTLEMENT_COVERAGE_DOCUMENTS`' entries whose
+ * document the manifest declares, and none where it declares no `Payment` (ADR-0468).
+ *
+ * Every payment-settlement site in this file derives from this — the coverage guards, the settlement
+ * posting's `settledDocuments`, the two application effects, the bill void's refusal, the FX
+ * revaluation's and the aging report's payment reads — so which reference settles which document,
+ * and by which direction, is stated once. Exported so a test can hold it against the allocation
+ * guard's references in both directions.
+ */
+export function paymentSettlementDocuments(manifest: Manifest): readonly SettlementCoverageConfig[] {
+  const names = new Set((manifest.entities ?? []).map((e) => e.name));
+  return names.has("Payment") ? settlementDocumentsFor(names) : [];
+}
+
+/**
+ * One document's spec from {@link paymentSettlementDocuments}, as the fold reads it; null if not
+ * settled. Membership is the filtered list's; the projection is `paymentSettlementSpecOf`'s, so the
+ * spec has one spelling.
+ */
+function settlementSpecIn(documents: readonly SettlementCoverageConfig[], entity: string): PaymentSettlementSpec | null {
+  return documents.some((d) => d.entity === entity) ? paymentSettlementSpecOf(entity) : null;
+}
+
+/**
+ * The per-document facts a payment-settlement site needs beyond the declaration, keyed by the
+ * declaration's entity. A table and not a second declaration: which documents are settled, through
+ * which reference and by which direction is `SETTLEMENT_COVERAGE_DOCUMENTS`' alone. A declared
+ * document with no entry here is a build fault, so {@link settlementFactsOf} throws rather than
+ * leaving it unsettled — the silent `continue` this replaced would have given a third document a
+ * coverage guard and a posting but no auto-settle, no refund reopen and no FX revaluation.
+ */
+const SETTLEMENT_DOCUMENT_FACTS: Readonly<
+  Record<
+    string,
+    {
+      readonly settleableStates: readonly string[];
+      readonly reopenState: string;
+      readonly fxSide: "ar" | "ap";
+      readonly fxCreditNote?: {
+        readonly typeField: string;
+        readonly typeValue: string;
+        readonly refField: string;
+        readonly creditedStates: readonly string[];
+      };
+    }
+  >
+> = {
+  Invoice: {
+    settleableStates: ["sent", "overdue"],
+    reopenState: "sent",
+    fxSide: "ar",
+    // The aging report's grouping (`creditNote` on its AR section), so the two agree.
+    fxCreditNote: { typeField: "document_type", typeValue: "credit_note", refField: "credit_note_of", creditedStates: ["void"] },
+  },
+  Bill: { settleableStates: ["approved", "overdue"], reopenState: "approved", fxSide: "ap" },
+};
+
+function settlementFactsOf(entity: string): (typeof SETTLEMENT_DOCUMENT_FACTS)[string] {
+  const facts = SETTLEMENT_DOCUMENT_FACTS[entity];
+  if (facts === undefined) throw new Error(`SETTLEMENT_COVERAGE_DOCUMENTS declares ${entity}, which compile.ts has no settlement facts for`);
+  return facts;
+}
+
 function declaresField(manifest: Manifest, entityName: string, field: string): boolean {
   const entity = (manifest.entities ?? []).find((e) => e.name === entityName);
   return entity !== undefined && resolvedFields(entity, manifest.traits ?? []).some((f) => f.name === field);
@@ -845,6 +920,10 @@ function defaultWriteEffectsWithStamps(
   // Every posting an effect writes is checked against the period its date falls in.
   const periodsOpt = postingPeriodsOf(manifest) !== undefined ? { periods: {} } : {};
   const hasGl = names.has("JournalEntry") && names.has("JournalLine") && names.has("LedgerAccount");
+  // Which documents payments settle, through which reference and by which direction: the one
+  // declaration, filtered to this manifest. Every payment site below reads it (ADR-0468).
+  const settlementDocuments = paymentSettlementDocuments(manifest);
+  const billSettlement = settlementSpecIn(settlementDocuments, "Bill");
   // Maps the tenant's finance settings to an effect's account-code resolver.
   const codeResolver = <T>(pick: (f: NonNullable<TenantSettings["finance"]>) => T) =>
     settingsStore === undefined
@@ -882,6 +961,13 @@ function defaultWriteEffectsWithStamps(
     hasTaxCodes &&
     names.has("BillLine") &&
     declaresField(manifest, "Bill", STAMPED_WITHHOLDING_FIELD);
+  // Keyed by entity and throwing on any other, so a third settled document cannot inherit Bill's
+  // answer by falling through a ternary.
+  const withholdingStampedOf = (entity: string): boolean => {
+    if (entity === "Invoice") return invoiceWithholdingStamped;
+    if (entity === "Bill") return billWithholdingStamped;
+    throw new Error(`no withholding stamp is decided for ${entity}`);
+  };
   // Tax determination from the tenant's declared jurisdiction and its rules, where the manifest
   // declares both and there is a settings store for the tenant to declare the jurisdiction in.
   const taxDetermination = (
@@ -1063,7 +1149,7 @@ function defaultWriteEffectsWithStamps(
         sourceSuffix: "-GL",
         reversalSuffix: "-VOID",
         sourceLabel: "bill",
-        ...(names.has("Payment") ? { refuseWhileSettledBy: "bill_id" } : {}),
+        ...(billSettlement !== null ? { refuseWhileSettledBy: billSettlement } : {}),
         ...clockOpt,
         ...periodsOpt,
       }),
@@ -1087,10 +1173,7 @@ function defaultWriteEffectsWithStamps(
     effects.push(
       paymentSettlementGlPostingEffect({
         ...postingFx("paid_at"),
-        settledDocuments: [
-          ...(names.has("Invoice") ? [{ refField: "invoice_id", entity: "Invoice" }] : []),
-          ...(names.has("Bill") ? [{ refField: "bill_id", entity: "Bill" }] : []),
-        ],
+        settledDocuments: settlementDocuments.map((d) => ({ refField: d.refField, entity: d.entity, settledBy: d.settledBy })),
         ...clockOpt,
         ...periodsOpt,
         ...codeResolver((f) => ({
@@ -1115,36 +1198,25 @@ function defaultWriteEffectsWithStamps(
     );
   }
   // Per-document application: a completed payment linked to an invoice/bill
-  // accumulates and auto-settles the document once fully covered.
-  if (names.has("Payment") && names.has("Invoice")) {
+  // accumulates and auto-settles the document once fully covered. One per declared document, in
+  // the declaration's order (Invoice, then Bill), each counting only payments of its `settledBy`.
+  for (const doc of settlementDocuments) {
+    const states = settlementFactsOf(doc.entity);
+    const withholdingStamped = withholdingStampedOf(doc.entity);
     effects.push(
       paymentApplicationEffect({
-        documentEntity: "Invoice",
-        refField: "invoice_id",
-        settleableStates: ["sent", "overdue"],
+        documentEntity: doc.entity,
+        refField: doc.refField,
+        settledBy: doc.settledBy,
+        settleableStates: states.settleableStates,
         paidAtField: STAMPED_PAID_AT_FIELD,
-        ...(invoiceWithholdingStamped ? { withholdingField: STAMPED_WITHHOLDING_FIELD } : {}),
+        ...(withholdingStamped ? { withholdingField: STAMPED_WITHHOLDING_FIELD } : {}),
         refundedState: "refunded",
-        reopenState: "sent",
+        reopenState: states.reopenState,
         ...clockOpt,
       }),
     );
-    stamps.push({ entity: "Invoice", field: STAMPED_PAID_AT_FIELD });
-  }
-  if (names.has("Payment") && names.has("Bill")) {
-    effects.push(
-      paymentApplicationEffect({
-        documentEntity: "Bill",
-        refField: "bill_id",
-        settleableStates: ["approved", "overdue"],
-        paidAtField: STAMPED_PAID_AT_FIELD,
-        ...(billWithholdingStamped ? { withholdingField: STAMPED_WITHHOLDING_FIELD } : {}),
-        refundedState: "refunded",
-        reopenState: "approved",
-        ...clockOpt,
-      }),
-    );
-    stamps.push({ entity: "Bill", field: STAMPED_PAID_AT_FIELD });
+    stamps.push({ entity: doc.entity, field: STAMPED_PAID_AT_FIELD });
   }
   // Unrealized FX revaluation at period close: when a FiscalPeriod closes, revalue every
   // open foreign-currency receivable/payable to the period-end rate and post one balanced
@@ -1157,37 +1229,22 @@ function defaultWriteEffectsWithStamps(
     names.has("ExchangeRate") &&
     (names.has("Invoice") || names.has("Bill"))
   ) {
-    const fxDocuments = [
-      ...(names.has("Invoice")
-        ? [
-            {
-              entity: "Invoice",
-              openStates: ["sent", "overdue"],
-              paymentRefField: "invoice_id",
-              side: "ar" as const,
-              ...(invoiceWithholdingStamped ? { withholdingField: STAMPED_WITHHOLDING_FIELD } : {}),
-              // The aging report's grouping (`creditNote` on its AR section), so the two agree.
-              creditNote: {
-                typeField: "document_type",
-                typeValue: "credit_note",
-                refField: "credit_note_of",
-                creditedStates: ["void"],
-              },
-            },
-          ]
-        : []),
-      ...(names.has("Bill")
-        ? [
-            {
-              entity: "Bill",
-              openStates: ["approved", "overdue"],
-              paymentRefField: "bill_id",
-              side: "ap" as const,
-              ...(billWithholdingStamped ? { withholdingField: STAMPED_WITHHOLDING_FIELD } : {}),
-            },
-          ]
-        : []),
-    ];
+    // One revalued side per declared document, its payment spec taken from the declaration and never
+    // retyped. Filtered on the document alone (`settlementDocumentsFor`) rather than through
+    // `paymentSettlementDocuments`, which also needs `Payment`: that is the gate this effect had
+    // before the payment specs were derived, and keeping it keeps every manifest's revaluation as it
+    // was.
+    const fxDocuments = settlementDocumentsFor(names).map((doc) => {
+      const facts = settlementFactsOf(doc.entity);
+      return {
+        entity: doc.entity,
+        openStates: facts.settleableStates,
+        payment: { refField: doc.refField, settledBy: doc.settledBy },
+        side: facts.fxSide,
+        ...(withholdingStampedOf(doc.entity) ? { withholdingField: STAMPED_WITHHOLDING_FIELD } : {}),
+        ...(facts.fxCreditNote !== undefined ? { creditNote: facts.fxCreditNote } : {}),
+      };
+    });
     effects.push(
       unrealizedFxRevaluationEffect({
         documents: fxDocuments,
@@ -1691,11 +1748,17 @@ export function compileOperateServer(
   const invoiceEntity = "Invoice";
   const certificateEntity = "WhtCertificate";
   const agingSections: Record<string, AgingSpec> = {};
-  if (agingNames.has(invoiceEntity) && agingNames.has(paymentEntity)) {
+  // Each section reads payments through the declaration's spec, so the open balance it prints counts
+  // only what the settlement posting cleared on that side (ADR-0468). Null exactly when the manifest
+  // lacks the document or `Payment`, which is the condition the two sections were gated on.
+  const agingDocuments = paymentSettlementDocuments(manifest);
+  const invoicePayment = settlementSpecIn(agingDocuments, invoiceEntity);
+  const billPayment = settlementSpecIn(agingDocuments, "Bill");
+  if (invoicePayment !== null) {
     agingSections["ar"] = {
       entity: invoiceEntity,
       openStates: ["sent", "overdue"],
-      paymentRefField: "invoice_id",
+      payment: invoicePayment,
       numberField: "invoice_number",
       ...(isStamped(effectWiring.stamps, invoiceEntity, STAMPED_WITHHOLDING_FIELD)
         ? { withholdingField: STAMPED_WITHHOLDING_FIELD }
@@ -1703,11 +1766,11 @@ export function compileOperateServer(
       creditNote: { typeField: "document_type", typeValue: "credit_note", refField: "credit_note_of", creditedStates: ["void"] },
     };
   }
-  if (agingNames.has("Bill") && agingNames.has(paymentEntity)) {
+  if (billPayment !== null) {
     agingSections["ap"] = {
       entity: "Bill",
       openStates: ["approved", "overdue"],
-      paymentRefField: "bill_id",
+      payment: billPayment,
       numberField: "bill_number",
       ...(isStamped(effectWiring.stamps, "Bill", STAMPED_WITHHOLDING_FIELD)
         ? { withholdingField: STAMPED_WITHHOLDING_FIELD }

@@ -176,12 +176,59 @@ const DEFAULTS = {
  * each spelled them out and a fourth would have been the fourth chance to disagree about which
  * state means *the money arrived*.
  */
-const APPLIED_PAYMENT_FALLBACKS = {
+export const APPLIED_PAYMENT_FALLBACKS = {
   paymentEntity: "Payment",
   stateField: "state",
   completedState: "completed",
   amountField: "amount",
 } as const;
+
+/** Which way a payment's money moved: in from a customer, or out to a supplier. */
+export type PaymentDirection = "inbound" | "outbound";
+
+/** How a payment record states its direction: the field, and the one value that means inbound. */
+export interface PaymentDirectionReading {
+  readonly field: string;
+  readonly inboundValue: string;
+}
+
+/**
+ * The one spelling of how a `Payment` says which way its money moved (ADR-0468).
+ *
+ * `paymentSettlementGlPostingEffect` posts to AR when this reads inbound and to AP otherwise, so every
+ * reader that decides which document a payment settles has to read the direction the way the posting
+ * does — the fold, the allocation guard and the effect all take it from here. Two spellings would let a
+ * payment count toward an invoice while its money cleared the payable.
+ */
+export const PAYMENT_DIRECTION = { field: "direction", inboundValue: "inbound" } as const satisfies PaymentDirectionReading;
+
+/**
+ * The direction a payment record posts as: `inbound` iff its direction field holds the inbound value,
+ * and **everything else outbound**, absent included — which is exactly how the settlement posting
+ * reads it, so a manifest whose `Payment` declares no inbound value posts every payment to AP.
+ *
+ * Both arguments are required: a default reading would let a caller read a payment by a spelling it
+ * never chose.
+ */
+export function paymentDirectionOf(record: Record<string, unknown>, direction: PaymentDirectionReading): PaymentDirection {
+  return record[direction.field] === direction.inboundValue ? "inbound" : "outbound";
+}
+
+/**
+ * Whether a payment's reference field names a document: a non-empty string and nothing else.
+ *
+ * `reference` is `acceptAny` in `FIELD_TYPE_CHECKS`, so `{"invoice_id": 42}` reaches the store; the
+ * strict form is the fail-closed reading for every reader — see the fold's own note.
+ */
+export function paymentNamesDocument(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+/** A payment reference field, and the direction whose money settles the document it names. */
+export interface PaymentSettlementSpec {
+  readonly refField: string;
+  readonly settledBy: PaymentDirection;
+}
 
 /** Which payment rows count toward a document, and how far the read may go. */
 export interface AppliedPaymentsConfig {
@@ -201,8 +248,8 @@ export interface AppliedPaymentsConfig {
 /**
  * One completed-payment total per document, per bucket, with how far the read got.
  *
- * `applied` is positionally aligned with the `refFields` it was asked for — index *i* answers for
- * `refFields[i]` — which is why it is an array and not a record: a caller holding two sides of the
+ * `applied` is positionally aligned with the specs it was asked for — index *i* answers for
+ * `specs[i]` — which is why it is an array and not a record: a caller holding two sides of the
  * ledger (`invoice_id` and `bill_id`) reads its own side by the position it supplied, and a record
  * keyed by field name would let a caller read the other side's map by typing the wrong key.
  */
@@ -215,6 +262,19 @@ export interface AppliedPaymentsRead {
 /**
  * The one reading of *completed payments summed per document*, folded page by page.
  *
+ * ## It counts exactly what the settlement posting cleared (ADR-0468)
+ *
+ * A row counts toward `specs[i]` only when all four hold: it is completed; its amount is positive;
+ * its direction — read through {@link paymentDirectionOf}, the posting's own reading — is the one
+ * that settles that document; and it names the document ({@link paymentNamesDocument}). Each clause
+ * mirrors `paymentSettlementGlPostingEffect`, which skips a zero or negative amount and clears AR for
+ * an inbound payment and AP for any other. Before, the fold read neither, and measured on the shipped
+ * pack an outbound payment naming an invoice marked it paid while the GL still carried the
+ * receivable, one inbound payment naming an invoice and a bill marked both paid while only AR was
+ * cleared, and a completed −50 lowered the applied figure while posting nothing — every entry
+ * balanced, so nothing in the detection stack could see it. A row naming two documents needs no
+ * clause of its own: its direction settles at most one of them, so the other bucket already skips it.
+ *
  * ## One map per bucket, and why that is the property worth keeping
  *
  * A bucket's keys are the values of **its own** `refField`, and nothing draws two entities' ids
@@ -226,14 +286,13 @@ export interface AppliedPaymentsRead {
  *
  * ## No early stop
  *
- * The fold reads every page even once a running total has crossed whatever the caller is comparing
- * it against, because `Payment.amount`'s declared `min: 0` is enforced by **nothing** — no
- * `FieldErrorCode` member covers a range and `type.min` is read only by two change-detectors in
- * `kernel/ddl/diff.ts` — so a later page can carry a negative correction that takes the total back
- * under. Measured on the effect below: an invoice of 400 with three payments of 200 and a
- * correction of −300 (true applied 300) was written `paid` at a cap of 3 and correctly left `sent`
- * at 99. `drainList` has no halting `onPage` for this reason, so the rule is structural here rather
- * than remembered.
+ * The fold reads every page even when a caller only compares the total against a threshold, because
+ * what it returns is a **sum a report prints** — the aging report and the FX revaluation read the
+ * whole map — and a sum over a prefix is not that sum, so a read that stops short must say so as
+ * `complete: false` rather than answer from what it saw. (The reason this paragraph gave before
+ * ADR-0468 was that a later page could carry a negative correction taking the total back under; a
+ * negative amount no longer counts, so that reason is gone and this one is what remains.) `drainList`
+ * has no halting `onPage` for this reason, so the rule is structural here rather than remembered.
  *
  * ## The reference must be a non-empty string
  *
@@ -248,14 +307,14 @@ export interface AppliedPaymentsRead {
 async function foldCompletedPayments(
   store: Pick<EntityStore, "listPage">,
   tenantId: string,
-  refFields: readonly string[],
+  specs: readonly PaymentSettlementSpec[],
   filters: readonly ListFilter[],
   config: AppliedPaymentsConfig,
 ): Promise<{ readonly applied: readonly ReadonlyMap<string, number>[]; readonly complete: boolean }> {
   const c = { ...APPLIED_PAYMENT_FALLBACKS, ...config };
   // Summed in exact ledger units and handed back as numbers only at the end: a double running total
   // over a tenant's whole payment history drifts by the representation error of every addend.
-  const units = refFields.map(() => new Map<string, bigint>());
+  const units = specs.map(() => new Map<string, bigint>());
   const outcome = await drainList(
     store,
     tenantId,
@@ -269,11 +328,18 @@ async function foldCompletedPayments(
         // direct caller can still hand over rows the filter did not select, and counting a
         // `pending` payment would settle a document nobody has paid.
         if (p[c.stateField] !== c.completedState) continue;
-        for (let i = 0; i < refFields.length; i += 1) {
-          const ref = p[refFields[i]!];
-          if (typeof ref !== "string" || ref.length === 0) continue;
+        // The posting skips a zero or negative amount, so the fold does too: a row that cleared
+        // nothing in the ledger applies nothing to a document.
+        const amount = unitsOf(p[c.amountField]);
+        if (amount <= 0n) continue;
+        const direction = paymentDirectionOf(p, PAYMENT_DIRECTION);
+        for (let i = 0; i < specs.length; i += 1) {
+          const spec = specs[i]!;
+          if (direction !== spec.settledBy) continue;
+          const ref = p[spec.refField];
+          if (!paymentNamesDocument(ref)) continue;
           const bucket = units[i]!;
-          bucket.set(ref, (bucket.get(ref) ?? 0n) + unitsOf(p[c.amountField]));
+          bucket.set(ref, (bucket.get(ref) ?? 0n) + amount);
         }
       }
     },
@@ -283,7 +349,7 @@ async function foldCompletedPayments(
 }
 
 /**
- * Every completed payment in the tenant, summed per document, one map per `refField`.
+ * Every completed payment in the tenant, summed per document, one map per spec.
  *
  * The tenant-wide form, for the two readers that need every document's figure at once: the aging
  * report and the period-close FX revaluation. Filtered on the payment **state** rather than on any
@@ -294,14 +360,14 @@ async function foldCompletedPayments(
 export async function readAppliedPayments(
   store: Pick<EntityStore, "listPage">,
   tenantId: string,
-  refFields: readonly string[],
+  specs: readonly PaymentSettlementSpec[],
   config: AppliedPaymentsConfig,
 ): Promise<AppliedPaymentsRead> {
   const c = { ...APPLIED_PAYMENT_FALLBACKS, ...config };
   return foldCompletedPayments(
     store,
     tenantId,
-    refFields,
+    specs,
     [{ field: c.stateField, op: "eq", value: c.completedState }],
     config,
   );
@@ -319,15 +385,15 @@ export async function readAppliedPayments(
 export async function readAppliedToDocument(
   store: Pick<EntityStore, "listPage">,
   tenantId: string,
-  refField: string,
+  spec: PaymentSettlementSpec,
   documentId: string,
   config: AppliedPaymentsConfig,
 ): Promise<{ readonly applied: number; readonly complete: boolean }> {
   const read = await foldCompletedPayments(
     store,
     tenantId,
-    [refField],
-    [{ field: refField, op: "eq", value: documentId }],
+    [spec],
+    [{ field: spec.refField, op: "eq", value: documentId }],
     config,
   );
   return { applied: read.applied[0]?.get(documentId) ?? 0, complete: read.complete };
@@ -983,10 +1049,16 @@ export function lifecycleStateGuard(config: LifecycleStateConfig): WriteGuard {
  */
 export const SETTLED_DOCUMENT_STATE = "paid";
 
-export interface SettlementCoverageConfig {
+export interface SettlementCoverageConfig extends PaymentSettlementSpec {
   readonly entity: string;
   /** The `Payment` field referencing this document (e.g. `invoice_id`). */
   readonly refField: string;
+  /**
+   * The direction whose money settles this document: `inbound` clears a receivable, `outbound` a
+   * payable. Required, because it is the one statement of which payments may name the document and
+   * count toward it (ADR-0468) — a default would decide that for a document nobody looked at.
+   */
+  readonly settledBy: PaymentDirection;
   readonly stateField?: string;
   readonly settledState?: string;
   readonly totalField?: string;
@@ -1021,9 +1093,13 @@ const COVERAGE_FALLBACKS = {
 } as const;
 
 /**
- * The documents the default guards cover, and the `Payment` field each is settled through.
+ * The documents the default guards cover, the `Payment` field each is settled through, and the
+ * direction whose money settles it.
  *
- * **One declaration with two readers**: `defaultWriteGuards` builds a guard per entry, and
+ * **The one declaration of which payment reference settles which document** (ADR-0468):
+ * `defaultWriteGuards` builds a coverage guard per entry and the payment-allocation guard from the
+ * whole list, `compile.ts` derives the settlement effects' documents, the application effects, the
+ * bill void's refusal, the aging sections' and the FX revaluation's payment reads from it, and
  * `apps/operate-server`'s boot survey reads the same list to say which settleable documents are
  * covered and which are not. Two hand-written lists would be ADR-0288's maintained list — wrong
  * four times in this repo — and here the two halves are a guard and the sentence claiming the guard
@@ -1044,6 +1120,7 @@ export const SETTLEMENT_COVERAGE_DOCUMENTS: readonly SettlementCoverageConfig[] 
   {
     entity: "Invoice",
     refField: "invoice_id",
+    settledBy: "inbound",
     withholdingField: "withholding_total",
     noun: "an invoice",
     remedy:
@@ -1053,6 +1130,7 @@ export const SETTLEMENT_COVERAGE_DOCUMENTS: readonly SettlementCoverageConfig[] 
   {
     entity: "Bill",
     refField: "bill_id",
+    settledBy: "outbound",
     withholdingField: "withholding_total",
     noun: "a bill",
     // No credit-note arm: `Bill` declares no `document_type`/`credit_note_of` pair, so the
@@ -1060,6 +1138,31 @@ export const SETTLEMENT_COVERAGE_DOCUMENTS: readonly SettlementCoverageConfig[] 
     remedy: "record the remaining payment and complete it, which settles the bill automatically",
   },
 ];
+
+/**
+ * The declaration's entries for the documents a manifest declares, in declaration order — the
+ * filter every reader of {@link SETTLEMENT_COVERAGE_DOCUMENTS} applies, written once.
+ */
+export function settlementDocumentsFor(entityNames: ReadonlySet<string>): readonly SettlementCoverageConfig[] {
+  return SETTLEMENT_COVERAGE_DOCUMENTS.filter((doc) => entityNames.has(doc.entity));
+}
+
+/** The settlement spec the declaration gives one document entity, or null if it declares none. */
+export function paymentSettlementSpecOf(entity: string): PaymentSettlementSpec | null {
+  const doc = SETTLEMENT_COVERAGE_DOCUMENTS.find((d) => d.entity === entity);
+  return doc === undefined ? null : { refField: doc.refField, settledBy: doc.settledBy };
+}
+
+/**
+ * The declaration's spec for a document a caller names by entity because it is settled there — the
+ * FX revaluation's fallbacks and its wiring. A document the declaration does not carry is a build
+ * fault, so this throws rather than answering a spec nobody declared.
+ */
+export function declaredSettlementSpec(entity: string): PaymentSettlementSpec {
+  const spec = paymentSettlementSpecOf(entity);
+  if (spec === null) throw new Error(`SETTLEMENT_COVERAGE_DOCUMENTS declares no ${entity}`);
+  return spec;
+}
 
 /**
  * Refuses a write that puts a document into its settled state while completed payments do not
@@ -1119,9 +1222,10 @@ export const SETTLEMENT_COVERAGE_DOCUMENTS: readonly SettlementCoverageConfig[] 
  * ## An exceeded ceiling refuses
  *
  * `READ_CEILING_EFFECT.guard` is `refuses`, because a decision from a prefix is not a decision —
- * and here the direction is not even bounded: nothing enforces `Payment.amount`'s `min: 0`, so a
- * dropped tail can carry a negative correction and an unread remainder can make the figure wrong
- * either way. `journalPostingGuard`'s precedent exactly.
+ * an unread remainder holds payments the figure omits, so the guard would refuse a document they
+ * cover. (A negative amount no longer counts toward the figure, ADR-0468, so the dropped tail can
+ * only understate it; refusing is still right, because understating is how a covered document is
+ * refused.) `journalPostingGuard`'s precedent exactly.
  *
  * ## The detail carries the figure
  *
@@ -1207,7 +1311,7 @@ export function settlementCoverageGuard(config: SettlementCoverageConfig): Write
     const read =
       documentId === null
         ? { applied: 0, complete: true }
-        : await readAppliedToDocument(input.store, input.tenantId, c.refField, documentId, {
+        : await readAppliedToDocument(input.store, input.tenantId, { refField: c.refField, settledBy: c.settledBy }, documentId, {
             paymentEntity: c.paymentEntity,
             stateField: c.paymentStateField,
             completedState: c.paymentCompletedState,

@@ -5,7 +5,7 @@ import type { RoleName } from "@crossengin/auth";
 import { computeAging, type AgingReport, type CreditNoteShape } from "./aging.js";
 import { drainList, type BoundedReadDeclaration } from "./list-drain.js";
 import type { EntityRecord, EntityStore } from "./store.js";
-import { readAppliedPayments } from "./write-guards.js";
+import { readAppliedPayments, type PaymentSettlementSpec } from "./write-guards.js";
 
 /** One AR/AP aging section the handler can produce. */
 export interface AgingSpec {
@@ -13,8 +13,12 @@ export interface AgingSpec {
   readonly entity: string;
   /** Document states included as open (issued/approved but not paid/void/draft). */
   readonly openStates: readonly string[];
-  /** The Payment field linking to this document (e.g. "invoice_id"). */
-  readonly paymentRefField: string;
+  /**
+   * The Payment field linking to this document and the direction that settles it, from
+   * `SETTLEMENT_COVERAGE_DOCUMENTS` — so the open balance this report prints is the one the GL
+   * carries: a payment whose money cleared the other control account applies nothing here (ADR-0468).
+   */
+  readonly payment: PaymentSettlementSpec;
   readonly numberField: string;
   readonly dueDateField?: string;
   readonly withholdingField?: string;
@@ -138,14 +142,14 @@ export function buildAgingHandler(ctx: AgingHandlerContext): Handler {
     // invoice with a same-id bill's payments.
     //
     // Zipped back onto the sections by **position**, which is what `AppliedPaymentsRead`
-    // guarantees: index *i* answers for `refFields[i]`.
+    // guarantees: index *i* answers for `specs[i]`.
     const specs = Object.entries(ctx.sections).map(([name, spec]) => ({ name, spec }));
     const bounded: string[] = [];
 
     const paymentRead = await readAppliedPayments(
       ctx.store,
       tenantId,
-      specs.map(({ spec }) => spec.paymentRefField),
+      specs.map(({ spec }) => spec.payment),
       { paymentEntity, stateField, completedState, amountField, ceiling: maxRows },
     );
     if (!paymentRead.complete) bounded.push(PAYMENT_READ_NAME);
@@ -153,7 +157,7 @@ export function buildAgingHandler(ctx: AgingHandlerContext): Handler {
       name,
       spec,
       // `!` and not `?? new Map()`: `foldCompletedPayments` builds one bucket per ref field with
-      // `refFields.map(() => new Map())`, so index `i` exists for every `i` a caller can ask about
+      // `specs.map(() => new Map())`, so index `i` exists for every `i` a caller can ask about
       // — the `??` arm was unreachable, and ADR-0361's reason for deleting an unreachable check is
       // that a dead arm reads as a handled case. Same spelling the fold itself uses one scope in.
       applied: paymentRead.applied[i]!,

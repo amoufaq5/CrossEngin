@@ -926,6 +926,7 @@ async function seedInvoice(
   if (opts.paid !== undefined) {
     await store.create(COVERAGE_TENANT, "Payment", {
       state: "completed",
+      direction: "inbound",
       amount: opts.paid,
       invoice_id: id,
     });
@@ -1012,7 +1013,7 @@ describe("compileOperateServer — settlement coverage is wired for the real pac
       total: 90,
       currency: "USD",
     });
-    await store.create(COVERAGE_TENANT, "Payment", { state: "completed", amount: 90, bill_id: String(bill["id"]) });
+    await store.create(COVERAGE_TENANT, "Payment", { state: "completed", direction: "outbound", amount: 90, bill_id: String(bill["id"]) });
     const r = await callOperation(compiled, "bill.update", { id: String(bill["id"]) }, { total: 120 });
     expect(r.status).toBe(422);
     expect(r.body["error"]).toBe("bill_locked");
@@ -1030,7 +1031,7 @@ describe("compileOperateServer — settlement coverage is wired for the real pac
       total: 120,
       currency: "USD",
     });
-    await store.create(COVERAGE_TENANT, "Payment", { state: "completed", amount: 90, bill_id: String(bill["id"]) });
+    await store.create(COVERAGE_TENANT, "Payment", { state: "completed", direction: "outbound", amount: 90, bill_id: String(bill["id"]) });
     const r = await callOperation(compiled, "bill.mark_paid", { id: String(bill["id"]) }, null);
     expect(r.status).toBe(422);
     expect(r.body["error"]).toBe("uncovered_settlement");

@@ -21,8 +21,9 @@ import { CREATED_BY_FIELD, UPDATED_BY_FIELD } from "./write-surface.js";
  *
  * Not every ledger posting is gated, and that is a choice rather than a measurement: `Invoice.send`
  * posts revenue (the recognition effect fires on `sent`), `JournalEntry.reverse` posts a reversal
- * entry and `Payment.refund` returns money (posting nothing), and none is in the set — issuing an invoice is ordinarily
- * one person's act. A tenant transition named anything else is not gated either.
+ * entry and `Payment.refund` returns money (posting the `-REFUND` reversal of its settlement entry),
+ * and none is in the set — issuing an invoice is ordinarily one person's act. A tenant transition
+ * named anything else is not gated either.
  */
 export const APPROVE_CLASS_TRANSITION_NAMES: ReadonlySet<string> = new Set([
   "approve",

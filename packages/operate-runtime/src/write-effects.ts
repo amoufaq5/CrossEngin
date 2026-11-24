@@ -31,9 +31,15 @@ import {
 import type { EntityRecord, ListFilter } from "./store.js";
 import {
   amountOwed,
+  PAYMENT_DIRECTION,
+  paymentDirectionOf,
+  paymentNamesDocument,
+  declaredSettlementSpec,
   readAppliedPayments,
   readAppliedToDocument,
   settlementIsCovered,
+  type PaymentDirection,
+  type PaymentSettlementSpec,
   type WriteGuardInput,
 } from "./write-guards.js";
 
@@ -464,13 +470,15 @@ export interface PostingReversalConfig {
   /** `JournalEntry.source` of the reversing entry. */
   readonly sourceLabel: string;
   /**
-   * The payment field naming this document. When set, leaving the state is **refused** while
-   * completed payments are applied to it: reversing the posting puts the whole control balance back
-   * while the settlement those payments posted stands, so a Bill of 200 with 50 paid, voided, left
-   * accounts payable 50 in debit — a balance owed by a vendor for a bill that no longer exists.
-   * Refunding the payment first reverses its settlement, and then the void is clean.
+   * The payment reference naming this document and the direction that settles it, from
+   * `SETTLEMENT_COVERAGE_DOCUMENTS`. When set, leaving the state is **refused** while completed
+   * payments are applied to it: reversing the posting puts the whole control balance back while the
+   * settlement those payments posted stands, so a Bill of 200 with 50 paid, voided, left accounts
+   * payable 50 in debit — a balance owed by a vendor for a bill that no longer exists. Refunding the
+   * payment first reverses its settlement, and then the void is clean. The applied figure is the
+   * fold's, so a +50/−50 pair no longer reads as nothing applied (ADR-0468): the −50 counts nothing.
    */
-  readonly refuseWhileSettledBy?: string;
+  readonly refuseWhileSettledBy?: PaymentSettlementSpec;
   readonly entryEntity?: string;
   readonly lineEntity?: string;
   readonly periods?: PostingPeriodConfig;
@@ -1979,8 +1987,10 @@ export interface PaymentSettlementGlConfig {
   readonly lineEntity?: string;
   readonly stateField?: string;
   readonly completedState?: string;
-  readonly directionField?: string;
-  readonly inboundValue?: string;
+  // No direction override: the posting reads a payment's direction through `PAYMENT_DIRECTION`
+  // alone, the spelling the fold and the allocation guard read (ADR-0468). An override here would
+  // let the posting clear AR for a payment those readers count toward a bill — two spellings of one
+  // fact, which is the divergence the declaration exists to make inexpressible.
   readonly amountField?: string;
   readonly cashAmountField?: string;
   readonly numberField?: string;
@@ -1999,8 +2009,11 @@ export interface PaymentSettlementGlConfig {
    * the realized exchange gain or loss, posted in the base currency only. Absent, everything is rate 1.
    */
   readonly fx?: PostingFxConfig;
-  /** The documents a payment settles, `[refField, entity]`, read for the rate they were booked at. */
-  readonly settledDocuments?: readonly { readonly refField: string; readonly entity: string }[];
+  /**
+   * The documents a payment settles — each its reference field, its entity and the direction that
+   * settles it, from `SETTLEMENT_COVERAGE_DOCUMENTS` — read for the rate they were booked at.
+   */
+  readonly settledDocuments?: readonly (PaymentSettlementSpec & { readonly entity: string })[];
   readonly clock?: { now(): Date };
 }
 
@@ -2010,8 +2023,6 @@ const SETTLEMENT_FALLBACKS = {
   lineEntity: "JournalLine",
   stateField: "state",
   completedState: "completed",
-  directionField: "direction",
-  inboundValue: "inbound",
   amountField: "amount",
   cashAmountField: "cash_amount",
   numberField: "payment_number",
@@ -2102,7 +2113,8 @@ export function paymentSettlementGlPostingEffect(config: PaymentSettlementGlConf
     if (payId === null) return;
     const amountUnits = moneyUnits(pay[c.amountField]) ?? 0n;
     if (amountUnits <= 0n) return;
-    const inbound = pay[c.directionField] === c.inboundValue;
+    const direction = paymentDirectionOf(pay, PAYMENT_DIRECTION);
+    const inbound = direction === "inbound";
 
     const now = c.clock?.now() ?? new Date();
     const nowIso = now.toISOString();
@@ -2122,7 +2134,7 @@ export function paymentSettlementGlPostingEffect(config: PaymentSettlementGlConf
     let controlRate = cashRate ?? RATE_ONE;
     let settled: Awaited<ReturnType<typeof settledDocumentRate>> = null;
     if (config.fx !== undefined) {
-      settled = await settledDocumentRate(input, config, pay, currency);
+      settled = await settledDocumentRate(input, config, pay, currency, direction);
       if (settled !== null) controlRate = settled.rate;
       else if (cashRate === null) {
         controlRate = await resolvePostingRate(input, config.fx, pay, currency, today, "this payment");
@@ -2190,24 +2202,37 @@ function quotientRate(functional: bigint, amount: bigint): string {
 /**
  * The rate the document a payment settles was booked at, when the payment names one in the same
  * currency and it carries a stamped rate; else null.
+ *
+ * A document whose `settledBy` is not this payment's direction is skipped: the posting clears the
+ * other side's control account, so that document's booking rate is not the rate of the balance
+ * cleared. The payment-allocation guard refuses such a payment before it completes, so this matters
+ * only where that guard is not in the guard list — a deployment passing its own `writeGuards`. A row
+ * written straight to the store runs no effect at all, and one completed later through a handler
+ * meets the guard at the completion edge. (The guard reads only the references `Payment` declares,
+ * so a manifest whose `Payment` lacks a reference the declaration carries is a second, contrived
+ * route — and an undeclared reference is refused at validation, ADR-0421.)
  */
 async function settledDocumentRate(
   input: WriteEffectInput,
   config: PaymentSettlementGlConfig,
   pay: EntityRecord,
   currency: string,
-): Promise<{ readonly rate: ExactDecimal; readonly refField: string; readonly documentId: string } | null> {
+  direction: PaymentDirection,
+): Promise<{ readonly rate: ExactDecimal; readonly spec: PaymentSettlementSpec; readonly documentId: string } | null> {
   const bookingField = config.fx?.bookingRateField;
   if (bookingField === undefined) return null;
   for (const doc of config.settledDocuments ?? []) {
+    if (doc.settledBy !== direction) continue;
     const ref = pay[doc.refField];
-    if (typeof ref !== "string" || ref.length === 0) continue;
+    if (!paymentNamesDocument(ref)) continue;
     const settled = await input.store.get(input.tenantId, doc.entity, ref);
     if (settled === null) continue;
     const docCurrency = typeof settled["currency"] === "string" ? (settled["currency"] as string) : null;
     if (docCurrency !== null && docCurrency.toUpperCase() !== currency.toUpperCase()) continue;
     const stamped = positiveRate(settled[bookingField]);
-    if (stamped !== null) return { rate: stamped, refField: doc.refField, documentId: ref };
+    if (stamped !== null) {
+      return { rate: stamped, spec: { refField: doc.refField, settledBy: doc.settledBy }, documentId: ref };
+    }
   }
   return null;
 }
@@ -2218,13 +2243,21 @@ async function settledDocumentRate(
  * instalment on its own rounds each one, so three payments of EUR 33.33 + 33.33 + 33.35 against
  * EUR 100.01 booked at 1.0731 cleared 107.33 from a receivable carried at 107.32 and left a cent
  * on a paid invoice for ever; converting the running total clears exactly what was booked.
+ *
+ * Exactly, **provided every instalment saw the same running total**. The total is the fold's, and
+ * ADR-0468 changed what the fold counts (a negative or wrong-direction row now counts nothing), so a
+ * foreign-currency document whose instalments straddle that upgrade, with such a legacy row ahead of
+ * a pre-upgrade instalment, can be left ±0.01 in functional AR/AP once paid: the conversions no
+ * longer telescope. The old fold could leave such a cent already whenever a negative row sat between
+ * instalments. Closing it means basing `before` on the functional amount the document's earlier
+ * settlement entries actually cleared rather than re-converting the fold's total.
  */
 async function clearedAtBookingRate(
   input: WriteEffectInput,
-  settled: { readonly rate: ExactDecimal; readonly refField: string; readonly documentId: string },
+  settled: { readonly rate: ExactDecimal; readonly spec: PaymentSettlementSpec; readonly documentId: string },
   amountUnits: bigint,
 ): Promise<bigint> {
-  const read = await readAppliedToDocument(input.store, input.tenantId, settled.refField, settled.documentId, {
+  const read = await readAppliedToDocument(input.store, input.tenantId, settled.spec, settled.documentId, {
     ceiling: 10_000,
   });
   if (!read.complete) {
@@ -2242,6 +2275,11 @@ export interface PaymentApplicationConfig {
   readonly documentEntity: string;
   /** The Payment field referencing the document (e.g. "invoice_id"). */
   readonly refField: string;
+  /**
+   * The direction whose money settles the document — `SETTLEMENT_COVERAGE_DOCUMENTS`' `settledBy`.
+   * Required: only a payment the posting cleared this document's control side with counts toward it.
+   */
+  readonly settledBy: PaymentDirection;
   readonly stateField?: string;
   readonly completedState?: string;
   readonly amountField?: string;
@@ -2253,9 +2291,9 @@ export interface PaymentApplicationConfig {
   readonly settleableStates?: readonly string[];
   /**
    * The largest payment set the applied total is summed over **in full**. Reaching it is reported
-   * rather than silently truncated, and the direction of the error is not bounded: nothing
-   * enforces `Payment.amount`'s declared `min: 0`, so a dropped negative correction over-reports
-   * the applied total and settles a document that is still owed.
+   * rather than silently truncated. A negative amount counts nothing since ADR-0468, so a dropped
+   * tail can only under-report the applied total — and a figure from a prefix is still not the
+   * figure, so the effect aborts rather than deciding from it.
    */
   readonly maxPayments?: number;
   /** Tax withheld at source; the payer owes the total less it (see `amountOwed`). */
@@ -2306,7 +2344,7 @@ export function paymentApplicationEffect(config: PaymentApplicationConfig): Writ
     if (!entersState(input, c.stateField, c.completedState)) return;
 
     const docId = input.after[c.refField];
-    if (typeof docId !== "string" || docId.length === 0) return;
+    if (!paymentNamesDocument(docId)) return;
     const doc = await input.store.get(input.tenantId, c.documentEntity, docId);
     if (doc === null) return;
     const docState = doc[c.documentStateField];
@@ -2320,9 +2358,11 @@ export function paymentApplicationEffect(config: PaymentApplicationConfig): Writ
     // Every completed payment, not the first page of them, and with no stop once the running total
     // crosses `total` — both rules live in `readAppliedToDocument` now, with the measured defect
     // that produced them (an invoice of 400 with three payments of 200 and a correction of −300,
-    // written `paid` at a cap of 3 and correctly left `sent` at 99). The `eq` filter on the
-    // reference is the shape that keeps this one index lookup rather than a tenant-wide drain.
-    const read = await readAppliedToDocument(input.store, input.tenantId, c.refField, docId, {
+    // written `paid` at a cap of 3 and correctly left `sent` at 99 — before ADR-0468 made a negative
+    // row count nothing, which is what the posting clears for it). Only payments of this document's
+    // `settledBy` direction count. The `eq` filter on the reference is the shape that keeps this one
+    // index lookup rather than a tenant-wide drain.
+    const read = await readAppliedToDocument(input.store, input.tenantId, { refField: c.refField, settledBy: c.settledBy }, docId, {
       paymentEntity: c.paymentEntity,
       stateField: c.stateField,
       completedState: c.completedState,
@@ -2361,6 +2401,7 @@ async function reopenUncovered(
     paymentEntity: string;
     documentEntity: string;
     refField: string;
+    settledBy: PaymentDirection;
     stateField: string;
     completedState: string;
     amountField: string;
@@ -2375,11 +2416,11 @@ async function reopenUncovered(
   reopenState: string,
 ): Promise<void> {
   const docId = input.after[c.refField];
-  if (typeof docId !== "string" || docId.length === 0) return;
+  if (!paymentNamesDocument(docId)) return;
   const doc = await input.store.get(input.tenantId, c.documentEntity, docId);
   if (doc === null || doc[c.documentStateField] !== c.paidState) return;
   const owed = amountOwed(doc, c.documentTotalField, c.withholdingField);
-  const read = await readAppliedToDocument(input.store, input.tenantId, c.refField, docId, {
+  const read = await readAppliedToDocument(input.store, input.tenantId, { refField: c.refField, settledBy: c.settledBy }, docId, {
     paymentEntity: c.paymentEntity,
     stateField: c.stateField,
     completedState: c.completedState,
@@ -2402,7 +2443,11 @@ async function reopenUncovered(
 interface FxRevalDocSpec {
   readonly entity: string;
   readonly openStates: readonly string[];
-  readonly paymentRefField: string;
+  /**
+   * The payment reference naming this document and the direction that settles it, from
+   * `SETTLEMENT_COVERAGE_DOCUMENTS`, so the open balance revalued is what the GL still carries.
+   */
+  readonly payment: PaymentSettlementSpec;
   /** "ar" → control is AR (asset); "ap" → control is AP (liability). */
   readonly side: "ar" | "ap";
   /**
@@ -2486,8 +2531,8 @@ const FX_REVAL_FALLBACKS = {
   lineEntity: "JournalLine",
   functionalCurrency: "USD",
   documents: [
-    { entity: "Invoice", openStates: ["sent", "overdue"], paymentRefField: "invoice_id", side: "ar" },
-    { entity: "Bill", openStates: ["approved", "overdue"], paymentRefField: "bill_id", side: "ap" },
+    { entity: "Invoice", openStates: ["sent", "overdue"], payment: declaredSettlementSpec("Invoice"), side: "ar" },
+    { entity: "Bill", openStates: ["approved", "overdue"], payment: declaredSettlementSpec("Bill"), side: "ap" },
   ] as readonly FxRevalDocSpec[],
   paymentEntity: "Payment",
   paymentStateField: "state",
@@ -2579,10 +2624,9 @@ export function unrealizedFxRevaluationEffect(config: UnrealizedFxRevaluationCon
     // invoice's payments with a same-id bill's.
     //
     // Zipped back onto the specs by **position**, which is what `AppliedPaymentsRead` guarantees:
-    // index *i* answers for `refFields[i]`, so the side a map belongs to is the index it was asked
+    // index *i* answers for `specs[i]`, so the side a map belongs to is the index it was asked
     // for and never a key a reader could mistype.
-    const refFields = c.documents.map((spec) => spec.paymentRefField);
-    const paymentRead = await readAppliedPayments(input.store, input.tenantId, refFields, {
+    const paymentRead = await readAppliedPayments(input.store, input.tenantId, c.documents.map((spec) => spec.payment), {
       paymentEntity: c.paymentEntity,
       stateField: c.paymentStateField,
       completedState: c.paymentCompletedState,
@@ -2595,7 +2639,7 @@ export function unrealizedFxRevaluationEffect(config: UnrealizedFxRevaluationCon
     const sides = c.documents.map((spec, i) => ({
       spec,
       // `!` and not `?? new Map()`: `foldCompletedPayments` builds one bucket per ref field with
-      // `refFields.map(() => new Map())`, so index `i` exists for every `i` a caller can ask about
+      // `specs.map(() => new Map())`, so index `i` exists for every `i` a caller can ask about
       // — the `??` arm was unreachable, and ADR-0361's reason for deleting an unreachable check is
       // that a dead arm reads as a handled case. Same spelling the fold itself uses one scope in.
       applied: paymentRead.applied[i]!,

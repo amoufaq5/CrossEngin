@@ -101,8 +101,10 @@ export const PAYMENT_ENTITY: Entity = {
       default: { kind: "literal", value: "bank_transfer" },
     },
     { name: "account_id", type: { kind: "reference", target: "Account" }, indexed: true },
-    // The document this payment applies to (one of, by direction). Lets partial
-    // payments accumulate against a specific invoice/bill and auto-settle it.
+    // The document this payment applies to (one of, by direction: an inbound payment may name
+    // only an invoice, an outbound one only a bill). Lets partial payments accumulate against a
+    // specific invoice/bill and auto-settle it. Enforced by operate-runtime's
+    // `paymentAllocationGuard` (ADR-0468), which also refuses a negative `amount`.
     { name: "invoice_id", type: { kind: "reference", target: "Invoice" }, indexed: true },
     { name: "bill_id", type: { kind: "reference", target: "Bill" }, indexed: true },
     { name: "amount", type: { kind: "decimal", precision: 16, scale: 2, min: 0 }, required: true },
