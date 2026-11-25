@@ -5,7 +5,11 @@ import {
   principalAbacAttributes,
   type ResolvedPrincipal,
 } from "@crossengin/api-gateway";
-import type { PrincipalResolver, PrincipalResolverInput } from "@crossengin/api-gateway-runtime";
+import {
+  PrincipalDirectoryUnavailable,
+  type PrincipalResolver,
+  type PrincipalResolverInput,
+} from "@crossengin/api-gateway-runtime";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -328,6 +332,8 @@ describe("CachedAbacAttributeDirectory", () => {
     };
     const cached = new CachedAbacAttributeDirectory(inner, { now: clock.now });
     await expect(cached.attributesFor(TENANT_A, USER)).rejects.toThrow("connection refused");
+    // Typed, so the gateway answers 503 rather than an unclassified 500 (ADR-0473).
+    await expect(cached.attributesFor(TENANT_A, USER)).rejects.toBeInstanceOf(PrincipalDirectoryUnavailable);
   });
 
   it("serves the last known value when a refresh throws", async () => {
@@ -366,8 +372,22 @@ describe("CachedAbacAttributeDirectory", () => {
     await cached.attributesFor(TENANT_A, USER);
     fail = true;
     clock.advance(100_001);
-    await expect(cached.attributesFor(TENANT_A, USER)).rejects.toThrow("blip");
+    const err = await cached.attributesFor(TENANT_A, USER).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PrincipalDirectoryUnavailable);
+    expect((err as Error).message).toContain("blip");
+    expect((err as Error).cause).toBeInstanceOf(Error);
     expect(onRefreshError).toHaveBeenCalledWith(TENANT_A, USER, expect.any(Error), false);
+  });
+
+  it("does not wrap a directory error that is already typed", async () => {
+    const typed = new PrincipalDirectoryUnavailable("inner", new Error("x"));
+    const inner: AbacAttributeDirectory = {
+      async attributesFor(): Promise<never> {
+        throw typed;
+      },
+    };
+    const cached = new CachedAbacAttributeDirectory(inner, { now: fakeClock().now });
+    await expect(cached.attributesFor(TENANT_A, USER)).rejects.toBe(typed);
   });
 
   it("serves a stale absence through a blip too", async () => {

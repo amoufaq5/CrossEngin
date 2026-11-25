@@ -78,6 +78,86 @@ export interface SystemActor {
   /** Primary role first. Must be non-empty; an empty list is a principal no grant can name. */
   readonly roles: readonly string[];
   readonly origin: SystemWriteOrigin;
+  /**
+   * Whether the tenant may be written at all, asked before **every** write this actor makes
+   * (ADR-0469). Required, because the alternative is a seam that defaults to *allow* — the defect
+   * restated as a default (ADR-0364, ADR-0386). A system write is not a request, so the
+   * request-path tenant-status gate (ADR-0334) is the wrong place to depend on: it is opt-in, and a
+   * job writing into a `pending_deletion` tenant's data — the data an Article 17 request has
+   * verified and queued for destruction — is the defect that gate exists to prevent.
+   */
+  readonly standing: TenantStandingReader;
+}
+
+/**
+ * Whether a tenant's data may be written by background work.
+ *
+ * Three answers and not a boolean, because *the tenant is blocked* and *nobody could say* lead to
+ * opposite dispositions: `blocked` is a fact about the tenant that a retry meets again, so it ends the
+ * run; `unknown` is a fact about the read, so it is retried. `status` is the lifecycle state the
+ * reader found — a vocabulary this package does not own (`@crossengin/tenant-lifecycle` does, and the
+ * reader is built from its `blocksWrites`), so it is carried as a string and never interpreted here.
+ */
+export type TenantStanding =
+  | { readonly kind: "writable" }
+  | { readonly kind: "blocked"; readonly status: string }
+  | { readonly kind: "unknown"; readonly reason: string };
+
+export type TenantStandingReader = (tenantId: string) => Promise<TenantStanding>;
+
+/**
+ * The reader for a deployment that holds **no tenant registry** — `--store memory`, where there is
+ * no `meta.tenants` to read and so no lifecycle state a tenant could be in. Named for that case and
+ * not `alwaysWritable`, because a deployment that does have a registry and passed this would be
+ * restating the defect the required field exists to end.
+ */
+export const NO_TENANT_REGISTRY_STANDING: TenantStandingReader = async () => ({ kind: "writable" });
+
+/**
+ * A system write refused because the tenant's lifecycle state blocks writes. **Not retryable**: the
+ * state is a fact about the tenant, so the next attempt meets it again, and burning a job's retry
+ * ladder on it would only delay the dead letter that says so. The message carries the state name and
+ * nothing from any row.
+ */
+export class TenantNotWritable extends Error {
+  readonly retryable = false;
+  constructor(
+    readonly tenantId: string,
+    readonly status: string,
+  ) {
+    super(`tenant_not_writable:${status}`);
+    this.name = "TenantNotWritable";
+  }
+}
+
+/** A system write not attempted because the tenant's standing could not be read. Retryable. */
+export class TenantStandingUnknown extends Error {
+  readonly retryable = true;
+  constructor(
+    readonly tenantId: string,
+    readonly reason: string,
+  ) {
+    super(`tenant_standing_unknown: ${reason}`);
+    this.name = "TenantStandingUnknown";
+  }
+}
+
+/** Throws the typed refusal for a non-writable answer; a reader that throws is `unknown`. */
+async function assertTenantWritable(reader: TenantStandingReader, tenantId: string): Promise<void> {
+  let standing: TenantStanding;
+  try {
+    standing = await reader(tenantId);
+  } catch (err) {
+    standing = { kind: "unknown", reason: err instanceof Error ? err.message : String(err) };
+  }
+  switch (standing.kind) {
+    case "writable":
+      return;
+    case "blocked":
+      throw new TenantNotWritable(tenantId, standing.status);
+    case "unknown":
+      throw new TenantStandingUnknown(tenantId, standing.reason);
+  }
 }
 
 /**
@@ -122,6 +202,12 @@ export interface SystemReadQuery {
 /** Everything a background unit of work may do in one tenant, bound to that tenant by construction. */
 export interface TenantEntityAccess {
   readonly tenantId: string;
+  /**
+   * Throws `TenantNotWritable` / `TenantStandingUnknown` unless the actor's standing reader answers
+   * `writable`. Every write calls it; a unit of work calls it first too, so a blocked tenant's run is
+   * refused before it reads anything rather than after it has computed what it would have written.
+   */
+  assertWritable(): Promise<void>;
   create(entity: string, body: Readonly<Record<string, unknown>>): Promise<SystemWriteResult>;
   update(entity: string, id: string, patch: Readonly<Record<string, unknown>>): Promise<SystemWriteResult>;
   transition(entity: string, id: string, transition: string): Promise<SystemWriteResult>;
@@ -235,6 +321,10 @@ export function buildSystemEntityAccess(input: SystemEntityAccessInput): SystemE
             operationId: spec.operationId,
           };
         }
+        // After the not-served answers and before anything reaches a handler: a blocked tenant is a
+        // throw rather than a `refused` result, because a sweep tallies a `refused` and carries on to
+        // the next record, and there is no next record worth reaching in a tenant nothing may write.
+        await assertTenantWritable(actor.standing, tenantId);
         sequence += 1;
         const at = now().toISOString();
         const route = routeFromSpec(spec);
@@ -292,6 +382,7 @@ export function buildSystemEntityAccess(input: SystemEntityAccessInput): SystemE
       };
       return {
         tenantId,
+        assertWritable: () => assertTenantWritable(actor.standing, tenantId),
         create: (entity, body) => dispatch(find(entity, "create"), `create on ${entity}`, {}, body),
         update: (entity, id, patch) => dispatch(find(entity, "update"), `update on ${entity}`, { id }, patch),
         transition: (entity, id, transition) =>

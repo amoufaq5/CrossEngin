@@ -222,7 +222,7 @@ describe("surveyManifestJobs", () => {
       servedOnlyProducers: [],
     });
     expect(survey.findings.map((f) => f.verdict)).toEqual(["producer_unmounted", "producer_unmounted"]);
-    expect(survey.findings[0]?.detail).toMatch(/A handler for it is registered, so mounting the producer is the whole remedy/);
+    expect(survey.findings[0]?.detail).toMatch(/A handler for it is registered here, so mounting the producer is the whole remedy/);
     expect(survey.findings[0]?.detail).not.toMatch(/register a handler/);
     expect(survey.findings[1]?.detail).toMatch(/Both halves are the remedy/);
   });
@@ -558,5 +558,25 @@ describe("unproducibleJobKinds", () => {
 
   it("is empty for no declarations", () => {
     expect(unproducibleJobKinds([])).toEqual([]);
+  });
+});
+
+describe("producer_unmounted speaks for this process, not the deployment (ADR-0469)", () => {
+  it("never claims nothing accumulates, because another replica may mount the producer", () => {
+    for (const handled of [false, true]) {
+      const survey = surveyManifestJobs({
+        jobs: [scheduled],
+        handledJobIds: handled ? [scheduled.id] : [],
+        producibleEventNames: EMITS_BOTH,
+        mountedProducers: [],
+        servedOnlyProducers: [],
+      });
+      const detail = survey.findings[0]!.detail;
+      expect(survey.findings[0]!.verdict).toBe("producer_unmounted");
+      expect(detail).toContain("this process does not mount");
+      expect(detail).toContain("Another replica on the same database may mount it");
+      expect(detail).not.toContain("this deployment does not mount");
+      expect(detail).not.toContain("no pending row accumulates");
+    }
   });
 });

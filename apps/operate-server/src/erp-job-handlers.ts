@@ -11,6 +11,9 @@ import {
   type SystemEntityAccess,
   type SystemWriteResult,
   type TenantEntityAccess,
+  TenantNotWritable,
+  TenantStandingUnknown,
+  type TenantStandingReader,
 } from "@crossengin/operate-runtime";
 import type { JobHandlerContext, JobHandlerProvider, JobHandlerResult } from "@crossengin/workflow-runtime-pg";
 
@@ -269,6 +272,13 @@ export interface ErpJobProvidersInput {
    * rows under another manifest's grants and guards.
    */
   readonly resolveAccess: JobAccessResolver;
+  /**
+   * Whether the run's tenant may be written. Required and asked first, before the run reads
+   * anything (ADR-0469): a run for a `suspended`, `archived` or `pending_deletion` tenant is still
+   * *claimed* — so it is finalized and reported, never silently skipped — and then refused here,
+   * non-retryably, because the tenant's state is a fact the next attempt would meet again.
+   */
+  readonly tenantStanding: TenantStandingReader;
   readonly settings: SettingsStore;
   readonly now?: () => Date;
 }
@@ -329,12 +339,25 @@ export function buildErpJobProviders(input: ErpJobProvidersInput): readonly JobH
         const access = resolved.access.forTenant(ctx.tenantId, {
           roles: input.coverage.actorRoles,
           origin: { kind: "job", jobId: ctx.jobDefinitionId, runId: ctx.runId },
+          standing: input.tenantStanding,
         });
         const tally = new Tally();
         try {
+          // Asked once up front so a blocked tenant's run reads nothing; every write asks again, so a
+          // tenant whose state changes while the run is under way stops being written at that write.
+          await access.assertWritable();
           const early = await impl({ ctx, access, at: fireTime(ctx, now), settings: input.settings, tally });
           return early ?? conclude(tally);
         } catch (err) {
+          if (err instanceof TenantNotWritable) {
+            // The code and the message carry the lifecycle state's name and nothing from any row.
+            // Writes made before a mid-run state change stay made, and the markers on them make a
+            // later run — once the tenant is writable again — finish rather than repeat the work.
+            return failed("tenant_not_writable", err.message, false);
+          }
+          if (err instanceof TenantStandingUnknown) {
+            return failed("tenant_standing_unknown", "the tenant's lifecycle state could not be read", true);
+          }
           // A ceiling is a property of the tenant's data and will be there next attempt too, so it
           // is a non-retryable failure rather than a throw — a throw is retried up to the job's
           // attempt ceiling, re-reading the same 20,000 rows each time for an answer that cannot change.
@@ -560,9 +583,29 @@ export function depreciationPeriodsDue(
   window.forEach((p, i) => {
     if (posted.has(p.key)) latestPosted = i;
   });
-  return window.filter(
+  const due = window.filter(
     (p, i) => p.key === current.key || drafts.has(p.key) || (latestPosted >= 0 && i > latestPosted),
   );
+  // A draft older than the window is still a charge a refused run started and must be finished:
+  // the window bounds the *catch-up* read, and a draft is found by its own unbounded read instead
+  // (ADR-0469), so it is resumed however far back it sits. Newer-than-current drafts are not charged
+  // early; there is no such draft unless a clock moved backwards.
+  const first = window[0]?.key ?? current.key;
+  const older = [...drafts]
+    .filter((key) => key < first && DEPRECIATION_PERIOD_KEY.test(key))
+    .sort()
+    .map(depreciationPeriodFromKey);
+  return [...older, ...due];
+}
+
+const DEPRECIATION_PERIOD_KEY = /^\d{4}-(0[1-9]|1[0-2])$/;
+
+/** The period a `YYYY-MM` marker names — the inverse of `depreciationPeriod`'s `key`. */
+export function depreciationPeriodFromKey(key: string): DepreciationPeriod {
+  const year = Number(key.slice(0, 4));
+  const month = Number(key.slice(5, 7));
+  // `depreciationPeriod` answers the month *before* the date it is given.
+  return depreciationPeriod(new Date(Date.UTC(year, month, 1)));
 }
 
 async function depreciationRun(run: Run): Promise<JobHandlerResult | null> {
@@ -605,10 +648,29 @@ async function depreciationRun(run: Run): Promise<JobHandlerResult | null> {
     ],
     "the depreciation entries in the catch-up window",
   );
+  // Every depreciation **draft**, however old, read separately and with no date bound (ADR-0469).
+  // The window read alone orphaned a draft a refused run left once its period fell out of the window:
+  // nothing would ever find it again, so the charge was neither posted nor reported. The population
+  // is the drafts refused runs left behind, which is small, and the read still refuses past the
+  // ceiling rather than acting on a prefix.
+  const strandedDrafts = await readAll(
+    run,
+    "JournalEntry",
+    [
+      { field: "source", value: "depreciation" },
+      { field: "state", value: "draft" },
+    ],
+    "the depreciation drafts earlier runs left behind",
+  );
   const byMarker = new Map<string, EntityRecord>();
   for (const je of existing) {
     const m = MARKER.exec(str(je, "memo") ?? "");
     if (m !== null) byMarker.set(m[0], je);
+  }
+  // Merged without overwriting: a draft the window read already found is the same row.
+  for (const je of strandedDrafts) {
+    const m = MARKER.exec(str(je, "memo") ?? "");
+    if (m !== null && !byMarker.has(m[0])) byMarker.set(m[0], je);
   }
 
   const charges: { readonly asset: EntityRecord; readonly period: DepreciationPeriod; readonly amount: bigint }[] = [];

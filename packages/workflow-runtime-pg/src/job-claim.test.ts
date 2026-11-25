@@ -1,9 +1,13 @@
 import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
+import { assertBindArity } from "@crossengin/testing";
 import { describe, expect, it } from "vitest";
 
 import {
   JOB_CLAIM_EXCLUDED_TENANT_STATUSES,
+  JOB_CLAIM_TENANT_SAVEPOINT,
   JOB_QUEUE_VISIBILITY,
+  JOB_RUN_STATUSES_WRITTEN,
+  type TenantClaimFailure,
   claimDueJobs,
   claimDueJobsPerTenant,
   listJobClaimTenants,
@@ -167,24 +171,50 @@ describe("listJobClaimTenants", () => {
 
 describe("claimDueJobsPerTenant", () => {
   const T = (n: number): string => `00000000-0000-4000-8000-${n.toString().padStart(12, "0")}`;
+  const unexpected = (f: TenantClaimFailure): void => {
+    throw new Error(`no tenant should fail here: ${f.tenantId} ${String(f.error)}`);
+  };
 
-  /** A queue of due runs per tenant; each claim takes from the head of the tenant it is confined to. */
+  const SAVEPOINT_RE = /^(SAVEPOINT|RELEASE SAVEPOINT|ROLLBACK TO SAVEPOINT) [a-z_]+$/;
+
+  /**
+   * A queue of due runs per tenant; each claim takes from the head of the tenant it is confined to.
+   * `failing` names tenants whose claim raises, and the fake then models Postgres' aborted
+   * transaction: every statement but a `ROLLBACK TO SAVEPOINT` raises `25P02` until one runs — so a
+   * claimer that does not roll back to a savepoint loses every later tenant, as the real one did.
+   */
   function queueConnection(
     due: Record<string, number>,
     log: string[],
+    failing: ReadonlySet<string> = new Set(),
   ): PgConnection {
     let current: string | null = null;
     let seq = 0;
+    let aborted = false;
     const conn: PgConnection = {
       query: (async (sql: string, params?: readonly unknown[]): Promise<PgQueryResult> => {
+        assertBindArity(sql, params);
+        if (SAVEPOINT_RE.test(sql)) {
+          log.push(sql);
+          if (sql.startsWith("ROLLBACK TO")) aborted = false;
+          else if (aborted) throw new Error("25P02 current transaction is aborted");
+          return { rows: [], rowCount: 0 };
+        }
+        if (aborted) throw new Error("25P02 current transaction is aborted");
         if (sql === SET_TENANT_CONTEXT_SQL) {
           current = String(params?.[0]);
           log.push(`ctx ${current}`);
           return { rows: [], rowCount: 1 };
         }
+        if (!sql.includes("FOR UPDATE SKIP LOCKED")) throw new Error(`unexpected statement: ${sql}`);
         const limit = Number(params?.[1]);
         const tenant = String(params?.[4]);
         if (tenant !== current) throw new Error(`claim for ${tenant} under context ${String(current)}`);
+        if (failing.has(tenant)) {
+          aborted = true;
+          log.push(`claim ${tenant} raised`);
+          throw new Error(`claim refused for ${tenant}`);
+        }
         const take = Math.min(limit, due[tenant] ?? 0);
         due[tenant] = (due[tenant] ?? 0) - take;
         log.push(`claim ${tenant} ${limit.toString()} -> ${take.toString()}`);
@@ -206,6 +236,7 @@ describe("claimDueJobsPerTenant", () => {
   it("sets each tenant's context before claiming its runs, all in one transaction", async () => {
     const log: string[] = [];
     const result = await claimDueJobsPerTenant(queueConnection({ [T(1)]: 1, [T(2)]: 1 }, log), {
+      onTenantClaimFailed: unexpected,
       workerId: "w",
       now: NOW,
       limit: 10,
@@ -215,13 +246,25 @@ describe("claimDueJobsPerTenant", () => {
     expect(log[0]).toBe("BEGIN");
     expect(log.at(-1)).toBe("COMMIT");
     expect(log.filter((l) => l === "BEGIN")).toHaveLength(1);
-    expect(log.slice(1, 5)).toEqual([`ctx ${T(1)}`, `claim ${T(1)} 5 -> 1`, `ctx ${T(2)}`, `claim ${T(2)} 5 -> 1`]);
+    const sp = JOB_CLAIM_TENANT_SAVEPOINT;
+    expect(log.slice(1, 9)).toEqual([
+      `SAVEPOINT ${sp}`,
+      `ctx ${T(1)}`,
+      `claim ${T(1)} 5 -> 1`,
+      `RELEASE SAVEPOINT ${sp}`,
+      `SAVEPOINT ${sp}`,
+      `ctx ${T(2)}`,
+      `claim ${T(2)} 5 -> 1`,
+      `RELEASE SAVEPOINT ${sp}`,
+    ]);
     expect(result.tenantsVisited).toBe(2);
+    expect(result.failedTenants).toEqual([]);
   });
 
   it("caps each tenant at its share, so one backlog cannot fill every slot", async () => {
     const log: string[] = [];
     const result = await claimDueJobsPerTenant(queueConnection({ [T(1)]: 100, [T(2)]: 100 }, log), {
+      onTenantClaimFailed: unexpected,
       workerId: "w",
       now: NOW,
       limit: 4,
@@ -234,6 +277,7 @@ describe("claimDueJobsPerTenant", () => {
   it("gives leftover capacity to the tenants that filled their share", async () => {
     const log: string[] = [];
     const result = await claimDueJobsPerTenant(queueConnection({ [T(1)]: 100, [T(2)]: 0, [T(3)]: 0 }, log), {
+      onTenantClaimFailed: unexpected,
       workerId: "w",
       now: NOW,
       limit: 9,
@@ -246,10 +290,17 @@ describe("claimDueJobsPerTenant", () => {
   it("rotates the starting tenant and resumes after the last one asked", async () => {
     const log: string[] = [];
     const conn = queueConnection({ [T(1)]: 100, [T(2)]: 100, [T(3)]: 100 }, log);
-    const first = await claimDueJobsPerTenant(conn, { workerId: "w", now: NOW, limit: 1, tenantIds: [T(1), T(2), T(3)] });
+    const first = await claimDueJobsPerTenant(conn, {
+      onTenantClaimFailed: unexpected,
+      workerId: "w",
+      now: NOW,
+      limit: 1,
+      tenantIds: [T(1), T(2), T(3)],
+    });
     expect(first.claimed.map((j) => j.tenantId)).toEqual([T(1)]);
     expect(first.nextStartIndex).toBe(1);
     const second = await claimDueJobsPerTenant(conn, {
+      onTenantClaimFailed: unexpected,
       workerId: "w",
       now: NOW,
       limit: 1,
@@ -262,17 +313,83 @@ describe("claimDueJobsPerTenant", () => {
 
   it("opens no transaction for an empty tenant list", async () => {
     const log: string[] = [];
-    const result = await claimDueJobsPerTenant(queueConnection({}, log), { workerId: "w", now: NOW, tenantIds: [] });
-    expect(result).toEqual({ claimed: [], nextStartIndex: 0, tenantsVisited: 0 });
+    const result = await claimDueJobsPerTenant(queueConnection({}, log), {
+      onTenantClaimFailed: unexpected,
+      workerId: "w",
+      now: NOW,
+      tenantIds: [],
+    });
+    expect(result).toEqual({ claimed: [], failedTenants: [], nextStartIndex: 0, tenantsVisited: 0 });
     expect(log).toEqual([]);
   });
 
   it("refuses a malformed tenant id before opening the transaction", async () => {
     const log: string[] = [];
     await expect(
-      claimDueJobsPerTenant(queueConnection({}, log), { workerId: "w", now: NOW, tenantIds: ["bad tenant"] }),
+      claimDueJobsPerTenant(queueConnection({}, log), {
+        onTenantClaimFailed: unexpected,
+        workerId: "w",
+        now: NOW,
+        tenantIds: ["bad tenant"],
+      }),
     ).rejects.toThrow(/invalid tenantId/);
     expect(log).toEqual([]);
+  });
+
+  it("rolls one tenant's failed visit back to its savepoint and still claims for the others", async () => {
+    const log: string[] = [];
+    const failures: TenantClaimFailure[] = [];
+    const result = await claimDueJobsPerTenant(
+      queueConnection({ [T(1)]: 1, [T(2)]: 1, [T(3)]: 1 }, log, new Set([T(2)])),
+      {
+        onTenantClaimFailed: (f) => failures.push(f),
+        workerId: "w",
+        now: NOW,
+        limit: 9,
+        tenantIds: [T(1), T(2), T(3)],
+      },
+    );
+    expect(result.claimed.map((j) => j.tenantId)).toEqual([T(1), T(3)]);
+    expect(result.failedTenants).toEqual([T(2)]);
+    expect(failures.map((f) => f.tenantId)).toEqual([T(2)]);
+    expect(String(failures[0]?.error)).toContain(`claim refused for ${T(2)}`);
+    const sp = JOB_CLAIM_TENANT_SAVEPOINT;
+    const b = log.indexOf(`claim ${T(2)} raised`);
+    // ROLLBACK TO and then RELEASE: the savepoint survives a rollback to it (ADR-0360).
+    expect(log.slice(b, b + 3)).toEqual([`claim ${T(2)} raised`, `ROLLBACK TO SAVEPOINT ${sp}`, `RELEASE SAVEPOINT ${sp}`]);
+    expect(log.at(-1)).toBe("COMMIT");
+  });
+
+  it("marks a pass-two failure as not the first visit, and keeps what the first visit claimed", async () => {
+    const log: string[] = [];
+    const failures: TenantClaimFailure[] = [];
+    // T1 fills its share in pass one and raises only when pass two asks it again.
+    const failing = {
+      has: (t: string) => t === T(1) && log.some((l) => l.startsWith(`claim ${T(1)} `) && l.includes("->")),
+    } as unknown as ReadonlySet<string>;
+    const result = await claimDueJobsPerTenant(queueConnection({ [T(1)]: 100, [T(2)]: 0 }, log, failing), {
+      onTenantClaimFailed: (f) => failures.push(f),
+      workerId: "w",
+      now: NOW,
+      limit: 4,
+      tenantIds: [T(1), T(2)],
+    });
+    expect(failures.map((f) => [f.tenantId, f.firstVisit])).toEqual([[T(1), false]]);
+    expect(result.claimed.filter((j) => j.tenantId === T(1))).toHaveLength(2);
+  });
+
+  it("does not ask a failed tenant again in the second pass", async () => {
+    const log: string[] = [];
+    const failures: TenantClaimFailure[] = [];
+    await claimDueJobsPerTenant(queueConnection({ [T(1)]: 100, [T(2)]: 100 }, log, new Set([T(1)])), {
+      onTenantClaimFailed: (f) => failures.push(f),
+      workerId: "w",
+      now: NOW,
+      limit: 4,
+      tenantIds: [T(1), T(2)],
+    });
+    expect(failures).toHaveLength(1);
+    expect(log.filter((l) => l === `claim ${T(1)} raised`)).toHaveLength(1);
   });
 
   it("runs beforeClaim once per tenant under that tenant's context", async () => {
@@ -280,6 +397,7 @@ describe("claimDueJobsPerTenant", () => {
     const conn = queueConnection({ [T(1)]: 100 }, log);
     const seen: string[] = [];
     await claimDueJobsPerTenant(conn, {
+      onTenantClaimFailed: unexpected,
       workerId: "w",
       now: NOW,
       limit: 4,
@@ -290,6 +408,26 @@ describe("claimDueJobsPerTenant", () => {
     });
     // T(1) fills its share and is asked again in pass two, without running beforeClaim twice.
     expect(seen).toEqual([`${T(1)} after ctx ${T(1)}`, `${T(2)} after ctx ${T(2)}`]);
+  });
+});
+
+describe("JOB_RUN_STATUSES_WRITTEN", () => {
+  it("is exactly the set of status values the queue's modules write", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const read = (f: string) => readFile(new URL(`./${f}`, import.meta.url), "utf8");
+    const [engine, cancellation, enqueue] = await Promise.all([
+      read("job-engine.ts"),
+      read("job-cancellation.ts"),
+      read("job-enqueue.ts"),
+    ]);
+    const literal = [...`${engine}\n${cancellation}`.matchAll(/SET status = '([a-z-]+)'/g)].map((m) => m[1]);
+    // `finalizeFailure` binds its status as a parameter, from this one union.
+    const bound = /disposition: "failed" \| "dead-lettered"/.test(engine) ? ["failed", "dead-lettered"] : [];
+    const inserted = [...enqueue.matchAll(/'(pending)',\s*\n/g)].map((m) => m[1]);
+    expect(literal.length).toBeGreaterThan(0);
+    expect(bound).toHaveLength(2);
+    expect(inserted.length).toBeGreaterThan(0);
+    expect(new Set([...literal, ...bound, ...inserted])).toEqual(new Set(JOB_RUN_STATUSES_WRITTEN));
   });
 });
 

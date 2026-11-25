@@ -62,8 +62,17 @@ function mockConn(
  * The claim's own statements, without the per-tenant scaffolding around them (the tenant list and each
  * tenant's context), so a test about what is claimed or swept reads the statements it is about.
  */
+const unexpected = (failure: { tenantId: string; error: unknown }): never => {
+  throw new Error(`unexpected tenant claim failure for ${failure.tenantId}: ${String(failure.error)}`);
+};
+
+/** The savepoint each tenant's claim runs under (ADR-0469) is scaffolding too. */
+const isSavepoint = (sql: string): boolean => /^\s*(SAVEPOINT|RELEASE SAVEPOINT|ROLLBACK TO SAVEPOINT)\b/.test(sql);
+
 function work(capture: ReadonlyArray<{ sql: string; params: readonly unknown[] | undefined }>) {
-  return capture.filter((c) => !c.sql.includes(".tenants WHERE status") && c.sql !== SET_TENANT_CONTEXT_SQL);
+  return capture.filter(
+    (c) => !c.sql.includes(".tenants WHERE status") && c.sql !== SET_TENANT_CONTEXT_SQL && !isSavepoint(c.sql),
+  );
 }
 
 function recordingEngine(): {
@@ -85,7 +94,7 @@ function recordingEngine(): {
 describe("buildJobClaimer", () => {
   it("claims per tenant and releases under the run's tenant, threading the schema", async () => {
     const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
-    const claimer = buildJobClaimer(mockConn([claimRow()], capture), { schema: "meta" });
+    const claimer = buildJobClaimer(mockConn([claimRow()], capture), { schema: "meta", onTenantClaimFailed: unexpected });
     const jobs = await claimer.claim({ workerId: "w", now: NOW, limit: 5, leaseMs: 30_000 });
     expect(jobs[0]?.jobId).toBe("00000000-0000-4000-8000-0000000009a1");
     const claimAt = capture.findIndex((c) => c.sql.includes("FOR UPDATE SKIP LOCKED"));
@@ -101,7 +110,7 @@ describe("buildJobClaimer", () => {
 
   it("reaps cancellations per tenant under that tenant's context when asked to", async () => {
     const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
-    const claimer = buildJobClaimer(mockConn([], capture), { reapCancellations: true });
+    const claimer = buildJobClaimer(mockConn([], capture), { reapCancellations: true, onTenantClaimFailed: unexpected });
     await claimer.claim({ workerId: "w", now: NOW, limit: 5, leaseMs: 30_000 });
     const reapAt = capture.findIndex((c) => c.sql.includes("lease_reaped"));
     expect(reapAt).toBeGreaterThan(0);
@@ -175,6 +184,7 @@ describe("buildWorkflowJobWorker", () => {
       engine,
       workerId: "w",
       now: () => new Date(NOW),
+      onTenantClaimFailed: unexpected,
     });
     const result = await worker.runOnce();
     expect(result.claimed).toBe(1);
@@ -194,7 +204,7 @@ describe("buildWorkflowJobWorker", () => {
       transaction: (async <T,>(fn: (tx: PgConnection) => Promise<T>): Promise<T> =>
         fn(conn)) as PgConnection["transaction"],
     };
-    const worker = buildWorkflowJobWorker({ conn, engine, workerId: "worker-A", now: () => new Date(NOW) });
+    const worker = buildWorkflowJobWorker({ conn, engine, workerId: "worker-A", now: () => new Date(NOW), onTenantClaimFailed: unexpected });
     const result = await worker.runOnce();
     expect(result.skipped).toEqual([{ jobId: "00000000-0000-4000-8000-0000000009a1", reason: "lease_lost" }]);
     expect(executed).toEqual([]);
@@ -258,6 +268,7 @@ describe("buildJobClaimer cancellation sweep", () => {
       reapCancellations: true,
       reapLimit: 5,
       onReaped: (runs) => void reaped.push(...runs.map((r) => r.runId)),
+      onTenantClaimFailed: unexpected,
     });
     await claimer.claim({ workerId: "worker-A", now: NOW, limit: 10, leaseMs: 30_000 });
     const statements = work(capture);
@@ -272,12 +283,123 @@ describe("buildJobClaimer cancellation sweep", () => {
 
   it("does not sweep unless asked — the columns are opt-in", async () => {
     const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
-    const claimer = buildJobClaimer(mockConn([], capture));
+    const claimer = buildJobClaimer(mockConn([], capture), { onTenantClaimFailed: unexpected });
     await claimer.claim({ workerId: "worker-A", now: NOW, limit: 10, leaseMs: 30_000 });
     const statements = work(capture);
     expect(statements).toHaveLength(1);
     expect(statements[0]!.sql).toContain("FOR UPDATE SKIP LOCKED");
     expect(statements[0]!.sql).not.toContain("lease_reaped");
+  });
+});
+
+describe("buildJobClaimer when one tenant's claim fails (ADR-0469)", () => {
+  it("reports the tenant and does not report runs its rolled-back sweep reaped", async () => {
+    const failures: string[] = [];
+    const reaped: string[] = [];
+    let swept = 0;
+    const base = mockConn([claimRow()]);
+    const conn: PgConnection = {
+      ...base,
+      query: (async (sql: string, params?: readonly unknown[]) => {
+        if (sql.includes("lease_reaped")) swept += 1;
+        // The sweep runs first and succeeds; only the claim statement after it raises.
+        if (sql.includes("FOR UPDATE SKIP LOCKED") && !sql.includes("lease_reaped")) {
+          throw new Error("permission denied for table job_runs");
+        }
+        return base.query(sql, params as unknown[]);
+      }) as PgConnection["query"],
+      transaction: (async <T,>(fn: (tx: PgConnection) => Promise<T>): Promise<T> =>
+        fn(conn)) as PgConnection["transaction"],
+    };
+    const claimer = buildJobClaimer(conn, {
+      reapCancellations: true,
+      onReaped: (runs) => void reaped.push(...runs.map((r) => r.runId)),
+      onTenantClaimFailed: (f) => void failures.push(f.tenantId),
+    });
+    const claimed = await claimer.claim({ workerId: "worker-A", now: NOW, limit: 10, leaseMs: 30_000 });
+    expect(claimed).toEqual([]);
+    expect(failures).toEqual([TENANT]);
+    // The sweep "reaped" a run inside the savepoint, and the savepoint was rolled back with the claim.
+    expect(swept).toBeGreaterThan(0);
+    expect(reaped).toEqual([]);
+  });
+});
+
+describe("buildJobProcessor lease loss (ADR-0469)", () => {
+  function leaseEngine(): { engine: JobExecutingEngine; seen: Array<{ aborted: boolean; reason: unknown }> } {
+    const seen: Array<{ aborted: boolean; reason: unknown }> = [];
+    return {
+      seen,
+      engine: {
+        executeJobRun: async (runId, _tenantId, options) => {
+          const signal = options?.signal;
+          // Yield to the heartbeat so it renews before the handler reads its signal.
+          await new Promise((r) => setTimeout(r, 5));
+          seen.push({ aborted: signal?.aborted === true, reason: signal?.reason });
+          return { runId, executed: true, disposition: "completed" as const };
+        },
+      },
+    };
+  }
+
+  it("aborts the handler's signal when a renew answers false, so it stops before writing twice", async () => {
+    const { engine, seen } = leaseEngine();
+    const lost: string[] = [];
+    const processor = buildJobProcessor(engine, {
+      workerId: "worker-A",
+      renewal: {
+        renewer: { renew: async () => false },
+        workerId: "worker-A",
+        intervalMs: 0,
+        sleep: async () => undefined,
+        onLeaseLost: () => void lost.push("lost"),
+      },
+    });
+    await processor.process(claimedJob());
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.aborted).toBe(true);
+    expect((seen[0]!.reason as Error).name).toBe("LeaseLostError");
+    expect(lost).toEqual(["lost"]);
+  });
+
+  it("does not abort when the renew throws, because this worker may still hold the lease", async () => {
+    const { engine, seen } = leaseEngine();
+    const processor = buildJobProcessor(engine, {
+      workerId: "worker-A",
+      renewal: {
+        renewer: {
+          renew: async () => {
+            throw new Error("connection reset");
+          },
+        },
+        workerId: "worker-A",
+        intervalMs: 0,
+        sleep: async () => undefined,
+      },
+    });
+    await processor.process(claimedJob());
+    expect(seen[0]!.aborted).toBe(false);
+  });
+
+  it("composes the lease signal with the cancellation signal, so either trips the handler", async () => {
+    const { engine, seen } = leaseEngine();
+    const processor = buildJobProcessor(engine, {
+      workerId: "worker-A",
+      renewal: {
+        renewer: { renew: async () => false },
+        workerId: "worker-A",
+        intervalMs: 0,
+        sleep: async () => undefined,
+      },
+      cancellation: {
+        watcher: { isCancelRequested: async () => false },
+        intervalMs: 0,
+        sleep: () => new Promise((r) => setTimeout(r, 1)),
+      },
+    });
+    await processor.process(claimedJob());
+    expect(seen[0]!.aborted).toBe(true);
+    expect((seen[0]!.reason as Error).name).toBe("LeaseLostError");
   });
 });
 
@@ -365,6 +487,7 @@ describe("buildWorkflowJobWorker cancellation wiring", () => {
       conn: mockConn([], capture),
       engine: recordingEngine().engine,
       workerId: "worker-A",
+      onTenantClaimFailed: unexpected,
       cancellation: true,
       now: () => new Date(NOW),
     });
@@ -379,6 +502,7 @@ describe("buildWorkflowJobWorker cancellation wiring", () => {
       conn: mockConn([], capture),
       engine: recordingEngine().engine,
       workerId: "worker-A",
+      onTenantClaimFailed: unexpected,
       now: () => new Date(NOW),
     });
     await worker.runOnce();
@@ -412,6 +536,7 @@ describe("buildWorkflowJobWorker cancellation wiring", () => {
       conn,
       engine,
       workerId: "worker-A",
+      onTenantClaimFailed: unexpected,
       cancellation: true,
       now: () => new Date(NOW),
     });

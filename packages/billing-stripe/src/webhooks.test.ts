@@ -79,6 +79,18 @@ describe("verifyStripeWebhook", () => {
     expect(verifyStripeWebhook(PAYLOAD, `t=${TIMESTAMP}`, SECRET, { now: NOW }).reason).toBe("missing_signature");
   });
 
+  it("names an absent or empty header missing_header, not missing_timestamp (ADR-0473)", () => {
+    expect(verifyStripeWebhook(PAYLOAD, "", SECRET, { now: NOW }).reason).toBe("missing_header");
+    expect(verifyStripeWebhook(PAYLOAD, "   ", SECRET, { now: NOW }).reason).toBe("missing_header");
+    expect(verifyStripeWebhook(PAYLOAD, null, SECRET, { now: NOW }).reason).toBe("missing_header");
+    expect(verifyStripeWebhook(PAYLOAD, undefined, SECRET, { now: NOW }).reason).toBe("missing_header");
+  });
+
+  it("names a header with no key=value pair malformed_header, which nothing produced before", () => {
+    expect(verifyStripeWebhook(PAYLOAD, "garbage", SECRET, { now: NOW }).reason).toBe("malformed_header");
+    expect(verifyStripeWebhook(PAYLOAD, "a,b", SECRET, { now: NOW }).reason).toBe("malformed_header");
+  });
+
   it("reports invalid_event_json when a validly-signed body is not JSON", () => {
     const nonJson = "not-json";
     const header = computeStripeSignatureHeader(nonJson, SECRET, TIMESTAMP);

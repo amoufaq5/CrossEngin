@@ -1549,9 +1549,11 @@ describe("compileOperateServer — a posted document is locked", () => {
     expect((await store.get(COVERAGE_TENANT, "Bill", billId))?.["state"]).toBe("paid");
     expect((await callOperation(compiled, "payment.refund", { id: payId }, null)).status).toBe(200);
     // Recognition, settlement and the refund's reversal of the settlement — and the refund re-opens
-    // the bill, since nothing is applied to it any more.
+    // the bill, since nothing is applied to it any more. Into `overdue` and not `approved`: this
+    // server reads the real clock and BILL_BODY fell due on 2026-07-01, so the re-open follows the
+    // due date (ADR-0475) — deterministic, since that date only recedes.
     expect(await journalEntryCount(store)).toBe(3);
-    expect((await store.get(COVERAGE_TENANT, "Bill", billId))?.["state"]).toBe("approved");
+    expect((await store.get(COVERAGE_TENANT, "Bill", billId))?.["state"]).toBe("overdue");
   });
 
   it("locks a completed payment, whose settlement has posted", async () => {

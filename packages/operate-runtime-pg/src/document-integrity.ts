@@ -2,7 +2,12 @@ import { createHash } from "node:crypto";
 
 import { resolvedFields } from "@crossengin/kernel/ddl";
 import type { Manifest } from "@crossengin/kernel/manifest";
-import type { PgConnection } from "@crossengin/kernel-pg";
+import {
+  applyStatementStop,
+  DEFAULT_LOCK_RETRIES,
+  DEFAULT_LOCK_TIMEOUT_MS,
+  type PgConnection,
+} from "@crossengin/kernel-pg";
 import {
   ReferencedRecordInUse,
   ReferenceNotFound,
@@ -190,19 +195,64 @@ export interface DocumentIndexEnsureReport {
   readonly stale: readonly StaleDocumentIndex[];
 }
 
+/** How the index builds bound their wait for a lock another session holds. */
+export interface DocumentIndexEnsureOptions {
+  /** `SET LOCAL lock_timeout` per build, in ms. Defaults to the migration applier's figure. */
+  readonly lockTimeoutMs?: number;
+  /** Retries after a lock timeout, each after a doubling pause from one second. */
+  readonly lockRetries?: number;
+  /** Injected for tests; the real one is a timer. */
+  readonly sleep?: (ms: number) => Promise<void>;
+}
+
+const LIVE_RUNTIME_INDEXES_SQL = `SELECT i.relname AS name, (x.indisvalid AND x.indisready) AS valid
+       FROM pg_index x
+       JOIN pg_class i ON i.oid = x.indexrelid
+       JOIN pg_class t ON t.oid = x.indrelid
+       JOIN pg_namespace n ON n.oid = t.relnamespace
+      WHERE n.nspname = $1 AND t.relname = 'operate_entity_records' AND starts_with(i.relname, $2)`;
+
+async function readLiveRuntimeIndexes(conn: PgConnection, schema: string): Promise<ReadonlyMap<string, boolean>> {
+  const live = await conn.query<{ readonly name: string; readonly valid: boolean }>(LIVE_RUNTIME_INDEXES_SQL, [
+    schema,
+    DOCUMENT_RUNTIME_INDEX_PREFIX,
+  ]);
+  return new Map(live.rows.map((r) => [r.name, r.valid] as const));
+}
+
 /**
- * Creates the plan's unique indexes, one statement each and each outside any transaction, so one
- * index refused by existing duplicates rolls back alone and leaves the others — ADR-0360's
- * per-statement discipline, here without a savepoint because there is no enclosing transaction to
- * poison. Never throws for a single index: a refusal is reported, because the table serves
- * correctly without the index minus the guarantee, and the boot line says which.
+ * Creates the plan's unique indexes that are not already there, one statement each, and reports per
+ * declared field whether it is enforced. Never throws for a single index: a refusal is reported,
+ * because the table serves correctly without the index minus the guarantee, and the boot line says
+ * which.
  *
- * **Not `CONCURRENTLY`.** A failed concurrent build leaves an *invalid* index behind, which a
- * later `IF NOT EXISTS` would accept as present while it enforces nothing — so the cost of the plain
- * form (it holds a `SHARE` lock, blocking writes to the shared table while it builds) is paid at
- * boot instead. And validity is **read back** from `pg_index` rather than inferred from the
- * statement succeeding, so an index someone else built concurrently and left invalid is reported
- * as `invalid_index` rather than counted.
+ * **The live index set is read first, and an index present and valid is not built again**
+ * (ADR-0472). The previous form issued `CREATE UNIQUE INDEX IF NOT EXISTS` for every planned index
+ * on every boot and every `document-indexes` run, and `IF NOT EXISTS` is not free: it takes the
+ * `SHARE` lock on `meta.operate_entity_records` **before** it finds the index exists, so a re-run
+ * against a table a writer held open waited behind that writer — and every insert queued behind the
+ * waiting `SHARE` request (ADR-0438's lock queue, measured there for the reconciler). On the shipped
+ * stack the non-owner API's `CREATE` was refused `42501` for not owning the table, so the boot path
+ * paid an error per index too; reading first answers both without a statement.
+ *
+ * A present but **invalid** index is reported `invalid_index` and not rebuilt: `IF NOT EXISTS` would
+ * accept it as present anyway, so issuing the statement could only wait for a lock to change
+ * nothing.
+ *
+ * The indexes that are missing are built under `SET LOCAL lock_timeout`, inside one transaction
+ * each, and a build that times out waiting is retried with a doubling pause — the migration
+ * applier's pattern and constants (`DEFAULT_LOCK_TIMEOUT_MS`, `DEFAULT_LOCK_RETRIES`,
+ * `applyStatementStop`), reused rather than restated. One that never gets the lock is reported
+ * `failed` with the lock timeout as its detail: the statement changed nothing, and re-running when
+ * the table is quieter is the remedy. A per-statement transaction rather than none: a plain (not
+ * `CONCURRENTLY`) index build is transactional, and `SET LOCAL` needs one to end with so the bound
+ * never reaches the pooled connection's next user.
+ *
+ * **Not `CONCURRENTLY`.** A failed concurrent build leaves an *invalid* index behind, which a later
+ * `IF NOT EXISTS` would accept as present while it enforces nothing — so the cost of the plain form
+ * (it holds a `SHARE` lock, blocking writes to the shared table while it builds) is paid when an
+ * index is missing, which after the first owner run is never. Validity is **read back** from
+ * `pg_index` after a build rather than inferred from the statement succeeding.
  *
  * An index carrying the prefix that the plan does not name is reported as stale with its `DROP`,
  * and never dropped: the store is additive, as the column store is, and dropping a constraint on
@@ -214,47 +264,70 @@ export async function ensureDocumentUniqueIndexes(
   schema: string,
   /** Other runtime indexes the served manifest declares — its lookup indexes — which are not stale. */
   alsoPlanned: ReadonlySet<string> = new Set(),
+  opts: DocumentIndexEnsureOptions = {},
 ): Promise<DocumentIndexEnsureReport> {
-  const results: DocumentUniqueIndexResult[] = [];
+  const lockTimeoutMs = opts.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS;
+  const lockRetries = opts.lockRetries ?? DEFAULT_LOCK_RETRIES;
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const before = await readLiveRuntimeIndexes(conn, schema);
+  const results: (DocumentUniqueIndexResult | { readonly index: DocumentUniqueIndex; readonly built: true })[] = [];
   for (const index of plan.uniqueIndexes) {
-    try {
-      await conn.query(index.sql);
+    const present = before.get(index.name);
+    if (present === true) {
       results.push({ index, outcome: "enforced", detail: null });
+      continue;
+    }
+    if (present === false) {
+      results.push({
+        index,
+        outcome: "invalid_index",
+        detail: "an index of this name exists and Postgres reports it invalid, so it enforces nothing",
+      });
+      continue;
+    }
+    let attempts = 0;
+    try {
+      for (;;) {
+        attempts++;
+        try {
+          await conn.transaction(async (tx) => {
+            await tx.query(`SET LOCAL lock_timeout = '${String(lockTimeoutMs)}ms'`);
+            await tx.query(index.sql);
+          });
+          break;
+        } catch (err) {
+          if (applyStatementStop(err) !== "lock_timeout" || attempts > lockRetries) throw err;
+          await sleep(1_000 * 2 ** (attempts - 1));
+        }
+      }
+      results.push({ index, built: true });
     } catch (err) {
       const code = (err as { readonly code?: unknown }).code;
       const message = err instanceof Error ? err.message : String(err);
+      const lockStop = applyStatementStop(err) === "lock_timeout";
       const outcome: DocumentUniqueIndexOutcome =
         code === PG_UNIQUE_VIOLATION
           ? "existing_duplicates"
           : code === PG_INSUFFICIENT_PRIVILEGE
             ? "not_owner"
             : "failed";
-      results.push({ index, outcome, detail: message });
+      results.push({
+        index,
+        outcome,
+        detail: lockStop
+          ? `lock timeout: waited ${String(lockTimeoutMs)} ms, ${String(attempts)} time(s), for a lock another` +
+            ` session holds on the table. The statement changed nothing; re-run when it is quieter` +
+            ` (Postgres: ${message})`
+          : message,
+      });
     }
   }
-  const live = await conn.query<{ readonly name: string; readonly valid: boolean }>(
-    `SELECT i.relname AS name, (x.indisvalid AND x.indisready) AS valid
-       FROM pg_index x
-       JOIN pg_class i ON i.oid = x.indexrelid
-       JOIN pg_class t ON t.oid = x.indrelid
-       JOIN pg_namespace n ON n.oid = t.relnamespace
-      WHERE n.nspname = $1 AND t.relname = 'operate_entity_records' AND starts_with(i.relname, $2)`,
-    [schema, DOCUMENT_RUNTIME_INDEX_PREFIX],
-  );
-  const liveByName = new Map(live.rows.map((r) => [r.name, r.valid] as const));
+  const anyBuilt = results.some((r) => "built" in r);
+  const liveByName = anyBuilt ? await readLiveRuntimeIndexes(conn, schema) : before;
   const verified = results.map((r): DocumentUniqueIndexResult => {
-    // A non-owner is refused `must be owner` (42501) even by `CREATE … IF NOT EXISTS` over an index
-    // that already exists — measured on PG 16, the ownership check runs before the existence check.
-    // That is the shipped deployment's ordinary case: the API connects as a confined role that owns
-    // nothing (ADR-0424), and the owner-run `document-indexes` step built the index before the API
-    // booted. So a refusal whose index is present and valid is enforcement, not a gap; only an
-    // absent one is `not_owner`.
-    if (r.outcome === "not_owner" && liveByName.get(r.index.name) === true) {
-      return { index: r.index, outcome: "enforced", detail: null };
-    }
-    if (r.outcome !== "enforced") return r;
+    if (!("built" in r)) return r;
     const valid = liveByName.get(r.index.name);
-    if (valid === true) return r;
+    if (valid === true) return { index: r.index, outcome: "enforced", detail: null };
     return {
       index: r.index,
       outcome: valid === false ? "invalid_index" : "failed",

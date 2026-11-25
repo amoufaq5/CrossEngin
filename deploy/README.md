@@ -1472,6 +1472,18 @@ command; the boot line then warns that four-eyes is off, and each approval you m
 your own design is answered `fourEyes: "self_approved"`. A design stored before this
 check existed names no designer and stays approvable (`designer_unrecorded`).
 
+Approve as a **signed-in person**, not with `OPERATE_ADMIN_API_KEY`: a key that names no
+principal is the same shared placeholder for every caller, so whether its holder requested the
+design cannot be established, and the approval answers **403 `four_eyes_unverifiable`** (an
+api-key spec naming its principal is fine). Rejecting a design the tenant is already **served**
+is **409 `manifest_active`** — to take it out of service, approve and activate a replacement. And
+the tenant's Activate is checked before anything is written: a design this deployment could not
+serve (extending a parent other than the one it runs, a lineage cycle, an inherited entity
+redeclared without `overrides: true`, an ABAC obligation no `--abac-policy` answers, or one that
+does not validate) is **422 `activation_unservable`** naming the `kind`, and the tenant keeps
+being served what it was served. Two concurrent decisions on one design land once; the other is
+a **409** with `concurrent: true`.
+
 Three things to know before the first one arrives.
 
 **Approval is the only gate, so read the diff rather than the summary.** Five of the

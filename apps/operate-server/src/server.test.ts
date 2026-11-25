@@ -519,7 +519,53 @@ describe("the API description declares the residency gate it is served behind (A
       expect(responses["421"], id).toBeUndefined();
       expect(responses["503"], id).toBeUndefined();
     }
-    expect((doc["components"] as Record<string, unknown>)["responses"]).toBeUndefined();
+    // Since ADR-0471 the 401/403/404/409/422 are shared response components on every document, so
+    // the absence this asserts is of the region gate's own components and schema, not of all of them.
+    const components = doc["components"] as Record<string, Record<string, unknown>>;
+    expect(Object.keys(components["responses"] ?? {}).filter((n) => /Residency/.test(n))).toEqual([]);
+    expect(components["schemas"]?.["ResidencyProblem"]).toBeUndefined();
+  });
+
+  // The tenant-status gate's half (ADR-0471), through `buildOperateHttpServer` rather than the
+  // emitter, because the closure on the shipped compose is this file's wiring: the gate returns the
+  // set it wrapped and the thunk hands it to the document. Deleting that assignment leaves every
+  // emitter test green and this one red.
+  async function documentWithTenantGate(gate: boolean): Promise<Record<string, unknown>> {
+    const { httpServer } = buildOperateHttpServer({
+      edgeTrust: "untrusted",
+      manifest,
+      store: new InMemoryEntityStore(),
+      apiKeys: keys,
+      extraRoutes: [{ route: PLATFORM_ROUTE, handler: async () => ({ kind: "json", status: 200, body: {} }) }],
+      ...(gate ? { tenantStatusGate: { directory: { statusFor: async () => "active" as const } } } : {}),
+    });
+    const res = await httpServer.dispatch(req("GET", "/v1/meta/openapi", "key-other"), null);
+    expect(res.status).toBe(200);
+    return parse(res.body);
+  }
+
+  it("declares the tenant-status gate's 403 and 503 on the operations it wraps and not on the exempt one", async () => {
+    const ops = responsesByOperation(await documentWithTenantGate(true));
+    expect(ops.size).toBeGreaterThan(100);
+    const exempt = ops.get("platform.ping");
+    expect(exempt?.["403"]).toEqual({ $ref: "#/components/responses/Forbidden" });
+    expect(exempt?.["503"]).toBeUndefined();
+    const create = ops.get("product.create");
+    expect(create?.["403"]).toEqual({ $ref: "#/components/responses/ForbiddenOrTenantStateRefused" });
+    expect(create?.["503"]).toEqual({ $ref: "#/components/responses/UnavailableOrTenantStatusUnresolved" });
+    for (const [id, responses] of ops) {
+      if (id === "platform.ping") continue;
+      expect(String((responses["403"] as { $ref: string }).$ref), id).toContain("OrTenantStateRefused");
+    }
+  });
+
+  it("declares none of the tenant-status gate's responses on the same server without it", async () => {
+    const doc = await documentWithTenantGate(false);
+    for (const [id, responses] of responsesByOperation(doc)) {
+      expect(String((responses["403"] as { $ref: string }).$ref), id).not.toContain("TenantState");
+      expect(responses["503"], id).toBeUndefined();
+    }
+    expect((doc["components"] as Record<string, Record<string, unknown>>)["schemas"]?.["TenantStateProblem"]).toBeUndefined();
   });
 });
 

@@ -34,6 +34,8 @@ export interface AiDesignBudgetOptions {
   readonly now?: () => Date;
   readonly periodKeyFor?: (date: Date) => string;
   readonly onDenied?: (tenantId: string, spentUsd: number, limitUsd: number) => void;
+  /** The ledger could not be read, so the design was refused without a spend figure (ADR-0470). */
+  readonly onUnavailable?: (tenantId: string, err: unknown) => void;
   /** A request whose estimate the month could not absorb, though the month was not yet spent. */
   readonly onReservationRefused?: (tenantId: string, estimateUsd: number, limitUsd: number) => void;
   /**
@@ -56,13 +58,31 @@ export interface EstimateInflationStoreLike {
   observe(tenantId: string, ratio: number): Promise<unknown>;
 }
 
-export interface BudgetCheck {
-  readonly allowed: boolean;
-  readonly reason: "ok" | "month_exceeded";
-  readonly spentUsd: number;
-  readonly limitUsd: number;
-  readonly remainingUsd: number;
-}
+/**
+ * The answer to "may this tenant start a design", discriminated on `reason` (ADR-0470).
+ *
+ * `unavailable` carries **no** `spentUsd`, which is the point: before it existed an unreadable ledger
+ * answered `month_exceeded` with `spentUsd: limitUsd`, so a database blip told a tenant its month was
+ * spent — a 402 claiming a figure nobody had read, which no retry could clear in the tenant's mind.
+ * Denying is still right (an unmetered call is costlier than a false denial); what changed is that the
+ * denial says what it knows.
+ */
+export type BudgetCheck =
+  | {
+      readonly allowed: true;
+      readonly reason: "ok";
+      readonly spentUsd: number;
+      readonly limitUsd: number;
+      readonly remainingUsd: number;
+    }
+  | {
+      readonly allowed: false;
+      readonly reason: "month_exceeded";
+      readonly spentUsd: number;
+      readonly limitUsd: number;
+      readonly remainingUsd: number;
+    }
+  | { readonly allowed: false; readonly reason: "unavailable"; readonly limitUsd: number };
 
 export interface AiDesignBudget {
   check(tenantId: string): Promise<BudgetCheck>;
@@ -118,7 +138,8 @@ export function buildAiDesignBudget(opts: AiDesignBudgetOptions): AiDesignBudget
   }
   const now = opts.now ?? ((): Date => new Date());
   const periodKeyFor = opts.periodKeyFor ?? defaultPeriodKey;
-  const { store, onDenied, onReservationRefused, inflationStore, onInflationFallback } = opts;
+  const { store, onDenied, onUnavailable, onReservationRefused, inflationStore, onInflationFallback } =
+    opts;
 
   return {
     ...(inflationStore === undefined
@@ -153,18 +174,12 @@ export function buildAiDesignBudget(opts: AiDesignBudgetOptions): AiDesignBudget
       let spentUsd: number;
       try {
         spentUsd = sanitizeSpend(await store.getMonthly(tenantId, periodKey));
-      } catch {
-        // Fail closed: an unreadable ledger leaves spend unknown, and letting an
-        // unmetered LLM call through is costlier than a false denial, so the
-        // tenant is reported as having consumed the whole ceiling.
-        onDenied?.(tenantId, limitUsd, limitUsd);
-        return {
-          allowed: false,
-          reason: "month_exceeded",
-          spentUsd: limitUsd,
-          limitUsd,
-          remainingUsd: 0,
-        };
+      } catch (err) {
+        // Fail closed: an unreadable ledger leaves spend unknown, and letting an unmetered LLM call
+        // through is costlier than a false denial — but the denial is `unavailable`, not
+        // `month_exceeded`, because no spend was read and a figure here would be invented.
+        onUnavailable?.(tenantId, err);
+        return { allowed: false, reason: "unavailable", limitUsd };
       }
       const remainingUsd = Math.max(0, limitUsd - spentUsd);
       if (spentUsd >= limitUsd) {

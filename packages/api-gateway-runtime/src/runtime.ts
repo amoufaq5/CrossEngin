@@ -35,9 +35,11 @@ import {
   type RedactionRegistry,
 } from "./redaction.js";
 import {
+  canonicalTenantId,
+  DEFAULT_JWT_CLOCK_SKEW_SECONDS,
+  isPrincipalDirectoryUnavailable,
   type JwksProvider,
   parseAuthHeader,
-  REQUIRED_JWT_CLAIMS,
   type RequiredJwtClaim,
   resolvePrincipalForCredential,
   verifyBearerJwt,
@@ -55,6 +57,7 @@ import {
   idempotencyMismatch,
   internalServerError,
   notFound,
+  principalDirectoryUnavailable,
   serviceUnavailable,
   tooManyRequests,
   unprocessableEntity,
@@ -164,12 +167,17 @@ export interface GatewayRuntimeOptions {
   /**
    * Which JWT claims must be present, beyond being correct when present.
    *
-   * Defaults to **all three** (`exp`, `iss`, `aud`), which is the fail-closed direction and the one
-   * every conformant OIDC or RFC 9068 minter satisfies — so a caller that forgets this gets the
-   * strict behaviour rather than the pre-ADR-0386 one. A deployment that must accept a token
-   * omitting one declares that, per claim.
+   * **Required, with no default** (ADR-0473). It was optional and defaulted to the strict set, which
+   * reads as the safe choice and is what let ADR-0386's own drop escape: `buildOperateGateway`
+   * forwarded the field inside a conditional spread, the spread bypassed the excess-property check,
+   * and the omission produced the *strict* answer — a safe wrong answer that `tsc`, the test suite
+   * and the boot line could not tell from the right one. An optional field with a default makes its
+   * own omission unobservable, so the compiler now asks every constructor. A caller that means the
+   * strict set passes `new Set(REQUIRED_JWT_CLAIMS)` and has said so; one that means *require
+   * nothing* passes an empty set.
    */
-  readonly requiredJwtClaims?: ReadonlySet<RequiredJwtClaim>;
+  readonly requiredJwtClaims: ReadonlySet<RequiredJwtClaim>;
+  /** Defaults to `DEFAULT_JWT_CLOCK_SKEW_SECONDS`, which the per-tenant router reads too. */
   readonly clockSkewSeconds?: number;
   readonly opaqueTokenLookup?: OpaqueTokenLookup;
   readonly hmacKeyLookup?: HmacKeyLookup;
@@ -214,7 +222,11 @@ export interface GatewayRuntimeOptions {
 export interface InternalErrorSite {
   readonly requestId: string;
   readonly stage: PipelineStage;
-  readonly answered: "500" | "success";
+  /**
+   * What the caller was told: a 500, a 503 for a principal directory that could not be read
+   * (ADR-0473), or a success whose completion failed afterwards.
+   */
+  readonly answered: "500" | "503" | "success";
 }
 
 export interface HandleResult {
@@ -335,8 +347,8 @@ export class GatewayRuntime {
     this.jwksProvider = opts.jwksProvider ?? null;
     this.jwtIssuer = opts.jwtIssuer ?? "https://crossengin.io";
     this.jwtAudience = opts.jwtAudience ?? "https://api.crossengin.io";
-    this.requiredJwtClaims = opts.requiredJwtClaims ?? new Set(REQUIRED_JWT_CLAIMS);
-    this.clockSkewSeconds = opts.clockSkewSeconds ?? 30;
+    this.requiredJwtClaims = opts.requiredJwtClaims;
+    this.clockSkewSeconds = opts.clockSkewSeconds ?? DEFAULT_JWT_CLOCK_SKEW_SECONDS;
     this.opaqueTokenLookup = opts.opaqueTokenLookup ?? null;
     this.hmacKeyLookup = opts.hmacKeyLookup ?? null;
     this.mtlsClientLookup = opts.mtlsClientLookup ?? null;
@@ -408,26 +420,55 @@ export class GatewayRuntime {
         denial = await run();
       } catch (err) {
         await this.abandonReservation(ctx);
-        this.reportInternalError(err, ctx.request.id, stage, "500");
-        const env = internalServerError({
-          reason: STAGE_THREW_CLIENT_DETAIL,
-          correlationId: ctx.request.correlationId ?? undefined,
-          requestId: ctx.request.id,
-        });
-        try {
-          recorder.record({
-            stage,
-            outcome: "error",
-            startedAt: this.now(),
-            completedAt: this.now(),
-            reason: internalErrorReason("stage_threw", err),
-            problemTypeUri: env.body.type,
-            responseStatus: env.body.status,
+        if (isPrincipalDirectoryUnavailable(err)) {
+          // Could-not-establish is a 503, not a 500 and not a 401 (ADR-0334's split, ADR-0473). The
+          // directory that decides whether this principal still holds a membership could not be read
+          // past its stale bound, so there is no answer in hand in either direction: a 401 would be a
+          // claim about the credential, and a 500 told the caller something in *this* request broke
+          // and invited no retry. The cause is still filed through `onInternalError`, under the id
+          // the caller holds: the body names none of it, and a directory's own refresh-error callback
+          // is optional — the shipped wiring passes none — so without this a database outage, or a
+          // membership row the contract refuses, would answer 503s whose cause reached no log.
+          this.reportInternalError(err, ctx.request.id, stage, "503");
+          const env = principalDirectoryUnavailable({
+            correlationId: ctx.request.correlationId ?? undefined,
           });
-        } catch {
-          // The stage recorded its own outcome before it threw; the response is still the 500.
+          try {
+            recorder.record({
+              stage,
+              outcome: "error",
+              startedAt: this.now(),
+              completedAt: this.now(),
+              reason: "principal_directory_unavailable",
+              problemTypeUri: env.body.type,
+              responseStatus: env.body.status,
+            });
+          } catch {
+            // The stage recorded its own outcome before it threw; the response is still the 503.
+          }
+          denial = env;
+        } else {
+          this.reportInternalError(err, ctx.request.id, stage, "500");
+          const env = internalServerError({
+            reason: STAGE_THREW_CLIENT_DETAIL,
+            correlationId: ctx.request.correlationId ?? undefined,
+            requestId: ctx.request.id,
+          });
+          try {
+            recorder.record({
+              stage,
+              outcome: "error",
+              startedAt: this.now(),
+              completedAt: this.now(),
+              reason: internalErrorReason("stage_threw", err),
+              problemTypeUri: env.body.type,
+              responseStatus: env.body.status,
+            });
+          } catch {
+            // The stage recorded its own outcome before it threw; the response is still the 500.
+          }
+          denial = env;
         }
-        denial = env;
       }
       if (denial !== null) {
         // A stage between `check_idempotency` and the handler — the rate limit, the signature, the
@@ -759,7 +800,7 @@ export class GatewayRuntime {
             ? (scp as readonly string[])
             : [];
       if (typeof jwt.payload.tenant_id === "string") {
-        ctx.tenantId = jwt.payload.tenant_id;
+        ctx.tenantId = canonicalTenantId(jwt.payload.tenant_id);
       }
       rec.record({
         stage: "authenticate",
@@ -822,7 +863,7 @@ export class GatewayRuntime {
       ctx.authScheme = "api_key_header";
       ctx.authPrincipalRef = lookup.principalRef;
       ctx.authScopes = lookup.scopes;
-      ctx.tenantId = lookup.tenantId;
+      ctx.tenantId = canonicalTenantId(lookup.tenantId);
       rec.record({
         stage: "authenticate",
         outcome: "pass",
@@ -894,8 +935,8 @@ export class GatewayRuntime {
         // laziness: telling a caller *which* half failed turns the header into a key-id oracle, so
         // an attacker learns which ids exist without ever producing a valid signature. The recorded
         // reasons differ, which is the bounce webhook's model (one opaque answer, a distinct reason
-        // logged) — the one of this repo's two live HMAC paths that gets disclosure right, where
-        // `verifyStripeWebhook` hands its cause to the caller and logs nothing.
+        // logged). The Stripe route used to hand its cause to the caller and log nothing; since
+        // ADR-0473 it follows this model too.
         const env = authenticationRequired({
           reason: "request signature not accepted",
           wwwAuthenticate: this.authChallenge(),
@@ -966,7 +1007,7 @@ export class GatewayRuntime {
       ctx.authScheme = "hmac_signature";
       ctx.authPrincipalRef = key.principalRef;
       ctx.authScopes = key.scopes;
-      ctx.tenantId = key.tenantId;
+      ctx.tenantId = canonicalTenantId(key.tenantId);
       rec.record({
         stage: "authenticate",
         outcome: "pass",
@@ -1041,7 +1082,7 @@ export class GatewayRuntime {
       ctx.authScheme = "mtls";
       ctx.authPrincipalRef = enrolled.principalRef;
       ctx.authScopes = enrolled.scopes;
-      ctx.tenantId = enrolled.tenantId;
+      ctx.tenantId = canonicalTenantId(enrolled.tenantId);
       rec.record({
         stage: "authenticate",
         outcome: "pass",
@@ -1116,8 +1157,13 @@ export class GatewayRuntime {
       });
       return env;
     }
-    ctx.principal = result.principal;
-    ctx.tenantId = result.principal.tenantId;
+    // Canonical on the way out of the resolver too, because a resolver is deployment code and may
+    // hand back the tenant it was given verbatim — and every reader after this stage (the handler's
+    // store lookup, the tenant-status gate, the audit row) keys on this one value, which the
+    // per-tenant router derived with the same function (ADR-0473).
+    const tenantId = canonicalTenantId(result.principal.tenantId);
+    ctx.principal = tenantId === result.principal.tenantId ? result.principal : { ...result.principal, tenantId };
+    ctx.tenantId = tenantId;
     rec.record({
       stage: "resolve_principal",
       outcome: "pass",

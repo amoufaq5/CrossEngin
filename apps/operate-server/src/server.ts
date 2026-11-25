@@ -12,6 +12,7 @@ import type {
   EntityWriteAuditor,
   OpenApiCoverageGap,
   OpenApiResidencyDeclaration,
+  OpenApiTenantStatusDeclaration,
   UiUserIdentityResolver,
 } from "@crossengin/operate-runtime";
 // A value import, not a type-only one: `decideCursorDisclosure` and `surveySortableClassifiedFields`
@@ -40,6 +41,7 @@ import {
   type ExtraGatewayRoute,
   type JobInvoker,
   type OperateServer,
+  type ReportSurface,
   type SequenceAllocator,
   type SettingsStore,
   type SystemEntityAccess,
@@ -64,9 +66,14 @@ import {
   type MtlsClientSpec,
   type JwtVerifyConfig,
 } from "./principals.js";
-import { applyTenantStatusGate, type TenantStatusGateOptions } from "./tenant-status-gate.js";
+import {
+  applyTenantStatusGate,
+  tenantStatusOpenApiDeclaration,
+  type TenantStatusGateOptions,
+} from "./tenant-status-gate.js";
 import { applyResidencyGate } from "./residency-gate.js";
 import { preAuthLimitedResponse, type PreAuthLimiter } from "./pre-auth-limit.js";
+import { preAuthAlreadyCounted } from "./tenant-gateway-cache.js";
 import { AbacObligationsUnevaluable, checkAbacObligations } from "./abac-obligations.js";
 import { surveySensitiveFields, type SensitiveFieldSurvey } from "./sensitive-field-policy.js";
 import {
@@ -194,7 +201,9 @@ export interface OperateHttpServerOptions {
   readonly preAuthLimiter?: PreAuthLimiter;
 }
 
-const METHOD_NOT_ALLOWED_TYPE = "https://crossengin.io/problems/method-not-allowed";
+// The registry's entry (ADR-0473's review): this spelled `/problems/method-not-allowed`, the one 405
+// in the binary on a different base from the login's, which already used the registry's.
+const METHOD_NOT_ALLOWED_TYPE = PROBLEM_TYPES.method_not_allowed;
 
 /**
  * The framework-agnostic serving core: turns a `RawHttpRequest` + body into a
@@ -307,7 +316,9 @@ export class OperateHttpServer {
     }
     // Before the webhook and the gateway alike: both verify a credential, which is the work this
     // bound exists to cap, and neither has run yet.
-    if (this.preAuthLimiter !== null) {
+    // Skipped when the per-tenant router already spent this request's decision before verifying its
+    // Bearer (ADR-0473): one request, one decision.
+    if (this.preAuthLimiter !== null && !preAuthAlreadyCounted(raw)) {
       const decision = this.preAuthLimiter.check(raw);
       if (!decision.allowed) {
         return preAuthLimitedResponse(decision.retryAfterSeconds);
@@ -422,7 +433,7 @@ export function logServerError(event: ServerErrorEvent): void {
  */
 export function logGatewayInternalError(
   err: unknown,
-  at: { readonly requestId: string; readonly stage: string; readonly answered: "500" | "success" },
+  at: { readonly requestId: string; readonly stage: string; readonly answered: "500" | "503" | "success" },
 ): void {
   const detail = err instanceof Error ? (err.stack ?? err.message) : "non_error_thrown";
   if (at.answered === "success") {
@@ -433,6 +444,8 @@ export function logGatewayInternalError(
     );
     return;
   }
+  // A "503" is a principal directory that could not be read (ADR-0473): the same line, because the
+  // caller holds the same id and the cause is the operator's to read.
   console.error(`[5xx] ${at.requestId} ${at.stage} ${detail}`);
 }
 
@@ -605,6 +618,8 @@ export interface BuildOperateHttpServerOptions {
   readonly onSurvey?: (report: {
     readonly sensitive: SensitiveFieldSurvey;
     readonly cursorDisclosure: CursorDisclosureDecision;
+    /** The compiled gateway's report surfaces, so the per-tenant report survey reads what was mounted (ADR-0472). */
+    readonly reportSurfaces: readonly ReportSurface[];
   }) => void;
   /**
    * The deployment's ABAC policy layer, or absent for none — in which case a manifest declaring an
@@ -757,6 +772,7 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
    * it carried `onInvalidManifest` and `onBuildRefused` and nothing else, both failure-only, so
    * ADR-0340's check only reaches an operator because it *throws*. A report had nowhere to go.
    */
+  let pendingSurvey: { sensitive: SensitiveFieldSurvey; cursorDisclosure: CursorDisclosureDecision } | null = null;
   if (options.onSurvey !== undefined) {
     // Computed only when something reads them, which is `--abac-policy`'s rule (ADR-0341: the
     // producer exists exactly when a consumer does). Not a micro-optimisation: `serve()` surveys
@@ -776,7 +792,8 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
       mode: options.cursorSealing?.mode ?? "absent",
       fields: surveySortableClassifiedFields(options.manifest),
     });
-    options.onSurvey({ sensitive, cursorDisclosure });
+    // Emitted once the gateway is built, below: the report survey reads its compiled surfaces.
+    pendingSurvey = { sensitive, cursorDisclosure };
   }
 
   // The hmac specs reach the wiring as well as the lookup, and the two halves are separate for a
@@ -841,9 +858,12 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
   // forwarding cannot drop it: on a deployment with no gate it stays `null`, which is the claim the
   // document then makes.
   let residencyDeclaration: OpenApiResidencyDeclaration | null = null;
+  // The tenant-status gate's counterpart (ADR-0471), filled from the set the gate returns.
+  let tenantStatusDeclaration: OpenApiTenantStatusDeclaration | null = null;
   const gateway = buildOperateGateway(options.manifest, {
     store: options.store,
     openApiResidency: () => residencyDeclaration,
+    openApiTenantStatus: () => tenantStatusDeclaration,
     principalRoles: wiring.principalRoles,
     principalResolver: standingChecked,
     opaqueTokenLookup: wiring.opaqueTokenLookup,
@@ -909,6 +929,9 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
       : {}),
     ...(options.now !== undefined ? { clock: { now: options.now } } : {}),
   });
+  if (options.onSurvey !== undefined && pendingSurvey !== null) {
+    options.onSurvey({ ...pendingSurvey, reportSurfaces: gateway.reportSurfaces });
+  }
   // After every registration and before the first request. The gate goes on the registry rather than
   // on each `register` call because that is the only way it is *total*: `operationIds()` is the whole
   // surface — manifest CRUD, lifecycle transitions, associations, the meta routes and every injected
@@ -916,7 +939,9 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
   // `GatewayRuntime` resolves a handler per request from this same registry, so replacing entries
   // after it was constructed takes effect.
   if (options.tenantStatusGate !== undefined) {
-    applyTenantStatusGate(gateway.handlers, options.tenantStatusGate);
+    tenantStatusDeclaration = tenantStatusOpenApiDeclaration(
+      applyTenantStatusGate(gateway.handlers, options.tenantStatusGate),
+    );
   }
   // After the status gate, so it wraps outermost: a request the tenant's residency forbids is refused
   // before anything — including the status lookup — is asked about the tenant on this instance. The

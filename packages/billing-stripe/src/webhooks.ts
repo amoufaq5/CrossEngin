@@ -10,6 +10,7 @@ export interface VerifyStripeWebhookOptions {
 }
 
 export type StripeWebhookReason =
+  | "missing_header"
   | "malformed_header"
   | "missing_timestamp"
   | "missing_signature"
@@ -59,13 +60,25 @@ function constantTimeHexEqual(a: string, b: string): boolean {
 
 export function verifyStripeWebhook(
   payload: string,
-  signatureHeader: string,
+  signatureHeader: string | null | undefined,
   secret: string,
   opts: VerifyStripeWebhookOptions = {},
 ): StripeWebhookResult {
   const tolerance = opts.toleranceSeconds ?? DEFAULT_WEBHOOK_TOLERANCE_SECONDS;
   const nowSeconds = Math.floor((opts.now ?? new Date()).getTime() / 1000);
 
+  // An absent header is its own reason (ADR-0473, closing ADR-0393 Q6): it used to parse as a header
+  // with no `t=`, so a request carrying no signature at all was recorded `missing_timestamp` — a
+  // claim about a header the caller never sent. Empty and whitespace-only are the same fact, since a
+  // proxy forwarding an unset header as `""` is how an absent one usually arrives.
+  if (signatureHeader === null || signatureHeader === undefined || signatureHeader.trim() === "") {
+    return { valid: false, reason: "missing_header" };
+  }
+  // A header naming no `key=value` pair at all is not a Stripe signature header with a part missing;
+  // it is not one. `malformed_header` was declared and produced by nothing until this.
+  if (!signatureHeader.split(",").some((part) => part.includes("="))) {
+    return { valid: false, reason: "malformed_header" };
+  }
   const { timestamp, signatures } = parseStripeSignatureHeader(signatureHeader);
   if (timestamp === null) {
     return { valid: false, reason: "missing_timestamp" };

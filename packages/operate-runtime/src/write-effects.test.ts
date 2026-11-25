@@ -15,6 +15,8 @@ import {
   paymentApplicationEffect,
   paymentSettlementGlPostingEffect,
   recognitionGlPostingEffect,
+  reopenStateFor,
+  resolveAccountId,
   runWriteEffects,
   taxRemittanceGlPostingEffect,
   taxRemittanceReversalCheckEffect,
@@ -27,6 +29,27 @@ import {
 
 const TENANT = "11111111-1111-1111-1111-111111111111";
 const clock = { now: () => new Date("2026-06-21T00:00:00.000Z") };
+
+/**
+ * A posted recognition entry `<number>-AR` debiting AR and crediting revenue for `total`, which is
+ * what the credit-note effect mirrors — its only path since ADR-0475 deleted the two-line fallback.
+ */
+async function seedRecognition(store: InMemoryEntityStore, number: string, total: number, currency = "USD"): Promise<void> {
+  const entry = await store.create(TENANT, "JournalEntry", { entry_number: `${number}-AR`, state: "posted", source: "invoice" });
+  for (const [account, debit, credit] of [["ar", total, 0], ["revenue", 0, total]] as const) {
+    await store.create(TENANT, "JournalLine", {
+      journal_entry_id: String(entry.id),
+      ledger_account_id: account,
+      description: account,
+      currency,
+      fx_rate: 1,
+      debit,
+      credit,
+      functional_debit: debit,
+      functional_credit: credit,
+    });
+  }
+}
 
 async function postedEntryWithLines() {
   const store = new InMemoryEntityStore();
@@ -213,7 +236,7 @@ describe("invoiceVoidCreditNoteEffect", () => {
 });
 
 describe("creditNoteGlPostingEffect (AR↔GL bridge)", () => {
-  const effect = creditNoteGlPostingEffect({ clock });
+  const effect = creditNoteGlPostingEffect({ clock, recognitionEntrySuffix: "-AR" });
 
   async function issued(amountField?: number) {
     const store = new InMemoryEntityStore();
@@ -225,34 +248,30 @@ describe("creditNoteGlPostingEffect (AR↔GL bridge)", () => {
       total: 200,
       ...(amountField !== undefined ? { credit_amount: amountField } : {}),
     });
+    await seedRecognition(store, "INV-2026-00009", 200, "EUR");
     return { store, id: String(inv.id), inv };
   }
   const voidIt = (store: InMemoryEntityStore, id: string, before: Record<string, unknown>): WriteEffectInput =>
     ({ operation: "transition", entity: "Invoice", tenantId: TENANT, id, before, after: { ...before, state: "void" }, store });
+  const linesOf = async (store: InMemoryEntityStore, number: string) => {
+    const entry = (await store.list(TENANT, "JournalEntry")).find((e) => e.entry_number === number);
+    return entry === undefined ? [] : (await store.list(TENANT, "JournalLine")).filter((l) => l.journal_entry_id === entry.id);
+  };
 
-  it("posts a balanced journal entry reversing revenue and AR for the full credit", async () => {
+  it("posts the mirror of the recognition entry for the full credit, on its accounts and currency", async () => {
     const { store, id, inv } = await issued();
     await effect(voidIt(store, id, inv));
-    const entries = await store.list(TENANT, "JournalEntry");
-    expect(entries.length).toBe(1);
-    const entry = entries[0]!;
-    expect(entry.entry_number).toBe("INV-2026-00009-CN-GL");
-    expect(entry.state).toBe("posted");
-    const lines = (await store.list(TENANT, "JournalLine")).filter((l) => l.journal_entry_id === entry.id);
-    expect(lines.length).toBe(2);
-    const debit = lines.reduce((s, l) => s + Number(l.debit), 0);
-    const credit = lines.reduce((s, l) => s + Number(l.credit), 0);
-    expect(debit).toBe(200);
-    expect(credit).toBe(200);
-    expect(debit).toBe(credit); // balanced
+    const lines = await linesOf(store, "INV-2026-00009-CN-GL");
+    expect(lines.map((l) => [l.ledger_account_id, Number(l.debit), Number(l.credit)]).sort()).toEqual(
+      [["ar", 0, 200], ["revenue", 200, 0]].sort(),
+    );
     expect(lines.every((l) => l.currency === "EUR")).toBe(true);
   });
 
   it("posts for the partial amount when credit_amount is set", async () => {
     const { store, id, inv } = await issued(75);
     await effect(voidIt(store, id, inv));
-    const entry = (await store.list(TENANT, "JournalEntry"))[0]!;
-    const lines = (await store.list(TENANT, "JournalLine")).filter((l) => l.journal_entry_id === entry.id);
+    const lines = await linesOf(store, "INV-2026-00009-CN-GL");
     expect(lines.reduce((s, l) => s + Number(l.debit), 0)).toBe(75);
     expect(lines.reduce((s, l) => s + Number(l.credit), 0)).toBe(75);
   });
@@ -264,39 +283,14 @@ describe("creditNoteGlPostingEffect (AR↔GL bridge)", () => {
     expect((await store.list(TENANT, "JournalEntry")).length).toBe(0);
   });
 
-  it("posts to the resolved chart-of-accounts ids when codes are configured", async () => {
+  it("posts nothing when the invoice has no posted recognition entry — the deleted fallback posted fx_rate 1", async () => {
+    // ADR-0475: the two-line revenue/AR pair this used to fall back to wrote `fx_rate: 1` and
+    // `functional = amount`, so a EUR invoice's credit carried EUR as functional, and it reversed no
+    // tax. `compile.ts` never selected it; with no recognition there is nothing to mirror.
     const store = new InMemoryEntityStore();
-    const ar = await store.create(TENANT, "LedgerAccount", { account_code: "1100", name: "AR" });
-    const rev = await store.create(TENANT, "LedgerAccount", { account_code: "4000", name: "Revenue" });
-    const inv = await store.create(TENANT, "Invoice", {
-      invoice_number: "INV-X",
-      state: "sent",
-      document_type: "invoice",
-      currency: "USD",
-      total: 50,
-    });
-    const resolving = creditNoteGlPostingEffect({
-      clock,
-      resolveAccountCodes: async () => ({ ar: "1100", revenue: "4000" }),
-    });
-    await resolving(voidIt(store, String(inv.id), inv));
-    const entry = (await store.list(TENANT, "JournalEntry"))[0]!;
-    const lines = (await store.list(TENANT, "JournalLine")).filter((l) => l.journal_entry_id === entry.id);
-    const arLine = lines.find((l) => Number(l.credit) > 0)!;
-    const revLine = lines.find((l) => Number(l.debit) > 0)!;
-    expect(arLine.ledger_account_id).toBe(String(ar.id));
-    expect(revLine.ledger_account_id).toBe(String(rev.id));
-  });
-
-  it("falls back to placeholder refs when a code resolves to no account", async () => {
-    const store = new InMemoryEntityStore();
-    const inv = await store.create(TENANT, "Invoice", { invoice_number: "INV-Y", state: "sent", document_type: "invoice", total: 50 });
-    const resolving = creditNoteGlPostingEffect({ clock, resolveAccountCodes: async () => ({ ar: "9999", revenue: "8888" }) });
-    await resolving(voidIt(store, String(inv.id), inv));
-    const entry = (await store.list(TENANT, "JournalEntry"))[0]!;
-    const lines = (await store.list(TENANT, "JournalLine")).filter((l) => l.journal_entry_id === entry.id);
-    expect(lines.find((l) => Number(l.credit) > 0)!.ledger_account_id).toBe("accounts_receivable");
-    expect(lines.find((l) => Number(l.debit) > 0)!.ledger_account_id).toBe("revenue");
+    const inv = await store.create(TENANT, "Invoice", { invoice_number: "INV-N", state: "sent", document_type: "invoice", currency: "EUR", total: 50 });
+    await effect(voidIt(store, String(inv.id), inv));
+    expect(await store.list(TENANT, "JournalEntry")).toEqual([]);
   });
 });
 
@@ -1189,7 +1183,7 @@ describe("whtCertificateClearingEffect", () => {
 // so these are regressions against a wrong *posting*, not against a wrong type.
 describe("amounts that arrive as wire decimals", () => {
   const credit = invoiceVoidCreditNoteEffect({ clock });
-  const creditGl = creditNoteGlPostingEffect({ clock });
+  const creditGl = creditNoteGlPostingEffect({ clock, recognitionEntrySuffix: "-AR" });
 
   const voidIt = (
     store: InMemoryEntityStore,
@@ -1221,6 +1215,7 @@ describe("amounts that arrive as wire decimals", () => {
       total: "105.00",
       credit_amount: "40.00",
     });
+    await seedRecognition(store, "INV-WIRE-1", 105, "EUR");
     return { store, id: String(inv.id), inv };
   }
 
@@ -1239,7 +1234,7 @@ describe("amounts that arrive as wire decimals", () => {
   it("posts the GL entry for the string partial amount, not the full total", async () => {
     const { store, id, inv } = await issuedWithStringCreditAmount();
     await creditGl(voidIt(store, id, inv));
-    const entry = (await store.list(TENANT, "JournalEntry"))[0]!;
+    const entry = (await store.list(TENANT, "JournalEntry")).find((e) => e.entry_number === "INV-WIRE-1-CN-GL")!;
     const lines = (await store.list(TENANT, "JournalLine")).filter((l) => l.journal_entry_id === entry.id);
     expect(lines.reduce((s, l) => s + Number(l.debit), 0)).toBe(40);
     expect(lines.reduce((s, l) => s + Number(l.credit), 0)).toBe(40);
@@ -1802,24 +1797,12 @@ describe("resolveAccountId — no positional fallback", () => {
       getLocked: (t, e, id, l) => store.getLocked(t, e, id, l),
       list: (t, e) => store.list(t, e),
     };
-    const inv = await store.create(TENANT, "Invoice", {
-      invoice_number: "INV-ACCT",
-      state: "sent",
-      document_type: "invoice",
-      total: 100,
-    });
-    await creditNoteGlPostingEffect({ clock, resolveAccountCodes: () => Promise.resolve({ ar: "1100", revenue: "4000" }) })({
-      operation: "transition",
-      entity: "Invoice",
-      tenantId: TENANT,
-      id: String(inv.id),
-      before: inv,
-      after: { ...inv, state: "void" },
-      store: unnarrowed,
-    });
-    const accounts = (await store.list(TENANT, "JournalLine")).map((l) => l.ledger_account_id);
-    expect(accounts).not.toContain("SOME-OTHER-ACCOUNT");
-    expect(accounts.sort()).toEqual(["accounts_receivable", "revenue"]);
+    // Asked directly: the credit-note effect that carried this test resolved accounts through its
+    // two-line fallback, which ADR-0475 deleted. The rule is `resolveAccountId`'s own.
+    const input = { tenantId: TENANT, store: unnarrowed } as unknown as WriteEffectInput;
+    const ledger = { ledgerAccountEntity: "LedgerAccount", accountCodeField: "account_code" };
+    expect(await resolveAccountId(input, ledger, "1100")).toBeNull();
+    expect(await resolveAccountId(input, ledger, "9999")).toBe("SOME-OTHER-ACCOUNT");
   });
 });
 
@@ -2055,7 +2038,7 @@ describe("entersState — the three prior-state effects stay inert on a create",
   it("creditNoteGlPostingEffect writes nothing for an invoice created already void", async () => {
     const store = new InMemoryEntityStore();
     const inv = await store.create(TENANT, "Invoice", { invoice_number: "INV-V2", state: "void", document_type: "invoice", total: 10 });
-    await creditNoteGlPostingEffect({ clock })(create("Invoice", inv, store, String(inv.id)));
+    await creditNoteGlPostingEffect({ clock, recognitionEntrySuffix: "-AR" })(create("Invoice", inv, store, String(inv.id)));
     expect((await store.list(TENANT, "JournalEntry")).length).toBe(0);
   });
 });
@@ -2887,5 +2870,182 @@ describe("taxReturnFilingCheckEffect", () => {
       store,
     });
     expect(store.writes).toEqual([]);
+  });
+});
+
+// ADR-0475: what the auto-settlement and the refund re-open write on the document they move, and
+// under which lock they read it.
+describe("paymentApplicationEffect — attribution, past-due re-open and the document lock", () => {
+  const config = {
+    documentEntity: "Invoice",
+    refField: "invoice_id",
+    settledBy: "inbound",
+    settleableStates: ["sent", "overdue"],
+    refundedState: "refunded",
+    reopenState: "sent",
+    overdueState: "overdue",
+    dueDateField: "due_date",
+    clock,
+  } as const;
+  const apply = paymentApplicationEffect(config);
+
+  /** Records every `getLocked` so the lock mode can be asserted rather than inferred. */
+  class LockRecordingStore extends InMemoryEntityStore {
+    readonly locks: { readonly entity: string; readonly id: string; readonly lock: string }[] = [];
+    readonly plainGets: { readonly entity: string; readonly id: string }[] = [];
+    override async getLocked(tenantId: string, entity: string, id: string, lock: "share" | "exclusive"): Promise<EntityRecord | null> {
+      this.locks.push({ entity, id, lock });
+      return super.getLocked(tenantId, entity, id, lock);
+    }
+    override async get(tenantId: string, entity: string, id: string): Promise<EntityRecord | null> {
+      this.plainGets.push({ entity, id });
+      return super.get(tenantId, entity, id);
+    }
+  }
+
+  async function invoice(store: InMemoryEntityStore, dueDate: string | undefined, state = "sent"): Promise<string> {
+    const inv = await store.create(TENANT, "Invoice", {
+      invoice_number: "INV-R",
+      state,
+      total: 100,
+      ...(dueDate !== undefined ? { due_date: dueDate } : {}),
+      updated_by: "hand-editor",
+    });
+    return String(inv.id);
+  }
+  async function complete(store: InMemoryEntityStore, invId: string, actor: string | undefined): Promise<string> {
+    const pay = await store.create(TENANT, "Payment", {
+      invoice_id: invId,
+      direction: "inbound",
+      amount: 100,
+      state: "completed",
+      ...(actor !== undefined ? { updated_by: actor } : {}),
+    });
+    await apply({
+      operation: "transition",
+      entity: "Payment",
+      tenantId: TENANT,
+      id: String(pay.id),
+      before: { state: "pending" },
+      after: (await store.get(TENANT, "Payment", String(pay.id)))!,
+      store,
+    });
+    return String(pay.id);
+  }
+  async function refund(store: InMemoryEntityStore, paymentId: string, actor: string): Promise<void> {
+    const before = (await store.get(TENANT, "Payment", paymentId))!;
+    const after = await store.update(TENANT, "Payment", paymentId, { state: "refunded", updated_by: actor });
+    await apply({ operation: "transition", entity: "Payment", tenantId: TENANT, id: paymentId, before, after: after!, store });
+  }
+  const doc = async (store: InMemoryEntityStore, id: string) => (await store.get(TENANT, "Invoice", id))!;
+
+  it("stamps the settling payment's actor as the document's updated_by", async () => {
+    const store = new InMemoryEntityStore();
+    const id = await invoice(store, "2026-07-15");
+    await complete(store, id, "clerk-a");
+    expect((await doc(store, id)).state).toBe("paid");
+    expect((await doc(store, id)).updated_by).toBe("clerk-a");
+  });
+
+  it("stamps the refunding actor on the re-opened document", async () => {
+    const store = new InMemoryEntityStore();
+    const id = await invoice(store, "2026-07-15");
+    const pay = await complete(store, id, "clerk-a");
+    await refund(store, pay, "clerk-b");
+    expect((await doc(store, id)).updated_by).toBe("clerk-b");
+  });
+
+  it("leaves updated_by alone when the trigger carries no stamp (a non-auditable entity)", async () => {
+    const store = new InMemoryEntityStore();
+    const id = await invoice(store, "2026-07-15");
+    await complete(store, id, undefined);
+    expect((await doc(store, id)).state).toBe("paid");
+    expect((await doc(store, id)).updated_by).toBe("hand-editor");
+  });
+
+  it("re-opens a past-due document as overdue and a not-yet-due one as sent", async () => {
+    // The clock reads 2026-06-21.
+    const store = new InMemoryEntityStore();
+    const pastDue = await invoice(store, "2026-06-01");
+    const future = await invoice(store, "2026-07-15");
+    const dueToday = await invoice(store, "2026-06-21");
+    const undated = await invoice(store, undefined);
+    for (const id of [pastDue, future, dueToday, undated]) {
+      await refund(store, await complete(store, id, "c"), "r");
+    }
+    expect((await doc(store, pastDue)).state).toBe("overdue");
+    expect((await doc(store, future)).state).toBe("sent");
+    // Due today is not past due — `mark_overdue` would not move it either.
+    expect((await doc(store, dueToday)).state).toBe("sent");
+    expect((await doc(store, undated)).state).toBe("sent");
+  });
+
+  it("re-opens into reopenState when no overdue state is configured — the pre-ADR-0475 behaviour", async () => {
+    const legacy = paymentApplicationEffect({ ...config, overdueState: undefined, dueDateField: undefined });
+    const store = new InMemoryEntityStore();
+    const id = await invoice(store, "2026-06-01");
+    const pay = await store.create(TENANT, "Payment", { invoice_id: id, direction: "inbound", amount: 100, state: "completed" });
+    await legacy({ operation: "transition", entity: "Payment", tenantId: TENANT, id: String(pay.id), before: { state: "pending" }, after: pay, store });
+    const after = await store.update(TENANT, "Payment", String(pay.id), { state: "refunded" });
+    await legacy({ operation: "transition", entity: "Payment", tenantId: TENANT, id: String(pay.id), before: pay, after: after!, store });
+    expect((await doc(store, id)).state).toBe("sent");
+  });
+
+  it("refuses to be configured with an overdue state and no due date, or the reverse", () => {
+    expect(() => paymentApplicationEffect({ ...config, dueDateField: undefined })).toThrow(/together/);
+    expect(() => paymentApplicationEffect({ ...config, overdueState: undefined })).toThrow(/together/);
+  });
+
+  it("reopenStateFor compares the due date's day against today", () => {
+    const c = { reopenState: "sent", overdueState: "overdue", dueDateField: "due_date" };
+    expect(reopenStateFor({ due_date: "2026-06-20" }, "2026-06-21", c)).toBe("overdue");
+    expect(reopenStateFor({ due_date: "2026-06-21T23:00:00.000Z" }, "2026-06-21", c)).toBe("sent");
+    expect(reopenStateFor({ due_date: "not a date" }, "2026-06-21", c)).toBe("sent");
+    expect(reopenStateFor({ due_date: "2026-06-20" }, "2026-06-21", { reopenState: "sent" })).toBe("sent");
+  });
+
+  it("reads the document under an exclusive lock on both the settle and the refund path", async () => {
+    const store = new LockRecordingStore();
+    const id = await invoice(store, "2026-07-15");
+    const pay = await complete(store, id, "c");
+    await refund(store, pay, "r");
+    expect(store.locks.filter((l) => l.entity === "Invoice")).toEqual([
+      { entity: "Invoice", id, lock: "exclusive" },
+      { entity: "Invoice", id, lock: "exclusive" },
+    ]);
+    // The lock is the read: no plain `get` of the document decides anything beside it. (The
+    // in-memory `getLocked` reads through `get`, so each locked read shows here once.)
+    expect(store.plainGets.filter((g) => g.entity === "Invoice")).toHaveLength(2);
+  });
+
+  it("serialises a refund behind mark_paid on the document, so the refund sees paid and re-opens it", async () => {
+    // The write skew of ADR-0433 Q5 in-process: `mark_paid` holds the document exclusively while it
+    // decides, and the refund's re-open asks for the same lock. Under a plain read the refund read
+    // `sent`, returned, and the invoice was then marked paid with nothing applied.
+    const store = new InMemoryEntityStore();
+    const id = await invoice(store, "2026-07-15");
+    const pay = await store.create(TENANT, "Payment", { invoice_id: id, direction: "inbound", amount: 100, state: "completed" });
+    let releaseMarkPaid!: () => void;
+    const markPaidHolds = new Promise<void>((r) => (releaseMarkPaid = r));
+    let markPaidLocked!: () => void;
+    const locked = new Promise<void>((r) => (markPaidLocked = r));
+    const markPaid = store.withTransaction(TENANT, async (tx) => {
+      await tx.getLocked(TENANT, "Invoice", id, "exclusive");
+      markPaidLocked();
+      await markPaidHolds;
+      await tx.update(TENANT, "Invoice", id, { state: "paid" });
+    });
+    await locked;
+    const refundDone = store.withTransaction(TENANT, async (tx) => {
+      const before = (await tx.get(TENANT, "Payment", String(pay.id)))!;
+      const after = await tx.update(TENANT, "Payment", String(pay.id), { state: "refunded" });
+      await apply({ operation: "transition", entity: "Payment", tenantId: TENANT, id: String(pay.id), before, after: after!, store: tx });
+    });
+    // The refund is parked on the lock: the invoice is still `sent` and unreleased.
+    await new Promise((r) => setTimeout(r, 20));
+    expect((await doc(store, id)).state).toBe("sent");
+    releaseMarkPaid();
+    await Promise.all([markPaid, refundDone]);
+    expect((await doc(store, id)).state).toBe("sent");
   });
 });

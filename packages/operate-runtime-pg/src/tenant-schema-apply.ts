@@ -11,8 +11,12 @@ import {
   relationDeleteIndex,
   type EntityTablePlan,
 } from "./column-plan.js";
-import { ensureColumnStoreExtensions } from "./column-store.js";
-import { emitManifestSchemaDdl, emitUniqueIndexDdl } from "./entity-ddl.js";
+import {
+  ensureColumnStoreExtensions,
+  uniqueIndexRefusalCause,
+  type UniqueIndexRefusalCause,
+} from "./column-store.js";
+import { emitManifestSchemaDdl, emitUniqueIndexDdl, uniqueIndexFields } from "./entity-ddl.js";
 import { tenantSchemaName, DEFAULT_TENANT_SCHEMA_PREFIX } from "./tenant-schema.js";
 import {
   blockingChanges,
@@ -87,10 +91,17 @@ const UNIQUE_INDEX_SAVEPOINT = "crossengin_tenant_unique_index";
  */
 export interface TenantUniqueIndexRefusal {
   readonly entity: string;
-  /** The statement that was attempted and raised — the one an operator re-runs after deduplicating. */
+  /** The field the index enforces, so the refusal can be named per field and not only per entity. */
+  readonly field: string;
+  /** The statement that was attempted and raised — the one an operator re-runs once `cause` is dealt with. */
   readonly sql: string;
   /** Postgres's own message, so the duplicate it found is legible without a second query. */
   readonly detail: string;
+  /**
+   * Why, from the SQLSTATE (ADR-0474). Only `duplicates` is cured by deduplicating; a `timed_out`
+   * refusal is a lock or a large table, and saying "deduplicate" for it is a remedy that cannot work.
+   */
+  readonly cause: UniqueIndexRefusalCause;
 }
 
 /** What one application of a tenant's manifest to their own schema did, and did not, do. */
@@ -267,7 +278,9 @@ export async function applyTenantManifestSchema(
     }
     const uniqueIndexRefusals: TenantUniqueIndexRefusal[] = [];
     for (const plan of plans.values()) {
-      for (const stmt of emitUniqueIndexDdl(plan)) {
+      // Zipped by position, as `ensureSchema` zips them: both read `enforceableUniqueColumns`.
+      const fields = [...uniqueIndexFields(plan).values()];
+      for (const [i, stmt] of emitUniqueIndexDdl(plan).entries()) {
         await tx.query(`SAVEPOINT ${UNIQUE_INDEX_SAVEPOINT}`);
         try {
           await tx.query(stmt);
@@ -282,8 +295,10 @@ export async function applyTenantManifestSchema(
           await tx.query(`RELEASE SAVEPOINT ${UNIQUE_INDEX_SAVEPOINT}`);
           uniqueIndexRefusals.push({
             entity: plan.entity,
+            field: fields[i]!,
             sql: stmt,
             detail: error instanceof Error ? error.message : String(error),
+            cause: uniqueIndexRefusalCause(error),
           });
         }
       }

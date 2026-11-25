@@ -7,7 +7,7 @@ import type { RouteDefinition } from "@crossengin/api-gateway";
 import { describe, expect, it } from "vitest";
 
 import { buildIncomingRequest } from "./adapters.js";
-import { InMemoryJwksProvider } from "./auth.js";
+import { InMemoryJwksProvider, REQUIRED_JWT_CLAIMS } from "./auth.js";
 import { HandlerRegistry } from "./dispatcher.js";
 import { GatewayRuntime } from "./runtime.js";
 import {
@@ -72,6 +72,7 @@ function request(headers: Record<string, string>) {
 
 function runtimeWith(resolver: PrincipalResolver, jwks: InMemoryJwksProvider): GatewayRuntime {
   return new GatewayRuntime({
+    requiredJwtClaims: new Set(REQUIRED_JWT_CLAIMS),
     routes: new InMemoryRouteRegistry().register(route),
     handlers: new HandlerRegistry().register("tenants.create", () => ({ kind: "json", status: 201, body: {} })),
     principalResolver: resolver,

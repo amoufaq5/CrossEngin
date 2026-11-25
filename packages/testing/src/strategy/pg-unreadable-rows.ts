@@ -2120,17 +2120,6 @@ export const UNREADABLE_ROW_SITES: readonly UnreadableRowDeclaration[] = Object.
   },
   
   {
-    file: "packages/operate-runtime-pg/src/column-store.ts",
-    scope: "listPageOn",
-    conversion: "<inline>",
-    reason: "unmigrated",
-    consequence:
-      "a refused record makes the whole page a 500, so one row written by an earlier manifest empties a collection for every caller",
-    note:
-      "Every list request a tenant makes against the typed column store, so this is the most-travelled conversion in the product.",
-  },
-  
-  {
     file: "packages/workflow-runtime-pg/src/definition-store.ts",
     scope: "loadEngineDefinitions",
     conversion: "rowToWorkflowDefinition",

@@ -49,8 +49,10 @@ import { runWriteEffects, type WriteEffect } from "./write-effects.js";
 import { validateBody, type EntityValidationPlan } from "./validation.js";
 import {
   isTransactional,
+  ListRowUnreadable,
   ListSurfaceUnserveable,
   projectRecord,
+  RecordIdConflict,
   ReferencedRecordInUse,
   ReferenceNotFound,
   UniqueViolation,
@@ -85,6 +87,9 @@ import {
 } from "./entity-audit.js";
 import type { RouteAction, RouteSpec } from "./operations.js";
 import { systemWriteOriginOf, type SystemWriteOrigin } from "./system-writer.js";
+import { reportHandlerFault, type HandlerFaultReporter } from "./handler-fault.js";
+import { DatetimeWireError } from "./datetime-store.js";
+import { DecimalWireError } from "./decimal-store.js";
 
 const FALLBACK_LIST_CONFIG: ListConfig = {
   defaultLimit: DEFAULT_PAGE_SIZE,
@@ -198,6 +203,13 @@ export interface HandlerContext {
    * report success unaccounted for.
    */
   readonly entityAudit?: EntityWriteAuditor;
+  /**
+   * Where the cause of a fixed-body 500 goes — an unclassified write failure, and a list page the
+   * store refused because a row could not be read back. **Required**: the body of both answers is
+   * deliberately empty of the cause, so a context that could omit this would be one where the cause
+   * reaches nobody, which is what it was before (see `handler-fault.ts`).
+   */
+  readonly reportFault: HandlerFaultReporter;
   readonly clock?: { now(): Date };
 }
 
@@ -436,6 +448,38 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
           page = await ctx.store.listPage(tenantId, spec.entity, query);
         } catch (err) {
           if (err instanceof ListSurfaceUnserveable) return storeRefused(err);
+          // A stored row this server cannot read back. Refused and **not** shortened (ADR-0405):
+          // the generic list has no sibling count to disagree with a short page, so a missing row
+          // would read as a record that does not exist. The catch covers the store call alone, so
+          // nothing the handler does after it can be mistaken for this. The body names the entity
+          // and nothing about the rows — their ids and the refusal's field path go to the operator,
+          // under the request id the caller holds. 500 and not 503: the row stays unreadable until
+          // someone repairs it, and a 503 invites a retry that cannot help.
+          //
+          // Two producers, and the second is the live one: the column store refuses a row its
+          // mapper cannot read (`ListRowUnreadable`, naming the ids), and the wire-type decorators
+          // over both stores refuse a *stored* value they cannot render — a `TIMESTAMPTZ` past year
+          // 275760 reaches them as the string "Invalid Date" — which used to escape this catch as
+          // an unclassified throw. Theirs names the entity and field and not the row, because they
+          // stop at the first record.
+          if (isStoredRowUnreadable(err)) {
+            reportHandlerFault(ctx.reportFault, {
+              kind: "page_unreadable",
+              operationId: spec.operationId,
+              entity: spec.entity,
+              requestId: request.id,
+              error: err,
+            });
+            return json(500, {
+              error: "page_unreadable",
+              detail:
+                `a stored ${spec.entity} on this page cannot be read by this server, so the page is ` +
+                // "What refused it", not "the records": the decorator producer names the entity
+                // and field, not the row (measured live), so naming rows would be false of one arm.
+                `refused rather than served without it; what refused it is in the server log ` +
+                `under this request's id`,
+            });
+          }
           throw err;
         }
         // Deliberately **not** `resolveObligation`: that helper turns a refusal into a 403, which is
@@ -587,7 +631,7 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
           if (early !== null) return early;
         }
         body = await applyEntitySequences(ctx, spec.entity, tenantId, body, settings);
-        return writeTxn(ctx, tenantId, async (store) => {
+        return writeTxn(ctx, writeIdentity, tenantId, async (store) => {
           // A caller-supplied id that already exists in this tenant is a 409 rather than whatever
           // the store does with it: the in-memory store overwrote the record and the Postgres stores
           // raised an unattributed key violation answered as a 500. Asked inside the transaction;
@@ -626,7 +670,7 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
             store,
           });
           return json(201, created);
-        }, createKeys);
+        }, createKeys, callerId);
       }
       case "update": {
         // Optimistic concurrency: a client MAY send the `updated_at` it last read as a reserved
@@ -666,7 +710,7 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
           updated_at: nowIso(ctx),
           ...(updateSurface?.stampsActor === true ? { [UPDATED_BY_FIELD]: actorId } : {}),
         };
-        return writeTxn(ctx, tenantId, async (store) => {
+        return writeTxn(ctx, writeIdentity, tenantId, async (store) => {
           // An outstanding obligation — entity-level or field-level — forces the load, on top of
           // the three reasons that already did. Without it the record is never fetched for a plain
           // patch and the obligation could only refuse.
@@ -773,7 +817,7 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
         // a delete can still raise `23505`, through an `ON DELETE SET NULL` cascade that collides
         // two siblings on a unique column, which is a consequence of the schema and not of
         // anything this caller typed.
-        return writeTxn(ctx, tenantId, async (store) => {
+        return writeTxn(ctx, writeIdentity, tenantId, async (store) => {
           // An outstanding obligation forces the load: the record is what the policy is about.
           // A recorder forces the load: a record of a delete that does not hold what was deleted
           // records only that something with this id is gone.
@@ -916,7 +960,8 @@ async function applyTransition(
 ): Promise<HandlerOutput> {
   const t = spec.transition;
   if (t === undefined) return json(500, { error: "missing_transition_spec" });
-  return writeTxn(ctx, tenantId, async (store) => {
+  const site: WriteSite = { operationId: spec.operationId, entity: spec.entity, requestId };
+  return writeTxn(ctx, site, tenantId, async (store) => {
     // Locked before anything is decided from it, and that is the half of serialising a line write
     // with its parent's transition that the line's own lock cannot supply: the transition's guards
     // read the lines (the journal balance, a recognition's tax split), and a line written by a
@@ -1219,6 +1264,17 @@ function cursorRefused(reason: CursorRefusal): HandlerOutput {
 }
 
 /** Current time as an ISO string, honoring an injected clock for deterministic tests. */
+/**
+ * Whether a list's store call refused because a **stored** record cannot be represented — as opposed
+ * to a request it cannot answer, which is `ListSurfaceUnserveable`'s 400. `direction === "stored"`
+ * is the line: an inbound wire error is the caller's malformed value and is never raised by a read.
+ */
+function isStoredRowUnreadable(err: unknown): boolean {
+  if (err instanceof ListRowUnreadable) return true;
+  if (err instanceof DatetimeWireError || err instanceof DecimalWireError) return err.direction === "stored";
+  return false;
+}
+
 function nowIso(ctx: HandlerContext): string {
   return (ctx.clock?.now() ?? new Date()).toISOString();
 }
@@ -1350,17 +1406,29 @@ function hasEffects(ctx: HandlerContext): boolean {
   return ctx.writeEffects !== undefined && ctx.writeEffects.length > 0;
 }
 
+/** What a write's fault report names: the operation, its entity, and the request id the caller holds. */
+interface WriteSite {
+  readonly operationId: string;
+  readonly entity: string;
+  readonly requestId: string;
+}
+
 /**
  * Runs a write unit (guard → store write → effects) atomically when the store
  * supports transactions: the body runs against a transaction-bound store and an
  * effect that throws rolls the whole unit back. On a non-transactional store the
  * body runs directly (best-effort). Either way a thrown error maps to 500.
+ *
+ * `callerRecordId` is the id the caller supplied on a create, or `null` — the one fact the
+ * `RecordIdConflict` arm needs, since `callerKeys` says *that* an id was sent and not *which*.
  */
 async function writeTxn(
   ctx: HandlerContext,
+  site: WriteSite,
   tenantId: string,
   body: (store: EntityStore) => Promise<HandlerOutput>,
   callerKeys: readonly string[],
+  callerRecordId: string | null = null,
 ): Promise<HandlerOutput> {
   try {
     const run = async (): Promise<HandlerOutput> => {
@@ -1381,6 +1449,19 @@ async function writeTxn(
     // field. See `uniqueConflict`.
     if (err instanceof UniqueViolation && callerKeys.includes(err.field)) {
       return uniqueConflict(err);
+    }
+    // The same rule for the record's own key. The create handler asks for a caller-supplied id
+    // before it writes and answers `id_conflict`, but that is a read, so two concurrent creates of
+    // one new id both pass it and the loser meets the key — which used to be the fixed 500 (P1.13b).
+    // Scoped to **this entity and the id the caller sent**: an effect of the same write creating a
+    // record under an id the server chose is an internal fault the caller cannot fix by sending a
+    // different id, so it keeps the 500.
+    if (
+      err instanceof RecordIdConflict &&
+      err.entity === site.entity &&
+      err.id === callerRecordId
+    ) {
+      return idConflict(site.entity);
     }
     // `uniqueConflict`'s rule: the caller supplied the id, so the caller can fix it. A dangling
     // reference the server wrote (an effect's fallback account code) is an internal fault and takes
@@ -1444,8 +1525,13 @@ async function writeTxn(
     // 500 rather than a 4xx: the bound is the deployment's, the caller neither chose it nor can
     // change it, and a retry gets the same answer — which is what a 500 says and a 409 would deny.
     // A posting an effect refused — into a locked period, or against an ambiguous source entry. The
-    // detail is built from literals and server-chosen values only, so it carries what a guard block
-    // would: the effect is the one place this check can run, since effects pass no guard.
+    // detail carries literals, server-chosen values (a period's status) and values from the caller's
+    // own document — the posting date, a jurisdiction or tax code, a label, an amount — which is what
+    // a guard block over that document would carry. None of those is a classified field in erp-core
+    // (measured, ADR-0432 Q6), and a refusal that would interpolate one must not be written: the
+    // detail reaches the caller verbatim. The effect is the one place this check can run, since
+    // effects pass no guard. (This used to say "literals and server-chosen values only", which the
+    // tax refusals' codes, dates and amounts are not.)
     if (isPostingRefused(err)) {
       return json(err.status, { error: err.error, detail: err.detail });
     }
@@ -1457,21 +1543,24 @@ async function writeTxn(
           `depends on, so ${err.computing} could not be computed over the whole set and nothing was written`,
       });
     }
-    // Unbound deliberately: the message is dropped, not moved, and that is the honest description
-    // rather than a tidier one. This layer has no
-    // recorder. A handler returns a `HandlerOutput`, the gateway's dispatch stage sees a 500 and
-    // records `handler_returned_<status>` with the handler's own body passed through, so a detail
-    // put here reaches the client and a detail put nowhere reaches nobody. Dropping it is still
-    // the right half to give up: the exception on this path is a database error naming entities,
-    // columns and tenant ids, and the deployment's own experience of it was a client reading
-    // `tenant_data_keys_tenant_id_fkey` off a 500 body. An operator loses a diagnosis they can
-    // recover from the process log; a caller cannot un-see one.
+    // The body names nothing, and the cause goes to the operator through `reportFault` with the
+    // request id the caller holds. The exception on this path is a database error naming entities,
+    // columns, constraints and tenant ids, and the deployment's own experience of putting it in a
+    // body was a client reading `tenant_data_keys_tenant_id_fkey` off a 500 — so the body stays the
+    // fixed sentence. What changed is the other half: this comment used to say the cause could be
+    // "recovered from the process log", and nothing wrote it there (a handler that *returns* a 500
+    // never reaches the gateway's `onInternalError`). `describeHandlerFault` is what the operator
+    // reads, and it redacts the value a `ZodError` or a Postgres `detail` carries.
     //
-    // Rethrowing is not the alternative it looks like: it would let the gateway's catch record the
-    // message, and it would also change four handlers' semantics, since the rollback is already
-    // complete by here and the throw would travel as if it were not. The fix is a recorder seam on
-    // `HandlerContext` — somewhere for a handler to put an operator-only string that the dispatch
-    // stage folds into the stage reason — which is a contract change this does not make.
+    // Rethrowing is still not the alternative it looks like: the rollback is complete by here, and a
+    // throw would travel as though it were not.
+    reportHandlerFault(ctx.reportFault, {
+      kind: "write_failed",
+      operationId: site.operationId,
+      entity: site.entity,
+      requestId: site.requestId,
+      error: err,
+    });
     return json(500, { error: "write_failed", detail: WRITE_FAILED_CLIENT_DETAIL });
   }
 }

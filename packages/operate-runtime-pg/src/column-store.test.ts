@@ -2,7 +2,9 @@ import { PGP_SYM_ENCRYPT_OPTIONS, type PgConnection } from "@crossengin/kernel-p
 import type { Manifest } from "@crossengin/kernel/manifest";
 import {
   encodeKeyset,
+  ListRowUnreadable,
   ListSurfaceUnserveable,
+  RecordIdConflict,
   ReferencedRecordInUse,
   ReferenceNotFound,
   UniqueViolation,
@@ -19,8 +21,18 @@ import {
   decimalSpecFromSqlType,
   ENCRYPTED_COLUMN_TYPE_SQL,
   EncryptedColumnNotCiphertext,
+  BootDdlStopped,
+  UNIQUE_INDEX_REFUSAL_CAUSES,
+  describeBootDdlStatement,
+  entityPrimaryKeyConstraintName,
+  isPrimaryKeyViolation,
+  uniqueIndexRefusalCause,
 } from "./column-store.js";
-import { SEARCH_FUNCTION_PRESENT_ROW, SEARCH_FUNCTION_PROBE_MATCH } from "./search-function.js";
+import {
+  searchFunctionCall,
+  SEARCH_FUNCTION_PRESENT_ROW,
+  SEARCH_FUNCTION_PROBE_MATCH,
+} from "./search-function.js";
 import {
   COLUMN_SCHEMA_AUTHORITY_PROBE_MATCH,
   COLUMN_SCHEMA_OWNER_AUTHORITY_ROW,
@@ -681,6 +693,9 @@ describe("ColumnMappedEntityStore — at-rest encryption of phi columns", () => 
     });
     const sel = cap.calls.find((c) => c.sql.includes("SELECT"))!;
     expect(sel.sql).toContain('"sku"::text');
+    // The fold is the column store's own declaration since ADR-0474 (`foldText` is required on the
+    // adapter), and it must be the wrapper the trigram index is built over or `?q=` never reads one.
+    expect(sel.sql).toContain(searchFunctionCall('"sku"::text'));
     expect(page.searchNarrowedBy).toEqual(["mrn"]);
     const unnarrowed = await store(capturePg([])).listPage(TENANT, "Widget", {
       limit: 5,
@@ -1652,9 +1667,12 @@ describe("ColumnMappedEntityStore — a declared unique field", () => {
   it("re-throws a 23505 from a constraint this store never emitted, untouched", async () => {
     // The most important of these. Claiming a field for a constraint that cannot be attributed
     // would be a guess in an error message, and an unattributable duplicate is exactly as opaque
-    // as it was before this existed — which is honest rather than improved. `catalog_pkey` is
-    // Postgres's own name for the primary key; nothing in this emitter produces it.
-    const original = pgError("23505", "catalog_pkey");
+    // as it was before this existed — which is honest rather than improved. This used to use
+    // `catalog_pkey`, under the claim that nothing in this emitter produces it — false: the emitter's
+    // unnamed `PRIMARY KEY ("tenant_id", "id")` is named exactly that by Postgres, and since ADR-0474
+    // a 23505 on it is `RecordIdConflict` (see "a caller id the tenant already holds"). A constraint
+    // this store really never emitted is one a hand or another tool added.
+    const original = pgError("23505", "catalog_sku_legacy_key");
     const cap = capturePg([], (sql) => (sql.startsWith("INSERT") ? original : null));
     const err = await catalogStore(cap)
       .create(TENANT, "Catalog", { id: "c1", sku: "S1" })
@@ -1875,5 +1893,198 @@ describe("ColumnMappedEntityStore — an encrypted scalar keeps its type (ADR-04
       count: "seven",
       flag: "yes",
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ADR-0474: the store's write and read diagnostics.
+// ---------------------------------------------------------------------------
+
+describe("ColumnMappedEntityStore — a caller id the tenant already holds", () => {
+  const pkey = (constraint: string) =>
+    Object.assign(new Error(`duplicate key value violates unique constraint "${constraint}"`), {
+      code: "23505",
+      constraint,
+    });
+
+  it("raises RecordIdConflict for a 23505 on the table's own primary key", async () => {
+    expect(entityPrimaryKeyConstraintName("widget")).toBe("widget_pkey");
+    const cap = capturePg([], (sql) => (sql.startsWith("INSERT") ? pkey("widget_pkey") : null));
+    const err = await store(cap)
+      .create(TENANT, "Widget", { id: "w-1", sku: "A" })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RecordIdConflict);
+    expect((err as RecordIdConflict).entity).toBe("Widget");
+    expect((err as RecordIdConflict).id).toBe("w-1");
+  });
+
+  it("leaves a 23505 on any other constraint to the unique-violation path", async () => {
+    const cap = capturePg([], (sql) => (sql.startsWith("INSERT") ? pkey("something_else_key") : null));
+    const err = await store(cap)
+      .create(TENANT, "Widget", { id: "w-1", sku: "A" })
+      .catch((e: unknown) => e);
+    expect(err).not.toBeInstanceOf(RecordIdConflict);
+    expect(err).not.toBeInstanceOf(UniqueViolation);
+  });
+
+  it("predicts Postgres's truncation of a long table's primary-key name", () => {
+    const long = "a".repeat(70);
+    const name = entityPrimaryKeyConstraintName(long);
+    expect(name).toHaveLength(63);
+    expect(name.endsWith("_pkey")).toBe(true);
+    expect(isPrimaryKeyViolation({ code: "23505", constraint: name }, long)).toBe(true);
+    expect(isPrimaryKeyViolation({ code: "23503", constraint: name }, long)).toBe(false);
+  });
+});
+
+describe("ColumnMappedEntityStore — a page holding a row the store cannot represent", () => {
+  const EVENT: Entity = {
+    name: "Event",
+    fields: [
+      { name: "title", type: { kind: "text" } },
+      { name: "at", type: { kind: "datetime" } },
+    ],
+  };
+  const eventStore = (cap: Captured) =>
+    new ColumnMappedEntityStore(cap.conn, { entities: [EVENT] } as unknown as Manifest, {
+      schema: "tenant_app",
+    });
+  const query = { limit: 10, cursor: null, sort: [], filters: [] };
+
+  it("refuses the whole page naming every unreadable row, and keeps the readable ones out of a short answer", async () => {
+    // Measured, the mapper is total over every value node-postgres hands back today — an invalid
+    // `Date` reads as the string "Invalid Date", which the wire-type decorator refuses above this
+    // store — so the refusal is exercised by a row whose column read itself throws, the shape a
+    // mapper's own guard would produce. What is under test is that one bad row refuses the page,
+    // names every bad row and drops none.
+    const raising = (id: string) => ({
+      id,
+      title: "far",
+      get at(): unknown {
+        throw new RangeError("Invalid time value");
+      },
+    });
+    const cap = capturePg([
+      { id: "ev-ok", title: "fine", at: new Date("2026-01-01T00:00:00.000Z") },
+      raising("ev-bad"),
+      raising("ev-bad-2"),
+    ]);
+    const err = await eventStore(cap).listPage(TENANT, "Event", query).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ListRowUnreadable);
+    const refused = err as ListRowUnreadable;
+    expect(refused.entity).toBe("Event");
+    expect(refused.rows.map((r) => r.identity)).toEqual(["ev-bad", "ev-bad-2"]);
+    expect(refused.rows[0]!.detail).toMatch(/Invalid time value/);
+  });
+
+  it("serves a page whose rows all read, which is the control", async () => {
+    const cap = capturePg([{ id: "ev-ok", title: "fine", at: new Date("2026-01-01T00:00:00.000Z") }]);
+    const page = await eventStore(cap).listPage(TENANT, "Event", query);
+    expect(page.records.map((r) => r["id"])).toEqual(["ev-ok"]);
+    expect(page.records[0]!["at"]).toBe("2026-01-01T00:00:00.000Z");
+  });
+});
+
+describe("ColumnMappedEntityStore — a boot DDL statement stopped by a lock", () => {
+  const lock = () =>
+    Object.assign(new Error("canceling statement due to lock timeout"), { code: "55P03" });
+
+  it("names the table and the act instead of Postgres's bare 'lock timeout'", async () => {
+    const cap = capturePg([], (sql) =>
+      sql.includes('CREATE TABLE IF NOT EXISTS "tenant_app"."widget"') ? lock() : null,
+    );
+    const s = new ColumnMappedEntityStore(cap.conn, MANIFEST, {
+      schema: "tenant_app",
+      encryptionKey: () => KEY,
+      ddl: { lockRetries: 0, sleep: async () => undefined },
+    });
+    const err = await s.ensureSchema().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(BootDdlStopped);
+    const stopped = err as BootDdlStopped;
+    expect(stopped.stop).toBe("lock_timeout");
+    expect(stopped.tables).toEqual(["tenant_app.widget"]);
+    expect(stopped.action).toBe("CREATE TABLE");
+    expect(stopped.message).toContain("tenant_app.widget");
+    expect(stopped.message).toContain("pg_locks");
+    // The lookup is pasteable: it names the table, not a placeholder.
+    expect(stopped.message).toContain("l.relation IN ('tenant_app.widget'::regclass)");
+    expect(stopped.message).not.toContain("<table>");
+    expect((stopped.cause as { code?: string }).code).toBe("55P03");
+  });
+
+  it("tells a statement-timeout stop to run the act by hand, not to raise a bound no flag reaches", async () => {
+    // `applyBootStatement` sets its `statement_timeout` with `SET LOCAL`, which overrides the
+    // session's `--pg-statement-timeout-ms` and which no flag reaches; the first draft said "raise it
+    // for this boot", a remedy that could not be followed (found in review).
+    const timeout = Object.assign(new Error("canceling statement due to statement timeout"), { code: "57014" });
+    const cap = capturePg([], (sql) =>
+      sql.includes('CREATE TABLE IF NOT EXISTS "tenant_app"."widget"') ? timeout : null,
+    );
+    const err = await new ColumnMappedEntityStore(cap.conn, MANIFEST, {
+      schema: "tenant_app",
+      encryptionKey: () => KEY,
+      ddl: { lockRetries: 0, sleep: async () => undefined },
+    })
+      .ensureSchema()
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(BootDdlStopped);
+    const stopped = err as BootDdlStopped;
+    expect(stopped.stop).toBe("statement_timeout");
+    expect(stopped.message).toContain("run that CREATE TABLE on tenant_app.widget by hand");
+    expect(stopped.message).not.toMatch(/raise it/);
+    expect(stopped.message).not.toMatch(/--pg-statement-timeout-ms/);
+  });
+
+  it("leaves every other DDL failure as it was", async () => {
+    const denied = Object.assign(new Error("permission denied for schema tenant_app"), { code: "42501" });
+    const cap = capturePg([], (sql) => (sql.includes("CREATE TABLE") ? denied : null));
+    const s = new ColumnMappedEntityStore(cap.conn, MANIFEST, {
+      schema: "tenant_app",
+      encryptionKey: () => KEY,
+      ddl: { lockRetries: 0, sleep: async () => undefined },
+    });
+    await expect(s.ensureSchema()).rejects.toBe(denied);
+  });
+
+  it("names both tables of a foreign key, which locks both", () => {
+    const sql =
+      `DO $ce_fk$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conrelid = '"s"."order"'::regclass) THEN ` +
+      `ALTER TABLE "s"."order" ADD CONSTRAINT "fk_order_account_id" FOREIGN KEY ("tenant_id", "account_id") ` +
+      `REFERENCES "s"."account" ("tenant_id", "id") ON DELETE RESTRICT; END IF; END $ce_fk$;`;
+    expect(describeBootDdlStatement(sql, "s", new Set(["order", "account"]))).toEqual({
+      tables: ["s.order", "s.account"],
+      action: "ADD FOREIGN KEY",
+    });
+    // An index name that merely starts with a table's name is not a table this store plans.
+    expect(
+      describeBootDdlStatement(`SELECT to_regclass('"s"."order_title_utrgm"')`, "s", new Set(["order"])).tables,
+    ).toEqual([]);
+  });
+});
+
+describe("ColumnMappedEntityStore — why a unique index was refused", () => {
+  const SHELF: Entity = {
+    name: "Shelf",
+    fields: [{ name: "ean", type: { kind: "text" }, unique: true }],
+  };
+
+  it("tells the reporter the field and the cause, and calls only a 23505 duplicates", async () => {
+    for (const [err, cause] of [
+      [Object.assign(new Error("could not create unique index"), { code: "23505" }), "duplicates"],
+      [Object.assign(new Error("canceling statement due to lock timeout"), { code: "55P03" }), "timed_out"],
+      [Object.assign(new Error("canceling statement due to statement timeout"), { code: "57014" }), "timed_out"],
+      [new Error("out of disk"), "other"],
+    ] as const) {
+      const seen: unknown[] = [];
+      const cap = capturePg([], (sql) => (sql.includes("shelf_ean_uniq") ? err : null));
+      await new ColumnMappedEntityStore(cap.conn, { entities: [SHELF] } as unknown as Manifest, {
+        schema: "tenant_app",
+        ddl: { lockRetries: 0, sleep: async () => undefined },
+        onUniqueIndexRefused: (_e, _s, _d, facts) => seen.push(facts),
+      }).ensureSchema();
+      expect(seen).toEqual([{ field: "ean", cause }]);
+    }
+    expect(UNIQUE_INDEX_REFUSAL_CAUSES).toEqual(["duplicates", "timed_out", "other"]);
+    expect(uniqueIndexRefusalCause("not an error")).toBe("other");
   });
 });

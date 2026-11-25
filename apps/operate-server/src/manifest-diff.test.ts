@@ -891,6 +891,45 @@ describe("changes the kernel diff refuses", () => {
     expect(view.rolesRemoved).toEqual(["app_user"]);
     expect(fieldChange(view, "WorkOrder", "title").change).toBe("type_changed");
   });
+
+  // The fallback is taken exactly when the kernel refuses a change, and it read `entity.fields`, so
+  // a trait-contributed field changed in the same proposal was neither added, removed nor modified
+  // there (ADR-0470). An enum widening forces the fallback; the trait field's retyping rides with it.
+  it("reports a trait field's change on the fallback path, resolving each side against its own traits", () => {
+    const withTrait = (kind: "text" | "integer"): Record<string, unknown> => {
+      const m = base();
+      field(m, "WorkOrder", "title")["type"] = { kind: "enum", values: ["a", "b"] };
+      m["traits"] = [
+        {
+          name: "referenced",
+          fields: [{ name: "ref_code", type: kind === "text" ? { kind: "text", maxLength: 40 } : { kind } }],
+        },
+      ];
+      (entity(m, "Customer")["traits"] as string[]).push("referenced");
+      return m;
+    };
+    const active = withTrait("text");
+    const next = withTrait("integer");
+    field(next, "WorkOrder", "title")["type"] = { kind: "enum", values: ["a", "b", "c"] };
+    const view = diffManifests(active, next);
+    expect(view.comparable).toBe(true);
+    expect(fieldChange(view, "WorkOrder", "title").change).toBe("type_changed");
+    const traitChange = fieldChange(view, "Customer", "ref_code");
+    expect(traitChange.change).toBe("type_changed");
+    expect(traitChange.to).toBe("integer");
+  });
+
+  it("reports a trait field removed on the fallback path by its field name", () => {
+    const active = base();
+    field(active, "WorkOrder", "title")["type"] = { kind: "enum", values: ["a", "b"] };
+    active["traits"] = [{ name: "referenced", fields: [{ name: "ref_code", type: { kind: "text" } }] }];
+    (entity(active, "Customer")["traits"] as string[]).push("referenced");
+    const next = base();
+    field(next, "WorkOrder", "title")["type"] = { kind: "enum", values: ["a", "b", "c"] };
+    const view = diffManifests(active, next);
+    expect(view.comparable).toBe(true);
+    expect(fieldChange(view, "Customer", "ref_code").change).toBe("removed");
+  });
 });
 
 // The two sections the register names as live members (a removed job, a narrowed view) are absent

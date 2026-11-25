@@ -1001,25 +1001,17 @@ export interface CreditNoteGlConfig {
   readonly numberField?: string;
   readonly totalField?: string;
   readonly creditAmountField?: string;
-  readonly currencyField?: string;
-  /** Ledger account entity + its code field, used to resolve configured account codes to ids. */
-  readonly ledgerAccountEntity?: string;
-  readonly accountCodeField?: string;
   /**
-   * Resolves the tenant's AR/revenue LedgerAccount *codes* (typically from tenant
-   * settings). When a code resolves to a real account it's used as the posting
-   * line's `ledger_account_id`; otherwise the placeholder ref below is used.
+   * Suffix of the invoice's recognition entry (e.g. "-AR"). The credit note posts the mirror of that
+   * entry — every line, tax and withholding included, at the rate recognition posted it at; when the
+   * invoice has no posted recognition entry, it posts nothing.
+   *
+   * Required since ADR-0475. It was optional, and its absence selected a two-line revenue/AR pair at
+   * `fx_rate` 1 for the gross amount: wrong for a taxed invoice (tax payable never reversed) and wrong
+   * for a foreign one (EUR amounts carried as functional). `compile.ts` always passed it, so that
+   * path had no production caller and was deleted rather than repaired (ADR-0337).
    */
-  readonly resolveAccountCodes?: (tenantId: string) => Promise<{ ar?: string; revenue?: string }>;
-  /** Fallback placeholder account references when no code is configured/found. */
-  readonly arAccountRef?: string;
-  readonly revenueAccountRef?: string;
-  /**
-   * Suffix of the invoice's recognition entry (e.g. "-AR"). When set, the credit note posts the
-   * mirror of that entry — every line, tax and withholding included — instead of the two-line
-   * revenue/AR pair; when the invoice has no posted recognition entry, it posts nothing.
-   */
-  readonly recognitionEntrySuffix?: string;
+  readonly recognitionEntrySuffix: string;
   readonly periods?: PostingPeriodConfig;
   readonly maxLines?: number;
   readonly clock?: { now(): Date };
@@ -1037,27 +1029,15 @@ const GL_DEFAULTS = {
   numberField: "invoice_number",
   totalField: "total",
   creditAmountField: "credit_amount",
-  currencyField: "currency",
-  ledgerAccountEntity: "LedgerAccount",
-  accountCodeField: "account_code",
-  arAccountRef: "accounts_receivable",
-  revenueAccountRef: "revenue",
 } as const;
 
 /**
- * AR↔GL bridge: when an issued invoice is voided (the same edge that issues a
- * credit note), auto-posts the matching balanced GL entry — a posted
- * `JournalEntry` numbered `<invoice>-CN-GL` with two lines that reverse the sale
- * (debit revenue, credit AR) for the credited amount (partial when the invoice
- * carries `credit_amount`). The AR and revenue lines use the tenant's configured
- * chart-of-accounts entries (`finance.arAccountCode` / `revenueAccountCode`
- * resolved to `LedgerAccount` ids); when a code isn't configured/found, a
- * placeholder ref is used so the bridge still posts. Fires only when the manifest
- * models a GL (JournalEntry + line). Written directly through the store (bypasses
- * guards/effects; balanced by construction) inside the void transaction, so AR and
- * GL move atomically.
+ * AR↔GL bridge: when an issued invoice is voided (the same edge that issues a credit note), posts
+ * `<invoice>-CN-GL`, the mirror of the invoice's recognition entry for the credited amount (partial
+ * when the invoice carries `credit_amount`). Written directly through the store (bypasses
+ * guards/effects; balanced by construction) inside the void transaction, so AR and GL move atomically.
  */
-export function creditNoteGlPostingEffect(config: CreditNoteGlConfig = {}): WriteEffect {
+export function creditNoteGlPostingEffect(config: CreditNoteGlConfig): WriteEffect {
   const c = { ...GL_DEFAULTS, ...config };
   return async (input) => {
     if (input.entity !== c.invoiceEntity) return;
@@ -1071,9 +1051,7 @@ export function creditNoteGlPostingEffect(config: CreditNoteGlConfig = {}): Writ
     const nowVoid = input.after[c.stateField] === c.voidState;
     if (!wasIssued || !nowVoid) return;
     if (input.before?.[c.documentTypeField] === c.creditNoteType) {
-      if (config.recognitionEntrySuffix !== undefined) {
-        await voidCreditNote(input, { ...c, recognitionEntrySuffix: config.recognitionEntrySuffix, periods: config.periods, maxLines: config.maxLines });
-      }
+      await voidCreditNote(input, { ...c, recognitionEntrySuffix: config.recognitionEntrySuffix, periods: config.periods, maxLines: config.maxLines });
       return;
     }
 
@@ -1085,84 +1063,35 @@ export function creditNoteGlPostingEffect(config: CreditNoteGlConfig = {}): Writ
     const amountUnits =
       requestedUnits !== null && requestedUnits > 0n && requestedUnits < totalUnits ? requestedUnits : totalUnits;
     if (amountUnits <= 0n) return;
-    const amount = unitsToNumber(amountUnits);
 
-    const now = c.clock?.now() ?? new Date();
-    const nowIso = now.toISOString();
-    const today = nowIso.slice(0, 10);
+    const nowIso = (c.clock?.now() ?? new Date()).toISOString();
     const origNumber = typeof original[c.numberField] === "string" ? (original[c.numberField] as string) : originalId;
-    const currency = typeof original[c.currencyField] === "string" ? (original[c.currencyField] as string) : "USD";
 
     // The credit reverses what recognition posted, line for line: revenue, each tax code's line,
-    // withholding and the control account, in the proportion credited. The two-line pair below
-    // reversed only revenue and AR, for the gross amount — so measured on the shipped pack a VAT 10%
+    // withholding and the control account, in the proportion credited. The two-line pair this
+    // replaced (ADR-0475 deleted it) reversed only revenue and AR, for the gross amount — so measured on the shipped pack a VAT 10%
     // invoice of 100 + 10, sent and voided, left revenue over-reversed by 10 and tax payable never
     // reversed at all: `{AR 0, revenue +10, tax_payable −10}`, an entry that balanced. Mirroring the
     // posted entry reuses recognition's own split rather than re-deriving it, so the two cannot
     // disagree about a rate, a code's account or a rounding.
-    if (config.recognitionEntrySuffix !== undefined) {
-      const recognition = await findEntryByNumber(input, c.entryEntity, `${origNumber}${config.recognitionEntrySuffix}`);
-      if (recognition === null || recognition[DEFAULTS.stateField] !== DEFAULTS.postedState) return;
-      await reverseEntry(input, {
-        entryEntity: c.entryEntity,
-        lineEntity: c.lineEntity,
-        lineEntryRefField: DEFAULTS.lineEntryRefField,
-        maxLines: config.maxLines ?? DEFAULTS.maxLines,
-        stateField: DEFAULTS.stateField,
-        postedState: DEFAULTS.postedState,
-        reversedState: DEFAULTS.reversedState,
-        source: recognition,
-        number: `${origNumber}-CN-GL`,
-        sourceLabel: "invoice",
-        memo: `Credit note GL posting for ${origNumber}`,
-        partCents: amountUnits < totalUnits ? amountUnits : null,
-        periods: config.periods,
-        nowIso,
-        actor: attributedToTrigger(original),
-      });
-      return;
-    }
-
-    // Resolve configured account codes to real LedgerAccount ids; fall back to placeholders.
-    const codes = config.resolveAccountCodes ? await config.resolveAccountCodes(input.tenantId) : {};
-    const arAccount = (await resolveAccountId(input, c, codes.ar)) ?? c.arAccountRef;
-    const revenueAccount = (await resolveAccountId(input, c, codes.revenue)) ?? c.revenueAccountRef;
-
-    const entry = await createPostedEntry(
-      input,
-      c.entryEntity,
-      {
-        entry_number: `${origNumber}-CN-GL`,
-        entry_date: today,
-        source: "system",
-        state: "posted",
-        memo: `Credit note GL posting for ${origNumber}`,
-        posted_at: nowIso,
-        created_at: nowIso,
-        updated_at: nowIso,
-      },
-      config.periods,
-    );
-    const entryId = String(entry["id"]);
-    const baseLine = { journal_entry_id: entryId, currency, fx_rate: 1, created_at: nowIso, updated_at: nowIso };
-    // Reverse the sale: debit revenue, credit AR — balanced by construction.
-    await input.store.create(input.tenantId, c.lineEntity, {
-      ...baseLine,
-      ledger_account_id: revenueAccount,
-      description: "Credit note — revenue reversal",
-      debit: amount,
-      credit: 0,
-      functional_debit: amount,
-      functional_credit: 0,
-    });
-    await input.store.create(input.tenantId, c.lineEntity, {
-      ...baseLine,
-      ledger_account_id: arAccount,
-      description: "Credit note — AR reversal",
-      debit: 0,
-      credit: amount,
-      functional_debit: 0,
-      functional_credit: amount,
+    const recognition = await findEntryByNumber(input, c.entryEntity, `${origNumber}${config.recognitionEntrySuffix}`);
+    if (recognition === null || recognition[DEFAULTS.stateField] !== DEFAULTS.postedState) return;
+    await reverseEntry(input, {
+      entryEntity: c.entryEntity,
+      lineEntity: c.lineEntity,
+      lineEntryRefField: DEFAULTS.lineEntryRefField,
+      maxLines: config.maxLines ?? DEFAULTS.maxLines,
+      stateField: DEFAULTS.stateField,
+      postedState: DEFAULTS.postedState,
+      reversedState: DEFAULTS.reversedState,
+      source: recognition,
+      number: `${origNumber}-CN-GL`,
+      sourceLabel: "invoice",
+      memo: `Credit note GL posting for ${origNumber}`,
+      partCents: amountUnits < totalUnits ? amountUnits : null,
+      periods: config.periods,
+      nowIso,
+      actor: attributedToTrigger(original),
     });
   };
 }
@@ -1363,7 +1292,7 @@ export interface PostingFxConfig {
  * said what its base currency is may well be booking in the currency it invoices in, and refusing
  * that would refuse a correct posting. Before this, every case posted at rate 1.
  */
-async function resolvePostingRate(
+export async function resolvePostingRate(
   input: WriteEffectInput,
   fx: PostingFxConfig | undefined,
   record: EntityRecord,
@@ -2304,6 +2233,15 @@ export interface PaymentApplicationConfig {
    */
   readonly refundedState?: string;
   readonly reopenState?: string;
+  /**
+   * The state a re-opened document goes to instead of `reopenState` when it is already past due —
+   * the lifecycle's `overdue`, named only where the lifecycle declares it and the document declares
+   * `dueDateField`. A refund used to put a document due last month back to `sent`, so it read as not
+   * yet due while the money had been owed for weeks, and nothing but a job's next sweep would move it.
+   */
+  readonly overdueState?: string;
+  /** The document's due date, compared against the injected clock's UTC date; required with `overdueState`. */
+  readonly dueDateField?: string;
   readonly clock?: { now(): Date };
 }
 
@@ -2333,6 +2271,11 @@ const APPLICATION_FALLBACKS = {
  */
 export function paymentApplicationEffect(config: PaymentApplicationConfig): WriteEffect {
   const c = { ...APPLICATION_FALLBACKS, ...config };
+  // Both or neither: an `overdueState` with no due date to compare would be ignored in silence, and
+  // a refund would go on re-opening a past-due document as not yet due under a config that says not.
+  if ((config.overdueState === undefined) !== (config.dueDateField === undefined)) {
+    throw new Error("paymentApplicationEffect: overdueState and dueDateField are configured together or not at all");
+  }
   return async (input) => {
     if (input.entity !== c.paymentEntity) return;
     if (c.refundedState !== undefined && c.reopenState !== undefined) {
@@ -2345,7 +2288,12 @@ export function paymentApplicationEffect(config: PaymentApplicationConfig): Writ
 
     const docId = input.after[c.refField];
     if (!paymentNamesDocument(docId)) return;
-    const doc = await input.store.get(input.tenantId, c.documentEntity, docId);
+    // Locked exclusively before the coverage is read, for the reason `reopenUncovered` states: two
+    // payments completing concurrently against one invoice each read only their own row plus what
+    // had committed, so with a plain read neither saw the pair cover the total and the invoice was
+    // left open with both paid in full. Exclusive is the mode `mark_paid` and a refund take on the
+    // document, so all three serialise on it and whichever runs second reads what the first wrote.
+    const doc = await input.store.getLocked(input.tenantId, c.documentEntity, docId, "exclusive");
     if (doc === null) return;
     const docState = doc[c.documentStateField];
     if (docState === c.paidState) return; // already settled
@@ -2382,8 +2330,39 @@ export function paymentApplicationEffect(config: PaymentApplicationConfig): Writ
       [c.documentStateField]: c.paidState,
       [c.paidAtField]: nowIso,
       updated_at: nowIso,
+      ...actedBy(input.after),
     });
   };
+}
+
+/**
+ * The `updated_by` a document an effect moves is stamped with: whoever performed the act that fired
+ * the effect, which is the stamp the handler wrote on the triggering record (`attributedToTrigger`'s
+ * source). Only `updated_by` — the document was not created by this act — and only when the trigger
+ * carries the stamp, so an entity without the `auditable` trait is not given a field it does not
+ * declare. Before this the auto-settlement and the refund re-open moved the document and left its
+ * `updated_by` naming whoever last edited it by hand, so the record of who marked an invoice paid
+ * named somebody who had not.
+ */
+function actedBy(trigger: EntityRecord): EntityRecord {
+  const actor = attributedToTrigger(trigger);
+  return Object.prototype.hasOwnProperty.call(actor, "updated_by") ? { updated_by: actor["updated_by"] ?? null } : {};
+}
+
+/**
+ * The state a document re-opens into: `overdueState` when one is configured and the document's due
+ * date is before `today`, else `reopenState`. A due date this cannot read is not past due, which is
+ * the state a document with no due date is in.
+ */
+export function reopenStateFor(
+  doc: EntityRecord,
+  today: string,
+  c: { readonly reopenState: string; readonly overdueState?: string; readonly dueDateField?: string },
+): string {
+  if (c.overdueState === undefined || c.dueDateField === undefined) return c.reopenState;
+  const raw = doc[c.dueDateField];
+  if (typeof raw !== "string" || !/^\d{4}-\d{2}-\d{2}/.test(raw)) return c.reopenState;
+  return raw.slice(0, 10) < today ? c.overdueState : c.reopenState;
 }
 
 /**
@@ -2411,13 +2390,23 @@ async function reopenUncovered(
     paidAtField: string;
     maxPayments: number;
     withholdingField?: string;
+    overdueState?: string;
+    dueDateField?: string;
     clock?: { now(): Date };
   },
   reopenState: string,
 ): Promise<void> {
   const docId = input.after[c.refField];
   if (!paymentNamesDocument(docId)) return;
-  const doc = await input.store.get(input.tenantId, c.documentEntity, docId);
+  // Exclusively, and before the payments are read: `mark_paid` holds this same lock on the document
+  // while `settlementCoverageGuard` reads the payments, so a refund that read the document with a
+  // plain `get` could decide from a state `mark_paid` was about to change. The write skew ADR-0433 Q5
+  // names (reasoned from the two reads, not measured against a pre-change build): the refund reads
+  // `sent` and leaves it alone, `mark_paid` reads the payment still completed and marks it paid, and
+  // both commit — a `paid` invoice with nothing applied. With
+  // the lock one waits for the other and reads what it committed, so either the refund sees `paid`
+  // and re-opens it or `mark_paid` sees the refund and refuses.
+  const doc = await input.store.getLocked(input.tenantId, c.documentEntity, docId, "exclusive");
   if (doc === null || doc[c.documentStateField] !== c.paidState) return;
   const owed = amountOwed(doc, c.documentTotalField, c.withholdingField);
   const read = await readAppliedToDocument(input.store, input.tenantId, { refField: c.refField, settledBy: c.settledBy }, docId, {
@@ -2433,9 +2422,14 @@ async function reopenUncovered(
   if (settlementIsCovered(owed, read.applied)) return;
   const nowIso = (c.clock?.now() ?? new Date()).toISOString();
   await input.store.update(input.tenantId, c.documentEntity, docId, {
-    [c.documentStateField]: reopenState,
+    [c.documentStateField]: reopenStateFor(doc, nowIso.slice(0, 10), {
+      reopenState,
+      ...(c.overdueState !== undefined ? { overdueState: c.overdueState } : {}),
+      ...(c.dueDateField !== undefined ? { dueDateField: c.dueDateField } : {}),
+    }),
     [c.paidAtField]: null,
     updated_at: nowIso,
+    ...actedBy(input.after),
   });
 }
 

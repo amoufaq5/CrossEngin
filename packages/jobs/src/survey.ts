@@ -78,8 +78,9 @@ export const JOB_SERVICE_VERDICTS = [
    */
   "event_unproducible",
   /**
-   * A producer for this kind exists in the codebase and **this deployment does not mount it**, so
-   * the job never becomes a run and no pending row accumulates either.
+   * A producer for this kind exists in the codebase and **this process does not mount it**, so this
+   * process never enqueues the job — a claim about the process and not the deployment, since another
+   * replica on the same database may mount the producer this one does not (ADR-0469).
    *
    * Its own verdict because it is the one fact `handler_missing` was asserting the opposite of:
    * that detail read *"`cron_scheduler` enqueues it — so every fire accumulates a pending run
@@ -320,6 +321,9 @@ function classify(
     };
   }
   if (!mountedProducers.has(producer)) {
+    // "This process", never "this deployment" (ADR-0469): `mountedProducers` is derived from this
+    // process's flags, and a second replica on the same database may mount the producer this one
+    // does not, so a claim about the whole deployment is one the survey cannot make.
     // A handler being registered does not change the verdict — the job still never runs — but it
     // halves the remedy, and naming a handler as missing when one is registered sends an operator
     // looking for code that exists.
@@ -329,9 +333,10 @@ function classify(
         kind,
         verdict: "producer_unmounted",
         detail:
-          `'${job.id}' is enqueued by ${producer}, which this deployment does not mount — so it ` +
-          "never becomes a run, and no pending row accumulates either. A handler for it is " +
-          "registered, so mounting the producer is the whole remedy",
+          `'${job.id}' is enqueued by ${producer}, which this process does not mount — so this ` +
+          "process never enqueues it. Another replica on the same database may mount it; if none " +
+          "does, it never becomes a run. A handler for it is registered here, so mounting the " +
+          "producer is the whole remedy",
       };
     }
     return {
@@ -339,10 +344,11 @@ function classify(
       kind,
       verdict: "producer_unmounted",
       detail:
-        `'${job.id}' is enqueued by ${producer}, which this deployment does not mount — so it ` +
-        "never becomes a run, and no pending row accumulates either. Both halves are the remedy: " +
-        "mount the producer and register a handler for this id, because the producer alone would " +
-        "fill the queue with work nothing can execute",
+        `'${job.id}' is enqueued by ${producer}, which this process does not mount — so this ` +
+        "process never enqueues it. Another replica on the same database may mount it; if none " +
+        "does, it never becomes a run. Both halves are the remedy: mount the producer and register " +
+        "a handler for this id, because the producer alone would fill the queue with work nothing " +
+        "can execute",
     };
   }
   const eventName = triggerEventName(job.trigger);

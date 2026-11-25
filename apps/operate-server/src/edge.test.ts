@@ -119,8 +119,14 @@ describe("fetchToRaw", () => {
     expect(res.status).toBe(413);
     expect(res.headers.get("content-type")).toBe("application/problem+json");
     const problem = (await res.json()) as { type: string; status: number };
-    expect(problem.type).toBe("https://crossengin.io/problems/payload-too-large");
+    // The registry's base, not the `/problems/` spelling both transports used before ADR-0473.
+    expect(problem.type).toBe("https://crossengin.io/errors/payload-too-large");
     expect(problem.status).toBe(413);
+    // Answered before the gateway, so it never passed the security-header stage until the
+    // outer finalizer: the headers and an id are on it now.
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(res.headers.get("x-frame-options")).toBe("DENY");
+    expect(res.headers.get("x-request-id")).toMatch(/^req_/);
   });
 
   it("answers a body that fails mid-read with a fixed 500 naming an id, never the cause", async () => {
@@ -159,6 +165,10 @@ describe("fetchToRaw", () => {
     expect(requestId).toMatch(/^req_/);
     expect(text).toContain(requestId);
     expect(logged.some((line) => String(line[0]).includes(requestId ?? "?") && String(line[0]).includes("db-internal-host"))).toBe(true);
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+    // Reported once, by the read path, under the id it minted — the finalizer saw the id and did
+    // not report it a second time.
+    expect(logged.filter((line) => String(line[0]).startsWith("[5xx] {")).length).toBe(1);
   });
 });
 
@@ -182,6 +192,26 @@ describe("createFetchHandler — serving over the Fetch API", () => {
     const parsed = (await list.json()) as { data: Array<Record<string, unknown>> };
     expect(parsed.data[0]).not.toHaveProperty("unit_cost");
     expect(parsed.data[0]).toMatchObject({ sku: "SKU-1" });
+  });
+
+  it("keeps the gateway's own headers on a response it answered", async () => {
+    const fetch = handler();
+    const res = await fetch(getReq("/v1/products", "key-manager"));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("strict-transport-security")).toContain("max-age=");
+    expect(res.headers.get("x-request-id")).toMatch(/^req_/);
+  });
+
+  it("puts the headers and an id on an answer the serving core gave before the gateway", async () => {
+    // A 405 for an unknown method is answered by `dispatchUnguarded`, ahead of the gateway, so it
+    // never passed the security-header stage — the outer finalizer is the only thing adding them.
+    const fetch = handler();
+    const res = await fetch(new Request("https://api.example.com/v1/products", { method: "PROPFIND" }));
+    expect(res.status).toBe(405);
+    expect(res.headers.get("x-frame-options")).toBe("DENY");
+    expect(res.headers.get("x-request-id")).toMatch(/^req_/);
+    // On the registry's base, as the login's 405 already was (the review's finding).
+    expect(((await res.json()) as { type: string }).type).toBe("https://crossengin.io/errors/method-not-allowed");
   });
 
   it("401s an unknown API key (fail-closed)", async () => {

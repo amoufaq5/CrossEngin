@@ -14,6 +14,7 @@ import { PostgresEventLog } from "./event-log.js";
 import {
   type JobQueueVisibilityReport,
   probeJobQueueVisibility,
+  type QueueVisibilitySubject,
 } from "./job-claim.js";
 import {
   WorkflowDefinitionIdResolver,
@@ -237,6 +238,21 @@ export const REPLAY_TABLES = [
   "workflow_timers",
 ] as const;
 
+/**
+ * The sentence the visibility probe speaks in for a replay (ADR-0469). It used to borrow the job
+ * worker's — *"the job worker claims per tenant … (claimDueJobsPerTenant), which serves the queue"* —
+ * which is false of these five tables: nothing replays them per tenant, so for a confined role there
+ * is no path that serves them, and the only session a replay is honest on is one Postgres exempts.
+ */
+export const REPLAY_VISIBILITY_SUBJECT: QueueVisibilitySubject = {
+  act: "a cross-tenant replay of the workflow projections",
+  whenConfined:
+    "The workflow replayer reads and repairs every tenant's events, instances, activities, signals and " +
+    "timers in one pass and has no per-tenant path, so for this role it would read nothing and report a " +
+    "clean bill of health; run it on a session exempt from these tables' policies (the role that owns " +
+    "them, which the schema migration connects as), never on the confined serving role",
+};
+
 export interface ReplayVisibilityReport {
   /** `visible` only when every one of the five tables is. */
   readonly usable: boolean;
@@ -428,7 +444,10 @@ export class WorkflowReplayer {
     if (this.visibility !== null) return this.visibility;
     const tables: { readonly table: string; readonly report: JobQueueVisibilityReport }[] = [];
     for (const table of REPLAY_TABLES) {
-      tables.push({ table, report: await probeJobQueueVisibility(this.conn, { table }) });
+      tables.push({
+        table,
+        report: await probeJobQueueVisibility(this.conn, { table, subject: REPLAY_VISIBILITY_SUBJECT }),
+      });
     }
     const blocked = tables.filter((t) => t.report.visibility !== "visible");
     this.visibility = {

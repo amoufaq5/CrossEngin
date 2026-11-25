@@ -1,4 +1,4 @@
-import { columnNameForField } from "@crossengin/kernel/ddl";
+import { columnNameForField, resolvedFields } from "@crossengin/kernel/ddl";
 import {
   ManifestSchema,
   abacObligationChanges,
@@ -204,9 +204,30 @@ function entityIndex(manifest: Manifest): ReadonlyMap<string, ManifestEntity> {
   return index;
 }
 
-function fieldIndex(entity: ManifestEntity | undefined): ReadonlyMap<string, ManifestField> {
+/**
+ * An entity's fields **as its served table has them** — a trait's included — over the traits of the
+ * manifest the entity came from (ADR-0470).
+ *
+ * The traits are a parameter and each side passes its **own** (ADR-0388's per-side rule): the old
+ * entity resolved against the new manifest's traits is how a trait field retyped or removed once
+ * answered `impact: none`. Both helpers below read `entity?.fields` until this, so on the fallback
+ * path — the one taken exactly when the kernel refuses a change as unsupported — a trait-contributed
+ * field's change was neither added, removed nor modified, and a removed trait column was shown to a
+ * reviewer by its raw column name.
+ */
+function servedFields(
+  entity: ManifestEntity | undefined,
+  traits: Manifest["traits"],
+): readonly ManifestField[] {
+  return entity === undefined ? [] : resolvedFields(entity, traits ?? []);
+}
+
+function fieldIndex(
+  entity: ManifestEntity | undefined,
+  traits: Manifest["traits"],
+): ReadonlyMap<string, ManifestField> {
   const index = new Map<string, ManifestField>();
-  for (const field of entity?.fields ?? []) {
+  for (const field of servedFields(entity, traits)) {
     if (!index.has(field.name)) index.set(field.name, field);
   }
   return index;
@@ -214,9 +235,12 @@ function fieldIndex(entity: ManifestEntity | undefined): ReadonlyMap<string, Man
 
 // The kernel reports removed fields by *column* name (a reference field's column is
 // `<name>_id`); reviewers read field names, so map back through the same emitter rule.
-function fieldNameByColumn(entity: ManifestEntity | undefined): ReadonlyMap<string, string> {
+function fieldNameByColumn(
+  entity: ManifestEntity | undefined,
+  traits: Manifest["traits"],
+): ReadonlyMap<string, string> {
   const index = new Map<string, string>();
-  for (const field of entity?.fields ?? []) {
+  for (const field of servedFields(entity, traits)) {
     index.set(columnNameForField(field), field.name);
   }
   return index;
@@ -365,8 +389,8 @@ function kernelEntityLayer(active: Manifest, next: Manifest): EntityLayer {
   for (const modified of diff.modifiedEntities) {
     const entity = modified.entity.name;
     const activeEntity = activeEntities.get(entity);
-    const activeFields = fieldIndex(activeEntity);
-    const namesByColumn = fieldNameByColumn(activeEntity);
+    const activeFields = fieldIndex(activeEntity, active.traits);
+    const namesByColumn = fieldNameByColumn(activeEntity, active.traits);
 
     for (const field of modified.diff.addedFields) {
       fieldChanges.push({
@@ -439,8 +463,8 @@ function fallbackEntityLayer(active: Manifest, next: Manifest): EntityLayer {
       added.push(name);
       continue;
     }
-    const previousFields = fieldIndex(previous);
-    const nextFields = fieldIndex(entity);
+    const previousFields = fieldIndex(previous, active.traits);
+    const nextFields = fieldIndex(entity, next.traits);
     const before = fieldChanges.length;
 
     for (const [fieldName, field] of nextFields) {

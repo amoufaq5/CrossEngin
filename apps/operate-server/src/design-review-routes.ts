@@ -1,4 +1,9 @@
-import type { PathSegment, ResolvedPrincipal, RouteDefinition } from "@crossengin/api-gateway";
+import {
+  principalNamesAPerson,
+  type PathSegment,
+  type ResolvedPrincipal,
+  type RouteDefinition,
+} from "@crossengin/api-gateway";
 import type { Handler, HandlerOutput, PrincipalRoles } from "@crossengin/api-gateway-runtime";
 import type { ExtraGatewayRoute } from "@crossengin/operate-runtime";
 import { z } from "zod";
@@ -17,9 +22,35 @@ const REVIEW_STATUS_VALUES: readonly ReviewStatusLike[] = [
   "rejected",
 ];
 
-/** Only a pending proposal may be approved; a rejection may also revoke a standing approval. */
-const APPROVABLE_FROM: readonly ReviewStatusLike[] = ["pending"];
-const REJECTABLE_FROM: readonly ReviewStatusLike[] = ["pending", "approved"];
+/**
+ * The review state each decision may be taken from: only a pending proposal may be approved; a
+ * rejection may also revoke a standing approval — of a manifest that is not yet **active**, which
+ * the store refuses separately (`manifest_active`).
+ *
+ * Declared here and enforced in **both** places that need it: the route reads it for its fast-path
+ * answer, and the store binds it into the decision's `UPDATE` predicate, which is what holds under
+ * concurrency (ADR-0470). One map rather than two lists, so the two cannot come to disagree about
+ * which states are decidable — a total map over the two decisions, so a third is a compile error.
+ */
+export const REVIEW_DECISION_FROM: Readonly<Record<"approved" | "rejected", readonly ReviewStatusLike[]>> = {
+  approved: ["pending"],
+  rejected: ["pending", "approved"],
+};
+
+/**
+ * What a decision did, as the store saw it inside the transaction that wrote it.
+ *
+ * `null` used to stand for both *no such proposal* and *a concurrent decision got there first*, and
+ * the route answered both with a 404 — so a reviewer whose approval lost a race was told the
+ * proposal did not exist, while it did and had just been decided by somebody else. ADR-0342's
+ * not-yours-versus-not-there, on a review queue: the two need different answers and different
+ * remedies (look again, versus nothing to look for).
+ */
+export type DesignDecisionOutcome<R = DesignReviewRecordLike> =
+  | { readonly kind: "decided"; readonly review: R }
+  | { readonly kind: "not_found" }
+  | { readonly kind: "status_changed"; readonly current: ReviewStatusLike }
+  | { readonly kind: "manifest_active" };
 
 export interface DesignReviewRecordLike {
   readonly id: string;
@@ -119,6 +150,26 @@ export const DESIGNER_CANNOT_APPROVE_DETAIL =
   "the principal that requested this design cannot approve it: another reviewer must, or a " +
   "deployment run by one operator starts the server with --allow-design-self-approval";
 
+/**
+ * The 403 for an approval by a credential that names nobody (ADR-0470).
+ *
+ * `fourEyesOutcome` compares principal ids, and a bare api-key resolves as a `service_account` on
+ * one shared placeholder id (ADR-0331), so "the designer is not the approver" is decidable only when
+ * the approver *names a person*: a design requested by a session and approved with the operator's
+ * bootstrap key compares two different ids and read `distinct_principals`, while the same human may
+ * hold both. So with self-approval refused, an approval needs a credential that names a person, and
+ * the sentence names the remedies an operator has — sign in, or a key that names its principal.
+ */
+export const FOUR_EYES_UNVERIFIABLE_DETAIL =
+  "this credential names no person, so whether its holder requested this design cannot be " +
+  "established: approve as a signed-in reviewer, with an api key that names its principal, or on a " +
+  "deployment run by one operator start the server with --allow-design-self-approval";
+
+/** The 409 for rejecting a manifest the tenant is already served. */
+export const MANIFEST_ACTIVE_DETAIL =
+  "this proposal is the tenant's active manifest, so rejecting it would read 'rejected' while it " +
+  "went on being served; to take it out of service, activate a replacement";
+
 export function fourEyesOutcome(designedBy: string | null, reviewedBy: string): FourEyesOutcome {
   if (designedBy === null) return "designer_unrecorded";
   return designedBy === reviewedBy ? "self_approved" : "distinct_principals";
@@ -151,8 +202,8 @@ export interface DesignReviewStoreLike {
   list(query?: DesignReviewListQueryLike): Promise<DesignReviewListPageLike>;
   getById(id: string): Promise<DesignReviewRecordLike | null>;
   counts(): Promise<DesignReviewCountsLike>;
-  approve(id: string, input: DesignApprovalInput): Promise<DesignReviewRecordLike | null>;
-  reject(id: string, input: DesignReviewDecisionInput): Promise<DesignReviewRecordLike | null>;
+  approve(id: string, input: DesignApprovalInput): Promise<DesignDecisionOutcome>;
+  reject(id: string, input: DesignReviewDecisionInput): Promise<DesignDecisionOutcome>;
 }
 
 export interface RiskReportLike {
@@ -613,7 +664,7 @@ function buildGetHandler(ctx: DesignReviewContext): Handler {
  * request body — a reviewer cannot attribute a decision to someone else.
  */
 function buildDecisionHandler(ctx: DesignReviewContext, target: "approved" | "rejected"): Handler {
-  const allowedFrom = target === "approved" ? APPROVABLE_FROM : REJECTABLE_FROM;
+  const allowedFrom = REVIEW_DECISION_FROM[target];
   return async ({ principal, params, parsedBody }) => {
     const denial = guard(ctx, principal);
     if (denial !== null) return denial;
@@ -628,23 +679,35 @@ function buildDecisionHandler(ctx: DesignReviewContext, target: "approved" | "re
         detail: `${current.reviewStatus} -> ${target}`,
       });
     }
+    if (target === "rejected" && current.status === "active") {
+      return json(409, { error: "manifest_active", detail: MANIFEST_ACTIVE_DETAIL });
+    }
     const reviewedBy = principal?.principalId ?? "";
     const fourEyes = fourEyesOutcome(current.designedBy, reviewedBy);
     // Only an approval is gated: a designer withdrawing their own design by rejecting it withholds
     // nothing and needs no second person.
-    if (target === "approved" && fourEyes === "self_approved" && ctx.selfApproval === "refused") {
-      return json(403, {
-        error: "designer_cannot_approve",
-        detail: DESIGNER_CANNOT_APPROVE_DETAIL,
-      });
+    if (target === "approved" && ctx.selfApproval === "refused") {
+      // Before the id comparison, because the comparison is meaningless for this credential: a
+      // credential naming nobody cannot be shown not to be the designer, and reading its
+      // placeholder id as a second person is the falsely-true four-eyes this refusal exists for.
+      // `guard` above has already refused a null principal.
+      if (principal !== null && !principalNamesAPerson(principal)) {
+        return json(403, { error: "four_eyes_unverifiable", detail: FOUR_EYES_UNVERIFIABLE_DETAIL });
+      }
+      if (fourEyes === "self_approved") {
+        return json(403, {
+          error: "designer_cannot_approve",
+          detail: DESIGNER_CANNOT_APPROVE_DETAIL,
+        });
+      }
     }
     const decision: DesignReviewDecisionInput = {
       reviewedBy,
       notes: parsed.data.notes ?? null,
     };
-    let review: DesignReviewRecordLike | null;
+    let outcome: DesignDecisionOutcome;
     try {
-      review =
+      outcome =
         target === "approved"
           ? await ctx.store.approve(id, { ...decision, selfApproval: ctx.selfApproval })
           : await ctx.store.reject(id, decision);
@@ -657,7 +720,25 @@ function buildDecisionHandler(ctx: DesignReviewContext, target: "approved" | "re
       }
       throw err;
     }
-    if (review === null) return json(404, { error: "review_not_found", detail: id });
+    // Switched, so a fifth outcome is a compile error here rather than whichever branch a chain of
+    // `if`s ended on. The read above is outside the store's transaction, so every refusal it already
+    // answered can still arrive here from a decision that landed in between.
+    let review: DesignReviewRecordLike;
+    switch (outcome.kind) {
+      case "not_found":
+        return json(404, { error: "review_not_found", detail: id });
+      case "status_changed":
+        return json(409, {
+          error: "illegal_transition",
+          detail: `${outcome.current} -> ${target}`,
+          concurrent: true,
+        });
+      case "manifest_active":
+        return json(409, { error: "manifest_active", detail: MANIFEST_ACTIVE_DETAIL });
+      case "decided":
+        review = outcome.review;
+        break;
+    }
     if (ctx.notifyDecision !== undefined) {
       try {
         await ctx.notifyDecision({

@@ -7,7 +7,6 @@ import {
   type ListValueType,
 } from "@crossengin/operate-runtime";
 
-import { searchFunctionCall } from "./search-function.js";
 import { isDatetimeComparable } from "./temporal-sql.js";
 
 /**
@@ -164,13 +163,16 @@ export interface ListSqlAdapter {
    * How this store folds accents in the substring predicate -- which decides whether a trigram
    * index can serve it, and so is a property of the store rather than of the query.
    *
-   * Optional, and absent means {@link searchFunctionCall}, the IMMUTABLE wrapper the entity DDL
-   * builds its index from. That direction is deliberate: an absent declaration errs toward
-   * *correct and slower* rather than *fast and unindexable*, which is ADR-0340's ordering argument
-   * -- a store that forgets to declare pays a constant factor, where the opposite default would
-   * silently make its predicate unable to reach any index.
+   * **Required** since ADR-0474 (ADR-0383 Q4), where it was optional with `searchFunctionCall`
+   * as the default. The default erred toward *correct and slower*, which is the right direction for
+   * a default to err, and it was still a default: a third store that forgot to declare would have
+   * paid the per-row wrapper call against a table with no index to repay it — exactly the 4.2x the
+   * document store measured — with nothing to say it had chosen to. Both stores now say which fold
+   * they want, so the choice is visible at the one place it is made: the column store names
+   * `searchFunctionCall` (its entity DDL builds trigram indexes over that call) and the document
+   * store names `rawFoldCall` (it has none).
    *
-   * A store overrides it only when it has **no trigram index to match**, and the override's cost
+   * A store declares the raw fold only when it has **no trigram index to match**, and the override's cost
    * and its return are both measured on PG 16.13 over a 200,000-row partition. The wrapper cannot
    * be inlined -- index matching requires the query to present the wrapper call that the index
    * stores, so inlining and index matching are mutually exclusive by construction -- so it costs a
@@ -186,18 +188,17 @@ export interface ListSqlAdapter {
    * override is what makes its predicate unindexable -- and that is the one thing a reader of this
    * field has to know.
    */
-  foldText?(exprSql: string): string;
+  foldText(exprSql: string): string;
 }
 
 /**
- * The fold this store declared, or the indexable default.
+ * The fold this store declared.
  *
  * One reader, so the `contains` predicate and the `?q=` OR group cannot fold differently within one
  * query -- which would make a row match through one surface and not the other.
  */
 function foldOf(adapter: ListSqlAdapter): (exprSql: string) => string {
-  const declared = adapter.foldText;
-  return declared === undefined ? searchFunctionCall : (sql) => declared.call(adapter, sql);
+  return (sql) => adapter.foldText(sql);
 }
 
 

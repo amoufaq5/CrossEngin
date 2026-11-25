@@ -460,11 +460,25 @@ export const REFUSED_ANCHORS: readonly {
  * not by wiring. Listed with the count so the boundary is a measurement, and asserted to still read
  * that way — if one of them starts holding a typed `Entity` it becomes a member of this rule and the
  * test says so.
+ *
+ * `design-review.ts` was the first of four and left it in ADR-0470, by the route this comment says a
+ * projected reader cannot take: it `safeParse`s the proposal with `ManifestSchema`, and once it holds a
+ * parsed `Manifest` it has the `Trait[]` and calls `resolvedClassifiedFields`, so the reviewer's risk
+ * gate scores a trait-carried `phi` field. Its raw projection survives only for a proposal that does
+ * not parse, and is then marked `classification_unresolved` rather than scored low.
+ * `RESOLVING_MANIFEST_READERS` names it so the move is asserted rather than remembered.
  */
 export const PROJECTED_MANIFEST_READERS: readonly string[] = Object.freeze([
-  "apps/operate-server/src/design-review.ts",
   "apps/operate-server/src/manifest-view.ts",
   "apps/operate-server/src/tenant-manifests.ts",
+]);
+
+/**
+ * Readers that left `PROJECTED_MANIFEST_READERS` by parsing the manifest and calling the resolver.
+ * Asserted to still call it, since nothing else would notice the call being reverted to a raw read.
+ */
+export const RESOLVING_MANIFEST_READERS: readonly string[] = Object.freeze([
+  "apps/operate-server/src/design-review.ts",
 ]);
 
 interface FunctionSpan {
@@ -584,7 +598,8 @@ export function manifestSpellings(code: string): ReadonlySet<string> {
 /**
  * A `.fields` or `?.fields` read.
  *
- * The optional-chaining arm is not decoration: `manifest-diff.ts` reads `entity?.fields ?? []` twice,
+ * The optional-chaining arm is not decoration: `manifest-diff.ts` read `entity?.fields ?? []` twice
+ * (until ADR-0470 resolved both),
  * and a matcher without it missed both — two members the brief had named by line number.
  */
 const FIELD_READ = /\b([A-Za-z_$][\w$]*)\s*\??\.\s*fields\b/g;
@@ -1072,31 +1087,5 @@ export const ENTITY_FIELD_APERTURE: readonly ApertureDeclaration[] = Object.free
       "Declared separately from `buildUiSchema` in the same file because it is reached with " +
       "`pickListColumns(entity, [])` and would still be narrow after that one is widened — the " +
       "heuristic matches on name patterns (`_date$`, `status`, `_id$`) over `entity.fields.map`.",
-  },
-  {
-    pkg: "apps/operate-server",
-    file: "apps/operate-server/src/manifest-diff.ts",
-    symbol: "fieldIndex",
-    direction: "incomplete",
-    consequence:
-      "A trait-contributed field is absent from the per-entity field index the diff compares against, " +
-      "so a change to one is reported as neither added nor modified.",
-    note:
-      "Reads `entity?.fields ?? []` through optional chaining on `ManifestEntity | undefined` — a " +
-      "shape a `\\.fields` matcher without the `?\\.` arm misses entirely, which is how both readers " +
-      "in this file stayed off the first census.",
-  },
-  {
-    pkg: "apps/operate-server",
-    file: "apps/operate-server/src/manifest-diff.ts",
-    symbol: "fieldNameByColumn",
-    direction: "incomplete",
-    consequence:
-      "The kernel reports a removed field by *column* name, and this maps it back; a trait-contributed " +
-      "column is not in the map, so the reviewer is shown the raw column name instead of the field " +
-      "name for exactly those fields.",
-    note:
-      "The sibling of `fieldIndex` and the same optional-chained read. Declared separately because the " +
-      "two are different maps with different consumers, and widening one does not widen the other.",
   },
 ]);

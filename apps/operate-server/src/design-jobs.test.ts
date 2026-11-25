@@ -485,38 +485,24 @@ describe("design-jobs — fail", () => {
   });
 });
 
-describe("design-jobs — deleteExpired", () => {
-  it("sweeps terminal jobs across tenants without any tenant context", async () => {
-    const { conn, captured, all } = fakeDesignJobDb();
+describe("design-jobs — no unscoped retention sweep (ADR-0470)", () => {
+  // `deleteExpired` ran a `DELETE` with no tenant context on a table whose only policy is tenant
+  // isolation, so on the confined serving role it removed nothing and reported 0. It had no caller
+  // and is deleted; this pins that it does not come back as a method on the store.
+  it("has no deleteExpired method", () => {
+    const { conn } = fakeDesignJobDb();
     const store = new PostgresDesignJobStore(conn);
-    const a = await store.create(TENANT_A, jobInput());
-    const b = await store.create(TENANT_B, jobInput());
-    await store.succeed(TENANT_A, a.id, { proposalId: randomUUID(), providerLabel: null });
-    await store.fail(TENANT_B, b.id, { error: "nope" });
-    captured.length = 0;
-    const deleted = await store.deleteExpired("2099-01-01T00:00:00.000Z");
-    expect(deleted).toBe(2);
-    expect(all()).toHaveLength(0);
-    expect(captured).toHaveLength(1);
-    const del = captured[0];
-    expect(del?.inTx).toBe(false);
-    expect(del?.sql).toBe(
-      "DELETE FROM meta.operate_design_jobs WHERE updated_at < $1 AND status IN ('succeeded', 'failed')",
-    );
-    expect(del?.params).toEqual(["2099-01-01T00:00:00.000Z"]);
-    expect(captured.some((c) => c.sql.includes("set_config"))).toBe(false);
+    expect("deleteExpired" in store).toBe(false);
   });
 
-  it("leaves in-flight jobs alone and returns zero when nothing is old enough", async () => {
-    const { conn, all } = fakeDesignJobDb();
+  it("issues no statement outside a tenant context on any per-job method", async () => {
+    const { conn, captured } = fakeDesignJobDb();
     const store = new PostgresDesignJobStore(conn);
-    const queued = await store.create(TENANT_A, jobInput());
-    const finished = await store.create(TENANT_A, jobInput());
-    await store.updateProgress(TENANT_A, queued.id, { status: "running", phase: "generating" });
-    await store.succeed(TENANT_A, finished.id, { proposalId: randomUUID(), providerLabel: null });
-    expect(await store.deleteExpired("2020-01-01T00:00:00.000Z")).toBe(0);
-    expect(await store.deleteExpired("2099-01-01T00:00:00.000Z")).toBe(1);
-    expect(all().map((r) => r["id"])).toEqual([queued.id]);
+    const a = await store.create(TENANT_A, jobInput());
+    await store.updateProgress(TENANT_A, a.id, { status: "running", phase: "generating" });
+    await store.succeed(TENANT_A, a.id, { proposalId: randomUUID(), providerLabel: null });
+    await store.getById(TENANT_A, a.id);
+    expect(captured.filter((c) => !c.inTx)).toEqual([]);
   });
 });
 

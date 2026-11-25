@@ -182,6 +182,12 @@ export interface WorkflowWorkerEvents {
   onLeaseLost?(kind: WorkflowWorkerKind, id: string): void;
   onJobCancelObserved?(runId: string): void;
   onJobsReaped?(runs: readonly ReapedJobRun[]): void;
+  /**
+   * One tenant's job claim raised. The claim rolls that tenant back to a savepoint and claims the
+   * others (ADR-0469), so without this the tenant's runs simply never arrive and nothing says why.
+   * Throttled per tenant, since a failing tenant fails again on every poll.
+   */
+  onJobTenantClaimFailed?(tenantId: string, err: unknown, suppressed: number): void;
   onDrained?(report: WorkflowWorkerDrainReport): void;
 }
 
@@ -381,6 +387,7 @@ export class WorkflowWorkerSupervisor {
   private readonly workerId: string;
   /** One per kind, so a failing timer claim does not consume the activity claim's window. */
   private readonly claimThrottles: Partial<Record<WorkflowWorkerKind, NoticeThrottle>> = {};
+  private readonly tenantClaimThrottles = new Map<string, NoticeThrottle>();
   private readonly clockMs: () => number;
   private stopping: readonly Promise<void>[] | null = null;
   private started = false;
@@ -540,6 +547,14 @@ export class WorkflowWorkerSupervisor {
             reapCancellations: cancelling,
             ...(input.jobServes !== undefined ? { serves: input.jobServes } : {}),
             ...(events.onJobsReaped !== undefined ? { onReaped: events.onJobsReaped } : {}),
+            onTenantClaimFailed: (failure) => {
+              const throttle =
+                this.tenantClaimThrottles.get(failure.tenantId) ??
+                new NoticeThrottle(config.noticeIntervalMs, this.clockMs);
+              this.tenantClaimThrottles.set(failure.tenantId, throttle);
+              const suppressed = throttle.admit();
+              if (suppressed !== null) events.onJobTenantClaimFailed?.(failure.tenantId, failure.error, suppressed);
+            },
           }),
           processor: this.jobProcessor(jobEngine, input, watcher, renewIntervalMs, now, sleep),
           claimRenewer: buildJobClaimRenewer(input.conn, { leaseMs: config.leaseMs, now, ...schemaOpt }),
@@ -798,10 +813,13 @@ export class WorkflowWorkerSupervisor {
             claimedBy: input.workerId,
             ...(signal !== undefined ? { signal } : {}),
           });
-        const execute =
+        // `leaseSignal` trips when a renew answers `false` (ADR-0469): another worker may own the run
+        // now, and a handler that ran on would make its writes twice. With a cancellation poll as
+        // well, the handler sees one signal that trips on either.
+        const execute = (leaseSignal: AbortSignal): Promise<unknown> =>
           watcher === undefined
-            ? run()
-            : abortWhile(run, {
+            ? run(leaseSignal)
+            : abortWhile((cancelSignal) => run(AbortSignal.any([cancelSignal, leaseSignal])), {
                 shouldAbort: () =>
                   watcher.isCancelRequested({ jobId: job.jobId, tenantId: job.tenantId }),
                 intervalMs: renewIntervalMs,
@@ -875,6 +893,13 @@ export function consoleWorkflowWorkerEvents(): WorkflowWorkerEvents {
       ),
     onJobCancelObserved: (runId) =>
       console.log(`[workflow-workers] job ${runId}: cancellation observed, handler signalled`),
+    onJobTenantClaimFailed: (tenantId, err, suppressed) =>
+      console.error(
+        `[workflow-workers] job claim for tenant ${tenantId} failed and was rolled back; the other` +
+          ` tenants were still claimed, and this tenant's runs wait until its claim succeeds` +
+          (suppressed > 0 ? ` (${suppressed.toString()} similar suppressed)` : ""),
+        err,
+      ),
     onJobsReaped: (runs) =>
       console.log(
         `[workflow-workers] reaped ${runs.length.toString()} abandoned cancelled job run(s)`,

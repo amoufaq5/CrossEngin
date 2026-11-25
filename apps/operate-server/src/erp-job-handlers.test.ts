@@ -5,8 +5,10 @@ import {
   routeFromSpec,
   InMemoryEntityStore,
   InMemorySettingsStore,
+  NO_TENANT_REGISTRY_STANDING,
   type EntityRecord,
   type EntityWriteAuditEvent,
+  type TenantStandingReader,
 } from "@crossengin/operate-runtime";
 import { buildErpCorePack } from "@crossengin/pack-erp-core";
 import type { JobHandlerContext, JobHandlerProvider, JobHandlerResult } from "@crossengin/workflow-runtime-pg";
@@ -17,6 +19,7 @@ import {
   DEPRECIATION_CATCH_UP_PERIODS,
   depreciationCatchUpWindow,
   depreciationPeriod,
+  depreciationPeriodFromKey,
   depreciationPeriodsDue,
   JOB_READ_CEILING,
   ERP_JOB_ABSENCES,
@@ -32,7 +35,14 @@ import { loadBuiltinPack } from "./manifest-source.js";
 const TENANT = "11111111-1111-4111-8111-111111111111";
 const FIRE = "2026-03-01T01:00:00.000Z";
 
-function harness(opts: { roles?: readonly string[]; manifest?: Manifest; segregationOfDuties?: boolean } = {}) {
+function harness(
+  opts: {
+    roles?: readonly string[];
+    manifest?: Manifest;
+    segregationOfDuties?: boolean;
+    tenantStanding?: TenantStandingReader;
+  } = {},
+) {
   const manifest = opts.manifest ?? buildErpCorePack();
   const store = new InMemoryEntityStore();
   const settings = new InMemorySettingsStore();
@@ -52,7 +62,13 @@ function harness(opts: { roles?: readonly string[]; manifest?: Manifest; segrega
     segregationOfDuties: opts.segregationOfDuties ?? false,
   });
   const resolveAccess: JobAccessResolver = async () => ({ kind: "access", access: compiled.systemEntityAccess });
-  const providers = buildErpJobProviders({ coverage, resolveAccess, settings, now: () => new Date(FIRE) });
+  const providers = buildErpJobProviders({
+    coverage,
+    resolveAccess,
+    tenantStanding: opts.tenantStanding ?? NO_TENANT_REGISTRY_STANDING,
+    settings,
+    now: () => new Date(FIRE),
+  });
   const seed = (entity: string, record: EntityRecord): Promise<EntityRecord> =>
     store.create(TENANT, entity, { created_at: FIRE, updated_at: FIRE, ...record });
   const run = (jobId: string, extra: Partial<JobHandlerContext> = {}): Promise<JobHandlerResult> => {
@@ -150,7 +166,11 @@ describe("erpJobCoverage under --segregation-of-duties", () => {
     await h.seed("PurchaseOrderLine", { purchase_order_id: old["id"], item_id: item["id"], quantity: "1.000", unit_price: "2.5000", received_quantity: "1.000", line_total: "2.50" });
     expect(await h.run("erp-core-inventory-reorder")).toMatchObject({ status: "completed" });
     const draft = (await h.store.listPage(TENANT, "PurchaseOrder", { filters: [{ field: "state", value: "draft" }], sort: [], limit: 10, cursor: null })).records[0]!;
-    const person = h.compiled.systemEntityAccess.forTenant(TENANT, { roles: ["erp_admin"], origin: { kind: "job", jobId: "x", runId: "y" } });
+    const person = h.compiled.systemEntityAccess.forTenant(TENANT, {
+      roles: ["erp_admin"],
+      origin: { kind: "job", jobId: "x", runId: "y" },
+      standing: NO_TENANT_REGISTRY_STANDING,
+    });
     expect(await person.transition("PurchaseOrder", draft["id"] as string, "submit")).toMatchObject({ kind: "written" });
     const spec = h.compiled.routeSpecs.find((s) => s.entity === "PurchaseOrder" && s.transition?.name === "approve")!;
     const out = await h.compiled.handlers.resolve(spec.operationId)!({
@@ -315,8 +335,11 @@ describe("depreciation catch-up", () => {
     expect(depreciationCatchUpWindow(15_000)).toBe(1);
     expect(depreciationCatchUpWindow(50_000)).toBe(1);
     const current = depreciationPeriod(new Date(FIRE));
-    // A one-period window is the run's own period: the old single-period read.
+    // A one-period window is the run's own period for the catch-up; a draft outside it is still
+    // charged, because drafts are found by their own unbounded read (ADR-0469) — this assertion used
+    // to read `["2026-02"]`, which pinned the orphaned draft as the specification.
     expect(depreciationPeriodsDue(current, new Set(["2026-01"]), new Set(["2025-12"]), 1).map((p) => p.key)).toEqual([
+      "2025-12",
       "2026-02",
     ]);
     expect(depreciationPeriodsDue(current, new Set(["2025-12"]), new Set(), 3).map((p) => p.key)).toEqual([
@@ -370,6 +393,91 @@ describe("depreciation catch-up", () => {
     const all = await entries(h);
     expect(all).toHaveLength(2);
     expect(all.every((e) => e["state"] === "posted")).toBe(true);
+  });
+});
+
+describe("depreciation drafts older than the catch-up window", () => {
+  it("parses a marker period back to the period it names", () => {
+    expect(depreciationPeriodFromKey("2025-03")).toEqual({ key: "2025-03", year: 2025, month: 3, endDate: "2025-03-31" });
+    expect(depreciationPeriodFromKey("2024-02")).toMatchObject({ endDate: "2024-02-29" });
+    expect(depreciationPeriodFromKey("2025-12")).toMatchObject({ key: "2025-12", endDate: "2025-12-31" });
+  });
+
+  it("charges a draft however far back it sits, oldest first, and no newer-than-current one", () => {
+    const current = depreciationPeriod(new Date(FIRE));
+    expect(depreciationPeriodsDue(current, new Set(), new Set(["2024-07", "2023-01"])).map((p) => p.key)).toEqual([
+      "2023-01",
+      "2024-07",
+      "2026-02",
+    ]);
+    expect(depreciationPeriodsDue(current, new Set(), new Set(["2027-01"])).map((p) => p.key)).toEqual(["2026-02"]);
+  });
+
+  it("resumes a refused run's draft whose period fell out of the window, rather than orphaning it", async () => {
+    const h = harness();
+    const a = await h.seed("FixedAsset", { asset_tag: "FA-1", name: "Lathe", category: "equipment", acquisition_date: "2024-01-15", acquisition_cost: "4800.00", depreciation_method: "straight_line", useful_life_months: 48, salvage_value: "0.00", state: "in_service" });
+    await h.seed("LedgerAccount", { account_code: "6100", name: "Dep", account_type: "expense" });
+    await h.seed("LedgerAccount", { account_code: "1590", name: "Acc", account_type: "asset" });
+    await h.settings.put(TENANT, { finance: { depreciationExpenseAccountCode: "6100", accumulatedDepreciationAccountCode: "1590" } });
+    // A draft for 2024-06, twenty months before the run's period and so outside any catch-up window.
+    await h.seed("JournalEntry", { entry_number: "JE-OLD", entry_date: "2024-06-30", source: "depreciation", state: "draft", memo: `x [depreciation:${a["id"] as string}:2024-06]` });
+    const result = await h.run("erp-core-depreciation-run");
+    expect(result).toEqual({ status: "completed", output: { charges_due: 2, posted: 2, caught_up: 1 } });
+    const all = (await h.store.listPage(TENANT, "JournalEntry", { filters: [], sort: [], limit: 50, cursor: null })).records;
+    expect(all).toHaveLength(2);
+    expect(all.every((e) => e["state"] === "posted")).toBe(true);
+    expect(all.find((e) => e["entry_number"] === "JE-OLD")).toMatchObject({ state: "posted" });
+  });
+});
+
+describe("a job writes nothing into a tenant whose state blocks writes", () => {
+  const blocked = (status: string): TenantStandingReader => async () => ({ kind: "blocked", status });
+
+  it("finalizes the run as a non-retryable tenant_not_writable failure and writes no row", async () => {
+    for (const status of ["pending_deletion", "suspended", "archived"]) {
+      const h = harness({ tenantStanding: blocked(status) });
+      await h.seed("Invoice", { account_id: "a1", invoice_number: "INV-1", state: "sent", currency: "USD", issue_date: "2026-01-01", due_date: "2026-02-01", subtotal: "10.00", tax_total: "0.00", total: "10.00", document_type: "invoice" });
+      const result = await h.run("erp-core-overdue-invoice-reminder");
+      expect(result).toEqual({
+        status: "failed",
+        error: { code: "tenant_not_writable", message: `tenant_not_writable:${status}` },
+        retryable: false,
+      });
+      const inv = (await h.store.listPage(TENANT, "Invoice", { filters: [], sort: [], limit: 10, cursor: null })).records[0];
+      expect(inv?.["state"]).toBe("sent");
+      expect(h.audited).toEqual([]);
+    }
+  });
+
+  it("refuses before the run reads anything, so a blocked tenant costs no sweep", async () => {
+    const h = harness({ tenantStanding: blocked("pending_deletion") });
+    const reads: string[] = [];
+    const original = h.store.listPage.bind(h.store);
+    h.store.listPage = async (...args) => {
+      reads.push(args[1]);
+      return original(...args);
+    };
+    await h.run("erp-core-depreciation-run");
+    expect(reads).toEqual([]);
+  });
+
+  it("is retryable when the tenant's standing could not be read", async () => {
+    const h = harness({
+      tenantStanding: async () => {
+        throw new Error("meta.tenants unreachable");
+      },
+    });
+    expect(await h.run("erp-core-overdue-invoice-reminder")).toMatchObject({
+      status: "failed",
+      error: { code: "tenant_standing_unknown" },
+      retryable: true,
+    });
+  });
+
+  it("still writes for a writable tenant — the control arm", async () => {
+    const h = harness({ tenantStanding: async () => ({ kind: "writable" }) });
+    await h.seed("Invoice", { account_id: "a1", invoice_number: "INV-1", state: "sent", currency: "USD", issue_date: "2026-01-01", due_date: "2026-02-01", subtotal: "10.00", tax_total: "0.00", total: "10.00", document_type: "invoice" });
+    expect(await h.run("erp-core-overdue-invoice-reminder")).toMatchObject({ status: "completed" });
   });
 });
 
@@ -529,6 +637,7 @@ describe("access resolution", () => {
       coverage: h.coverage,
       resolveAccess: async () => ({ kind: "unavailable", reason: "tenant gateway refused: lineage_cycle", retryable: false }),
       settings: h.settings,
+      tenantStanding: NO_TENANT_REGISTRY_STANDING,
     });
     const p = providers.find((x) => x.serves === "job" && x.jobId === "erp-core-overdue-invoice-reminder");
     const r = await (p as Extract<JobHandlerProvider, { serves: "job" }>).handler({
@@ -546,6 +655,7 @@ describe("access resolution", () => {
       coverage: h.coverage,
       resolveAccess: async () => ({ kind: "unavailable", reason: "tenant gateway refused: unknown", retryable: true }),
       settings: h.settings,
+      tenantStanding: NO_TENANT_REGISTRY_STANDING,
     }).find((x) => x.serves === "job" && x.jobId === "erp-core-overdue-invoice-reminder") as Extract<JobHandlerProvider, { serves: "job" }>;
     const r2 = await transient.handler({
       runId: "r",

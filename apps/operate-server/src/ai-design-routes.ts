@@ -9,6 +9,7 @@ import {
 import type { ExtraGatewayRoute } from "@crossengin/operate-runtime";
 import { z } from "zod";
 
+import type { ActivationCheck } from "./activation-check.js";
 import {
   diffFragment,
   schemaFragment,
@@ -140,8 +141,16 @@ export interface AiDesignContext {
    * concurrency. The routes therefore no longer record spend — the designer has charged it.
    */
   readonly budget?: {
-    check(tenantId: string): Promise<{ allowed: boolean; spentUsd: number; limitUsd: number }>;
+    check(tenantId: string): Promise<BudgetCheckLike>;
   };
+  /**
+   * Whether the proposal can be served, asked before an activation is written (ADR-0470).
+   *
+   * **Required**, so a deployment cannot wire the activate route and forget it: an optional check
+   * defaulting to *admit* would be the pre-ADR-0470 behaviour kept as the default, where an
+   * unservable manifest is activated with a 200 and its tenant gets a 503 on every request after.
+   */
+  readonly activationCheck: ActivationCheck;
   /** The tenant's residency profile against this deployment's AI provider; absent admits all. */
   readonly providerAdmission?: (tenantId: string) => Promise<AiProviderAdmission>;
   readonly summarize: (manifest: Record<string, unknown>) => unknown;
@@ -158,6 +167,27 @@ export interface AiDesignContext {
   /** When set, activation requires platform approval: resolves the proposal's review status. */
   readonly reviewGate?: { reviewStatusFor(tenantId: string, id: string): Promise<ReviewStatusLike | null> };
 }
+
+/**
+ * Structural mirror of `BudgetCheck` in `ai-design-budget.ts`. Discriminated, because "the month is
+ * spent" and "the ledger could not be read" have different answers: the first is a 402 the tenant
+ * can only wait out, the second a 503 that is over when the database is back (ADR-0470).
+ */
+export type BudgetCheckLike =
+  | { readonly allowed: true; readonly spentUsd: number; readonly limitUsd: number }
+  | {
+      readonly allowed: false;
+      readonly reason: "month_exceeded";
+      readonly spentUsd: number;
+      readonly limitUsd: number;
+    }
+  | { readonly allowed: false; readonly reason: "unavailable"; readonly limitUsd: number };
+
+/** How long a client is told to wait before retrying a design the ledger could not admit. */
+export const BUDGET_UNAVAILABLE_RETRY_AFTER_SECONDS = 30;
+
+/** How long a client is told to wait after an activation check that established nothing. */
+export const ACTIVATION_CHECK_RETRY_AFTER_SECONDS = 5;
 
 export const DesignRequestSchema = z.object({
   description: z.string().min(1).max(4000),
@@ -230,9 +260,22 @@ async function admitDesign(ctx: AiDesignContext, tenant: string): Promise<Handle
     if (!admission.allowed) return providerResidencyRefusal(admission.refusal);
   }
   // Spend gate before the LLM call: an unbounded design loop is the one way a tenant admin
-  // can run up real money on this endpoint. Fail-closed (a ledger read error denies).
+  // can run up real money on this endpoint. Fail-closed (a ledger read error denies) — and denies
+  // as what it is: a 503 with a retry, not a 402 telling the tenant its month is spent when nobody
+  // could read the month (ADR-0470).
   if (ctx.budget !== undefined) {
     const budget = await ctx.budget.check(tenant);
+    if (!budget.allowed && budget.reason === "unavailable") {
+      return {
+        kind: "json",
+        status: 503,
+        headers: { "retry-after": BUDGET_UNAVAILABLE_RETRY_AFTER_SECONDS.toString() },
+        body: {
+          error: "ai_budget_unavailable",
+          detail: "the AI design budget ledger could not be read, so no design was started; try again shortly",
+        },
+      };
+    }
     if (!budget.allowed) {
       return json(402, {
         error: "ai_budget_exceeded",
@@ -420,6 +463,33 @@ function buildActivateHandler(ctx: AiDesignContext): Handler {
           reviewStatus,
         });
       }
+    }
+    // After the review gate, so an unreviewed proposal is told it needs review rather than what is
+    // wrong with it; before `activate`, so a refusal writes nothing and the tenant goes on being
+    // served what it was served (ADR-0470). 422 and not 503: the request was understood and the
+    // manifest is what is wrong, so retrying it unchanged cannot succeed.
+    //
+    // Except for `unknown`, which says the reverse: nothing about the manifest was established —
+    // the check threw something the cache could not classify — so the honest answer is the one the
+    // gateway gives the same condition, a 503 a client may retry (`GATEWAY_BUILD_REFUSALS` marks
+    // `unknown` non-permanent). A 422 there would tell a tenant admin their manifest is wrong while
+    // its sentence tells them to try again.
+    const refusal = await ctx.activationCheck(tenant, current.manifest);
+    if (refusal !== null && refusal.kind === "unknown") {
+      return {
+        kind: "json",
+        status: 503,
+        headers: { "retry-after": ACTIVATION_CHECK_RETRY_AFTER_SECONDS.toString() },
+        body: { error: "activation_check_unavailable", kind: refusal.kind, detail: refusal.sentence },
+      };
+    }
+    if (refusal !== null) {
+      return json(422, {
+        error: "activation_unservable",
+        kind: refusal.kind,
+        detail: refusal.sentence,
+        issues: refusal.issues,
+      });
     }
     const proposal = await ctx.store.activate(tenant, id);
     if (proposal === null) return json(404, { error: "proposal_not_found", detail: id });

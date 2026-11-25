@@ -17,7 +17,7 @@ describe("computeWhtReconciliation", () => {
       ["i2", 20], // partial
       // i3 → uncertified
     ]);
-    const r = computeWhtReconciliation({ invoices, certifiedByInvoice: certified });
+    const r = computeWhtReconciliation({ voidedStates: [], invoices, certifiedByInvoice: certified });
     expect(r.totals).toEqual({ withheld: 180, certified: 120, uncertified: 60 });
     const byId = new Map(r.rows.map((row) => [row.invoiceId, row]));
     expect(byId.get("i1")).toMatchObject({ withheld: 100, certified: 100, gap: 0, status: "certified" });
@@ -26,12 +26,12 @@ describe("computeWhtReconciliation", () => {
   });
 
   it("excludes invoices with no positive withholding", () => {
-    const r = computeWhtReconciliation({ invoices, certifiedByInvoice: new Map() });
+    const r = computeWhtReconciliation({ voidedStates: [], invoices, certifiedByInvoice: new Map() });
     expect(r.rows.map((row) => row.invoiceId).sort()).toEqual(["i1", "i2", "i3"]);
   });
 
   it("orders rows by the largest open gap first", () => {
-    const r = computeWhtReconciliation({ invoices, certifiedByInvoice: new Map([["i1", 100]]) });
+    const r = computeWhtReconciliation({ voidedStates: [], invoices, certifiedByInvoice: new Map([["i1", 100]]) });
     // i2 (gap 50) and i3 (gap 30) outrank the certified i1 (gap 0).
     expect(r.rows.map((row) => row.invoiceId)).toEqual(["i2", "i3", "i1"]);
   });
@@ -39,7 +39,7 @@ describe("computeWhtReconciliation", () => {
   it("groups per-currency subtotals ordered by descending uncertified then currency", () => {
     // USD: withheld 150, certified 120 → uncertified 30. EUR: withheld 30, certified 0 → 30.
     // GBP: withheld 200, certified 0 → 200. Order: GBP (200), then EUR/USD tie at 30 → EUR < USD.
-    const r = computeWhtReconciliation({
+    const r = computeWhtReconciliation({ voidedStates: [],
       invoices: [
         { id: "i1", invoice_number: "INV-1", currency: "USD", withholding_total: 100 },
         { id: "i2", invoice_number: "INV-2", currency: "USD", withholding_total: 50 },
@@ -59,7 +59,7 @@ describe("computeWhtReconciliation", () => {
   });
 
   it("groups a null currency under the empty-string key", () => {
-    const r = computeWhtReconciliation({
+    const r = computeWhtReconciliation({ voidedStates: [],
       invoices: [
         { id: "i1", invoice_number: "INV-1", withholding_total: 40 }, // no currency → null
         { id: "i2", invoice_number: "INV-2", currency: "USD", withholding_total: 10 },
@@ -77,7 +77,7 @@ describe("computeWhtReconciliation", () => {
   });
 
   it("rounds per-currency subtotals to 2 decimals", () => {
-    const r = computeWhtReconciliation({
+    const r = computeWhtReconciliation({ voidedStates: [],
       invoices: [
         { id: "i1", invoice_number: "INV-1", currency: "USD", withholding_total: 10.005 },
         { id: "i2", invoice_number: "INV-2", currency: "USD", withholding_total: 20.004 },
@@ -90,7 +90,7 @@ describe("computeWhtReconciliation", () => {
   });
 
   it("treats over-certification as fully certified (no negative gap surfaced as open)", () => {
-    const r = computeWhtReconciliation({
+    const r = computeWhtReconciliation({ voidedStates: [],
       invoices: [{ id: "x", invoice_number: "INV-X", currency: "USD", withholding_total: 40 }],
       certifiedByInvoice: new Map([["x", 50]]),
     });
@@ -102,13 +102,13 @@ describe("computeWhtReconciliation", () => {
 describe("computeWhtReconciliation — money", () => {
   it("sums withholding exactly across many invoices", () => {
     const invoices = Array.from({ length: 1000 }, (_, i) => ({ id: `i${String(i)}`, invoice_number: `I-${String(i)}`, withholding_total: "0.10", currency: "USD" }));
-    const r = computeWhtReconciliation({ invoices, certifiedByInvoice: new Map(invoices.map((inv) => [inv.id, 0.1])) });
+    const r = computeWhtReconciliation({ voidedStates: [], invoices, certifiedByInvoice: new Map(invoices.map((inv) => [inv.id, 0.1])) });
     expect(r.totals).toEqual({ withheld: 100, certified: 100, uncertified: 0 });
     expect(r.rows.every((row) => row.status === "certified")).toBe(true);
   });
 
   it("calls a one-cent gap partial rather than rounding it away", () => {
-    const r = computeWhtReconciliation({
+    const r = computeWhtReconciliation({ voidedStates: [],
       invoices: [{ id: "a", invoice_number: "A", withholding_total: "5.00", currency: "USD" }],
       certifiedByInvoice: new Map([["a", 4.99]]),
     });

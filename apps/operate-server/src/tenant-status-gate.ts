@@ -1,5 +1,6 @@
 import { SAFE_HTTP_METHODS } from "@crossengin/api-gateway";
 import type { Handler, HandlerOutput, HandlerRegistry } from "@crossengin/api-gateway-runtime";
+import type { OpenApiTenantStatusDeclaration } from "@crossengin/operate-runtime";
 import {
   TENANT_LIFECYCLE_STATES,
   TenantLifecycleStateSchema,
@@ -192,6 +193,20 @@ export interface TenantStatusGateOptions {
 const PROBLEM_TYPE = "https://crossengin.dev/problems/tenant-lifecycle-state";
 const UNAVAILABLE_PROBLEM_TYPE = "https://crossengin.dev/problems/tenant-status-unavailable";
 
+/**
+ * The `reason` values the gate's 403 can carry, and its 503's. Named once so the bodies below and
+ * the API description `tenantStatusOpenApiDeclaration` hands the emitter are one spelling (ADR-0471):
+ * a published enum written beside the code that sends it would be a second copy that drifts.
+ */
+export const TENANT_STATE_REFUSAL_REASONS = [
+  "tenant_writes_blocked",
+  "tenant_reads_blocked",
+  "tenant_not_provisioned",
+] as const;
+export const TENANT_STATUS_UNAVAILABLE_REASON = "tenant_status_unavailable";
+/** Seconds the 503 asks a client to wait; it is the gate's own retry-after, sent on every 503. */
+export const TENANT_STATUS_RETRY_AFTER_SECONDS = 5;
+
 function detailFor(status: TenantLifecycleState, write: boolean): string {
   switch (status) {
     case "deleted":
@@ -221,7 +236,7 @@ export function tenantStateProblem(status: TenantLifecycleState, write: boolean)
       status: 403,
       detail: detailFor(status, write),
       tenantStatus: status,
-      reason: write ? "tenant_writes_blocked" : "tenant_reads_blocked",
+      reason: write ? TENANT_STATE_REFUSAL_REASONS[0] : TENANT_STATE_REFUSAL_REASONS[1],
     },
   };
 }
@@ -237,13 +252,16 @@ export function tenantStatusUnavailableProblem(): HandlerOutput {
   return {
     kind: "json",
     status: 503,
-    headers: { "content-type": "application/problem+json", "retry-after": "5" },
+    headers: {
+      "content-type": "application/problem+json",
+      "retry-after": String(TENANT_STATUS_RETRY_AFTER_SECONDS),
+    },
     body: {
       type: UNAVAILABLE_PROBLEM_TYPE,
       title: "Workspace state unavailable",
       status: 503,
       detail: "This workspace's lifecycle state could not be established; the request was not run.",
-      reason: "tenant_status_unavailable",
+      reason: TENANT_STATUS_UNAVAILABLE_REASON,
     },
   };
 }
@@ -260,7 +278,7 @@ export function tenantUnknownProblem(): HandlerOutput {
       status: 403,
       detail: "This workspace is not provisioned.",
       tenantStatus: null,
-      reason: "tenant_not_provisioned",
+      reason: TENANT_STATE_REFUSAL_REASONS[2],
     },
   };
 }
@@ -328,22 +346,54 @@ export function withTenantStatus(
  * that method now exists: a cross-cutting refusal that covers "the routes we remembered" is the
  * shape of defect this repo keeps finding. Must be called after every registration — the snapshot is
  * taken once — and is idempotent per boot only in the sense that calling it twice double-wraps, so
- * the one caller is `node.ts`.
+ * the one caller is `buildOperateHttpServer`.
+ *
+ * Returns the operation ids it wrapped (ADR-0471) rather than their count, because that set is the
+ * one fact the API description needs: which operations can answer the gate's 403 and 503. Derived
+ * here, from the wrapping itself, so the document cannot name an exempt operation or miss a gated
+ * one — a second spelling of the exemption rule in the emitter is what would drift.
  */
 export function applyTenantStatusGate(
   registry: HandlerRegistry,
   opts: TenantStatusGateOptions,
-): number {
-  let wrapped = 0;
+): ReadonlySet<string> {
+  const wrapped = new Set<string>();
   for (const operationId of registry.operationIds()) {
     const handler = registry.resolve(operationId);
     if (handler === null) continue;
     const gated = withTenantStatus(handler, operationId, opts);
     if (gated === handler) continue;
     registry.register(operationId, gated);
-    wrapped += 1;
+    wrapped.add(operationId);
   }
   return wrapped;
+}
+
+/**
+ * What the API description says about the gate on these operations: its two problem types, its
+ * reasons, the states its 403 can name and its retry-after — every value read from the constants
+ * the bodies above are built from, so the published schema and the sent body are one spelling.
+ *
+ * The states are those `blocksWrites` or `blocksReads` refuses in, in lifecycle order; `active` is
+ * absent because the gate never refuses it. `tenantStatus: null` (an unprovisioned tenant) is the
+ * emitter's to describe, since it is not a state.
+ */
+export function tenantStatusOpenApiDeclaration(
+  gatedOperationIds: ReadonlySet<string>,
+): OpenApiTenantStatusDeclaration {
+  return {
+    gatedOperationIds,
+    refused: {
+      type: PROBLEM_TYPE,
+      reasons: TENANT_STATE_REFUSAL_REASONS,
+      states: TENANT_LIFECYCLE_STATES.filter((s) => blocksWrites(s) || blocksReads(s)),
+    },
+    unavailable: {
+      type: UNAVAILABLE_PROBLEM_TYPE,
+      reason: TENANT_STATUS_UNAVAILABLE_REASON,
+      retryAfterSeconds: TENANT_STATUS_RETRY_AFTER_SECONDS,
+    },
+  };
 }
 
 /**

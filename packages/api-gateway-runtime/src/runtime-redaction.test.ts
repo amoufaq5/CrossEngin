@@ -1,3 +1,4 @@
+import { REQUIRED_JWT_CLAIMS } from "./auth.js";
 import type { RouteDefinition, IncomingRequest } from "@crossengin/api-gateway";
 import type {
   AbacBatchEvaluator,
@@ -98,6 +99,7 @@ function runtimeFor(spec: ResponseRedactionSpec, body: unknown): GatewayRuntime 
     body,
   }));
   return new GatewayRuntime({
+    requiredJwtClaims: new Set(REQUIRED_JWT_CLAIMS),
     routes,
     handlers,
     principalResolver: new InMemoryPrincipalResolver(),
@@ -146,6 +148,7 @@ describe("GatewayRuntime — response redaction by classification", () => {
       body: PATIENT_BODY,
     }));
     const runtime = new GatewayRuntime({
+      requiredJwtClaims: new Set(REQUIRED_JWT_CLAIMS),
       routes,
       handlers,
       principalResolver: new InMemoryPrincipalResolver(),
@@ -187,6 +190,7 @@ function authenticatedRuntime(spec: ResponseRedactionSpec, body: unknown): Gatew
     abacAttributes: { department: "clinical" },
   });
   return new GatewayRuntime({
+    requiredJwtClaims: new Set(REQUIRED_JWT_CLAIMS),
     routes,
     handlers,
     principalResolver,
@@ -586,6 +590,7 @@ function erroringRuntime(spec: ResponseRedactionSpec, status: number, body: unkn
   const routes = new InMemoryRouteRegistry().register(publicRoute());
   const handlers = new HandlerRegistry().register("patients.list", () => ({ kind: "json", status, body }));
   return new GatewayRuntime({
+    requiredJwtClaims: new Set(REQUIRED_JWT_CLAIMS),
     routes,
     handlers,
     principalResolver: new InMemoryPrincipalResolver(),

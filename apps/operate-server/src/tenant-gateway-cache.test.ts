@@ -7,6 +7,7 @@ import { ERP_CORE_PACK_SLUG, buildErpCorePack } from "@crossengin/pack-erp-core"
 import { describe, expect, it } from "vitest";
 
 import type { RawHttpRequest, RawHttpResponse } from "./http.js";
+import { PreAuthLimiter } from "./pre-auth-limit.js";
 import { buildJwksProvider, parseApiKeySpec, type JwtVerifyConfig } from "./principals.js";
 import { buildOperateHttpServer, type OperateHttpServer } from "./server.js";
 import {
@@ -15,6 +16,8 @@ import {
   TenantGatewayCache,
   bearerTenantVerifier,
   buildPerTenantDispatch,
+  markPreAuthCounted,
+  preAuthAlreadyCounted,
   resolveRequestTenant,
   type BearerTenantVerdict,
   type BearerTenantVerifier,
@@ -463,6 +466,94 @@ describe("buildPerTenantDispatch — a browser session reaches its tenant's own 
     const res = await dispatch(req("/v1/widgets", { authorization: `Bearer ${forged}`, "x-tenant-id": TENANT_1 }), null);
     expect(res.status).toBe(401);
     expect(defaultCalls).toHaveLength(1);
+  });
+});
+
+describe("buildPerTenantDispatch — the pre-authentication bound runs before the Bearer is verified (ADR-0473)", () => {
+  function compileLimited(manifest: Manifest, limiter: PreAuthLimiter): OperateHttpServer {
+    return buildOperateHttpServer({
+      edgeTrust: "untrusted",
+      manifest,
+      store: new InMemoryEntityStore(),
+      apiKeys: API_KEYS,
+      jwt: JWT,
+      now: () => GATEWAY_NOW,
+      preAuthLimiter: limiter,
+    }).httpServer;
+  }
+
+  function limitedEdge(limit: number) {
+    const limiter = new PreAuthLimiter({ limit, windowSeconds: 60 }, "untrusted", () => 0);
+    const checks: RawHttpRequest[] = [];
+    const original = limiter.check.bind(limiter);
+    limiter.check = (raw) => {
+      checks.push(raw);
+      return original(raw);
+    };
+    const verifyCalls: string[] = [];
+    const verify: BearerTenantVerifier = async (token) => {
+      verifyCalls.push(token);
+      return VERIFY(token);
+    };
+    const source = fakeSource({ [TENANT_1]: tinyManifest("t-one", "Widget") as Record<string, unknown> });
+    const cache = new TenantGatewayCache({ source, lineage: LINEAGE, build: (m) => compileLimited(m, limiter), now: () => 0 });
+    const fallback = compileLimited(tinyManifest("default", "Fallback"), limiter);
+    const dispatch = buildPerTenantDispatch({
+      defaultDispatch: (r, b) => fallback.dispatch(r, b),
+      cache,
+      apiKeys: API_KEYS,
+      verifyBearer: verify,
+      preAuthLimiter: limiter,
+    });
+    return { dispatch, checks, verifyCalls };
+  }
+
+  it("spends exactly one decision per request, on the tenant's gateway and on the fallback alike", async () => {
+    const { dispatch, checks } = limitedEdge(100);
+    const routed = req("/v1/widgets", { authorization: `Bearer ${sessionFor(TENANT_1)}` });
+    expect((await dispatch(routed, null)).status).toBe(200);
+    expect(checks).toEqual([routed]);
+    expect(preAuthAlreadyCounted(routed)).toBe(true);
+    const unrouted = req("/v1/widgets", {});
+    await dispatch(unrouted, null);
+    expect(checks).toHaveLength(2);
+  });
+
+  it("refuses an over-limit request before its signature is verified", async () => {
+    const { dispatch, verifyCalls } = limitedEdge(1);
+    const token = sessionFor(TENANT_1);
+    expect((await dispatch(req("/v1/widgets", { authorization: `Bearer ${token}` }), null)).status).toBe(200);
+    expect(verifyCalls).toHaveLength(1);
+    const second = await dispatch(req("/v1/widgets", { authorization: `Bearer ${token}` }), null);
+    expect(second.status).toBe(429);
+    expect(second.headers["retry-after"]).toBeDefined();
+    // The verifier is never reached for the refused request.
+    expect(verifyCalls).toHaveLength(1);
+  });
+
+  it("does not spend a second decision on a request an outer interceptor already counted", async () => {
+    const { dispatch, checks } = limitedEdge(100);
+    const counted = req("/v1/widgets", { authorization: `Bearer ${sessionFor(TENANT_1)}` });
+    markPreAuthCounted(counted);
+    expect((await dispatch(counted, null)).status).toBe(200);
+    expect(checks).toEqual([]);
+  });
+
+  it("a request nobody marked is still checked by the server it reaches (the control)", async () => {
+    const limiter = new PreAuthLimiter({ limit: 0, windowSeconds: 60 }, "untrusted", () => 0);
+    const server = compileLimited(tinyManifest("default", "Fallback"), limiter);
+    expect((await server.dispatch(req("/v1/fallbacks", {}), null)).status).toBe(429);
+  });
+});
+
+describe("resolveRequestTenant — one canonical spelling on both sides (ADR-0473)", () => {
+  it("lowercases an api-key spec's uppercase tenant, in both credential positions", async () => {
+    const upper = "00000000-0000-4000-8000-0000000000AB";
+    const keys = [parseApiKeySpec(`key-u:operator:${upper}`)];
+    expect(await resolveRequestTenant(req("/x", { "x-api-key": "key-u" }), keys, null)).toBe(upper.toLowerCase());
+    expect(await resolveRequestTenant(req("/x", { authorization: "Bearer key-u" }), keys, null)).toBe(
+      upper.toLowerCase(),
+    );
   });
 });
 

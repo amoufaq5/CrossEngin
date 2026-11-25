@@ -23,6 +23,7 @@ import {
   releaseJobClaim,
   renewJobClaim,
   type JobClaimScope,
+  type TenantClaimFailure,
 } from "./job-claim.js";
 import type { PostgresJobRunEngine } from "./job-engine.js";
 
@@ -46,6 +47,13 @@ export interface BuildJobClaimerOptions {
    * unfiltered and an empty declaration claims nothing.
    */
   readonly serves?: JobClaimScope;
+  /**
+   * A tenant whose claim raised. Required, because the claim rolls that tenant back to a savepoint
+   * and goes on to the next one (ADR-0469): the failure is otherwise invisible, since the poll still
+   * returns the other tenants' runs and an empty share reads exactly like an empty queue. Any run the
+   * reap swept for that tenant is rolled back with it and is not reported as reaped.
+   */
+  readonly onTenantClaimFailed: (failure: TenantClaimFailure) => void;
 }
 
 /**
@@ -58,7 +66,7 @@ export interface BuildJobClaimerOptions {
  * boot-time probe. The rotation index lives here, in the claimer, so successive polls start with
  * successive tenants.
  */
-export function buildJobClaimer(conn: PgConnection, opts: BuildJobClaimerOptions = {}): JobClaimer {
+export function buildJobClaimer(conn: PgConnection, opts: BuildJobClaimerOptions): JobClaimer {
   const schemaOpt = opts.schema !== undefined ? { schema: opts.schema } : {};
   const servesOpt = opts.serves !== undefined ? { serves: opts.serves } : {};
   const reap = opts.reapCancellations === true;
@@ -67,12 +75,19 @@ export function buildJobClaimer(conn: PgConnection, opts: BuildJobClaimerOptions
     claim: async (o) => {
       const tenantIds = await listJobClaimTenants(conn, schemaOpt);
       const reaped: ReapedJobRun[] = [];
+      // Tenants whose *first* visit failed: only that visit ran the reap, so only its reap was
+      // rolled back. A pass-two failure leaves the first visit's committed reap standing.
+      const reapRolledBack = new Set<string>();
       const result = await claimDueJobsPerTenant(conn, {
         ...o,
         ...schemaOpt,
         ...servesOpt,
         tenantIds,
         startIndex,
+        onTenantClaimFailed: (failure) => {
+          if (failure.firstVisit) reapRolledBack.add(failure.tenantId);
+          opts.onTenantClaimFailed(failure);
+        },
         ...(reap
           ? {
               beforeClaim: async (tx: PgConnection, tenantId: string) => {
@@ -89,7 +104,10 @@ export function buildJobClaimer(conn: PgConnection, opts: BuildJobClaimerOptions
           : {}),
       });
       startIndex = result.nextStartIndex;
-      if (reaped.length > 0) opts.onReaped?.(reaped);
+      // A reap inside a tenant whose claim then failed was rolled back to the savepoint with it, so
+      // reporting those runs as reaped would claim a terminal state the database does not hold.
+      const committed = reaped.filter((run) => !reapRolledBack.has(run.tenantId));
+      if (committed.length > 0) opts.onReaped?.(committed);
       return result.claimed;
     },
     release: (o) => releaseJobClaim(conn, { ...o, ...schemaOpt }),
@@ -180,10 +198,12 @@ export function buildJobProcessor(
           ...(signal !== undefined ? { signal } : {}),
         });
 
-      const execute =
+      // `leaseSignal` is the lease-loss abort `renewWhile` hands a signal-taking task (ADR-0469). With
+      // a cancellation poll as well, the handler sees one signal that trips on either.
+      const execute = (leaseSignal?: AbortSignal): Promise<unknown> =>
         cancellation === undefined
-          ? run()
-          : abortWhile(run, {
+          ? run(leaseSignal)
+          : abortWhile((cancelSignal) => run(combineSignals(cancelSignal, leaseSignal)), {
               shouldAbort: () =>
                 cancellation.watcher.isCancelRequested({ jobId: job.jobId, tenantId: job.tenantId }),
               intervalMs: cancellation.intervalMs,
@@ -195,7 +215,7 @@ export function buildJobProcessor(
             });
 
       if (renewal === undefined) {
-        await execute;
+        await execute();
         return;
       }
       await renewWhile(execute, {
@@ -209,6 +229,10 @@ export function buildJobProcessor(
       });
     },
   };
+}
+
+function combineSignals(a: AbortSignal, b: AbortSignal | undefined): AbortSignal {
+  return b === undefined ? a : AbortSignal.any([a, b]);
 }
 
 export interface BuildWorkflowJobWorkerInput {
@@ -240,6 +264,8 @@ export interface BuildWorkflowJobWorkerInput {
   readonly onReaped?: (runs: readonly ReapedJobRun[]) => void;
   /** The job ids / kinds this process's registry serves — `buildJobHandlerRegistry().servedJobIds`. */
   readonly serves?: JobClaimScope;
+  /** See `BuildJobClaimerOptions.onTenantClaimFailed`. */
+  readonly onTenantClaimFailed: (failure: TenantClaimFailure) => void;
 }
 
 /**
@@ -256,6 +282,7 @@ export function buildWorkflowJobWorker(input: BuildWorkflowJobWorkerInput): Work
     reapCancellations: cancelling,
     ...(input.onReaped !== undefined ? { onReaped: input.onReaped } : {}),
     ...(input.serves !== undefined ? { serves: input.serves } : {}),
+    onTenantClaimFailed: input.onTenantClaimFailed,
   });
   const watcher = cancelling
     ? buildJobCancellationWatcher(input.conn, input.schema !== undefined ? { schema: input.schema } : {})

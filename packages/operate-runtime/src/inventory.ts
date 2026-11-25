@@ -3,6 +3,7 @@ import type { Manifest } from "@crossengin/kernel/manifest";
 
 import { parseDecimal } from "./decimal.js";
 import { drainList, ReadCeilingExceeded } from "./list-drain.js";
+import { convertBalanced, rateWire } from "./money.js";
 import { PostingRefused, type PostingPeriodConfig } from "./posting-period.js";
 import type { EntityRecord, EntityStore, ListFilter } from "./store.js";
 import {
@@ -10,6 +11,8 @@ import {
   createPostedEntry,
   entersState,
   resolveAccountId,
+  resolvePostingRate,
+  type PostingFxConfig,
   type WriteEffect,
   type WriteEffectInput,
 } from "./write-effects.js";
@@ -205,6 +208,12 @@ export interface InventoryConfig {
    * naming no order line bills goods a receipt has already credited to GRNI.
    */
   readonly receiptsCreditGrni?: boolean;
+  /**
+   * How a posting finds the rate its lines' currency converts into the functional currency at —
+   * the document effects' `PostingFxConfig`, taken on the entry's own date (ADR-0475). Absent, every
+   * line posts at rate 1, which is right only for a manifest declaring no exchange-rate tables.
+   */
+  readonly fx?: PostingFxConfig;
 }
 
 const MAX_ROWS = 10_000;
@@ -440,6 +449,20 @@ async function postEntry(
   for (const net of byCurrency.values()) {
     if (net !== 0n) throw new Error(`inventory posting ${memo} does not balance`);
   }
+  // Each currency's lines at that currency's rate on the entry's date, converted **and balanced**
+  // (`convertBalanced`), and refused by name — `exchange_rate_unresolved` — exactly where a document
+  // posting is. Resolved before the entry is created, so a refusal writes nothing. This replaces
+  // `fx_rate: 1, functional = amount`, which for a EUR item put EUR inventory into the functional
+  // ledger unconverted: a receipt of EUR 100 at 1.1 read USD 100 of stock, a wrong figure that
+  // balanced (ADR-0378), since every line was wrong by the same factor.
+  const today = nowIso.slice(0, 10);
+  const functional = new Map<PostingLine, { d: bigint; c: bigint; rate: number | string }>();
+  for (const currency of byCurrency.keys()) {
+    const rate = await resolvePostingRate(input, c.fx, {}, currency, today, `the inventory posting ${number}`);
+    const group = kept.filter((l) => l.currency === currency);
+    const converted = convertBalanced(group.map((l) => ({ d: l.debit, c: l.credit })), rate);
+    group.forEach((l, i) => functional.set(l, { ...converted[i]!, rate: rateWire(rate) }));
+  }
   const entry = await createPostedEntry(
     input,
     "JournalEntry",
@@ -457,18 +480,17 @@ async function postEntry(
     c.periods,
   );
   for (const l of kept) {
-    const debit = renderUnits(l.debit, MONEY_SCALE);
-    const credit = renderUnits(l.credit, MONEY_SCALE);
+    const f = functional.get(l)!;
     await input.store.create(input.tenantId, "JournalLine", {
       journal_entry_id: String(entry["id"]),
       ledger_account_id: l.account,
       description: l.description,
-      debit,
-      credit,
+      debit: renderUnits(l.debit, MONEY_SCALE),
+      credit: renderUnits(l.credit, MONEY_SCALE),
       currency: l.currency,
-      fx_rate: 1,
-      functional_debit: debit,
-      functional_credit: credit,
+      fx_rate: f.rate,
+      functional_debit: renderUnits(f.d, MONEY_SCALE),
+      functional_credit: renderUnits(f.c, MONEY_SCALE),
       created_at: nowIso,
       updated_at: nowIso,
       ...actor,

@@ -241,6 +241,41 @@ export function serviceUnavailable(input: {
 }
 
 /**
+ * How long a client is told to wait after a principal directory could not be read. Five seconds for
+ * `RESIDENCY_UNRESOLVED_RETRY_AFTER_SECONDS`' reason: the outage behind it is a database the caller
+ * cannot see, measured in seconds, and a figure below the directory's own refresh cadence would only
+ * buy a second miss.
+ */
+export const PRINCIPAL_DIRECTORY_RETRY_AFTER_SECONDS = 5;
+
+/**
+ * The 503 for a request whose principal could not be established because the directory that decides
+ * it could not be read (ADR-0473).
+ *
+ * Under `service_unavailable`'s registry type with the specific code in `extensions.error`, which is
+ * ADR-0462's shape for the AI-provider residency refusal: the registry lives in
+ * `@crossengin/api-gateway`, and a client keyed on the generic type already reads the right thing —
+ * *retry later* — while one that wants the cause has it by name. The detail names no store, no
+ * tenant and no principal, because the caller is not yet authenticated.
+ */
+export function principalDirectoryUnavailable(input: {
+  readonly correlationId?: string;
+}): ProblemEnvelope {
+  return buildEnvelope({
+    key: "service_unavailable",
+    status: 503,
+    detail:
+      "whether this credential's principal may act could not be established right now; retry after the interval in retry-after",
+    extensions: {
+      error: "principal_directory_unavailable",
+      retryAfterSeconds: PRINCIPAL_DIRECTORY_RETRY_AFTER_SECONDS,
+    },
+    correlationId: input.correlationId,
+    extraHeaders: { "retry-after": PRINCIPAL_DIRECTORY_RETRY_AFTER_SECONDS.toString() },
+  });
+}
+
+/**
  * A real upstream timeout, and only that. It has no caller on the request path: the dispatch stage
  * used it for every uncaught handler throw, which is `internalServerError`'s job — 504 invites the
  * retry a permanent fault cannot survive. Kept rather than deleted because an upstream the gateway

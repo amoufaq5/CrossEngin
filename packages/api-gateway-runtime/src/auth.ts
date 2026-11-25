@@ -80,6 +80,81 @@ export interface JwksProvider {
   getPublicKeyForKid(kid: string): Promise<string | null>;
 }
 
+/**
+ * How far either side of now a JWT's `exp` and `nbf` may be, in seconds, when a gateway is not told
+ * otherwise.
+ *
+ * Exported so the one other verifier of the same token — the per-tenant router's pre-routing check
+ * in `apps/operate-server` — reads this figure rather than restating it (ADR-0473). The two must
+ * agree, and the direction a disagreement fails in is not safe: a router stricter than the gateway
+ * refuses to route a token the deployment's gateway then accepts, so that request is served the
+ * boot manifest rather than the tenant's own.
+ */
+export const DEFAULT_JWT_CLOCK_SKEW_SECONDS = 30;
+
+const CANONICAL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The one spelling of a tenant id every reader keys on: a UUID-shaped id lowercased, anything else
+ * unchanged.
+ *
+ * Postgres compares a `uuid` case-insensitively, and every string-keyed structure in this process —
+ * the per-tenant gateway cache, the per-tenant store registry, the status and attribute directories
+ * — does not. So two readers that each kept the spelling they were handed disagreed for an
+ * uppercase id: the router lowercased the token's claim, while a resolver that passed the claim
+ * through verbatim left the gateway's `ctx.tenantId` uppercase and the store lookup missed
+ * (ADR-0434's open question, ADR-0473). One function, called by both, is what makes them agree.
+ *
+ * A non-UUID id is returned **unchanged** rather than refused or lowercased: nothing here can say
+ * whether `ACME` and `acme` are one tenant, and the store that receives it is the place that refuses
+ * a tenant id that is not one. Lowercasing it would invent an equivalence nobody declared.
+ */
+export function canonicalTenantId(tenantId: string): string;
+export function canonicalTenantId(tenantId: string | null): string | null;
+export function canonicalTenantId(tenantId: string | null): string | null {
+  if (tenantId === null) return null;
+  return CANONICAL_UUID_RE.test(tenantId) ? tenantId.toLowerCase() : tenantId;
+}
+
+/**
+ * Thrown by a principal or attribute directory that **could not establish** an answer — a read that
+ * failed with no cached value it may still serve.
+ *
+ * The gateway maps it to a **503 with `Retry-After`** (`principalDirectoryUnavailable`), where any
+ * other stage throw is a 500. ADR-0334's split one directory over: a state that *forbids* the
+ * request is a refusal, a state that could not be *established* is a 503, because a 401 would be a
+ * claim about the credential and none is in hand — and a 500 says this request broke, which a
+ * database that will be back in seconds did not.
+ *
+ * `cause` carries the underlying error for the operator's log; nothing of it reaches a response.
+ */
+export class PrincipalDirectoryUnavailable extends Error {
+  constructor(
+    readonly directory: string,
+    cause: unknown,
+  ) {
+    super(
+      `${directory} could not be read and no cached answer may be served: ` +
+        (cause instanceof Error ? cause.message : String(cause)),
+      { cause },
+    );
+    this.name = "PrincipalDirectoryUnavailable";
+  }
+}
+
+/**
+ * By `Error.name` as well as by `instanceof`, because the class crosses a package boundary through
+ * `dist/` and two resolutions of one module defeat `instanceof` — `tenant-gateway-cache.ts`'
+ * `refusalKindOf` reason. A missed match costs a 500 instead of a 503, which is the direction that
+ * was the defect, not a new one.
+ */
+export function isPrincipalDirectoryUnavailable(err: unknown): err is PrincipalDirectoryUnavailable {
+  return (
+    err instanceof PrincipalDirectoryUnavailable ||
+    (err instanceof Error && err.name === "PrincipalDirectoryUnavailable")
+  );
+}
+
 export interface InMemoryJwksOptions {
   readonly keys: ReadonlyArray<{ readonly kid: string; readonly publicKeyBase64: string }>;
 }
@@ -131,6 +206,11 @@ export const REQUIRED_JWT_CLAIMS: readonly RequiredJwtClaim[] = Object.freeze(
   Object.keys(REQUIRED_JWT_CLAIM_COSTS) as RequiredJwtClaim[],
 );
 
+/** RFC 7519 §2's NumericDate as the two time guards below can compare it: a finite JSON number. */
+function isNumericDate(v: unknown): v is number {
+  return typeof v === "number" && Number.isFinite(v);
+}
+
 /**
  * Whether a claim is present **in a form the guard that reads it can use** — which is what
  * "present" has to mean here, and `!== undefined` is not it.
@@ -147,7 +227,10 @@ export const REQUIRED_JWT_CLAIMS: readonly RequiredJwtClaim[] = Object.freeze(
  * `!== undefined`, which is the permissive answer.
  */
 const CLAIM_IS_USABLE: Readonly<Record<RequiredJwtClaim, (v: unknown) => boolean>> = Object.freeze({
-  exp: (v) => typeof v === "number",
+  // Finite as well as a number (ADR-0473): `JSON.parse("1e400")` is `Infinity`, and
+  // `Infinity + skew < now` is false for ever, so an `exp` of `1e400` was a usable expiry that never
+  // arrives — the "never expires" cost this map exists to refuse, spelled as a number.
+  exp: (v) => isNumericDate(v),
   iss: (v) => typeof v === "string",
   // Both RFC 7519 §4.1.3 forms, matching the `audOk` computation below.
   aud: (v) => typeof v === "string" || Array.isArray(v),
@@ -217,8 +300,8 @@ export async function verifyBearerJwt(input: {
   // not yet decided to believe — `rbacCheck`'s reason for evaluating an obligation only after the
   // role check (ADR-0340).
   for (const claim of REQUIRED_JWT_CLAIMS) {
-    if (!input.opts.requiredClaims.has(claim)) continue;
-    if (!CLAIM_IS_USABLE[claim](jwt.payload[claim])) {
+    if (CLAIM_IS_USABLE[claim](jwt.payload[claim])) continue;
+    if (input.opts.requiredClaims.has(claim)) {
       // The claim's own value is deliberately not in the reason: it reaches a log line and a
       // `StageResult.reason`, and a claim from an unverified-by-policy token is caller-controlled
       // (ADR-0367's rule, ADR-0373's `unreadableDetail`). "absent or not usable" rather than
@@ -226,11 +309,31 @@ export async function verifyBearerJwt(input: {
       // a token carrying `exp: "soon"`.
       return { outcome: "required_claim_absent", reason: `${claim} is absent or not usable` };
     }
+    // A claim the deployment relaxed (`--jwt-optional-claim`) may be **absent**; it may not be
+    // present and unusable (ADR-0473's review). The relaxation declares that a token omitting the
+    // claim is acceptable, and says nothing about one carrying `exp: "soon"` — which every guard
+    // below skips, so under `--jwt-optional-claim exp` such a token never expired, and under
+    // `--jwt-optional-claim tenant_id` a `tenant_id: ""` set the request's tenant to the empty
+    // string. The `nbf` hole below, on the four claims a relaxation reaches.
+    if (claim in jwt.payload) {
+      return { outcome: "credential_malformed", reason: `${claim} is present and not usable` };
+    }
   }
-  if (typeof jwt.payload.exp === "number" && jwt.payload.exp + input.opts.clockSkewSeconds < input.opts.nowSeconds) {
+  // `nbf` is never *required* — its absence means valid from issuance (see `REQUIRED_JWT_CLAIM_COSTS`)
+  // — but a **present** `nbf` that is not a NumericDate is refused (ADR-0473). The guard below was
+  // `typeof nbf === "number" && …`, so `nbf: "2099-01-01"` skipped the comparison and verified as
+  // valid now: a token whose minter said *not before 2099* accepted today, which is ADR-0386's
+  // present-and-unusable hole on the one time claim that ADR did not reach. `credential_malformed`
+  // and not `not_yet_valid_token`, because nothing establishes a time to be before — the claim is
+  // not a date — and not `required_claim_absent`, because nothing required it. `in` rather than
+  // `!== undefined` so an explicit `nbf: null` counts as present, which it is on the wire.
+  if ("nbf" in jwt.payload && !isNumericDate(jwt.payload.nbf)) {
+    return { outcome: "credential_malformed", reason: "nbf is present and is not a NumericDate" };
+  }
+  if (isNumericDate(jwt.payload.exp) && jwt.payload.exp + input.opts.clockSkewSeconds < input.opts.nowSeconds) {
     return { outcome: "expired_token", reason: "exp is in the past" };
   }
-  if (typeof jwt.payload.nbf === "number" && jwt.payload.nbf - input.opts.clockSkewSeconds > input.opts.nowSeconds) {
+  if (isNumericDate(jwt.payload.nbf) && jwt.payload.nbf - input.opts.clockSkewSeconds > input.opts.nowSeconds) {
     return { outcome: "not_yet_valid_token", reason: "nbf is in the future" };
   }
   if (typeof jwt.payload.iss === "string" && jwt.payload.iss !== input.opts.expectedIssuer) {
@@ -583,8 +686,10 @@ export interface ResolvePrincipalInput {
 export async function resolvePrincipalForCredential(
   input: ResolvePrincipalInput,
 ): Promise<{ readonly principal: ResolvedPrincipal | null; readonly outcome: AuthOutcome }> {
-  const headerTenant = input.request.tenantHint ?? null;
-  const authTenant = input.authenticatedTenantId ?? null;
+  // Both sides canonical before they are compared, or an uppercase claim beside the same id in
+  // lowercase in `x-tenant-id` is refused `tenant_mismatch` — a 401 for one tenant named twice.
+  const headerTenant = canonicalTenantId(input.request.tenantHint ?? null);
+  const authTenant = canonicalTenantId(input.authenticatedTenantId ?? null);
   // A spoofable header must not claim a different tenant than the credential.
   if (authTenant !== null && headerTenant !== null && authTenant !== headerTenant) {
     return { principal: null, outcome: "tenant_mismatch" };

@@ -8,7 +8,15 @@ import { compileOperateServer } from "./compile.js";
 import type { EntityWriteAuditEvent } from "./entity-audit.js";
 import { ReadCeilingExceeded } from "./list-drain.js";
 import { InMemoryEntityStore } from "./store.js";
-import { systemRequestId, systemWriteOriginOf, type SystemActor } from "./system-writer.js";
+import {
+  NO_TENANT_REGISTRY_STANDING,
+  systemRequestId,
+  systemWriteOriginOf,
+  TenantNotWritable,
+  TenantStandingUnknown,
+  type SystemActor,
+  type TenantStandingReader,
+} from "./system-writer.js";
 
 const TENANT = "11111111-1111-4111-8111-111111111111";
 const OTHER = "22222222-2222-4222-8222-222222222222";
@@ -17,6 +25,7 @@ const NOW = new Date("2026-03-01T01:00:00.000Z");
 const ACTOR: SystemActor = {
   roles: ["erp_admin"],
   origin: { kind: "job", jobId: "erp-core-depreciation-run", runId: "8b1a9953-c461-4b6d-9f3e-0c5a2f7d41aa" },
+  standing: NO_TENANT_REGISTRY_STANDING,
 };
 
 function setup() {
@@ -168,7 +177,7 @@ describe("buildSystemEntityAccess — a background write runs the request pipeli
       return { kind: "json", status: 201, body: { id: "rec_1" } };
     };
     compiled.handlers.register("ledgerAccount.create", recording);
-    const access = compiled.systemEntityAccess.forTenant(TENANT, { roles: ["erp_admin"], origin });
+    const access = compiled.systemEntityAccess.forTenant(TENANT, { roles: ["erp_admin"], origin, standing: NO_TENANT_REGISTRY_STANDING });
     const r = await access.create("LedgerAccount", { account_code: "1000", name: "Cash", account_type: "asset" });
     expect(r.kind).toBe("written");
     expect(seen).toHaveLength(1);
@@ -185,7 +194,7 @@ describe("buildSystemEntityAccess — a background write runs the request pipeli
       return { kind: "json", status: 201, body: { id: "rec_1" } };
     };
     compiled.handlers.register("ledgerAccount.create", recording);
-    const access = compiled.systemEntityAccess.forTenant(TENANT, { roles: ["erp_admin"], origin });
+    const access = compiled.systemEntityAccess.forTenant(TENANT, { roles: ["erp_admin"], origin, standing: NO_TENANT_REGISTRY_STANDING });
     await access.create("LedgerAccount", { account_code: "1000", name: "Cash", account_type: "asset" });
     expect(seen[0]?.requestId).toMatch(/^req_maint_bwb42_[0-9]+$/);
     expect(seen[0]?.origin).toEqual(origin);
@@ -199,7 +208,7 @@ describe("buildSystemEntityAccess — a background write runs the request pipeli
       ids.push(input.request.id);
       return { kind: "json", status: 201, body: { id: "rec_1" } };
     });
-    const access = compiled.systemEntityAccess.forTenant(TENANT, { roles: ["erp_admin"], origin });
+    const access = compiled.systemEntityAccess.forTenant(TENANT, { roles: ["erp_admin"], origin, standing: NO_TENANT_REGISTRY_STANDING });
     await access.create("LedgerAccount", { account_code: "1000", name: "Cash", account_type: "asset" });
     expect(ids).toEqual([systemRequestId(origin, 1)]);
     expect(systemRequestId(origin, 7)).toBe("req_maint_bwb42_7");
@@ -208,7 +217,7 @@ describe("buildSystemEntityAccess — a background write runs the request pipeli
   it("refuses a maintenance dispatch that writes a server-owned field, so such a correction goes through the store", async () => {
     const { compiled } = setup();
     const origin = { kind: "maintenance", operation: "bill_withholding_backfill", runId: "bwb-42" } as const;
-    const access = compiled.systemEntityAccess.forTenant(TENANT, { roles: ["erp_admin"], origin });
+    const access = compiled.systemEntityAccess.forTenant(TENANT, { roles: ["erp_admin"], origin, standing: NO_TENANT_REGISTRY_STANDING });
     const r = await access.update("Bill", "rec_any", { withholding_total: "10.00" });
     expect(r).toMatchObject({ kind: "refused", status: 422 });
     expect(JSON.stringify(r)).toContain("field_server_owned");
@@ -229,7 +238,7 @@ describe("buildSystemEntityAccess — a background write runs the request pipeli
   it("files a provisioning write's audit record under the provisioning origin", async () => {
     const { compiled, audited } = setup();
     const origin = { kind: "provisioning", operation: "starter_chart", provisioningId: "areq_7" } as const;
-    const access = compiled.systemEntityAccess.forTenant(TENANT, { roles: ["erp_admin"], origin });
+    const access = compiled.systemEntityAccess.forTenant(TENANT, { roles: ["erp_admin"], origin, standing: NO_TENANT_REGISTRY_STANDING });
     const r = await access.create("LedgerAccount", { account_code: "1000", name: "Cash", account_type: "asset" });
     expect(r.kind).toBe("written");
     expect(audited[0]).toMatchObject({ actorUserId: null, origin });
@@ -238,5 +247,76 @@ describe("buildSystemEntityAccess — a background write runs the request pipeli
   it("refuses an actor with no role, since no grant could name it", () => {
     const { compiled } = setup();
     expect(() => compiled.systemEntityAccess.forTenant(TENANT, { ...ACTOR, roles: [] })).toThrow(/at least one role/);
+  });
+});
+
+describe("buildSystemEntityAccess — a tenant whose state blocks writes is written by nothing", () => {
+  const blocked = (status: string): TenantStandingReader => async () => ({ kind: "blocked", status });
+
+  it("throws the typed, non-retryable refusal and writes nothing at all", async () => {
+    const { compiled, store, audited } = setup();
+    const reached: string[] = [];
+    compiled.handlers.register("ledgerAccount.create", () => {
+      reached.push("handler");
+      return { kind: "json", status: 201, body: { id: "rec_1" } };
+    });
+    const access = compiled.systemEntityAccess.forTenant(TENANT, { ...ACTOR, standing: blocked("pending_deletion") });
+    const err = await access
+      .create("LedgerAccount", { account_code: "1000", name: "Cash", account_type: "asset" })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(TenantNotWritable);
+    expect(err).toMatchObject({ status: "pending_deletion", retryable: false, message: "tenant_not_writable:pending_deletion" });
+    // The handler was never reached, so no guard, effect or audit row ran either.
+    expect(reached).toEqual([]);
+    expect(audited).toEqual([]);
+    expect(await store.listPage(TENANT, "LedgerAccount", { filters: [], sort: [], limit: 10, cursor: null })).toMatchObject({
+      records: [],
+    });
+  });
+
+  it("refuses a transition and an update the same way, not only a create", async () => {
+    const { compiled } = setup();
+    const access = compiled.systemEntityAccess.forTenant(TENANT, { ...ACTOR, standing: blocked("suspended") });
+    await expect(access.transition("Invoice", "inv-1", "mark_overdue")).rejects.toBeInstanceOf(TenantNotWritable);
+    await expect(access.update("Invoice", "inv-1", { memo: "x" })).rejects.toBeInstanceOf(TenantNotWritable);
+    await expect(access.assertWritable()).rejects.toMatchObject({ status: "suspended" });
+  });
+
+  it("still reads, because a blocked tenant's data is readable and a sweep reads before it decides", async () => {
+    const { compiled, access } = setup();
+    await ledger(access, "1000", "asset");
+    const ro = compiled.systemEntityAccess.forTenant(TENANT, { ...ACTOR, standing: blocked("archived") });
+    expect(await ro.readAll("LedgerAccount", {}, { ceiling: 10, computing: "x" })).toHaveLength(1);
+  });
+
+  it("answers a reader that throws as unknown, which is retryable — never as writable", async () => {
+    const { compiled } = setup();
+    const throwing: TenantStandingReader = async () => {
+      throw new Error("connection reset");
+    };
+    const access = compiled.systemEntityAccess.forTenant(TENANT, { ...ACTOR, standing: throwing });
+    const err = await access.create("LedgerAccount", { account_code: "1", name: "x", account_type: "asset" }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(TenantStandingUnknown);
+    expect(err).toMatchObject({ retryable: true });
+    const unknown = compiled.systemEntityAccess.forTenant(TENANT, {
+      ...ACTOR,
+      standing: async () => ({ kind: "unknown", reason: "directory unreachable" }),
+    });
+    await expect(unknown.assertWritable()).rejects.toBeInstanceOf(TenantStandingUnknown);
+  });
+
+  it("asks the reader for the tenant the access is bound to, on every write", async () => {
+    const { compiled } = setup();
+    const asked: string[] = [];
+    const access = compiled.systemEntityAccess.forTenant(OTHER, {
+      ...ACTOR,
+      standing: async (t) => {
+        asked.push(t);
+        return { kind: "writable" };
+      },
+    });
+    await access.create("LedgerAccount", { account_code: "1", name: "x", account_type: "asset" });
+    await access.create("LedgerAccount", { account_code: "2", name: "y", account_type: "asset" });
+    expect(asked).toEqual([OTHER, OTHER]);
   });
 });

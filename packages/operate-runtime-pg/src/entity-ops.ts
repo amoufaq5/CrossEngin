@@ -3,6 +3,7 @@ import {
   encodeKeyset,
   keysetOf,
   ListSurfaceUnserveable,
+  RecordIdConflict,
   preconditionHolds,
   withoutNullFields,
   type ConditionalRemove,
@@ -203,9 +204,31 @@ export async function createOp(
       [tenantId, entity, id, JSON.stringify(stored)],
     );
   } catch (err) {
+    if (isDocumentRecordKeyViolation(err)) throw new RecordIdConflict(entity, id);
     rethrowDocumentUniqueViolation(integrity, err);
   }
   return stored;
+}
+
+/**
+ * The catalog's unique constraint on `(tenant_id, entity, record_id)` — the record's own key on this
+ * store, since `meta.operate_entity_records`' primary key is a surrogate `id` that no caller names.
+ * Spelled here because this package does not import the catalog at runtime; `entity-ops.test.ts`
+ * asserts it against `META_OPERATE_ENTITY_RECORDS`, so a rename there fails a test rather than
+ * turning the race's 409 back into a 500.
+ */
+export const DOCUMENT_RECORD_KEY_CONSTRAINT = "operate_entity_records_tenant_entity_record_key";
+
+/**
+ * Whether `err` is a `23505` on the record key: a second create of an id the tenant already holds
+ * for this entity. The create handler's pre-flight `get` cannot see an uncommitted row, so the loser
+ * of two concurrent creates arrives here (ADR-0417 Q2) and is told `id_conflict` rather than 500.
+ */
+export function isDocumentRecordKeyViolation(err: unknown): boolean {
+  return (
+    (err as { readonly code?: unknown } | null)?.code === "23505" &&
+    (err as { readonly constraint?: unknown }).constraint === DOCUMENT_RECORD_KEY_CONSTRAINT
+  );
 }
 
 export async function updateOp(

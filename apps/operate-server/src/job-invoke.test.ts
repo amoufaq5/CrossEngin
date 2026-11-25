@@ -3,7 +3,13 @@ import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 import { SET_TENANT_CONTEXT_SQL } from "@crossengin/workflow-runtime-pg";
 import { describe, expect, it } from "vitest";
 
-import { PostgresJobInvoker, buildActionRoleMap, mergeActionRoleMaps } from "./job-invoke.js";
+import {
+  JOB_INVOKE_ENQUEUE_REMEDY,
+  PostgresJobInvoker,
+  buildActionRoleMap,
+  mergeActionRoleMaps,
+  type JobInvocationFailure,
+} from "./job-invoke.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 const NOW = () => new Date("2026-05-17T12:00:00.000Z");
@@ -50,12 +56,18 @@ const reindexJob: JobDeclaration = JobDeclarationSchema.parse({
   onFailure: { strategy: "dead-letter" },
 });
 
+const unexpectedError = (f: JobInvocationFailure): never => {
+  throw new Error(`unexpected enqueue failure: ${String(f.error)}`);
+};
+
 describe("PostgresJobInvoker", () => {
   it("enqueues a userInvoked run for a matching action and maps the result", async () => {
     const calls: Call[] = [];
-    const invoker = new PostgresJobInvoker(mockConn(calls), [reindexJob], { now: NOW });
-    const runs = await invoker.invoke({ tenantId: TENANT, action: "reindex-catalog", data: { scope: "all" }, idempotencyKey: "inv-1" });
+    const invoker = new PostgresJobInvoker(mockConn(calls), [reindexJob], { now: NOW, servedJobIds: () => ["reindex-catalog"], onError: unexpectedError });
+    const outcome = await invoker.invoke({ tenantId: TENANT, action: "reindex-catalog", data: { scope: "all" }, idempotencyKey: "inv-1" });
 
+    expect(outcome.kind).toBe("enqueued");
+    const runs = outcome.kind === "enqueued" ? outcome.runs : [];
     expect(runs).toHaveLength(1);
     expect(runs[0]).toMatchObject({ jobId: "reindex-catalog", inserted: true });
     const ins = inserts(calls);
@@ -68,16 +80,16 @@ describe("PostgresJobInvoker", () => {
 
   it("returns an empty list when no userInvoked job matches the action", async () => {
     const calls: Call[] = [];
-    const invoker = new PostgresJobInvoker(mockConn(calls), [reindexJob], { now: NOW });
-    const runs = await invoker.invoke({ tenantId: TENANT, action: "unknown", data: {} });
-    expect(runs).toEqual([]);
+    const invoker = new PostgresJobInvoker(mockConn(calls), [reindexJob], { now: NOW, servedJobIds: () => ["reindex-catalog"], onError: unexpectedError });
+    const outcome = await invoker.invoke({ tenantId: TENANT, action: "unknown", data: {} });
+    expect(outcome).toEqual({ kind: "no_listener" });
     // Not one statement, so no transaction is opened and no context is set when nothing is planned.
     expect(calls).toHaveLength(0);
   });
 
   it("establishes the tenant RLS context, with the tenant bound rather than interpolated", async () => {
     const calls: Call[] = [];
-    const invoker = new PostgresJobInvoker(mockConn(calls), [reindexJob], { now: NOW });
+    const invoker = new PostgresJobInvoker(mockConn(calls), [reindexJob], { now: NOW, servedJobIds: () => ["reindex-catalog"], onError: unexpectedError });
     await invoker.invoke({ tenantId: TENANT, action: "reindex-catalog", data: {}, idempotencyKey: "inv-2" });
 
     // `meta.job_runs` carries exactly one ALL-scope isolation policy with a NULL WITH CHECK, so its
@@ -92,6 +104,76 @@ describe("PostgresJobInvoker", () => {
     expect(ctx[0]!.sql).toContain("$1");
     // And it precedes the insert it exists to admit.
     expect(calls.indexOf(ctx[0]!)).toBeLessThan(calls.indexOf(inserts(calls)[0]!));
+  });
+});
+
+describe("PostgresJobInvoker served gating and enqueue failures (ADR-0469)", () => {
+  const otherJob: JobDeclaration = JobDeclarationSchema.parse({
+    id: "reindex-search",
+    name: "reindex-search",
+    trigger: { kind: "userInvoked", action: "reindex-catalog" },
+    onFailure: { strategy: "dead-letter" },
+  });
+
+  it("refuses not_served before issuing any statement when no matching job is served", async () => {
+    const calls: Call[] = [];
+    const invoker = new PostgresJobInvoker(mockConn(calls), [reindexJob], {
+      now: NOW,
+      servedJobIds: () => [],
+      onError: unexpectedError,
+    });
+    const outcome = await invoker.invoke({ tenantId: TENANT, action: "reindex-catalog", data: {} });
+    expect(outcome).toEqual({ kind: "not_served", jobIds: ["reindex-catalog"] });
+    expect(calls).toHaveLength(0);
+  });
+
+  it("enqueues only the served jobs and names the unserved ones beside them", async () => {
+    const calls: Call[] = [];
+    const invoker = new PostgresJobInvoker(mockConn(calls), [reindexJob, otherJob], {
+      now: NOW,
+      servedJobIds: () => ["reindex-catalog"],
+      onError: unexpectedError,
+    });
+    const outcome = await invoker.invoke({ tenantId: TENANT, action: "reindex-catalog", data: {} });
+    expect(outcome.kind).toBe("enqueued");
+    if (outcome.kind !== "enqueued") return;
+    expect(outcome.runs.map((r) => r.jobId)).toEqual(["reindex-catalog"]);
+    expect(outcome.unservedJobIds).toEqual(["reindex-search"]);
+    expect(inserts(calls).map((c) => c.params?.[1])).toEqual(["reindex-catalog"]);
+  });
+
+  it("answers queue_unavailable and reports the run ids and the remedy when the enqueue throws", async () => {
+    const failures: JobInvocationFailure[] = [];
+    const conn: PgConnection = {
+      ...mockConn([]),
+      transaction: (async () => {
+        throw new Error("permission denied for table job_runs");
+      }) as PgConnection["transaction"],
+    };
+    const invoker = new PostgresJobInvoker(conn, [reindexJob], {
+      now: NOW,
+      servedJobIds: () => ["reindex-catalog"],
+      onError: (f) => void failures.push(f),
+    });
+    const outcome = await invoker.invoke({
+      tenantId: TENANT,
+      action: "reindex-catalog",
+      data: {},
+      idempotencyKey: "inv-3",
+    });
+    expect(outcome).toEqual({ kind: "queue_unavailable" });
+    expect(failures).toHaveLength(1);
+    expect(failures[0]!.action).toBe("reindex-catalog");
+    expect(failures[0]!.tenantId).toBe(TENANT);
+    expect(failures[0]!.remedy).toBe(JOB_INVOKE_ENQUEUE_REMEDY);
+    // The id is the one the statement was writing: a successful run with the same key gets it too.
+    const calls: Call[] = [];
+    const ok = await new PostgresJobInvoker(mockConn(calls), [reindexJob], {
+      now: NOW,
+      servedJobIds: () => ["reindex-catalog"],
+      onError: unexpectedError,
+    }).invoke({ tenantId: TENANT, action: "reindex-catalog", data: {}, idempotencyKey: "inv-3" });
+    expect(ok.kind === "enqueued" ? ok.runs.map((r) => r.runId) : []).toEqual(failures[0]!.runIds);
   });
 });
 

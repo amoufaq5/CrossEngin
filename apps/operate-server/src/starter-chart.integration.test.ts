@@ -11,6 +11,7 @@ import {
   type EntityRecord,
   type EntityWriteAuditEvent,
   type StarterChartReport,
+  NO_TENANT_REGISTRY_STANDING,
   type SystemActor,
   type TenantSettings,
 } from "@crossengin/operate-runtime";
@@ -51,7 +52,11 @@ const PROVISIONING = "55555555-5555-4555-8555-555555555555";
 const NOW = "2026-11-23T10:00:00.000Z";
 
 function provisioningActor(roles: readonly string[] = ["erp_admin"]): SystemActor {
-  return { roles, origin: { kind: "provisioning", operation: "starter_chart", provisioningId: PROVISIONING } };
+  return {
+    roles,
+    origin: { kind: "provisioning", operation: "starter_chart", provisioningId: PROVISIONING },
+    standing: NO_TENANT_REGISTRY_STANDING,
+  };
 }
 
 async function harness(manifest: Manifest, settings?: TenantSettings) {

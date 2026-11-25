@@ -4,7 +4,13 @@ import type { PgConnection } from "@crossengin/kernel-pg";
 import { describe, expect, it } from "vitest";
 
 import { DesignerCannotApproveError } from "./design-review-routes.js";
-import { PostgresDesignReviewStore, withPlatformReview } from "./design-review-store.js";
+import { PostgresDesignReviewStore, withPlatformReview, type DesignReviewRecord } from "./design-review-store.js";
+import type { DesignDecisionOutcome } from "./design-review-routes.js";
+
+/** The decided record, or null for any other outcome — the shape these tests asserted before ADR-0470. */
+function reviewOf(outcome: DesignDecisionOutcome<DesignReviewRecord>): DesignReviewRecord | null {
+  return outcome.kind === "decided" ? outcome.review : null;
+}
 
 const TENANT_A = "00000000-0000-4000-8000-000000000001";
 const TENANT_B = "00000000-0000-4000-8000-000000000002";
@@ -104,7 +110,22 @@ function fakeReviewDb(): FakeDb {
       return { rows: [row], rowCount: 1 };
     }
     if (sql.startsWith("UPDATE") && sql.includes("review_status = $3")) {
-      const row = writable().find((r) => r["id"] === p[0] && r["tenant_id"] === p[1]);
+      // The decision's predicate, modelled rather than ignored (ADR-0470): the row must still be in
+      // an allowed source status, and a rejection must not reach an active manifest. A fake that
+      // matched on id alone would pass every race test whether or not the predicate was there.
+      // Applied only when the statement says so, so a statement that dropped the predicate is
+      // modelled as unguarded and the race tests below fail rather than passing on the parameter.
+      const allowed =
+        sql.includes("review_status = ANY($6::text[])") && Array.isArray(p[5])
+          ? (p[5] as readonly unknown[])
+          : null;
+      const row = writable().find(
+        (r) =>
+          r["id"] === p[0] &&
+          r["tenant_id"] === p[1] &&
+          (allowed === null || allowed.includes(r["review_status"])) &&
+          (!sql.includes("status <> 'active'") || r["status"] !== "active"),
+      );
       if (row === undefined) return { rows: [], rowCount: 0 };
       row["review_status"] = p[2];
       row["reviewed_by"] = p[3];
@@ -121,6 +142,13 @@ function fakeReviewDb(): FakeDb {
       }
       const grouped = [...tally.entries()].map(([review_status, n]) => ({ review_status, n }));
       return { rows: grouped, rowCount: grouped.length };
+    }
+    if (sql.startsWith("SELECT review_status, status FROM")) {
+      const row = writable().find((r) => r["id"] === p[0] && r["tenant_id"] === p[1]);
+      return {
+        rows: row === undefined ? [] : [{ review_status: row["review_status"], status: row["status"] }],
+        rowCount: row === undefined ? 0 : 1,
+      };
     }
     if (sql.startsWith("SELECT review_status FROM")) {
       const row = visible().find((r) => r["tenant_id"] === p[0] && r["id"] === p[1]);
@@ -379,11 +407,11 @@ describe("design-review-store — approve / reject", () => {
   it("approve sets every review field and returns the updated record", async () => {
     const { conn, captured, seed } = fakeReviewDb();
     const row = seed({ tenant_id: TENANT_B, review_status: "pending" });
-    const record = await new PostgresDesignReviewStore(conn).approve(String(row["id"]), {
+    const record = reviewOf(await new PostgresDesignReviewStore(conn).approve(String(row["id"]), {
       reviewedBy: "ops@crossengin.dev",
       notes: "looks good",
       selfApproval: "refused",
-    });
+    }));
     expect(record?.reviewStatus).toBe("approved");
     expect(record?.reviewedBy).toBe("ops@crossengin.dev");
     expect(record?.reviewNotes).toBe("looks good");
@@ -432,16 +460,22 @@ describe("design-review-store — approve / reject", () => {
       "approved",
       "ops@crossengin.dev",
       "looks good",
+      ["pending"],
     ]);
+    // The source-status predicate is in the statement itself (ADR-0470), so a concurrent decision
+    // committed between the read above and this write makes it match nothing rather than overwrite.
+    expect(update?.sql).toContain("AND review_status = ANY($6::text[])");
+    // An approval never reaches an active manifest anyway, so it carries no status clause.
+    expect(update?.sql).not.toContain("status <> 'active'");
   });
 
   it("reject sets review_status rejected with the reviewer and notes", async () => {
     const { conn, captured, seed } = fakeReviewDb();
     const row = seed({ tenant_id: TENANT_A, review_status: "pending" });
-    const record = await new PostgresDesignReviewStore(conn).reject(String(row["id"]), {
+    const record = reviewOf(await new PostgresDesignReviewStore(conn).reject(String(row["id"]), {
       reviewedBy: "ops@crossengin.dev",
       notes: "PHI field is unclassified",
-    });
+    }));
     expect(record?.reviewStatus).toBe("rejected");
     expect(record?.reviewNotes).toBe("PHI field is unclassified");
     const update = captured.find((c) => c.sql.startsWith("UPDATE"));
@@ -456,8 +490,8 @@ describe("design-review-store — approve / reject", () => {
     const store = new PostgresDesignReviewStore(conn);
     const first = seed({ review_status: "pending" });
     const second = seed({ review_status: "pending" });
-    const omitted = await store.approve(String(first["id"]), { reviewedBy: "ops", selfApproval: "refused" });
-    const explicit = await store.reject(String(second["id"]), { reviewedBy: "ops", notes: null });
+    const omitted = reviewOf(await store.approve(String(first["id"]), { reviewedBy: "ops", selfApproval: "refused" }));
+    const explicit = reviewOf(await store.reject(String(second["id"]), { reviewedBy: "ops", notes: null }));
     expect(omitted?.reviewNotes).toBeNull();
     expect(explicit?.reviewNotes).toBeNull();
     const updates = captured.filter((c) => c.sql.startsWith("UPDATE"));
@@ -467,12 +501,14 @@ describe("design-review-store — approve / reject", () => {
     expect(updates).toHaveLength(2);
   });
 
-  it("returns null for a missing id from both decisions", async () => {
+  it("answers not_found for a missing id from both decisions", async () => {
     const { conn, seed } = fakeReviewDb();
     seed();
     const store = new PostgresDesignReviewStore(conn);
-    expect(await store.approve(randomUUID(), { reviewedBy: "ops", selfApproval: "refused" })).toBeNull();
-    expect(await store.reject(randomUUID(), { reviewedBy: "ops" })).toBeNull();
+    expect(await store.approve(randomUUID(), { reviewedBy: "ops", selfApproval: "refused" })).toEqual({
+      kind: "not_found",
+    });
+    expect(await store.reject(randomUUID(), { reviewedBy: "ops" })).toEqual({ kind: "not_found" });
   });
 
   it("models a SELECT-scoped review arm: the grant alone reaches no write", async () => {
@@ -525,16 +561,16 @@ describe("design-review-store — approve / reject", () => {
     const store = new PostgresDesignReviewStore(conn);
     const own = seed({ review_status: "pending", designed_by: "designer-1" });
     const other = seed({ review_status: "pending", designed_by: "designer-1" });
-    const self = await store.approve(String(own["id"]), {
+    const self = reviewOf(await store.approve(String(own["id"]), {
       reviewedBy: "designer-1",
       selfApproval: "permitted",
-    });
+    }));
     expect(self?.reviewStatus).toBe("approved");
     expect(self?.designedBy).toBe("designer-1");
-    const distinct = await store.approve(String(other["id"]), {
+    const distinct = reviewOf(await store.approve(String(other["id"]), {
       reviewedBy: "reviewer-2",
       selfApproval: "refused",
-    });
+    }));
     expect(distinct?.reviewStatus).toBe("approved");
   });
 
@@ -542,27 +578,70 @@ describe("design-review-store — approve / reject", () => {
     const { conn, seed } = fakeReviewDb();
     const store = new PostgresDesignReviewStore(conn);
     const own = seed({ review_status: "pending", designed_by: "designer-1" });
-    expect((await store.reject(String(own["id"]), { reviewedBy: "designer-1" }))?.reviewStatus).toBe(
+    expect((reviewOf(await store.reject(String(own["id"]), { reviewedBy: "designer-1" })))?.reviewStatus).toBe(
       "rejected",
     );
     const legacy = seed({ review_status: "pending" });
-    const approved = await store.approve(String(legacy["id"]), {
+    const approved = reviewOf(await store.approve(String(legacy["id"]), {
       reviewedBy: "designer-1",
       selfApproval: "refused",
-    });
+    }));
     expect(approved?.reviewStatus).toBe("approved");
     expect(approved?.designedBy).toBeNull();
   });
 
-  it("does not gate on the current review status — the route layer owns the transition", async () => {
+  // This test pinned the defect as the specification: its title was "does not gate on the current
+  // review status — the route layer owns the transition", and the route's check ran on a read taken
+  // outside the store's transaction, so two concurrent decisions both passed it and the second
+  // overwrote the first (ADR-0372's class; ADR-0470). The store gates now, in the UPDATE.
+  it("gates on the current review status in the statement, answering status_changed", async () => {
     const { conn, seed } = fakeReviewDb();
     const row = seed({ review_status: "not_required" });
     const store = new PostgresDesignReviewStore(conn);
-    const approved = await store.approve(String(row["id"]), { reviewedBy: "ops", selfApproval: "refused" });
-    expect(approved?.reviewStatus).toBe("approved");
-    const flipped = await store.reject(String(row["id"]), { reviewedBy: "ops2" });
-    expect(flipped?.reviewStatus).toBe("rejected");
-    expect(flipped?.reviewedBy).toBe("ops2");
+    expect(await store.approve(String(row["id"]), { reviewedBy: "ops", selfApproval: "refused" })).toEqual({
+      kind: "status_changed",
+      current: "not_required",
+    });
+    expect(await store.reject(String(row["id"]), { reviewedBy: "ops2" })).toEqual({
+      kind: "status_changed",
+      current: "not_required",
+    });
+    expect(row["review_status"]).toBe("not_required");
+    expect(row["reviewed_by"]).toBeNull();
+  });
+
+  it("lets exactly one of two decisions on one pending proposal land", async () => {
+    const { conn, seed } = fakeReviewDb();
+    const row = seed({ review_status: "pending" });
+    const store = new PostgresDesignReviewStore(conn);
+    const first = await store.approve(String(row["id"]), { reviewedBy: "rev-1", selfApproval: "refused" });
+    const second = await store.reject(String(row["id"]), { reviewedBy: "rev-2" });
+    expect(first.kind).toBe("decided");
+    // A rejection may revoke an approval — that is the one second decision the map allows.
+    expect(second.kind).toBe("decided");
+    const third = await store.approve(String(row["id"]), { reviewedBy: "rev-3", selfApproval: "refused" });
+    expect(third).toEqual({ kind: "status_changed", current: "rejected" });
+    expect(row["reviewed_by"]).toBe("rev-2");
+  });
+
+  it("refuses to reject an approved manifest that is active, and writes nothing", async () => {
+    const { conn, captured, seed } = fakeReviewDb();
+    const row = seed({ review_status: "approved", status: "active", reviewed_by: "rev-1" });
+    const store = new PostgresDesignReviewStore(conn);
+    expect(await store.reject(String(row["id"]), { reviewedBy: "rev-2" })).toEqual({ kind: "manifest_active" });
+    const update = captured.find((c) => c.sql.startsWith("UPDATE"));
+    expect(update?.sql).toContain("AND status <> 'active'");
+    expect(row["review_status"]).toBe("approved");
+    expect(row["status"]).toBe("active");
+    expect(row["reviewed_by"]).toBe("rev-1");
+  });
+
+  it("still rejects an approved manifest that is not active", async () => {
+    const { conn, seed } = fakeReviewDb();
+    const row = seed({ review_status: "approved", status: "draft" });
+    const store = new PostgresDesignReviewStore(conn);
+    const outcome = await store.reject(String(row["id"]), { reviewedBy: "rev-2" });
+    expect(reviewOf(outcome)?.reviewStatus).toBe("rejected");
   });
 });
 
@@ -641,17 +720,23 @@ describe("design-review-store — row mapping", () => {
 
   it("normalizes reviewed_at / created_at Dates to ISO strings and keeps nulls null", async () => {
     const { conn, seed } = fakeReviewDb();
-    const row = seed({ tenant_id: TENANT_A, provider_label: "anthropic/claude-sonnet-4-6" });
+    // Pending, because an approval is decidable only from pending now (ADR-0470); this test is
+    // about row mapping, and a `not_required` seed would have it assert on a refused decision.
+    const row = seed({
+      tenant_id: TENANT_A,
+      provider_label: "anthropic/claude-sonnet-4-6",
+      review_status: "pending",
+    });
     const before = await new PostgresDesignReviewStore(conn).getById(String(row["id"]));
     expect(before?.reviewedAt).toBeNull();
     expect(before?.reviewedBy).toBeNull();
     expect(before?.reviewNotes).toBeNull();
     expect(before?.providerLabel).toBe("anthropic/claude-sonnet-4-6");
     expect(before?.createdAt).toBe((row["created_at"] as Date).toISOString());
-    const after = await new PostgresDesignReviewStore(conn).approve(String(row["id"]), {
+    const after = reviewOf(await new PostgresDesignReviewStore(conn).approve(String(row["id"]), {
       reviewedBy: "ops",
       selfApproval: "refused",
-    });
+    }));
     expect(after?.reviewedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 });

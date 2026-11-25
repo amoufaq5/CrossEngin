@@ -1425,6 +1425,23 @@ describe("WorkflowReplayer.probeVisibility", () => {
     }
   });
 
+  it("speaks about the replay and its own remedy, never the job worker's (ADR-0469)", async () => {
+    const state = emptyState();
+    state.isOwner = false;
+    const report = await buildReplayer(state).probeVisibility();
+    expect(report.detail).toContain("a cross-tenant replay of the workflow projections");
+    expect(report.detail).toContain("no per-tenant path");
+    // The borrowed sentence named a subsystem these tables are not served by.
+    expect(report.detail).not.toContain("job worker");
+    expect(report.detail).not.toContain("claimDueJobsPerTenant");
+    expect(report.detail).not.toContain("serves the queue");
+  });
+
+  it("names the replay in the exempt sentence too", async () => {
+    const report = await buildReplayer(emptyState()).probeVisibility();
+    expect(report.tables[0]?.report.detail).toContain("a cross-tenant replay of the workflow projections sees every tenant's rows");
+  });
+
   it("reports a table with RLS switched off as unguarded rather than as visible", async () => {
     const state = emptyState();
     state.isOwner = false;

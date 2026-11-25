@@ -122,7 +122,12 @@ export function convertBalanced(lines: readonly UnitPair[], rate: ExactDecimal):
       floor -= 1n;
       remainder += divisor;
     }
-    const nearest = remainder * 2n >= divisor ? floor + 1n : floor;
+    // Half away from zero, `convertUnits`' rule: a positive half rounds up and a negative half
+    // rounds down. `remainder * 2n >= divisor` alone rounded every half up, so a negative half went
+    // toward +∞ — −0.5 to 0 where `convertUnits` answers −1 — and the two helpers disagreed by a
+    // cent on exactly the values a reversal or a refund feeds them.
+    const twice = remainder * 2n;
+    const nearest = twice > divisor || (twice === divisor && product >= 0n) ? floor + 1n : floor;
     return { value: nearest, floor, remainder, moved: false };
   };
   const debits = lines.map((l) => leg(l.d));

@@ -403,70 +403,153 @@ describe("ensureDocumentUniqueIndexes", () => {
   const plan = planDocumentIntegrity(MANIFEST, TABLE);
   const [account, contact] = plan.uniqueIndexes as [(typeof plan.uniqueIndexes)[0], (typeof plan.uniqueIndexes)[0]];
 
+  /**
+   * A fake that models the catalog: `live` is what `pg_index` holds, a successful build adds its
+   * index to it (valid unless `buildsInvalid`), and every build must run inside a transaction that
+   * set `lock_timeout` first. Its fallback throws, so a statement this module stops issuing — or
+   * starts issuing — fails the test rather than passing on an empty answer.
+   */
   function ddlConn(opts: {
-    fail?: (sql: string) => Error | null;
+    fail?: (sql: string, attempt: number) => Error | null;
     live: readonly { name: string; valid: boolean }[];
-  }): { conn: PgConnection; sql: string[] } {
+    buildsInvalid?: boolean;
+  }): { conn: PgConnection; sql: string[]; catalogReads: () => number } {
     const sql: string[] = [];
+    const live = new Map(opts.live.map((l) => [l.name, l.valid] as const));
+    const attempts = new Map<string, number>();
+    let reads = 0;
+    let lockTimeoutSet = false;
+    const run = async (text: string, params: readonly unknown[], inTx: boolean) => {
+      assertBindArity(text, params);
+      sql.push(text);
+      if (text.startsWith("SET LOCAL lock_timeout")) {
+        if (!inTx) throw new Error("SET LOCAL outside a transaction is a no-op");
+        lockTimeoutSet = true;
+        return { rows: [], rowCount: 0 };
+      }
+      if (text.startsWith("CREATE UNIQUE INDEX")) {
+        if (!inTx || !lockTimeoutSet) throw new Error("a build must run in a transaction with lock_timeout set");
+        const n = (attempts.get(text) ?? 0) + 1;
+        attempts.set(text, n);
+        const e = opts.fail?.(text, n) ?? null;
+        if (e !== null) throw e;
+        const name = /"([^"]+)"/.exec(text)?.[1] ?? "";
+        live.set(name, opts.buildsInvalid !== true);
+        return { rows: [], rowCount: 0 };
+      }
+      if (text.includes("FROM pg_index")) {
+        expect(params).toEqual(["meta", DOCUMENT_RUNTIME_INDEX_PREFIX]);
+        reads++;
+        const rows = [...live].map(([name, valid]) => ({ name, valid }));
+        return { rows, rowCount: rows.length };
+      }
+      throw new Error(`unexpected: ${text}`);
+    };
     const conn = {
-      query: async (text: string, params: readonly unknown[] = []) => {
-        assertBindArity(text, params);
-        sql.push(text);
-        if (text.startsWith("CREATE UNIQUE INDEX")) {
-          const e = opts.fail?.(text) ?? null;
-          if (e !== null) throw e;
-          return { rows: [], rowCount: 0 };
+      query: (text: string, params: readonly unknown[] = []) => run(text, params, false),
+      transaction: async <T,>(fn: (tx: PgConnection) => Promise<T>): Promise<T> => {
+        lockTimeoutSet = false;
+        const tx = { query: (text: string, params: readonly unknown[] = []) => run(text, params, true) };
+        try {
+          return await fn(tx as unknown as PgConnection);
+        } finally {
+          lockTimeoutSet = false;
         }
-        if (text.includes("FROM pg_index")) {
-          expect(params).toEqual(["meta", DOCUMENT_RUNTIME_INDEX_PREFIX]);
-          return { rows: opts.live, rowCount: opts.live.length };
-        }
-        throw new Error(`unexpected: ${text}`);
-      },
-      transaction: async () => {
-        throw new Error("the index DDL must run outside a transaction");
       },
     } as unknown as PgConnection;
-    return { conn, sql };
+    return { conn, sql, catalogReads: () => reads };
   }
-  const pgError = (code: string): Error => Object.assign(new Error(`pg ${code}`), { code });
+  const pgError = (code: string, message = `pg ${code}`): Error => Object.assign(new Error(message), { code });
+  const creates = (sql: readonly string[]): string[] => sql.filter((s) => s.startsWith("CREATE UNIQUE INDEX"));
+  const noSleep = { sleep: async (): Promise<void> => undefined };
 
-  it("reports every index enforced when each was built and reads back valid", async () => {
-    const { conn } = ddlConn({ live: [account, contact].map((i) => ({ name: i.name, valid: true })) });
+  it("issues no CREATE at all for an index already present and valid, and reads the catalog once", async () => {
+    const { conn, sql, catalogReads } = ddlConn({ live: [account, contact].map((i) => ({ name: i.name, valid: true })) });
     const r = await ensureDocumentUniqueIndexes(conn, plan, "meta");
     expect(r.results.map((x) => x.outcome)).toEqual(["enforced", "enforced"]);
+    expect(creates(sql)).toEqual([]);
+    expect(sql.some((s) => s.startsWith("SET LOCAL"))).toBe(false);
+    expect(catalogReads()).toBe(1);
     expect(r.stale).toEqual([]);
   });
 
-  it("names each refusal, attempts every index, and never throws", async () => {
+  it("builds only the missing index, under lock_timeout, and verifies it afterwards", async () => {
+    const { conn, sql, catalogReads } = ddlConn({ live: [{ name: account.name, valid: true }] });
+    const r = await ensureDocumentUniqueIndexes(conn, plan, "meta", new Set(), { lockTimeoutMs: 1234 });
+    expect(r.results.map((x) => x.outcome)).toEqual(["enforced", "enforced"]);
+    expect(creates(sql)).toEqual([contact.sql]);
+    expect(sql).toContain("SET LOCAL lock_timeout = '1234ms'");
+    expect(catalogReads()).toBe(2);
+  });
+
+  it("names each refusal, attempts every missing index, and never throws", async () => {
     const { conn, sql } = ddlConn({
       fail: (s) => (s.includes(account.name) ? pgError("23505") : pgError("42501")),
       live: [],
     });
-    const r = await ensureDocumentUniqueIndexes(conn, plan, "meta");
+    const r = await ensureDocumentUniqueIndexes(conn, plan, "meta", new Set(), noSleep);
     expect(r.results.map((x) => x.outcome)).toEqual(["existing_duplicates", "not_owner"]);
-    expect(sql.filter((s) => s.startsWith("CREATE UNIQUE INDEX"))).toHaveLength(2);
+    expect(creates(sql)).toHaveLength(2);
   });
 
-  it("counts an owner-built index as enforced when this role is refused only for not owning the table", async () => {
-    // The shipped case since ADR-0424: the API is a confined role, the owner built the index first,
-    // and Postgres refuses `IF NOT EXISTS` with 42501 anyway (measured: the ownership check precedes
-    // the existence check). Present and valid is enforcement; absent, or invalid, is still a gap.
-    const { conn } = ddlConn({
+  it("counts an owner-built index as enforced without asking this role to build it", async () => {
+    // The shipped case since ADR-0424: the API is a confined role, the owner built the index first.
+    // It used to issue the CREATE anyway and read the 42501 as enforcement after a second catalog
+    // read; it now issues nothing for the present index, so the only refusal left is the absent one.
+    const { conn, sql } = ddlConn({
       fail: () => pgError("42501"),
-      live: [
-        { name: account.name, valid: true },
-        { name: contact.name, valid: false },
-      ],
+      live: [{ name: account.name, valid: true }],
     });
-    const r = await ensureDocumentUniqueIndexes(conn, plan, "meta");
+    const r = await ensureDocumentUniqueIndexes(conn, plan, "meta", new Set(), noSleep);
     expect(r.results.map((x) => x.outcome)).toEqual(["enforced", "not_owner"]);
+    expect(creates(sql)).toEqual([contact.sql]);
   });
 
-  it("does not count a statement that succeeded over an index Postgres reports invalid, or missing", async () => {
-    const { conn } = ddlConn({ live: [{ name: account.name, valid: false }] });
+  it("reports a present invalid index without re-issuing a statement IF NOT EXISTS would accept", async () => {
+    const { conn, sql } = ddlConn({ live: [{ name: account.name, valid: false }, { name: contact.name, valid: true }] });
     const r = await ensureDocumentUniqueIndexes(conn, plan, "meta");
-    expect(r.results.map((x) => x.outcome)).toEqual(["invalid_index", "failed"]);
+    expect(r.results.map((x) => x.outcome)).toEqual(["invalid_index", "enforced"]);
+    expect(creates(sql)).toEqual([]);
+  });
+
+  it("does not count a build Postgres reports invalid afterwards", async () => {
+    const { conn } = ddlConn({ live: [], buildsInvalid: true });
+    const r = await ensureDocumentUniqueIndexes(conn, plan, "meta");
+    expect(r.results.map((x) => x.outcome)).toEqual(["invalid_index", "invalid_index"]);
+  });
+
+  it("retries a lock timeout with a doubling pause, and succeeds when the lock frees", async () => {
+    const pauses: number[] = [];
+    const { conn, sql } = ddlConn({
+      live: [{ name: contact.name, valid: true }],
+      fail: (_s, n) => (n <= 2 ? pgError("55P03", "canceling statement due to lock timeout") : null),
+    });
+    const r = await ensureDocumentUniqueIndexes(conn, plan, "meta", new Set(), {
+      lockRetries: 2,
+      sleep: async (ms) => {
+        pauses.push(ms);
+      },
+    });
+    expect(r.results.map((x) => x.outcome)).toEqual(["enforced", "enforced"]);
+    expect(creates(sql)).toHaveLength(3);
+    expect(pauses).toEqual([1000, 2000]);
+  });
+
+  it("reports a build that never gets its lock as failed, naming the lock timeout, after the bounded retries", async () => {
+    const { conn, sql } = ddlConn({
+      live: [{ name: contact.name, valid: true }],
+      fail: () => pgError("55P03", "canceling statement due to lock timeout"),
+    });
+    const r = await ensureDocumentUniqueIndexes(conn, plan, "meta", new Set(), { lockRetries: 2, ...noSleep });
+    expect(r.results[0]?.outcome).toBe("failed");
+    expect(r.results[0]?.detail).toMatch(/^lock timeout: waited \d+ ms, 3 time\(s\)/);
+    expect(creates(sql)).toHaveLength(3);
+  });
+
+  it("does not retry a refusal that is not a lock timeout", async () => {
+    const { conn, sql } = ddlConn({ live: [{ name: contact.name, valid: true }], fail: () => pgError("42501") });
+    await ensureDocumentUniqueIndexes(conn, plan, "meta", new Set(), { lockRetries: 5, ...noSleep });
+    expect(creates(sql)).toHaveLength(1);
   });
 
   it("reports a runtime index the manifest no longer produces, with its DROP, and drops nothing", async () => {

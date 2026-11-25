@@ -1,3 +1,5 @@
+import { ManifestSchema, resolvedClassifiedFields, resolvedFields, type Manifest } from "@crossengin/kernel";
+
 export const REVIEW_STATUSES = ["not_required", "pending", "approved", "rejected"] as const;
 
 export type ReviewStatus = (typeof REVIEW_STATUSES)[number];
@@ -27,7 +29,8 @@ export type RiskCode =
   | "large_surface"
   | "no_permissions"
   | "unreferenced_role"
-  | "empty_manifest";
+  | "empty_manifest"
+  | "classification_unresolved";
 
 export interface RiskFinding {
   readonly code: RiskCode;
@@ -125,6 +128,39 @@ function normalizeFields(value: unknown): readonly NormalizedField[] {
   });
 }
 
+/**
+ * The entities with their classified fields **as the served table has them** — a trait's included —
+ * when the proposal parses as a manifest (ADR-0470).
+ *
+ * The raw projection below read `entity["fields"]` alone, so a `phi` field contributed by a custom
+ * trait scored `level: "low", sensitiveFields: 0` on the page a reviewer approves from — the narrow
+ * side of ADR-0361's split, on the one gate where it is a decision rather than a display. The kernel's
+ * `resolvedClassifiedFields` is the one answer the redaction, the write mask and every boot survey
+ * use, so the reviewer is now shown the classification the gateway will enforce.
+ *
+ * Over each manifest's **own** traits, which is the only list it has: a design extending the
+ * deployment's pack inherits that pack's entities rather than its traits' fields on its own
+ * entities, and the seven packs declare no custom trait, so the parent contributes nothing here.
+ */
+function resolvedEntities(manifest: Manifest): readonly NormalizedEntity[] {
+  const traits = manifest.traits ?? [];
+  return (manifest.entities ?? []).map((entity) => {
+    const classified = new Map(
+      resolvedClassifiedFields(entity, traits).map((f) => [f.field, f.classification]),
+    );
+    return {
+      name: entity.name,
+      fields: resolvedFields(entity, traits).map((field) => ({
+        name: field.name,
+        classification: classified.get(field.name) ?? null,
+      })),
+      // `auditable` is a trait name, so it is read off the parsed entity's trait list: the same fact
+      // `validateClassifications` reads when it refuses phi/regulated without it.
+      auditable: (entity.traits ?? []).includes(AUDITABLE_TRAIT),
+    };
+  });
+}
+
 function normalizeEntities(value: unknown): readonly NormalizedEntity[] {
   return keyedEntries(value, "entity").map(([name, raw]) => {
     const entity = recordOf(raw);
@@ -165,7 +201,12 @@ function list(names: readonly string[]): string {
 
 export function assessManifestRisk(manifest: Record<string, unknown>): ManifestRiskReport {
   const doc = recordOf(manifest) ?? {};
-  const entities = normalizeEntities(doc["entities"]);
+  // A proposal that parses is assessed over its resolved fields. One that does not keeps the raw
+  // projection — a reviewer still needs to see something — and carries a finding saying the count is
+  // over own fields only, at `high`, so an unparseable proposal can never read `low` on the strength
+  // of a count that could not see a trait (ADR-0337's falsely-true direction).
+  const parsed = ManifestSchema.safeParse(manifest);
+  const entities = parsed.success ? resolvedEntities(parsed.data) : normalizeEntities(doc["entities"]);
   const permissionEntries = new Map<string, Record<string, unknown> | null>(
     keyedEntries(doc["permissions"], "permission").map(([name, raw]) => [name, recordOf(raw)]),
   );
@@ -244,6 +285,14 @@ export function assessManifestRisk(manifest: Record<string, unknown>): ManifestR
     findings.push({ code, level, message, entities: affected });
   };
 
+  if (!parsed.success) {
+    add(
+      "classification_unresolved",
+      "high",
+      "This proposal does not parse as a manifest, so fields its traits contribute could not be resolved: the sensitive-field count and the data findings below cover its own fields only, and activating it will be refused.",
+      [],
+    );
+  }
   if (entities.length === 0) {
     add(
       "empty_manifest",

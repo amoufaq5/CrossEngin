@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { renewWhile, type ClaimRenewer } from "./renew.js";
+import { LeaseLostError, renewWhile, type ClaimRenewer } from "./renew.js";
 
 /** A controllable sleep: each call parks until the test releases it, so heartbeat ticks are exact. */
 function controllableSleep() {
@@ -97,5 +97,85 @@ describe("renewWhile", () => {
     releaseNext(); // unpark → heartbeat sees done → breaks WITHOUT renewing
     await expect(wrapped).resolves.toBe("fast");
     expect(renews).toEqual([]);
+  });
+
+  it("aborts a signal-taking task when a renew answers false, so a job handler stops writing", async () => {
+    const renewer: ClaimRenewer = { renew: async () => false };
+    const { sleep, releaseNext } = controllableSleep();
+    let seen: AbortSignal | null = null;
+    let finishTask!: () => void;
+    const wrapped = renewWhile(
+      (signal) => {
+        seen = signal;
+        return new Promise<void>((r) => (finishTask = r));
+      },
+      { renewer, timerId: "run_1", workerId: "w", tenantId: "t-1", intervalMs: 100, sleep },
+    );
+    expect((seen as AbortSignal | null)?.aborted).toBe(false);
+    releaseNext(); // heartbeat → renew false → abort + onLeaseLost
+    await flush();
+    const signal = seen as unknown as AbortSignal;
+    expect(signal.aborted).toBe(true);
+    expect(signal.reason).toBeInstanceOf(LeaseLostError);
+    expect((signal.reason as LeaseLostError).claimId).toBe("run_1");
+    finishTask();
+    await expect(wrapped).resolves.toBeUndefined();
+  });
+
+  it("does not abort when a renew throws, because the lease may still be held", async () => {
+    let lost = false;
+    const renewer: ClaimRenewer = {
+      renew: async () => {
+        throw new Error("connection reset");
+      },
+    };
+    const { sleep, releaseNext } = controllableSleep();
+    let seen: AbortSignal | null = null;
+    let finishTask!: () => void;
+    const wrapped = renewWhile(
+      (signal) => {
+        seen = signal;
+        return new Promise<void>((r) => (finishTask = r));
+      },
+      {
+        renewer,
+        timerId: "run_1",
+        workerId: "w",
+        tenantId: "t-1",
+        intervalMs: 100,
+        sleep,
+        onLeaseLost: () => {
+          lost = true;
+        },
+      },
+    );
+    releaseNext();
+    await flush();
+    expect(lost).toBe(true);
+    expect((seen as unknown as AbortSignal).aborted).toBe(false);
+    finishTask();
+    await wrapped;
+  });
+
+  it("keeps the signal unaborted while every renew succeeds", async () => {
+    const renewer: ClaimRenewer = { renew: async () => true };
+    const { sleep, releaseNext } = controllableSleep();
+    let seen: AbortSignal | null = null;
+    let finishTask!: () => void;
+    const wrapped = renewWhile(
+      (signal) => {
+        seen = signal;
+        return new Promise<void>((r) => (finishTask = r));
+      },
+      { renewer, timerId: "run_1", workerId: "w", tenantId: "t-1", intervalMs: 100, sleep },
+    );
+    releaseNext();
+    await flush();
+    releaseNext();
+    await flush();
+    expect((seen as unknown as AbortSignal).aborted).toBe(false);
+    finishTask();
+    releaseNext();
+    await wrapped;
   });
 });

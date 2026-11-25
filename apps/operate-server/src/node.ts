@@ -207,6 +207,11 @@ import {
   type ObservedUniqueRefusal,
 } from "./unique-enforcement.js";
 import {
+  formatUniqueIndexRefusal,
+  observedUniqueRefusal,
+  type UniqueIndexRefusalLine,
+} from "./unique-index-refusal.js";
+import {
   TENANT_WRITE_STATUS_DETAIL,
   probeTenantWriteStatus,
   type RekeyOptions,
@@ -232,7 +237,8 @@ import {
   type SensitiveFieldDeclaration,
 } from "./sensitive-field-policy.js";
 import { formatAdminGrant } from "./admin-grant.js";
-import { formatTenantManifestSurvey } from "./tenant-manifest-survey.js";
+import { formatTenantManifestSurvey, servedFromOf, surveyTenantManifest } from "./tenant-manifest-survey.js";
+import { readFlagJsonFile } from "./flag-json-file.js";
 import { formatServingRoleSurvey, surveyServingRole } from "./serving-role-survey.js";
 import { userIdentityFromStore } from "./user-identity.js";
 import {
@@ -306,6 +312,7 @@ import {
   type TenantBackfillReport,
 } from "./bill-withholding-backfill.js";
 import {
+  NO_TENANT_REGISTRY_STANDING,
   decimalFieldIndexFromManifest,
   systemRequestId,
   temporalFieldIndexFromManifest,
@@ -375,7 +382,7 @@ import {
   defaultLoginAdmissionPolicy,
 } from "./login-admission.js";
 import { formatCredentialAuth, resolveCredentialAuth } from "./credential-auth-env.js";
-import { ensureSearchExtension, searchExtensionLine } from "@crossengin/operate-runtime-pg";
+import { ensureSearchExtension, searchExtensionLine, searchReachTable } from "@crossengin/operate-runtime-pg";
 import {
   ensureDeclaredIndexes,
   formatDeclaredIndexPlan,
@@ -427,6 +434,7 @@ import {
   buildPersistentPackSubmissionEngine,
 } from "@crossengin/marketplace-runtime-pg";
 import {
+  JOB_RUN_STATUSES_WRITTEN,
   PostgresJobRunEngine,
   PostgresWorkflowDefinitionStore,
   buildJobHandlerRegistry,
@@ -472,6 +480,7 @@ import type {
   ExtraGatewayRoute,
   SystemEntityAccess,
   TaxRemittanceWiring,
+  TenantStandingReader,
   WriteMaskMode,
 } from "@crossengin/operate-runtime";
 import {
@@ -531,6 +540,7 @@ import {
   TenantGatewayCache,
   bearerTenantVerifier,
   buildPerTenantDispatch,
+  markPreAuthCounted,
 } from "./tenant-gateway-cache.js";
 import { buildTenantManifestLineage } from "./tenant-manifest-lineage.js";
 import {
@@ -538,6 +548,7 @@ import {
   PostgresActivationWatermarkSource,
 } from "./manifest-activation-poller.js";
 import { DEFAULT_AI_DESIGN_MAX_USD_PER_MONTH, buildAiDesignBudget } from "./ai-design-budget.js";
+import { buildActivationCheck } from "./activation-check.js";
 import { AiModelPriceInvalid, decideAiDesignPricing, parseDeclaredModelPrice } from "./ai-design-pricing.js";
 import { buildAiProviderResidencyGate, formatAiProviderResidency } from "./ai-provider-residency.js";
 import { PostgresDesignJobStore } from "./design-jobs.js";
@@ -628,6 +639,7 @@ import {
   logServerError,
   type WebhookRoute,
 } from "./server.js";
+import { finalizeOuterResponse, pathOfUrl, payloadTooLargeResponse } from "./outer-response.js";
 import { JobScheduler, PostgresTenantSource, StaticTenantSource, type TenantSource } from "./scheduler.js";
 import { PostgresEntityEventSink } from "./entity-events.js";
 import { buildSloEnforcement, loadSloConfig } from "./slo-config.js";
@@ -743,6 +755,7 @@ import {
 } from "./stripe-usage-sync.js";
 import { PostgresJobInvoker, buildActionRoleMap, mergeActionRoleMaps } from "./job-invoke.js";
 import { buildErpJobProviders, erpJobCoverage, type JobAccessResolver } from "./erp-job-handlers.js";
+import { tenantStandingFromDirectory } from "./job-tenant-standing.js";
 import { invokeRolesByAction, isUnservableJobVerdict, type JobProducer } from "@crossengin/jobs";
 
 function firstHeader(v: string | readonly string[] | undefined): string | undefined {
@@ -840,6 +853,14 @@ export function createNodeRequestListener(
     bytes: resolveMaxRequestBodyBytes(o.bytes),
   }));
   return async (req, res) => {
+    // The last step before the socket, on every exit (ADR-0473): the six security headers merged,
+    // an id ensured, and a 5xx no inner layer reported logged under the id it was given.
+    const finalize = (response: RawHttpResponse): RawHttpResponse =>
+      finalizeOuterResponse(response, {
+        method: req.method ?? "GET",
+        path: pathOfUrl(req.url ?? "/"),
+        onUnreportedServerError: logServerError,
+      });
     try {
       const body = await readLimitedBody(req, routeBodyLimitFor(req.url ?? "/", overrides, limit));
       const raw: RawHttpRequest = {
@@ -848,25 +869,15 @@ export function createNodeRequestListener(
         headers: req.headers,
         remoteAddress: req.socket?.remoteAddress ?? null,
       };
-      const response = await server.dispatch(raw, body);
+      const response = finalize(await server.dispatch(raw, body));
       res.writeHead(response.status, response.headers);
       res.end(response.body ?? undefined);
     } catch (err) {
       if (err instanceof RequestBodyTooLargeError) {
-        const payload = new TextEncoder().encode(
-          JSON.stringify({
-            type: "https://crossengin.io/problems/payload-too-large",
-            title: "Payload too large",
-            status: 413,
-            detail: err.message,
-            extensions: {},
-          }),
-        );
-        res.writeHead(413, {
-          "content-type": "application/problem+json",
-          "content-length": payload.byteLength.toString(),
-        });
-        res.end(payload);
+        // One 413 for both transports, on the registry's base rather than `/problems/`.
+        const tooLarge = finalize(payloadTooLargeResponse(err.message, err.limitBytes));
+        res.writeHead(tooLarge.status, tooLarge.headers);
+        res.end(tooLarge.body ?? undefined);
         return;
       }
       // The exception's message went into this body until now — reachable before authentication,
@@ -883,7 +894,7 @@ export function createNodeRequestListener(
         reason: err instanceof Error ? err.message.slice(0, 480) : "non_error_thrown",
         cause: err,
       });
-      const fallback = internalErrorResponse(requestId);
+      const fallback = finalize(internalErrorResponse(requestId));
       try {
         res.writeHead(fallback.status, fallback.headers);
         res.end(fallback.body ?? undefined);
@@ -913,7 +924,7 @@ async function resolveJwtConfig(
     specs.push({ kid: ownSigningKey.kid, publicKeyBase64: ownSigningKey.publicKeyBase64 });
   }
   if (options.jwksFile !== null) {
-    const parsed = JSON.parse(await readFile(options.jwksFile, "utf8")) as unknown;
+    const parsed = await readFlagJsonFile("--jwks-file", options.jwksFile);
     if (!Array.isArray(parsed)) throw new Error(`--jwks-file must be a JSON array of {kid, publicKeyBase64}`);
     for (const k of parsed as JwksKeySpec[]) {
       if (typeof k.kid !== "string" || typeof k.publicKeyBase64 !== "string") {
@@ -1179,9 +1190,12 @@ async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<
   // reference picker's typeahead showed an empty dropdown. Provisioned here rather than in either
   // store because the dependency belongs to the query builder they share, which is the level at
   // which attaching it to one store's DDL is what made it absent from the other.
-  const searchExt = await ensureSearchExtension(conn);
+  const searchExt = await ensureSearchExtension(conn, searchReachTable(options.store, manifest, options.schema));
   console.info(searchExtensionLine(searchExt, options.store));
   if (options.store === "pg-columns") {
+    // What the applying arm's unique-index build refused, so the enforcement line below counts it
+    // as withheld rather than enforced (ADR-0440 Q9).
+    const bootUniqueRefusals: ObservedUniqueRefusal[] = [];
     const store = new ColumnMappedEntityStore(columnConn, manifest, {
       ...(options.schema !== null ? { schema: options.schema } : {}),
       ...(columnKey !== undefined ? { encryptionKey: columnKey } : {}),
@@ -1191,12 +1205,12 @@ async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<
       // it succeed — so `ensureSchema` reports rather than taking the deployment down over rows it
       // cannot deduplicate. What must not happen is that it reports to nobody: a declared
       // uniqueness that is silently not enforced is the defect this whole emitter exists to close.
-      onUniqueIndexRefused: (entity, sql, detail) =>
-        console.error(
-          `[unique] ${entity}: a declared unique field is NOT enforced — the index could not be` +
-            ` created and the duplicate rows are already there: ${detail}. Deduplicate, then run:` +
-            ` ${sql}`,
-        ),
+      // The sentence is keyed on the cause, because "deduplicate" is the remedy for one of three
+      // (ADR-0474): a lock or statement timeout abandons the build having read no row.
+      onUniqueIndexRefused: (entity, sql, detail, facts) => {
+        bootUniqueRefusals.push(observedUniqueRefusal({ entity, ...facts }));
+        console.error(formatUniqueIndexRefusal("boot", { entity, sql, detail, ...facts }));
+      },
       onLookupIndexRefused: (entity, sql, detail) =>
         console.warn(
           `[indexes] ${entity}: a declared lookup index was not built (${detail}); lists and parent` +
@@ -1230,11 +1244,14 @@ async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<
     sayUniqueEnforcement(
       manifest,
       "pg-columns",
-      ensured.uniqueIndexes.map((u) => ({
-        entity: u.entity,
-        field: u.field,
-        reason: u.state === "invalid" ? ("index_invalid" as const) : ("index_failed" as const),
-      })),
+      [
+        ...ensured.uniqueIndexes.map((u) => ({
+          entity: u.entity,
+          field: u.field,
+          reason: u.state === "invalid" ? ("index_invalid" as const) : ("index_failed" as const),
+        })),
+        ...bootUniqueRefusals,
+      ],
       store,
     );
     return { store, allocator, settingsStore, conn, columnKey, columnConn, ambient };
@@ -2110,7 +2127,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     // the catalog (by plan or Stripe price id), falling back to the subscription's own metadata.
     let planLimits: PlanLimitsLookup | undefined;
     if (options.planCatalogFile !== null) {
-      planLimits = buildPlanCatalog(JSON.parse(await readFile(options.planCatalogFile, "utf8"))).toLookup();
+      planLimits = buildPlanCatalog(await readFlagJsonFile("--plan-catalog", options.planCatalogFile)).toLookup();
     }
     mountedOutOfRegistry.add("stripe_webhook");
     webhookRoute = {
@@ -2126,9 +2143,13 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           store: subscriptionStore,
           ...(planLimits !== undefined ? { planLimits } : {}),
         });
-        return result.ok
-          ? jsonRaw(200, { received: true, applied: result.applied })
-          : jsonRaw(400, { error: "invalid_signature", reason: result.reason });
+        if (result.ok) return jsonRaw(200, { received: true, applied: result.applied });
+        // One opaque body for every refusal, the reason in the log (ADR-0473, closing ADR-0393 Q6):
+        // the route used to hand `reason` to the caller and log nothing, which is the bounce
+        // webhook's policy inverted — a caller probing the endpoint learned which half of its
+        // forgery failed, and an operator learned nothing.
+        console.error(`[stripe-webhook] refused: ${result.reason}`);
+        return jsonRaw(400, { error: "invalid_signature" });
       },
     };
   }
@@ -2182,9 +2203,31 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   }
   // On-demand job invocation: POST /v1/meta/jobs/invoke enqueues the caller tenant's userInvoked
   // jobs. Enabled by --enable-job-invoke over a pg store (needs the conn + the manifest's jobs).
+  // Read per invocation: the handler registry is built below, after the gateway this route joins, and
+  // a request arrives only once the listener opens (ADR-0469). An invocation none of whose jobs is
+  // served is refused 409 before anything is enqueued.
+  let servedJobIdsForInvoke: readonly string[] = [];
+  // The tenant standing every system write consults first (ADR-0469). Built below, once the
+  // tenant-status directory is known, so a job and a request read one directory and cannot disagree
+  // about a tenant; until then it answers `unknown`, which refuses — nothing writes before the
+  // listener opens and the workers start, so the arm is unreachable and fails closed if it is not.
+  let systemWriteStandingReader: TenantStandingReader | null = null;
+  const systemWriteStanding: TenantStandingReader = (tenantId) =>
+    systemWriteStandingReader === null
+      ? Promise.resolve({ kind: "unknown", reason: "the tenant standing reader is not built yet" })
+      : systemWriteStandingReader(tenantId);
   const jobInvoker =
     options.enableJobInvoke && conn !== undefined
-      ? new PostgresJobInvoker(conn, Object.values(manifest.jobs ?? {}), schemaOpt)
+      ? new PostgresJobInvoker(conn, Object.values(manifest.jobs ?? {}), {
+          ...schemaOpt,
+          servedJobIds: () => servedJobIdsForInvoke,
+          onError: (failure) =>
+            console.error(
+              `[jobs] invoke '${failure.action}' for tenant ${failure.tenantId} could not enqueue` +
+                ` run(s) ${failure.runIds.join(", ")}; answered 503 job_queue_unavailable. ${failure.remedy}`,
+              failure.error,
+            ),
+        })
       : undefined;
   // Per-action invoke roles: the manifest's declared invokeRoles are the baseline; the operator's
   // --job-invoke-action-role overrides win per action.
@@ -2359,6 +2402,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       actor: {
         roles: options.jobActorRoles,
         origin: { kind: "provisioning", operation: "starter_chart", provisioningId: by.provisioningId },
+        standing: systemWriteStanding,
       },
       settings: settingsStore,
       updatedBy: by.principalId,
@@ -2550,7 +2594,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   const capabilitiesSource: unknown =
     options.deletionCapabilityDeclarations ??
     (options.deletionCapabilities !== null
-      ? (JSON.parse(await readFile(options.deletionCapabilities, "utf8")) as unknown)
+      ? await readFlagJsonFile("--deletion-capabilities", options.deletionCapabilities)
       : null);
   if (capabilitiesSource !== null) {
     deletionCapabilities = DeletionCapabilitiesSchema.parse(capabilitiesSource);
@@ -3202,7 +3246,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   let deletionEscalation: DeletionEscalationWiring | null = null;
   if (options.deletionEscalationConfig !== null && conn !== undefined) {
     const parsed = DeletionEscalationConfigSchema.parse(
-      JSON.parse(await readFile(options.deletionEscalationConfig, "utf8")) as unknown,
+      await readFlagJsonFile("--deletion-escalation-config", options.deletionEscalationConfig),
     );
     const deletionDeclarer = new PostgresIncidentDeclarer({ conn });
     deletionEscalator = new DeletionEvidenceEscalator({
@@ -4340,6 +4384,11 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
               console.warn(
                 `[ai-design] tenant ${tenantId} denied: $${spentUsd.toFixed(2)} of $${limitUsd.toFixed(2)} monthly budget spent`,
               ),
+            onUnavailable: (tenantId, err) =>
+              console.error(
+                `[ai-design] tenant ${tenantId} refused: the monthly budget ledger could not be read ` +
+                  `(${err instanceof Error ? err.message : String(err)}); answered 503 with a retry`,
+              ),
             onReservationRefused: (tenantId, estimateUsd, limitUsd) =>
               console.warn(
                 `[ai-design] tenant ${tenantId} refused: a $${estimateUsd.toFixed(4)} design estimate does not fit ` +
@@ -4457,6 +4506,16 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
         allowedRoles: new Set(options.aiDesignRoles),
         onActivated: (tenantId) => gatewayCache?.invalidate(tenantId),
+        // The same lineage, ABAC layer and sealing mode the gateway cache builds with, so a
+        // proposal refused here is one that cache would have refused after activation (ADR-0470).
+        activationCheck: buildActivationCheck({
+          lineage: tenantLineage,
+          abac:
+            abac === undefined
+              ? null
+              : { answerableKeys: abac.answerableKeys, recordBearingKeys: abac.recordBearingKeys },
+          cursorSealing: cursorSealing.mode,
+        }),
         summarize: manifestSummary,
         projectSchema: projectManifestView,
         diffManifests,
@@ -5472,10 +5531,27 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     const resolved = await resolveTenantServing(tenantId);
     return resolved.kind === "access" ? { kind: "access", access: resolved.access } : resolved;
   };
+  // A job writes only into a tenant whose state admits a write (ADR-0469). Over the request-path
+  // gate's own directory when it is mounted, so the two cannot disagree; otherwise over one of its
+  // own on the same row; and with no Postgres store there is no tenant registry to read, which the
+  // [jobs] line says rather than leaving the absence implied.
+  const jobStandingSource: "gate_directory" | "own_directory" | "no_registry" =
+    tenantStatusGate !== undefined ? "gate_directory" : conn !== undefined ? "own_directory" : "no_registry";
+  systemWriteStandingReader =
+    tenantStatusGate !== undefined
+      ? tenantStandingFromDirectory(tenantStatusGate.directory)
+      : conn !== undefined
+        ? tenantStandingFromDirectory(
+            new CachedTenantStatusDirectory(tenantStatusDirectoryFromStore(new PostgresTenantStore(conn)), {
+              ...(options.tenantStatusTtlMs !== null ? { ttlMs: options.tenantStatusTtlMs } : {}),
+            }),
+          )
+        : NO_TENANT_REGISTRY_STANDING;
   const JOB_HANDLER_PROVIDERS: readonly JobHandlerProvider[] = buildErpJobProviders({
     coverage: erpJobs,
     resolveAccess: resolveJobAccess,
     settings: settingsStore,
+    tenantStanding: systemWriteStanding,
   });
   // The names this deployment's emitter can actually produce, for `event_unproducible` (ADR-0362).
   // Computed from the same `--event-prefix` `entityEventEffect` is given above, because a prefix on
@@ -5539,10 +5615,30 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       `${jobHandlers.survey.unservable.length.toString()} unservable; producers mounted: ` +
       `${mountedProducers.length > 0 ? mountedProducers.join(", ") : "none"}`,
   );
-  if (jobHandlers.servedJobIds.length > 0) {
+  servedJobIdsForInvoke = jobHandlers.servedJobIds;
+  // The job ids a worker in **this process** can execute: every declaration a handler is registered
+  // for, whether or not this process mounts its producer (ADR-0469's review). `servedJobIds` is the
+  // narrower answer to *will a run of it ever arrive from here* — it drops a declaration whose
+  // producer this process does not mount — and the worker used it, so on a split fleet (producers on
+  // a web replica, `--workflow-workers` on another) the worker replica served nothing, refused its
+  // job worker as `no_job_handlers` with five handlers registered, and every run the other replica
+  // enqueued sat `pending` for ever. Measured live before this: `0 served … producers mounted:
+  // none`, the job worker not started, the run never claimed.
+  const executableJobIds = manifestJobs
+    .filter((j) => jobHandlers.registry.resolve(j.id, j.trigger.kind) !== undefined)
+    .map((j) => j.id);
+  if (executableJobIds.length > 0) {
     console.info(
       `[jobs] handlers registered, writing through the gateway as ${erpJobs.actorRoles.join("+")}: ` +
-        `${jobHandlers.servedJobIds.join(", ")}`,
+        `${executableJobIds.join(", ")}`,
+    );
+    console.info(
+      jobStandingSource === "no_registry"
+        ? "[jobs] tenant standing: no tenant registry on this store, so a job write is not refused for" +
+            " a tenant's lifecycle state — there is no state to read"
+        : "[jobs] tenant standing: every job write is refused, non-retryably, for a tenant whose state" +
+            " blocks writes (suspended, archived, pending_deletion, deleted), read from " +
+            (jobStandingSource === "gate_directory" ? "the request-path gate's directory" : "meta.tenants.status"),
     );
   }
   for (const note of erpJobs.partial) console.warn(`[jobs] ${note.jobId} is served partly: ${note.reason}`);
@@ -5617,6 +5713,30 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       );
     }
   }
+  // Whether this database's `meta.job_runs.status` CHECK admits every status the job engine writes
+  // (ADR-0469). Value-granular through `admissionBlocksValues`, ADR-0363's shape: a CHECK that
+  // refuses `dead-lettered` or `cancelled` raises `23514` inside the finalize, after the handler's
+  // writes committed, so the run stays `pending`, is re-claimed and re-executed — the handler's
+  // business writes made twice. That is load-bearing exactly when a worker in this process will
+  // execute runs, so it refuses the boot then and warns otherwise (the producers still write
+  // `pending`, which every catalogued spelling admits).
+  const jobStatusBlocking =
+    admission === null
+      ? []
+      : admissionBlocksValues(
+          admission,
+          JOB_RUN_STATUSES_WRITTEN.map((value) => ({ table: `${metaSchema}.job_runs`, column: "status", value })),
+        );
+  const jobWorkerExecutes = options.workflowWorkers && conn !== undefined && executableJobIds.length > 0;
+  for (const finding of jobStatusBlocking) {
+    const line =
+      `[jobs] meta.job_runs.status refuses ${finding.refused.map((c) => `'${c.value}'`).join(", ")}, which the` +
+      " job engine writes: a finalize would raise 23514 after the handler's writes committed and the" +
+      ` run would be re-executed${jobWorkerExecutes ? "" : " (no worker here executes runs, so this is a warning)"}` +
+      `\n${admissionRemedy(metaSchema, finding)}`;
+    if (jobWorkerExecutes) throw new Error(line);
+    console.warn(line);
+  }
   // The three durable workers that drive the workflow queues. The engine has been mountable since
   // ADR-0331 and nothing polled it, so this is the half that makes a due timer actually fire. Each
   // worker refuses for a named reason rather than polling uselessly; the supervisor prints which.
@@ -5625,7 +5745,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     const workerConfig =
       options.workflowWorkerConfig !== null
         ? parseWorkflowWorkerConfig(
-            JSON.parse(await readFile(options.workflowWorkerConfig, "utf8")) as unknown,
+            await readFlagJsonFile("--workflow-worker-config", options.workflowWorkerConfig),
           )
         : undefined;
     // hostname:pid, because this value lands in `claimed_by` and its job is to let an operator
@@ -5644,7 +5764,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       // `due` CTE names only the served job ids, so an unserved run is never claimed at all rather
       // than claimed and finalized `failed` with handler_not_found, and an unserved backlog cannot
       // starve served runs out of a batch.
-      ...(jobHandlers.servedJobIds.length > 0
+      ...(executableJobIds.length > 0
         ? {
             jobEngine: new PostgresJobRunEngine(conn, jobHandlers.registry, {
               ...schemaOpt,
@@ -5655,7 +5775,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
                   err,
                 ),
             }),
-            jobServes: { jobIds: jobHandlers.servedJobIds },
+            jobServes: { jobIds: executableJobIds },
           }
         : {}),
       ...schemaOpt,
@@ -5672,8 +5792,10 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     if (queueVisibility.visibility === "confined_by_rls") {
       console.log(
         `[jobs] row-level security confines '${queueVisibility.role}' on meta.job_runs, so the job ` +
-          "worker claims one tenant at a time under each tenant's own context (two statements per " +
-          "non-deleted tenant per poll, in one transaction)",
+          "worker claims one tenant at a time under each tenant's own context, each inside its own savepoint" +
+          " in one transaction per poll; a tenant whose claim raises is rolled back and named, and the" +
+          " others are still claimed. A suspended, archived or pending_deletion tenant is still claimed," +
+          " and its runs are refused by the writer, not left pending",
       );
     } else if (queueVisibility.visibility !== "visible") {
       console.warn(`[jobs] job queue: ${queueVisibility.detail}`);
@@ -6251,10 +6373,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
             // defect `onUniqueIndexRefused` exists to prevent on the boot store, one path over.
             for (const refusal of application.uniqueIndexRefusals) {
               console.error(
-                `[unique] tenant ${application.tenantId} (${application.schema})` +
-                  ` ${refusal.entity}: a declared unique field is NOT enforced — the index could` +
-                  ` not be created and the duplicate rows are already there: ${refusal.detail}.` +
-                  ` Deduplicate, then run: ${refusal.sql}`,
+                formatUniqueIndexRefusal(`tenant ${application.tenantId} (${application.schema})`, refusal),
               );
             }
             return;
@@ -6326,12 +6445,16 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         // tenant's tables (a restart, or another replica), is refused outright: the fallback is the
         // flip itself there, and a 503 is the one answer that is not a wrong one.
         let served = tenantManifest;
+        // Where this tenant's records go, for the per-tenant survey (ADR-0472): a retained or a
+        // fallback serving is a fact the tenant cannot see and the operator must be told.
+        let servingKind: "applied" | "retained" | "refused" | null = null;
         if (tenantStoreRegistry !== null) {
           const serving = await tenantStoreRegistry.ensureServing(tenantId, tenantManifest);
           if (serving.kind === "stranded") {
             throw new TenantSchemaStranded(tenantId, serving.application.schema);
           }
           served = serving.manifest;
+          servingKind = serving.kind;
         }
         return buildOperateHttpServer({
           manifest: served,
@@ -6479,7 +6602,22 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           // before this function is reached (its refusal has to fire before anything mounts), so
           // passing it there would survey the same manifest twice and report it once.
           onSurvey: (report): void => {
-            const reading = formatTenantManifestSurvey(tenantId, report);
+            // Every boot survey, over the tenant's compiled manifest and read against the
+            // deployment's facts — one producer per sentence, every line prefixed, silent when clean.
+            const reading = formatTenantManifestSurvey(
+              tenantId,
+              surveyTenantManifest(served, report, {
+                deploymentManifest: manifest,
+                storeKind: options.store,
+                servedFrom: servedFromOf(servingKind),
+                segregationOfDuties: {
+                  enabled: options.segregationOfDuties,
+                  removalsRead: entityAudit !== null,
+                },
+                phi: { keyConfigured: columnKey !== undefined, allowPlaintextPhi: options.allowPlaintextPhi },
+                allowDanglingReferences: options.allowDanglingReferences,
+              }),
+            );
             for (const line of reading.lines) {
               if (reading.level === "warn") console.warn(line);
               else console.info(line);
@@ -6562,6 +6700,9 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         // carries its tenant only in the token's claim — reaches its tenant's own gateway. Without
         // it every JWT without an `x-tenant-id` header was served the deployment's manifest.
         verifyBearer: jwt !== null ? bearerTenantVerifier(jwt) : null,
+        // Before the Bearer is verified, and the request marked so the server it reaches does not
+        // count it again (ADR-0473, closing ADR-0449 Q6).
+        ...(preAuthLimiter !== undefined ? { preAuthLimiter } : {}),
       }),
     };
   }
@@ -6771,6 +6912,9 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         // falls through to the dispatch that counts it, so none is counted twice.
         if (preAuthLimiter !== undefined && isAuthTokenPath(raw.url)) {
           const decision = preAuthLimiter.check(raw);
+          // Marked, so a login that declines the request and falls through does not spend a second
+          // decision in the dispatch behind it (ADR-0473).
+          markPreAuthCounted(raw);
           if (!decision.allowed) return preAuthLimitedResponse(decision.retryAfterSeconds);
         }
         return (await login(raw, body)) ?? (await inner.dispatch(raw, body));
@@ -6820,6 +6964,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           isAccessRequestIntakePath(raw.url)
         ) {
           const decision = preAuthLimiter.check(raw);
+          markPreAuthCounted(raw);
           if (!decision.allowed) return preAuthLimitedResponse(decision.retryAfterSeconds);
         }
         return (await intake(raw, body)) ?? (await inner.dispatch(raw, body));
@@ -7084,7 +7229,7 @@ export async function runDocumentIndexes(options: DocumentIndexesOptions): Promi
 export interface ColumnSchemaRunReport {
   readonly schema: string | null;
   readonly grants: readonly string[];
-  readonly uniqueIndexRefusals: readonly { readonly entity: string; readonly detail: string; readonly sql: string }[];
+  readonly uniqueIndexRefusals: readonly UniqueIndexRefusalLine[];
 }
 
 /**
@@ -7099,7 +7244,7 @@ export async function runColumnSchema(options: ColumnSchemaOptions): Promise<Col
       ? loadManifestFromJson(await readFile(options.manifestPath, "utf8"))
       : await loadBuiltinPack(options.pack ?? "");
   const conn = createNodePgConnection(parsePgEnvConfig());
-  const refusals: { entity: string; detail: string; sql: string }[] = [];
+  const refusals: UniqueIndexRefusalLine[] = [];
   try {
     const store = new ColumnMappedEntityStore(conn, manifest, {
       ...(options.schema !== null ? { schema: options.schema } : {}),
@@ -7108,7 +7253,7 @@ export async function runColumnSchema(options: ColumnSchemaOptions): Promise<Col
       encryptionKey: () => {
         throw new Error("column-schema applies DDL and reads no column-encryption key");
       },
-      onUniqueIndexRefused: (entity, sql, detail) => refusals.push({ entity, detail, sql }),
+      onUniqueIndexRefused: (entity, sql, detail, facts) => refusals.push({ entity, detail, sql, ...facts }),
       onLookupIndexRefused: (entity, sql, detail) =>
         console.error(`[indexes] ${entity}: declared lookup index not built (${detail}). Statement: ${sql}`),
     });

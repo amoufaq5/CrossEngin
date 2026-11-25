@@ -3,7 +3,8 @@ import type { Handler, HandlerOutput, PrincipalRoles } from "@crossengin/api-gat
 import type { RoleName } from "@crossengin/auth";
 
 import { drainList, type BoundedReadDeclaration } from "./list-drain.js";
-import { computeWhtReconciliation, type WhtReconciliation } from "./wht-reconciliation.js";
+import { moneyUnits } from "./money.js";
+import { computeWhtReconciliation, type WhtCreditNoteShape, type WhtReconciliation } from "./wht-reconciliation.js";
 import type { EntityRecord, EntityStore, ListFilter } from "./store.js";
 
 export interface WhtReconciliationHandlerContext {
@@ -20,6 +21,20 @@ export interface WhtReconciliationHandlerContext {
   readonly certificateInvoiceField?: string;
   readonly certificateAmountField?: string;
   readonly issueDateField?: string;
+  readonly invoiceStateField?: string;
+  /**
+   * The invoice lifecycle's cancelled states, from the manifest (`compile.ts` reads them off its
+   * `void` transition). Required, because an omitted set is the defect this field closes: a voided
+   * invoice still carries the `withholding_total` its recognition stamped, and the report counted it
+   * as tax the customer withheld (ADR-0475).
+   */
+  readonly voidedStates: readonly string[];
+  /**
+   * How a credit note is told from the invoice it credits. Present, a credit note's withholding is
+   * netted against its invoice rather than reported as a second withholding — a void copies the
+   * invoice's figure onto the credit note it issues, so the two together doubled it.
+   */
+  readonly creditNote?: WhtCreditNoteShape;
   /**
    * The largest set either read here reads **in full** — the withholding invoices, and the
    * confirmed certificates. Reaching it is *declared* on the answer rather than silently truncated,
@@ -46,6 +61,7 @@ const DEFAULT_WHT_MAX_ROWS = 20_000;
 /** The two reads behind the report, as {@link WhtReconciliationResponse.bounded} names them. */
 const INVOICE_READ_NAME = "invoices";
 const CERTIFICATE_READ_NAME = "certificates";
+const CREDIT_NOTE_READ_NAME = "credit_notes";
 
 /**
  * `GET /v1/meta/wht-reconciliation`'s body: the reconciliation, and how far its two reads got.
@@ -56,7 +72,8 @@ const CERTIFICATE_READ_NAME = "certificates";
  * because the two errors point **opposite** ways: a dropped invoice is absent from the report,
  * understating the withheld total and the uncertified exposure with it, while a dropped certificate
  * leaves an invoice's certified total too small, so a fully-certified invoice is reported with a gap
- * it does not have.
+ * it does not have. A dropped credit note (`credit_notes`) leaves its invoice's withholding counted as
+ * still withheld, the same direction as a dropped certificate.
  */
 export interface WhtReconciliationResponse extends WhtReconciliation, BoundedReadDeclaration {}
 
@@ -119,7 +136,9 @@ export function buildWhtReconciliationHandler(ctx: WhtReconciliationHandlerConte
   const certInvoiceField = ctx.certificateInvoiceField ?? "invoice_id";
   const certAmountField = ctx.certificateAmountField ?? "amount";
   const issueDateField = ctx.issueDateField ?? "issue_date";
+  const invoiceStateField = ctx.invoiceStateField ?? "state";
   const maxRows = ctx.maxRows ?? DEFAULT_WHT_MAX_ROWS;
+  const voidedStates = new Set(ctx.voidedStates);
 
   return async ({ principal, request }) => {
     const tenantId = principal?.tenantId ?? null;
@@ -180,6 +199,40 @@ export function buildWhtReconciliationHandler(ctx: WhtReconciliationHandlerConte
     );
     if (!invoiceOutcome.complete) bounded.push(INVOICE_READ_NAME);
 
+    // Every credit note carrying withholding, **whatever its issue date**: a credit note applies to
+    // the invoice it names, and a void in July credits a June invoice, so netting only the ones the
+    // period selected would report the June invoice as still withheld. Not netted from a credit note
+    // that was itself voided — a withdrawn credit took nothing back.
+    const creditedByInvoice = new Map<string, bigint>();
+    const cn = ctx.creditNote;
+    if (cn !== undefined) {
+      const cnOutcome = await drainList(
+        ctx.store,
+        tenantId,
+        invoiceEntity,
+        {
+          sort: [],
+          filters: [
+            { field: cn.typeField, op: "eq", value: cn.typeValue },
+            { field: withholdingField, op: "gt", value: "0" },
+          ],
+        },
+        { ceiling: maxRows },
+        (rows) => {
+          for (const note of rows) {
+            if (note[cn.typeField] !== cn.typeValue) continue;
+            const state = note[invoiceStateField];
+            if (typeof state === "string" && voidedStates.has(state)) continue;
+            const ref = note[cn.refField];
+            const withheld = moneyUnits(note[withholdingField]) ?? 0n;
+            if (typeof ref !== "string" || ref.length === 0 || withheld <= 0n) continue;
+            creditedByInvoice.set(ref, (creditedByInvoice.get(ref) ?? 0n) + withheld);
+          }
+        },
+      );
+      if (!cnOutcome.complete) bounded.push(CREDIT_NOTE_READ_NAME);
+    }
+
     // Confirmed certificates, summed by their invoice — folded as the pages arrive, so this read is
     // O(invoices with a certificate) however many certificates there are.
     const certifiedByInvoice = new Map<string, number>();
@@ -204,6 +257,9 @@ export function buildWhtReconciliationHandler(ctx: WhtReconciliationHandlerConte
     const report = computeWhtReconciliation({
       invoices,
       certifiedByInvoice,
+      voidedStates: ctx.voidedStates,
+      stateField: invoiceStateField,
+      ...(cn !== undefined ? { creditNote: cn, creditedByInvoice } : {}),
       ...(ctx.numberField !== undefined ? { numberField: ctx.numberField } : {}),
       withholdingField,
       ...(ctx.currencyField !== undefined ? { currencyField: ctx.currencyField } : {}),

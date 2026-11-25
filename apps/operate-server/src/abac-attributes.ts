@@ -4,7 +4,12 @@ import {
   type PrincipalRefused,
   type ResolvedPrincipal,
 } from "@crossengin/api-gateway";
-import type { PrincipalResolver, PrincipalResolverInput } from "@crossengin/api-gateway-runtime";
+import {
+  PrincipalDirectoryUnavailable,
+  isPrincipalDirectoryUnavailable,
+  type PrincipalResolver,
+  type PrincipalResolverInput,
+} from "@crossengin/api-gateway-runtime";
 import { DEFAULT_MAX_STALE_MS } from "./tenant-status-gate.js";
 
 /**
@@ -234,7 +239,12 @@ export class CachedAbacAttributeDirectory implements AbacAttributeDirectory {
       const servable = cached !== undefined && nowMs - cached.readAtMs <= this.maxStaleMs;
       this.onRefreshError?.(tenantId, userId, err, servable);
       if (servable) return cached.attributes;
-      throw err;
+      // Typed, so the gateway answers 503 with retry-after rather than an unclassified 500
+      // (ADR-0473, closing ADR-0341 Q2): nothing about this principal could be established, which
+      // is ADR-0334's could-not-establish status, while the cause stays in the log and out of the
+      // body. Covers the first lookup and a refresh past `maxStaleMs` alike, since both are the
+      // same fact — no answer this directory may serve.
+      throw isPrincipalDirectoryUnavailable(err) ? err : new PrincipalDirectoryUnavailable("membership directory", err);
     }
   }
 

@@ -1,7 +1,5 @@
 import { isRegionAllowed, selectPrimaryRegion, type Region, type ResidencyProfile } from "@crossengin/residency";
 
-import type { TenantResidencyDirectory } from "./directory.js";
-
 /**
  * What a serving region should do with a request for a tenant:
  * - `serve` — this region is allowed; handle it here.
@@ -30,24 +28,13 @@ export function decideRegionRouting(profile: ResidencyProfile, servingRegion: Re
   return { action: "deny", reason: here.reason };
 }
 
-export interface RegionRouteRequest {
-  readonly tenantId: string;
-  readonly servingRegion: Region;
-}
-
-/**
- * Resolves a tenant's residency profile from a directory and decides how the
- * serving region should handle the request. An unknown tenant denies (fail-closed) —
- * a request is never served without a residency profile to authorize the region.
+/*
+ * `RegionRouter` — the stateful class that resolved a profile from a directory and denied a tenant
+ * with none — is deleted (ADR-0472). It was constructed only by its own test, and the post-auth
+ * residency decision it was declared as waiting for exists: `apps/operate-server`'s
+ * `residency-gate.ts` (`applyResidencyGate`, ADR-0451) wraps every handler, reads the
+ * **authenticated** tenant, and calls `decideRegionRouting` above. A callerless second spelling of
+ * live code is deleted rather than kept (ADR-0337), and the one real difference between the two —
+ * the class denied an unprofiled tenant where the gate serves one — is a decision the gate makes
+ * and documents, not one a class nothing constructs can make for it.
  */
-export class RegionRouter {
-  constructor(private readonly directory: TenantResidencyDirectory) {}
-
-  async route(request: RegionRouteRequest): Promise<RoutingDecision> {
-    const profile = await this.directory.resolve(request.tenantId);
-    if (profile === null) {
-      return { action: "deny", reason: `no residency profile for tenant '${request.tenantId}'` };
-    }
-    return decideRegionRouting(profile, request.servingRegion);
-  }
-}

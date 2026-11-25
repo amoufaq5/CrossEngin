@@ -65,6 +65,11 @@ async function emitFor(pack: string): Promise<PackEmit> {
     version: manifestHash(manifest),
     coverage: [],
     residency: null,
+    // Ungated (ADR-0471): the per-pack figures are about the manifest, not about which gates a
+    // deployment mounts, so no tenant gate, no write audit and no guard/effect refusals.
+    tenantStatus: null,
+    writeAudit: null,
+    writeRefusals: { checks: false, stateConditionedEntities: new Set() },
   });
   const doc = emit.document;
   return {
@@ -194,6 +199,9 @@ describe("the collision refusal is empty today and reachable from a manifest", (
       version: "v",
       coverage: [],
       residency: null,
+      tenantStatus: null,
+      writeAudit: null,
+      writeRefusals: { checks: false, stateConditionedEntities: new Set() },
     });
     expect(emit.document).toBeNull();
     expect(emit.refused?.kind).toBe("path_collision");

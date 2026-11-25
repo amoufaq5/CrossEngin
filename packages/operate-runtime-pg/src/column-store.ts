@@ -1,18 +1,24 @@
 import { foreignKeyBaseName, qualifyTable, quoteIdent } from "@crossengin/kernel/ddl";
 import type { Manifest } from "@crossengin/kernel/manifest";
 import {
+  applyStatementStop,
   ensurePgcryptoExtension,
   isoCalendarDate,
   isoInstant,
   pgpSymDecryptExpr,
   pgpSymEncryptExpr,
+  readRowsWithUnreadable,
+  textIdentity,
+  type ApplyStatementStop,
   type PgConnection,
   type PgQueryResult,
 } from "@crossengin/kernel-pg";
 import {
   encodeKeyset,
   keysetOf,
+  ListRowUnreadable,
   ListSurfaceUnserveable,
+  RecordIdConflict,
   ReferencedRecordInUse,
   ReferenceNotFound,
   UniqueViolation,
@@ -81,6 +87,7 @@ import {
 import {
   SEARCH_FUNCTION_ADMITS_INDEX,
   ensureSearchFunction,
+  searchFunctionCall,
   searchFunctionLine,
 } from "./search-function.js";
 import { withTenantContext } from "./tenant-context.js";
@@ -257,6 +264,131 @@ const PG_UNIQUE_VIOLATION = "23505";
 /** Postgres's foreign-key-violation SQLSTATE: a dangling reference on write, a referenced row on delete. */
 const PG_FOREIGN_KEY_VIOLATION = "23503";
 
+/** Postgres's identifier limit, which it truncates a derived constraint name to. */
+const PG_IDENTIFIER_MAX = 63;
+
+/**
+ * The name Postgres gives the unnamed `PRIMARY KEY ("tenant_id", "id")` `emitEntityTableDdl`
+ * writes: `<table>_pkey`, with the table name truncated so the whole fits 63 bytes. Table names
+ * here are ASCII identifiers, so bytes and characters agree.
+ */
+export function entityPrimaryKeyConstraintName(table: string): string {
+  return `${table.slice(0, PG_IDENTIFIER_MAX - "_pkey".length)}_pkey`;
+}
+
+/**
+ * Whether `err` is a `23505` on this table's own primary key — i.e. a second create of an id the
+ * tenant already holds. The pre-flight `get` in the create handler cannot see a row a concurrent
+ * transaction has not committed, so two creates of one new id both pass it and the loser arrives
+ * here; before `RecordIdConflict` it escaped as the handler's fixed 500 (ADR-0417 Q2).
+ */
+export function isPrimaryKeyViolation(err: unknown, table: string): boolean {
+  return (
+    (err as { readonly code?: unknown } | null)?.code === PG_UNIQUE_VIOLATION &&
+    (err as { readonly constraint?: unknown }).constraint === entityPrimaryKeyConstraintName(table)
+  );
+}
+
+/**
+ * Why a unique index could not be built. Three members and not a free string, because the remedy
+ * differs and an operator acts on the remedy: `duplicates` is the rows (deduplicate, then re-run),
+ * `timed_out` is another session or the table's size (find the lock or raise the bound, then
+ * re-run), and `other` is neither (read the detail). Before ADR-0474 every refusal was reported as
+ * the first, so a boot that lost a lock race told an operator to deduplicate a table holding no
+ * duplicates.
+ */
+export const UNIQUE_INDEX_REFUSAL_CAUSES = ["duplicates", "timed_out", "other"] as const;
+export type UniqueIndexRefusalCause = (typeof UNIQUE_INDEX_REFUSAL_CAUSES)[number];
+
+/** Decided by SQLSTATE: `23505` is duplicates, a lock or statement timeout is `timed_out`. */
+export function uniqueIndexRefusalCause(err: unknown): UniqueIndexRefusalCause {
+  if ((err as { readonly code?: unknown } | null)?.code === PG_UNIQUE_VIOLATION) return "duplicates";
+  if (applyStatementStop(err) !== null) return "timed_out";
+  return "other";
+}
+
+/** What `onUniqueIndexRefused` is told beside the statement: the field the index enforces, and why. */
+export interface UniqueIndexRefusalFacts {
+  readonly field: string;
+  readonly cause: UniqueIndexRefusalCause;
+}
+
+/**
+ * A boot DDL statement stopped by `lock_timeout` or `statement_timeout` after `applyBootStatement`'s
+ * retries, re-raised naming **the table and the act**.
+ *
+ * Without it a boot behind another session's `ACCESS EXCLUSIVE` lock failed with Postgres's own
+ * `canceling statement due to lock timeout`, which names neither the table nor the statement — so an
+ * operator could not tell which of the 1,274 statements an `erp-core` boot issues was waiting, nor
+ * on what (ADR-0444 Q6). The tables come from the statement itself, restricted to the ones this
+ * store plans, which every statement it emits names at least one of (measured on `erp-core`: 1,274
+ * of 1,274; 75 name two, a foreign key locking both its tables, and both are named).
+ */
+export class BootDdlStopped extends Error {
+  readonly stop: ApplyStatementStop;
+  readonly tables: readonly string[];
+  readonly action: string;
+  override readonly cause: unknown;
+
+  constructor(stop: ApplyStatementStop, tables: readonly string[], action: string, cause: unknown) {
+    const on = tables.length === 0 ? "a table this store plans" : tables.join(" and ");
+    // The lookup names the tables themselves, so it can be pasted as it stands — the first draft
+    // printed a `'<table>'` placeholder beside the very table name it had just named (found live).
+    const relations =
+      tables.length === 0
+        ? "l.relation = '<table>'::regclass"
+        : `l.relation IN (${tables.map((t) => `'${t.replace(/'/g, "''")}'::regclass`).join(", ")})`;
+    const remedy =
+      stop === "lock_timeout"
+        ? `another session holds a lock on ${on} that this statement needs; find it with ` +
+          `SELECT l.pid, l.mode, a.query FROM pg_locks l JOIN pg_stat_activity a USING (pid) ` +
+          `WHERE ${relations} AND l.granted, then end that session or let it finish, and restart`
+        : // Not "raise it": the bound is `applyBootStatement`'s `SET LOCAL`, which overrides the
+          // session's `--pg-statement-timeout-ms` and which no flag reaches, so that remedy could
+          // not be followed (found in review).
+          `the statement ran past the boot DDL's fixed statement timeout, which no flag raises; ` +
+          `run that ${action} on ${on} by hand as the table's owner while it is quiet, then restart`;
+    super(`schema DDL stopped by ${stop} on ${on} (${action}): ${remedy}`);
+    this.name = "BootDdlStopped";
+    this.stop = stop;
+    this.tables = tables;
+    this.action = action;
+    this.cause = cause;
+  }
+}
+
+/** The DDL act a boot statement performs, read off its first DDL clause — for a refusal's sentence. */
+const BOOT_DDL_ACTIONS: readonly (readonly [RegExp, string])[] = [
+  [/\bCREATE TABLE\b/, "CREATE TABLE"],
+  [/\bCREATE (?:UNIQUE )?INDEX\b/, "CREATE INDEX"],
+  [/\bCREATE POLICY\b|\bDROP POLICY\b/, "policy"],
+  [/\bADD CONSTRAINT\b[^;]*\bFOREIGN KEY\b/, "ADD FOREIGN KEY"],
+  [/\bADD CONSTRAINT\b/, "ADD CONSTRAINT"],
+  [/\bADD COLUMN\b/, "ADD COLUMN"],
+  [/\bALTER COLUMN\b/, "ALTER COLUMN"],
+  [/\b(?:ENABLE|FORCE) ROW LEVEL SECURITY\b/, "row level security"],
+  [/\bCOMMENT ON\b/, "COMMENT ON"],
+];
+
+/** The planned tables a statement names, in order of first appearance, and its act. */
+export function describeBootDdlStatement(
+  sql: string,
+  schema: string,
+  plannedTables: ReadonlySet<string>,
+): { readonly tables: readonly string[]; readonly action: string } {
+  const prefix = `${quoteIdent(schema)}.`;
+  const tables: string[] = [];
+  for (const m of sql.matchAll(/"((?:[^"]|"")+)"\."((?:[^"]|"")+)"/g)) {
+    const qualified = `"${m[1]!}".`;
+    const table = m[2]!.replaceAll('""', '"');
+    if (qualified !== prefix || !plannedTables.has(table)) continue;
+    const named = `${schema}.${table}`;
+    if (!tables.includes(named)) tables.push(named);
+  }
+  const action = BOOT_DDL_ACTIONS.find(([re]) => re.test(sql))?.[1] ?? "DDL";
+  return { tables, action };
+}
+
 export interface ColumnMappedEntityStoreOptions {
   readonly schema?: string;
   /** SQL expression yielding the pgcrypto key (a reference, never the raw key). */
@@ -275,8 +407,19 @@ export interface ColumnMappedEntityStoreOptions {
    * deployment down over rows this code cannot deduplicate would be the wrong trade — the table
    * serves perfectly well without the index, minus the guarantee — so the failure is reported and
    * the boot goes on. Absent, a failure is swallowed, which is why `node.ts` always supplies it.
+   *
+   * The fourth argument says **which field** and **why** (ADR-0474). Every refusal used to be
+   * reported as duplicates — "Deduplicate, then run" — while the statement can equally fail on a
+   * lock it waited for and did not get, or on a statement timeout over a large table, where
+   * deduplicating is a remedy that cannot work (ADR-0334). `cause` is decided from the SQLSTATE, so
+   * only a `23505` is called duplicates.
    */
-  readonly onUniqueIndexRefused?: (entity: string, sql: string, detail: string) => void;
+  readonly onUniqueIndexRefused?: (
+    entity: string,
+    sql: string,
+    detail: string,
+    facts: UniqueIndexRefusalFacts,
+  ) => void;
   /**
    * Called once per declared lookup index `ensureSchema` could not build. A lookup index changes
    * how fast a query is answered and never what it answers, so a failure is reported and the boot
@@ -310,9 +453,7 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
   private readonly deletePolicies: ReadonlyMap<string, OnDelete>;
   private readonly joinPlans: readonly JoinTablePlan[];
   private readonly joinIndex: ReadonlyMap<string, JoinTablePlan>;
-  private readonly onUniqueIndexRefused:
-    | ((entity: string, sql: string, detail: string) => void)
-    | null;
+  private readonly onUniqueIndexRefused: ColumnMappedEntityStoreOptions["onUniqueIndexRefused"] | null;
   private readonly onLookupIndexRefused:
     | ((entity: string, sql: string, detail: string) => void)
     | null;
@@ -447,7 +588,7 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
       isolationQualRendering,
       catalogGuards,
     })) {
-      await applyBootStatement(this.conn, stmt, this.ddl);
+      await this.applyNamingStop(schema, stmt);
     }
     // Last, and each in its own try, because this is the only statement class here whose outcome
     // depends on existing **data**: a unique index over a populated table holding duplicates raises
@@ -457,7 +598,9 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
     // attempted, which is `kernel-pg`'s continue-past-a-failure rule (ADR-0295) for the same reason.
     for (const plan of this.plans.values()) {
       // Zipped by position: both read `enforceableUniqueColumns` in one order.
-      const names = [...uniqueIndexFields(plan).keys()];
+      const byName = uniqueIndexFields(plan);
+      const names = [...byName.keys()];
+      const fields = [...byName.values()];
       for (const [i, stmt] of emitUniqueIndexDdl(plan).entries()) {
         try {
           // A valid index of this name is left alone without the `CREATE`, which would take a
@@ -470,6 +613,7 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
             plan.entity,
             stmt,
             err instanceof Error ? err.message : String(err),
+            { field: fields[i]!, cause: uniqueIndexRefusalCause(err) },
           );
         }
       }
@@ -481,6 +625,23 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
       this.onLookupIndexRefused?.(r.index.entity, r.index.sql, r.detail ?? r.outcome);
     }
     return { mode: "applied", role: null, schema: schema ?? null, uniqueIndexes: [] };
+  }
+
+  /**
+   * `applyBootStatement`, re-raising a lock or statement timeout as a `BootDdlStopped` naming the
+   * table and the act. Every other failure propagates untouched: only a stop has a remedy that
+   * depends on knowing *where* it happened.
+   */
+  private async applyNamingStop(schema: string | undefined, stmt: string): Promise<void> {
+    try {
+      await applyBootStatement(this.conn, stmt, this.ddl);
+    } catch (err) {
+      const stop = applyStatementStop(err);
+      if (stop === null || schema === undefined) throw err;
+      const planned = new Set([...this.plans.values()].map((p) => p.table).concat(this.joinPlans.map((j) => j.table)));
+      const { tables, action } = describeBootDdlStatement(stmt, schema, planned);
+      throw new BootDdlStopped(stop, tables, action, err);
+    }
   }
 
   /** The manifest's declared lookup indexes this store builds, and those it does not, with why. */
@@ -649,6 +810,10 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
       // — and a forged one — a page rather than a 500.
       comparableValue: (field, text) => columnComparableValue(idx.get(field), text),
       idExpr: quoteIdent("id"),
+      // The IMMUTABLE wrapper, because `emitEntityTableDdl` builds this store's trigram indexes over
+      // exactly this call and an index is matched only when the query presents the expression it
+      // stores (ADR-0383). Declared rather than defaulted since ADR-0474.
+      foldText: (sql) => searchFunctionCall(sql),
     };
     const { where, orderBy, unserveable, searchNarrowedBy } = buildListSql(
       query,
@@ -675,7 +840,24 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
         LIMIT ${limitParam}`,
       params,
     );
-    const rows = res.rows.map((r) => rowToRecord(plan, r));
+    // A row this store cannot represent refuses the **page**, naming the row, rather than either
+    // dropping it or escaping as an unclassified throw. Dropping it would hand back a short page with
+    // a cursor that walks past a record nobody was told existed; the throw it used to be became the
+    // gateway's opaque 500 with nothing saying which row (ADR-0405 Q1). **No value node-postgres
+    // returns makes `rowToRecord` throw today** — measured: a `TIMESTAMPTZ` past year 275760 parses
+    // into an invalid `Date` that `isoInstant` renders as the string "Invalid Date" rather than
+    // raising, and the wire-type decorator one layer up is what refuses it — so this arm is a fence
+    // for a mapper guard that does not exist yet, not the live producer (an earlier version of this
+    // comment named that timestamp as the live member; it is the decorator's). The handler answers
+    // `page_unreadable` for either, and the ids go to the operator's log only. All rows are read
+    // first, so the refusal names every unreadable row on the page and not merely the first.
+    const read = readRowsWithUnreadable(
+      res.rows,
+      (r) => rowToRecord(plan, r),
+      (r) => textIdentity(r, "id"),
+    );
+    if (read.unreadable.length > 0) throw new ListRowUnreadable(entity, read.unreadable);
+    const rows = read.records;
     const hasMore = rows.length > query.limit;
     const records = hasMore ? rows.slice(0, query.limit) : rows;
     const lastRow = res.rows[records.length - 1];
@@ -767,6 +949,7 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
         values,
       );
     } catch (err) {
+      if (isPrimaryKeyViolation(err, plan.table)) throw new RecordIdConflict(entity, id);
       this.rethrowUniqueViolation(entity, err);
     }
     return stored;

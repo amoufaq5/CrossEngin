@@ -168,6 +168,73 @@ export class UniqueViolation extends Error {
 }
 
 /**
+ * A create named a record id another record of this entity already holds in this tenant.
+ *
+ * `UniqueViolation`'s sibling for the one key the manifest does not declare: the record's own id.
+ * The create handler asks for the id before it writes and answers `409 id_conflict`, and that
+ * pre-check is a read — so two concurrent creates of one new caller-supplied id both pass it, and
+ * the loser meets the key itself (the column store's `(tenant_id, id)` primary key, the document
+ * store's `(tenant_id, entity, record_id)` unique constraint). Unattributed, that `23505` was the
+ * fixed 500, measured live: the identical request answered 409 when it arrived second and 500 when
+ * it arrived together. Both stores raise this instead, so the race answers what the read answers.
+ *
+ * It carries the id so `writeTxn` can confirm the conflict is about **the id the caller sent** and
+ * not about a record an effect of the same write created under an id the server chose — which is
+ * the same rule `uniqueConflict` applies to a field. The id is never put in a response body.
+ */
+export class RecordIdConflict extends Error {
+  readonly entity: string;
+  readonly id: string;
+
+  constructor(entity: string, id: string) {
+    super(`a '${entity}' with this id already exists in the tenant`);
+    this.name = "RecordIdConflict";
+    this.entity = entity;
+    this.id = id;
+  }
+}
+
+/**
+ * One row a list page could not be read back as a record: its id, read off the raw row so it
+ * answers for the row the mapper refused, and the field path and issue code of the refusal — never
+ * the stored value. `kernel-pg`'s `UnreadableRow` shape, restated structurally because this package
+ * cannot depend on `kernel-pg`.
+ */
+export interface UnreadableListRow {
+  readonly identity: string | null;
+  readonly detail: string;
+}
+
+/**
+ * A list page held at least one row this store cannot represent as a record.
+ *
+ * The page is **refused rather than shortened**, and that is ADR-0405's settled shape for a list a
+ * caller cannot cross-check: a page with a row silently missing reads as a record that does not
+ * exist, and the generic entity list has no sibling count to disagree with it. What changed is that
+ * the refusal is *named*, and that it names **every** refused row of the page, so an operator has
+ * the ids to repair in one read rather than one per request.
+ *
+ * Thrown by `ColumnMappedEntityStore`'s `listPageOn` when its row mapper throws. Measured, that
+ * mapper is total over every value node-postgres returns today (an out-of-range `TIMESTAMPTZ`
+ * reads as the string "Invalid Date", which the wire-type decorator above the store refuses), so
+ * this is a fence for a mapper guard rather than the live producer of `page_unreadable` — that is
+ * the decorator's stored-direction wire error, which the list handler answers the same way. An
+ * earlier version of this comment said the unread row "used to escape the store as a bare
+ * `RangeError` or `ZodError`", which the mapper never did. Lives here for `UniqueViolation`'s reason.
+ */
+export class ListRowUnreadable extends Error {
+  readonly entity: string;
+  readonly rows: readonly UnreadableListRow[];
+
+  constructor(entity: string, rows: readonly UnreadableListRow[]) {
+    super(`${rows.length.toString()} row(s) of a '${entity}' page could not be read as records`);
+    this.name = "ListRowUnreadable";
+    this.entity = entity;
+    this.rows = rows;
+  }
+}
+
+/**
  * A write set a `reference` field to an id no record of the target entity holds in this tenant.
  *
  * Both Postgres stores raise it: the column store from its composite foreign key's `23503`, the

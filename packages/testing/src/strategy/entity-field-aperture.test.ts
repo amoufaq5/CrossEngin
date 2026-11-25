@@ -13,6 +13,7 @@ import {
   ENTITY_FIELD_APERTURE,
   FIELD_APERTURE_DIRECTIONS,
   PROJECTED_MANIFEST_READERS,
+  RESOLVING_MANIFEST_READERS,
   READER_ACCOUNTINGS,
   REFUSED_ANCHORS,
   RESOLUTION_CALLS,
@@ -398,7 +399,7 @@ describe("the scanner — the anchor rejects what it should", () => {
   });
 
   it("reads an optional-chained `entity?.fields`", () => {
-    // `manifest-diff.ts` writes both of its reads this way, and a matcher without the `?.` arm
+    // `manifest-diff.ts` wrote both of its reads this way (until ADR-0470), and a matcher without the `?.` arm
     // missed two members the brief had named by line number.
     const text = [
       'import type { Manifest } from "@crossengin/kernel/manifest";',
@@ -544,7 +545,12 @@ describe("the real workspace", () => {
     expect(scan.files).toBeGreaterThanOrEqual(900);
     expect(scan.readers.length).toBeGreaterThanOrEqual(14);
     expect(scan.readers.length).toBeLessThanOrEqual(40);
-    expect(raw.length).toBeGreaterThanOrEqual(10);
+    // 8 and not 10: ADR-0470 moved two raw readers onto the resolver (`manifest-diff.ts`'
+    // `fieldIndex` and `fieldNameByColumn`); `design-review.ts` also moved, but out of the separate
+    // projected population, which this count never included. The population shrank for the reason
+    // the rule exists. The floor
+    // still guards a matcher that stopped matching, which would take it to zero.
+    expect(raw.length).toBeGreaterThanOrEqual(8);
     // The rejected bucket is three times the population, so it is where a break shows up first. A
     // collapse here means the read matcher stopped examining and the population survived by luck.
     expect(scan.rejected.length).toBeGreaterThanOrEqual(45);
@@ -620,6 +626,16 @@ describe("the real workspace", () => {
       const text = readFileSync(join(REPO_ROOT, file), "utf8");
       expect(text, file).toMatch(/\[["']fields["']\]/);
       expect(scan.readers.filter((r) => r.file === file), file).toEqual([]);
+    }
+  });
+
+  it("keeps a reader that left the projected population on the resolver (ADR-0470)", () => {
+    for (const file of RESOLVING_MANIFEST_READERS) {
+      expect(PROJECTED_MANIFEST_READERS, file).not.toContain(file);
+      const text = readFileSync(join(REPO_ROOT, file), "utf8");
+      expect(text, file).toMatch(/ManifestSchema\.safeParse\(/);
+      expect(text, file).toMatch(/resolvedClassifiedFields\(/);
+      expect(scan.readers.filter((r) => r.file === file && r.accounting === "raw"), file).toEqual([]);
     }
   });
 

@@ -18,7 +18,7 @@ import {
 import { describe, expect, it } from "vitest";
 
 import { servedAuthSchemesFor } from "./auth-scheme-survey.js";
-import { API_KEY_QUERY_PARAM } from "./auth.js";
+import { API_KEY_QUERY_PARAM, REQUIRED_JWT_CLAIMS } from "./auth.js";
 import { HandlerRegistry } from "./dispatcher.js";
 import {
   GatewayRuntime,
@@ -180,6 +180,7 @@ function buildRuntime(
   } = {},
 ): GatewayRuntime {
   return new GatewayRuntime({
+    requiredJwtClaims: new Set(REQUIRED_JWT_CLAIMS),
     routes: new InMemoryRouteRegistry().register(openRoute()),
     handlers: new HandlerRegistry().register("tenants.create", () => ({
       kind: "json",

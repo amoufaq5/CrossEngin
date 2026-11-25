@@ -128,13 +128,39 @@ export function buildAgingHandler(ctx: AgingHandlerContext): Handler {
     if (!roles.some((r) => ctx.viewerRoles.has(r as RoleName))) {
       return json(403, { error: "forbidden", detail: "finance role required" });
     }
-    // An optional `?asOf=YYYY-MM-DD` pulls a historical aging snapshot; a malformed
-    // value is ignored (fall back to the clock), so the param never widens/breaks the report.
+    // `?asOf=YYYY-MM-DD` ages the open set at that date — **today or later only** (ADR-0475). It
+    // was documented as "a historical aging snapshot" and was not one: the date reached only the
+    // days-past-due arithmetic, while the open set is today's (a document paid after `asOf` is
+    // absent) and the applied payments are every payment to date (one made after `asOf` is
+    // subtracted), so a past `asOf` answered a figure that was true on no day, under a 200. Both
+    // errors understate the receivable. Refused by name until a point-in-time read exists — ADR-0359's
+    // rule, since the drop changes which rows come back. A future date is served: no payment or
+    // state change postdates today, so today's open set *is* the open set as of then, and only the
+    // ageing moves. A malformed value is refused too, where it used to fall back to today in silence
+    // and hand back a report for a date the caller did not ask about.
     const asOfParam = firstQuery(request.query["asOf"]);
-    const asOf =
-      asOfParam !== undefined && AS_OF_PATTERN.test(asOfParam)
-        ? `${asOfParam}T00:00:00.000Z`
-        : (ctx.clock?.now() ?? new Date()).toISOString();
+    const now = (ctx.clock?.now() ?? new Date()).toISOString();
+    if (asOfParam !== undefined && asOfParam !== "") {
+      // Round-tripped rather than `Date.parse`d: ECMAScript rolls 2026-02-30 forward to 2 March,
+      // so a parse alone accepts a day that does not exist and ages against a different one.
+      const parsed = Date.parse(`${asOfParam}T00:00:00.000Z`);
+      if (
+        !AS_OF_PATTERN.test(asOfParam) ||
+        Number.isNaN(parsed) ||
+        new Date(parsed).toISOString().slice(0, 10) !== asOfParam
+      ) {
+        return json(400, { error: "as_of_malformed", detail: "asOf must be a date in the form YYYY-MM-DD" });
+      }
+      if (asOfParam < now.slice(0, 10)) {
+        return json(400, {
+          error: "as_of_not_served",
+          detail:
+            `asOf ${asOfParam} is before today (${now.slice(0, 10)}, UTC): this report ages today's open documents ` +
+            "against every payment to date, so it cannot say what was open on a past date; omit asOf, or ask for today or later",
+        });
+      }
+    }
+    const asOf = asOfParam !== undefined && asOfParam !== "" ? `${asOfParam}T00:00:00.000Z` : now;
 
     // Every section's applied-payment map is filled in ONE pass over the payment pages, before the
     // section loop — the one-pass property and the per-section keying both live in

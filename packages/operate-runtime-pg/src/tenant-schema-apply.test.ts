@@ -451,6 +451,27 @@ describe("applyTenantManifestSchema — declared uniqueness", () => {
     expect(result.uniqueIndexRefusals[0]?.entity).toBe("Product");
     expect(result.uniqueIndexRefusals[0]?.sql).toContain('"product_sku_uniq"');
     expect(result.uniqueIndexRefusals[0]?.detail).toContain("could not create unique index");
+    expect(result.uniqueIndexRefusals[0]?.field).toBe("sku");
+    expect(result.uniqueIndexRefusals[0]?.cause).toBe("duplicates");
+  });
+
+  it("calls a lock or statement timeout timed_out and anything else other, never duplicates", async () => {
+    // ADR-0474: every refusal used to be reported as duplicates, so an operator told to deduplicate
+    // a table that holds none. The cause comes from the SQLSTATE and only `23505` is duplicates.
+    const raising = (err: unknown) => (sql: string) =>
+      sql.startsWith("CREATE UNIQUE INDEX") && sql.includes('"sku"') ? (err as Error) : null;
+    const lock = Object.assign(new Error("canceling statement due to lock timeout"), { code: "55P03" });
+    const stmt = Object.assign(new Error("canceling statement due to statement timeout"), { code: "57014" });
+    const other = Object.assign(new Error("permission denied for table product"), { code: "42501" });
+    for (const [err, cause] of [
+      [lock, "timed_out"],
+      [stmt, "timed_out"],
+      [other, "other"],
+    ] as const) {
+      const cap = capturePg([], raising(err));
+      const result = await applyTenantManifestSchema(cap.conn, TENANT, manifestOf([PRODUCT]));
+      expect(result.uniqueIndexRefusals.map((r) => [r.field, r.cause])).toEqual([["sku", cause]]);
+    }
   });
 
   it("rolls back to the savepoint, so the refusal does not abort the transaction", async () => {

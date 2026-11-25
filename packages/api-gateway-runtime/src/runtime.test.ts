@@ -11,14 +11,15 @@ import {
 import { describe, expect, it } from "vitest";
 
 import { buildIncomingRequest } from "./adapters.js";
-import { InMemoryJwksProvider } from "./auth.js";
+import { InMemoryJwksProvider, PrincipalDirectoryUnavailable, REQUIRED_JWT_CLAIMS } from "./auth.js";
 import { HandlerRegistry } from "./dispatcher.js";
-import { GatewayRuntime } from "./runtime.js";
+import { GatewayRuntime, type GatewayRuntimeOptions } from "./runtime.js";
 import {
   InMemoryIdempotencyStore,
   InMemoryPrincipalResolver,
   InMemoryRateLimitChecker,
   InMemoryRouteRegistry,
+  type PrincipalResolver,
 } from "./stores.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
@@ -117,11 +118,12 @@ function fixedClock(iso: string) {
 interface BuildRuntimeOpts {
   readonly routes?: InMemoryRouteRegistry;
   readonly handlers?: HandlerRegistry;
-  readonly principalResolver?: InMemoryPrincipalResolver;
+  readonly principalResolver?: PrincipalResolver;
   readonly idempotency?: InMemoryIdempotencyStore;
   readonly rateLimit?: InMemoryRateLimitChecker;
   readonly jwks?: InMemoryJwksProvider;
   readonly nowIso?: string;
+  readonly onInternalError?: GatewayRuntimeOptions["onInternalError"];
 }
 
 function buildRuntime(opts: BuildRuntimeOpts = {}) {
@@ -145,6 +147,7 @@ function buildRuntime(opts: BuildRuntimeOpts = {}) {
   const idempotencyStore = opts.idempotency ?? new InMemoryIdempotencyStore();
   const rateLimitChecker = opts.rateLimit ?? new InMemoryRateLimitChecker({ limit: 100 });
   const runtime = new GatewayRuntime({
+    requiredJwtClaims: new Set(REQUIRED_JWT_CLAIMS),
     routes,
     handlers,
     principalResolver,
@@ -155,6 +158,7 @@ function buildRuntime(opts: BuildRuntimeOpts = {}) {
     jwtAudience: AUDIENCE,
     clockSkewSeconds: 30,
     clock: fixedClock(opts.nowIso ?? "2026-05-16T12:00:00.000Z"),
+    ...(opts.onInternalError !== undefined ? { onInternalError: opts.onInternalError } : {}),
   });
   return { runtime, routes, handlers, principalResolver, idempotencyStore, rateLimitChecker };
 }
@@ -652,5 +656,137 @@ describe("GatewayRuntime — security headers on every response, denials include
     expect(response.headers["referrer-policy"]).toBe("no-referrer");
     expect(response.headers["x-content-type-options"]).toBe("nosniff");
     expect(response.headers["content-security-policy"]).toContain("default-src");
+  });
+});
+
+describe("GatewayRuntime — a directory that cannot answer is a 503, not a 500 (ADR-0473)", () => {
+  async function jwtRequest(
+    resolver: PrincipalResolver,
+    onInternalError?: GatewayRuntimeOptions["onInternalError"],
+  ) {
+    const kp = generateEd25519Keypair();
+    const kid = ed25519PublicKeyFingerprint(kp.publicKeyBase64).slice(0, 16);
+    const jwks = new InMemoryJwksProvider({ keys: [{ kid, publicKeyBase64: kp.publicKeyBase64 }] });
+    const { runtime } = buildRuntime({
+      jwks,
+      principalResolver: resolver,
+      ...(onInternalError !== undefined ? { onInternalError } : {}),
+    });
+    const token = buildJwt({
+      privateKeyBase64: kp.privateKeyBase64,
+      publicKeyBase64: kp.publicKeyBase64,
+      kid,
+      sub: USER,
+      tenantId: TENANT,
+      exp: Math.floor(Date.parse("2026-05-16T12:00:00.000Z") / 1000) + 3_600,
+    });
+    return runtime.handleRequest(fixtureRequest({ headers: { authorization: `Bearer ${token}` } }));
+  }
+
+  it("maps PrincipalDirectoryUnavailable from resolve_principal to 503 with retry-after", async () => {
+    const { response, execution } = await jwtRequest({
+      async resolve() {
+        throw new PrincipalDirectoryUnavailable("membership directory", new Error("ECONNREFUSED"));
+      },
+    });
+    expect(response.status).toBe(503);
+    expect(response.headers["retry-after"]).toBe("5");
+    const body = JSON.parse(new TextDecoder().decode(response.bodyBytes!)) as {
+      type: string;
+      extensions: Record<string, unknown>;
+      detail: string;
+    };
+    expect(body.type).toContain("service-unavailable");
+    expect(body.extensions["error"]).toBe("principal_directory_unavailable");
+    // Nothing of the cause reaches the caller.
+    expect(JSON.stringify(body)).not.toContain("ECONNREFUSED");
+    const last = execution.stages[execution.stages.length - 1]!;
+    expect(last.stage).toBe("resolve_principal");
+    expect(last.reason).toBe("principal_directory_unavailable");
+    // Through every exit, so the response still carries the headers and the id.
+    expect(response.headers["x-content-type-options"]).toBe("nosniff");
+    expect(response.headers["x-request-id"]).toBe("req_test00000001");
+  });
+
+  // The review's finding: the shipped wiring builds the membership directory with no refresh-error
+  // callback, so a 503 whose cause was filed nowhere would leave an outage, or a membership row the
+  // contract refuses, with no diagnosis in any log. The cause goes where a 500's does, under the id.
+  it("files the cause through onInternalError under the request id, answered 503", async () => {
+    const reported: { err: unknown; at: { requestId: string; stage: string; answered: string } }[] = [];
+    const cause = new Error("ECONNREFUSED 10.0.0.7:5432");
+    const { response } = await jwtRequest(
+      {
+        async resolve() {
+          throw new PrincipalDirectoryUnavailable("membership directory", cause);
+        },
+      },
+      (err, at) => reported.push({ err, at }),
+    );
+    expect(response.status).toBe(503);
+    expect(reported).toHaveLength(1);
+    expect(reported[0]!.at).toEqual({ requestId: "req_test00000001", stage: "resolve_principal", answered: "503" });
+    expect((reported[0]!.err as Error).cause).toBe(cause);
+  });
+
+  it("keeps any other resolver throw a 500, so the 503 is not a blanket remap", async () => {
+    const { response } = await jwtRequest({
+      async resolve() {
+        throw new Error("a bug");
+      },
+    });
+    expect(response.status).toBe(500);
+  });
+});
+
+describe("GatewayRuntime — the tenant id is canonical once it leaves authentication (ADR-0473)", () => {
+  it("lowercases an uppercase tenant claim even when the resolver hands it back verbatim", async () => {
+    const kp = generateEd25519Keypair();
+    const kid = ed25519PublicKeyFingerprint(kp.publicKeyBase64).slice(0, 16);
+    const jwks = new InMemoryJwksProvider({ keys: [{ kid, publicKeyBase64: kp.publicKeyBase64 }] });
+    const upper = "00000000-0000-4000-8000-0000000000AB";
+    // A library resolver that passes the tenant through untouched — the shape that left the gateway
+    // keyed on the claim's spelling while the router keyed on the lowercase one.
+    const passthrough: PrincipalResolver = {
+      async resolve(input) {
+        return {
+          principalId: USER,
+          tenantId: input.tenantId,
+          principalKind: "user",
+          authScheme: "bearer_jwt",
+          grantedScopes: ["tenants:write"],
+          mfaProofAgeSeconds: 30,
+          resolvedAt: "2026-05-16T12:00:00.000Z",
+        };
+      },
+    };
+    let seenTenant: string | null = "unset";
+    let seenInputTenant: string | null = "unset";
+    const handlers = new HandlerRegistry().register("tenants.create", (input) => {
+      seenTenant = input.principal?.tenantId ?? null;
+      return { kind: "json", status: 201, body: {} };
+    });
+    const resolver: PrincipalResolver = {
+      async resolve(input) {
+        seenInputTenant = input.tenantId;
+        return passthrough.resolve(input);
+      },
+    };
+    const { runtime } = buildRuntime({ jwks, principalResolver: resolver, handlers });
+    const token = buildJwt({
+      privateKeyBase64: kp.privateKeyBase64,
+      publicKeyBase64: kp.publicKeyBase64,
+      kid,
+      sub: USER,
+      tenantId: upper,
+      exp: Math.floor(Date.parse("2026-05-16T12:00:00.000Z") / 1000) + 3_600,
+    });
+    const { response, execution } = await runtime.handleRequest(
+      // The hint names the same tenant in lowercase, which used to be refused `tenant_mismatch`.
+      fixtureRequest({ headers: { authorization: `Bearer ${token}`, "x-tenant-id": upper.toLowerCase() } }),
+    );
+    expect(response.status).toBe(201);
+    expect(seenInputTenant).toBe(upper.toLowerCase());
+    expect(seenTenant).toBe(upper.toLowerCase());
+    expect(execution.tenantId).toBe(upper.toLowerCase());
   });
 });

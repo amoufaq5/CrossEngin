@@ -15,16 +15,24 @@ import { ABAC_GRANT_POSITIONS, ABAC_RECORD_AVAILABILITY } from "@crossengin/auth
 import { resolveManifest, type Manifest, type ManifestRegistry } from "@crossengin/kernel/manifest";
 import { ERP_CORE_PACK_SLUG, buildErpCorePack } from "@crossengin/pack-erp-core";
 import { buildErpRetailPack } from "@crossengin/pack-erp-retail";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 
 import { compileOperateServer, type CompiledOperateServer } from "./compile.js";
 import { buildSpecHandler, type HandlerContext } from "./handlers.js";
+import { describeFaultError, type HandlerFault } from "./handler-fault.js";
+import { MAKER_CHECKER_ERRORS } from "./maker-checker.js";
+import { DatetimeWireError } from "./datetime-store.js";
+import { DecimalWireError } from "./decimal-store.js";
+import { InMemorySequenceAllocator } from "./sequences.js";
 import { manifestRouteSpecs, routeFromSpec } from "./operations.js";
 import { SEALED_CURSOR_PREFIX, buildCursorSealer } from "./cursor-seal.js";
 import {
   InMemoryEntityStore,
   ListSurfaceUnserveable,
   ReferencedRecordInUse,
+  ListRowUnreadable,
+  RecordIdConflict,
   ReferenceNotFound,
   UniqueViolation,
   decodeKeyset,
@@ -285,7 +293,8 @@ describe("operate handlers — transactional effects", () => {
 
   // `writeTxn` used to put `e.message` straight into the 500 body with no slice at all, which on a
   // real deployment handed a client the database's own error text. The body carries a fixed
-  // sentence now; the diagnosis is lost rather than moved, because this layer has no recorder.
+  // sentence; the diagnosis goes to the handler context's `reportFault` since ADR-0474 (see
+  // "a write failure is reported" below), where before that it was dropped.
   it("carries a fixed sentence and no part of the thrown message", async () => {
     const message =
       `insert or update on table "tenant_data_keys" violates foreign key constraint ` +
@@ -812,6 +821,9 @@ function clinicCtx(
     principalRoles,
     validationPlans: buildValidationPlans(CLINIC),
     classifiedFields: buildClassifiedFieldIndex(CLINIC),
+    // A no-op: a throw here would be swallowed by `reportHandlerFault`, so a test that cares
+    // passes its own recorder through `extra`.
+    reportFault: () => undefined,
     ...(abacEvaluator !== undefined ? { abacEvaluator } : {}),
     ...(extra ?? {}),
   };
@@ -2360,5 +2372,331 @@ describe("operate handlers — a partially-narrowed search says so on the page",
       const out = await hit(clinicCtx(store, evaluator("satisfied")), "roster.list", { role: "clinician" });
       expect(bodyOf(out)["page"]).not.toHaveProperty("searchNarrowedBy");
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ADR-0474. A handler that *returns* a fixed 500 never reaches the gateway's catch, so its cause was
+// dropped: measured live, a forced `23503` answered `write_failed` and the log held nothing for the
+// request id the caller held. The cause now goes to the context's required `reportFault`, redacted
+// by error shape, and the response body is unchanged.
+// ---------------------------------------------------------------------------
+
+/** `serving`, with the gateway reporter the deployment supplies, collecting what it is handed. */
+function servingReporting(store: InMemoryEntityStore): { readonly seen: { err: unknown; requestId: string; stage: string; answered: string }[] } {
+  const seen: { err: unknown; requestId: string; stage: string; answered: string }[] = [];
+  server = compileOperateServer(resolved, {
+    store,
+    principalRoles,
+    onInternalError: (err, at) => {
+      seen.push({ err, requestId: at.requestId, stage: at.stage, answered: at.answered });
+    },
+  });
+  return { seen };
+}
+
+/** A `pg`-shaped error, carrying values where node-postgres puts them: `message` and `detail`. */
+function pgError(code: string, fields: Record<string, string>, message: string): Error {
+  return Object.assign(new Error(message), { code, ...fields });
+}
+
+describe("operate handlers — a write failure is reported, and the body still names nothing", () => {
+  it("hands a 23503 to the deployment's reporter naming its constraint, under the caller's request id", async () => {
+    const store = new RaisingStore();
+    const { seen } = servingReporting(store);
+    store.arm(
+      pgError(
+        "23503",
+        {
+          constraint: "fk_product_supplier_id",
+          table: "product",
+          schema: "public",
+          detail: `Key (tenant_id, supplier_id)=(${TENANT}, sup-secret-9) is not present in table "supplier".`,
+        },
+        `insert or update on table "product" violates foreign key constraint "fk_product_supplier_id"`,
+      ),
+    );
+    const out = await invoke("product.create", { role: "retail_admin", body: productBody() });
+    expect(out.status).toBe(500);
+    expect(bodyOf(out)).toEqual({ error: "write_failed", detail: "the write could not be completed" });
+
+    expect(seen).toHaveLength(1);
+    const reported = seen[0]!;
+    expect(reported.requestId).toBe("req_op000000001");
+    expect(reported.stage).toBe("dispatch_handler");
+    expect(reported.answered).toBe("500");
+    const line = (reported.err as Error).message;
+    expect(line).toContain("write_failed product.create Product");
+    expect(line).toContain("sqlstate=23503");
+    expect(line).toContain("constraint=fk_product_supplier_id");
+    expect(line).toContain("table=product");
+    // The key values live in `detail` and the tenant id in it is not something a log line needs.
+    expect(line).not.toContain("sup-secret-9");
+    expect(line).not.toContain(TENANT);
+    // And the stack is the line, so a reporter printing `err.stack` prints nothing else.
+    expect((reported.err as Error).stack).toBe(`HandlerFault: ${line}`);
+  });
+
+  it("reduces a ZodError to its paths and codes, never the received value", async () => {
+    const parsed = z.object({ state: z.enum(["draft", "sent"]) }).safeParse({ state: "MRN-777-secret" });
+    if (parsed.success) throw new Error("the fixture must fail to parse");
+    const store = new RaisingStore();
+    const { seen } = servingReporting(store);
+    store.arm(parsed.error);
+    const out = await invoke("product.create", { role: "retail_admin", body: productBody() });
+    expect(out.status).toBe(500);
+    // The ZodError's own message carries `received`; the reported line must not.
+    expect(parsed.error.message).toContain("MRN-777-secret");
+    const line = (seen[0]!.err as Error).message;
+    expect(line).toContain("ZodError: state: invalid_enum_value");
+    expect(line).not.toContain("MRN-777-secret");
+  });
+
+  it("falls back to one console line in the gateway's [5xx] shape when no reporter is supplied", async () => {
+    const store = new RaisingStore();
+    serving(store);
+    store.arm(pgError("23503", { constraint: "fk_x" }, "violates"));
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const out = await invoke("product.create", { role: "retail_admin", body: productBody() });
+      expect(out.status).toBe(500);
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(String(spy.mock.calls[0]?.[0])).toMatch(/^\[5xx\] req_op000000001 write_failed product\.create Product: Error sqlstate=23503 constraint=fk_x$/);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("does not report the classified refusals, which name their own cause", async () => {
+    const store = new RaisingStore();
+    const { seen } = servingReporting(store);
+    store.arm(new UniqueViolation("Product", "sku"));
+    expect((await invoke("product.create", { role: "retail_admin", body: productBody() })).status).toBe(409);
+    expect(seen).toEqual([]);
+  });
+
+  it("answers the request even when the reporter itself throws", async () => {
+    const store = new RaisingStore();
+    server = compileOperateServer(resolved, {
+      store,
+      principalRoles,
+      onInternalError: () => {
+        throw new Error("log sink down");
+      },
+    });
+    store.arm(new Error("boom"));
+    const out = await invoke("product.create", { role: "retail_admin", body: productBody() });
+    expect(out.status).toBe(500);
+    expect(bodyOf(out)["error"]).toBe("write_failed");
+  });
+
+  it("describes a non-Error throw by its type and nothing else", () => {
+    expect(describeFaultError({ mrn: "MRN-1" })).toBe("non_error_thrown (object)");
+    expect(describeFaultError("x".repeat(10))).toBe("non_error_thrown (string)");
+  });
+
+  it("bounds a code-authored message rather than printing it whole", () => {
+    const line = describeFaultError(new RangeError("v".repeat(2000)));
+    expect(line.startsWith("RangeError: ")).toBe(true);
+    expect(line.length).toBeLessThanOrEqual(501);
+  });
+});
+
+describe("operate handlers — two creates naming one new id: the loser is a 409, not a 500", () => {
+  // The pre-flight `get` cannot see a row a concurrent transaction has not committed, so the loser
+  // of the race reaches the store's own key and used to answer `500 write_failed` (ADR-0417 Q2).
+  // Both stores now raise `RecordIdConflict` on that key, and the answer depends on whether the
+  // caller supplied the id: only then is "send a different id" an instruction they can follow.
+  it("409s id_conflict when the caller supplied the colliding id", async () => {
+    const store = new RaisingStore();
+    serving(store);
+    store.arm(new RecordIdConflict("Product", "prod-new-1"));
+    const out = await invoke("product.create", { role: "retail_admin", body: { ...productBody(), id: "prod-new-1" } });
+    expect(out.status).toBe(409);
+    expect(bodyOf(out)["error"]).toBe("id_conflict");
+    expect(bodyOf(out)["field"]).toBe("id");
+  });
+
+  it("stays a 500 when the server chose the id, since the caller cannot send a different one", async () => {
+    const store = new RaisingStore();
+    const { seen } = servingReporting(store);
+    store.arm(new RecordIdConflict("Product", "server-chosen"));
+    const out = await invoke("product.create", { role: "retail_admin", body: productBody() });
+    expect(out.status).toBe(500);
+    expect(bodyOf(out)["error"]).toBe("write_failed");
+    expect(seen).toHaveLength(1);
+  });
+
+  it("stays a 500 when the conflict is on another entity's or another id's key", async () => {
+    // An effect writing a second record can collide on that record's key; that is not the caller's id.
+    const a = new RaisingStore();
+    serving(a);
+    a.arm(new RecordIdConflict("Supplier", "prod-new-1"));
+    expect(
+      (await invoke("product.create", { role: "retail_admin", body: { ...productBody(), id: "prod-new-1" } })).status,
+    ).toBe(500);
+    const b = new RaisingStore();
+    serving(b);
+    b.arm(new RecordIdConflict("Product", "some-other-id"));
+    expect(
+      (await invoke("product.create", { role: "retail_admin", body: { ...productBody(), id: "prod-new-1" } })).status,
+    ).toBe(500);
+  });
+});
+
+/** A store whose page holds a row it cannot represent, refusing the way `ColumnMappedEntityStore` does. */
+class UnreadablePageStore extends CapturingStore {
+  override async listPage(): Promise<ListPage> {
+    throw new ListRowUnreadable("Product", [
+      { identity: "prod-7", detail: "price: invalid_type" },
+      { identity: null, detail: "created_at: invalid_date" },
+    ]);
+  }
+}
+
+describe("operate handlers — a page holding an unreadable row is refused by name, not served short", () => {
+  it("500s page_unreadable naming the entity and reports the refused rows", async () => {
+    const store = new UnreadablePageStore();
+    const { seen } = servingReporting(store);
+    const out = await invoke("product.list", { role: "retail_admin" });
+    expect(out.status).toBe(500);
+    const body = bodyOf(out);
+    expect(body["error"]).toBe("page_unreadable");
+    expect(String(body["detail"])).toContain("Product");
+    // The body names no row; the ids are the operator's.
+    expect(JSON.stringify(body)).not.toContain("prod-7");
+    expect(seen).toHaveLength(1);
+    const fault = (seen[0]!.err as { fault?: HandlerFault }).fault;
+    expect(fault?.kind).toBe("page_unreadable");
+    const line = (seen[0]!.err as Error).message;
+    expect(line).toContain("prod-7 (price: invalid_type)");
+    expect(line).toContain("<no id> (created_at: invalid_date)");
+  });
+
+  it("refuses the same way when the wire-type decorator cannot render a stored value", async () => {
+    // The live producer: over either store, a `TIMESTAMPTZ` past year 275760 reaches
+    // `withDatetimeWireType` as the string "Invalid Date", which it refuses as `stored`.
+    class StoredDatetimeStore extends CapturingStore {
+      override async listPage(): Promise<ListPage> {
+        throw new DatetimeWireError("Product", "created_at", "datetime", "not_an_instant", "stored");
+      }
+    }
+    const { seen } = servingReporting(new StoredDatetimeStore());
+    const out = await invoke("product.list", { role: "retail_admin" });
+    expect(out.status).toBe(500);
+    expect(bodyOf(out)["error"]).toBe("page_unreadable");
+    expect((seen[0]!.err as Error).message).toContain("Product.created_at");
+  });
+
+  it("does not take an inbound wire error, which a read cannot raise, for an unreadable row", async () => {
+    class InboundStore extends CapturingStore {
+      override async listPage(): Promise<ListPage> {
+        throw new DecimalWireError("Product", "unit_price", "not_a_decimal", "inbound");
+      }
+    }
+    servingReporting(new InboundStore());
+    await expect(invoke("product.list", { role: "retail_admin" })).rejects.toBeInstanceOf(DecimalWireError);
+  });
+
+  it("leaves a readable page alone, which is the control", async () => {
+    const store = new CapturingStore();
+    const { seen } = servingReporting(store);
+    expect((await invoke("product.list", { role: "retail_admin" })).status).toBe(200);
+    expect(seen).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ADR-0440 Q8 asked for an offline test of the *moved* line, and the half that has one now is the
+// line moved **onto** the approved document: its row is read by the approval, so the mover is its
+// `updated_by` and the row read refuses them. (The half moved *away* is the audit trail's, whose
+// SQL sits in `operate-server`'s audit store.) Before this the arm was fenced by one trailing
+// assertion of another test, and removing `same(row[UPDATED_BY_FIELD])` failed only that line.
+// ---------------------------------------------------------------------------
+
+describe("operate handlers — maker-checker sees a line moved onto the approved document", () => {
+  const CORE = buildErpCorePack();
+  const ids = {
+    alice: "11111111-1111-4111-8111-111111111111",
+    bob: "22222222-2222-4222-8222-222222222222",
+    carol: "33333333-3333-4333-8333-333333333333",
+    dave: "44444444-4444-4444-8444-444444444444",
+  } as const;
+  type Who = keyof typeof ids;
+
+  function rig(): (who: Who, opId: string, params?: Record<string, string>, body?: Record<string, unknown>) => Promise<HandlerOutput> {
+    const compiled = compileOperateServer(CORE, {
+      store: new InMemoryEntityStore(),
+      allocator: new InMemorySequenceAllocator(),
+      principalRoles,
+      clock: { now: () => new Date("2026-06-03T12:00:00.000Z") },
+      segregationOfDuties: true,
+    });
+    return async (who, opId, params = {}, body) => {
+      const spec = compiled.routeSpecs.find((s) => s.operationId === opId);
+      if (spec === undefined) throw new Error(`no route for ${opId}`);
+      return compiled.handlers.resolve(opId)!({
+        request: buildIncomingRequest({
+          id: "req_mc00000001",
+          receivedAt: "2026-06-03T12:00:00.000Z",
+          method: spec.method,
+          path: "/v1/x",
+          headers: {},
+          host: "api.example.com",
+          scheme: "https",
+          bodyBytes: null,
+          clientIp: "203.0.113.1",
+          edgeTrust: "untrusted",
+        }),
+        route: routeFromSpec(spec),
+        principal: {
+          principalId: ids[who],
+          tenantId: TENANT,
+          principalKind: "user",
+          authScheme: "api_key_header",
+          grantedScopes: ["erp_admin"],
+          abacAttributes: {},
+          mfaProofAgeSeconds: null,
+          resolvedAt: "2026-06-03T12:00:00.000Z",
+        },
+        params,
+        parsedBody: body ?? null,
+      });
+    };
+  }
+
+  async function created(out: Promise<HandlerOutput>): Promise<string> {
+    const o = await out;
+    expect(o.status).toBe(201);
+    return bodyOf(o)["id"] as string;
+  }
+
+  async function setup(call: ReturnType<typeof rig>): Promise<{ x: string; y: string; line: string }> {
+    const vendor = await created(call("bob", "vendor.create", {}, { name: "Acme", vendor_code: "ACME" }));
+    const bill = (who: Who) =>
+      created(call(who, "bill.create", {}, { vendor_id: vendor, bill_date: "2026-06-01", due_date: "2026-07-01" }));
+    const x = await bill("bob");
+    const y = await bill("carol");
+    const line = await created(
+      call("bob", "billLine.create", {}, { bill_id: x, description: "widgets", quantity: 1, unit_price: "900.00", amount: "900.00" }),
+    );
+    return { x, y, line };
+  }
+
+  it("refuses the approver who moved another author's line onto the document", async () => {
+    const call = rig();
+    const { y, line } = await setup(call);
+    expect((await call("alice", "billLine.update", { id: line }, { bill_id: y })).status).toBe(200);
+    const out = await call("alice", "bill.approve", { id: y });
+    expect(out.status).toBe(422);
+    expect(bodyOf(out)["error"]).toBe(MAKER_CHECKER_ERRORS.same_person);
+    expect(String(bodyOf(out)["detail"])).toContain("BillLine");
+  });
+
+  it("admits an approver who neither wrote nor moved it, which is the control", async () => {
+    const call = rig();
+    const { y, line } = await setup(call);
+    expect((await call("alice", "billLine.update", { id: line }, { bill_id: y })).status).toBe(200);
+    expect((await call("dave", "bill.approve", { id: y })).status).toBe(200);
   });
 });

@@ -41,8 +41,10 @@ import { REPO_ROOT, workspaceRoots } from "./workspace-sql-scan.js";
  *     the widening *found*, so it is kept whole as members of it resolve, and the two resolutions so
  *     far are the two different answers a finding here can have: `CampaignScheduler` was **deleted**
  *     (ADR-0337 — a second spelling of live code), and `KeyRotationMigrator` was **wired**
- *     (ADR-0349 — `crypto-pg`'s per-tenant rekey constructs it). Neither is declared below any
- *     more, which is the rule working rather than the list rotting: a resolved member's line is
+ *     (ADR-0349 — `crypto-pg`'s per-tenant rekey constructs it). `RegionRouter` was deleted too
+ *     (ADR-0472), on the first answer: its declaration said nothing consults residency after
+ *     authentication, which `apps/operate-server`'s `residency-gate.ts` (`applyResidencyGate`,
+ *     ADR-0451) had made false. None of the three is declared below any more, which is the rule working rather than the list rotting: a resolved member's line is
  *     deleted, and until it is, `overtaken` says so.
  *  2. **`apps/*` was out of scope by declaration**, so an app-internal store the app never
  *     constructs — the same defect — was unasked. In scope now, and the walk is per *member* rather
@@ -1782,20 +1784,6 @@ export const UNREACHABLE_STORES: readonly UnreachableDeclaration[] = Object.free
     consequence:
       "Nothing: `operate-server` resolves entitlements through `operate-runtime-pg`'s entitlement store, which is the production implementation of the same seam.",
     note: "The in-memory implementation of `EntitlementResolver`, constructed by 22 of its own tests. Declared rather than excused by `test_surface` because only this package's own tests build it, so the rule cannot distinguish it from a dead driver without the declaration — and that is the right place for the judgement, since the fact that no *other* package needs it is exactly what makes it a local fixture rather than public test surface.",
-  },
-
-  /* -------------------------------------------------------- residency-runtime (1) */
-  {
-    scope: "symbol",
-    pkg: "packages/residency-runtime",
-    symbol: "RegionRouter",
-    reason: "prerequisite_of_unbuilt_surface",
-    blockedBy:
-      "a residency decision keyed on the authenticated tenant. The request path already consults the pure `decideRegionRouting`: `OperateHttpServer.checkResidency` runs before dispatch whenever `--region` and a residency source are configured, answering 421 or 403 — but it reads the unverified `x-tenant-id` hint, never grants on it, and treats a tenant with no profile as unconstrained. This class resolves by the tenant id and **denies** a tenant with no profile, so its place is after authentication, where nothing consults residency today; wiring it is also a choice between those two answers to an unprofiled tenant. ADR-0077's Q6 gates multi-region on demand.",
-    tables: [],
-    consequence:
-      "Residency is enforced only on the pre-authentication hint: a request whose tenant comes from its credential and that carries no `x-tenant-id` hint is not residency-checked at all, and a tenant with no profile is served where this class would deny.",
-    note: "`decideRegionRouting` (the pure half, in the same module) *is* reachable; the class is constructed only by `router.test.ts`. CLAUDE.md calls this package `small: a tenant→region directory interface, decideRegionRouting and serving-region affinity selection`, which is accurate about what exists and silent about what runs.",
   },
 
   /* ------------------------------------------------------- workflow-runtime-pg (1) */

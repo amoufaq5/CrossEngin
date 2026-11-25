@@ -12,9 +12,11 @@ import {
   type AiManifestListQuery,
   type AiManifestRecordLike,
   type AiManifestStore,
+  type BudgetCheckLike,
   type DesignResultLike,
   type ManifestDesignerLike,
 } from "./ai-design-routes.js";
+import type { ActivationCheck, ActivationRefusal } from "./activation-check.js";
 import type { ManifestProposalStatus } from "./tenant-manifests.js";
 import type {
   ActiveManifestSourceLike,
@@ -227,6 +229,18 @@ interface CtxOverrides {
   readonly store?: FakeStore;
   readonly designer?: ManifestDesignerLike | null;
   readonly onActivated?: (tenantId: string) => void;
+  readonly activationCheck?: ActivationCheck;
+}
+
+/** Admits every activation: the route tests below are about the route, not the check (ADR-0470). */
+const admitAll: ActivationCheck = async () => null;
+
+function budgetOk(spentUsd: number): BudgetCheckLike {
+  return { allowed: true, spentUsd, limitUsd: 25 };
+}
+
+function budgetSpent(spentUsd: number): BudgetCheckLike {
+  return { allowed: false, reason: "month_exceeded", spentUsd, limitUsd: 25 };
 }
 
 function makeCtx(overrides: CtxOverrides = {}): AiDesignContext & { store: FakeStore } {
@@ -237,6 +251,7 @@ function makeCtx(overrides: CtxOverrides = {}): AiDesignContext & { store: FakeS
     principalRoles: (p: ResolvedPrincipal | null) => ({ primaryRole: p?.grantedScopes[0] ?? "anon" }),
     allowedRoles: new Set(["tenant_admin"]),
     onActivated: overrides.onActivated,
+    activationCheck: overrides.activationCheck ?? admitAll,
     summarize: (manifest: Record<string, unknown>) => ({ keys: Object.keys(manifest).sort() }),
   };
 }
@@ -617,6 +632,97 @@ describe("ai-design-routes — activate", () => {
   });
 });
 
+describe("ai-design-routes — activation is refused when it cannot be served (ADR-0470)", () => {
+  const refusal: ActivationRefusal = {
+    kind: "lineage_parent_unknown",
+    sentence: "this manifest extends a parent this deployment does not serve",
+    issues: ["extends unknown parent 'operate-erp/retail'"],
+  };
+
+  it("422s activation_unservable naming the kind, and writes nothing", async () => {
+    const asked: Array<{ tenantId: string; manifest: Record<string, unknown> }> = [];
+    const activated: string[] = [];
+    const ctx = makeCtx({
+      onActivated: (t) => activated.push(t),
+      activationCheck: async (tenantId, manifest) => {
+        asked.push({ tenantId, manifest });
+        return refusal;
+      },
+    });
+    const id = await draftId(ctx);
+    const out = (await findHandler(ctx, "ai.manifests.activate")(
+      input("tenant_admin", { params: { id } }),
+    )) as JsonOut;
+    expect(out.status).toBe(422);
+    expect(out.body).toEqual({
+      error: "activation_unservable",
+      kind: "lineage_parent_unknown",
+      detail: refusal.sentence,
+      issues: refusal.issues,
+    });
+    // Asked about the stored proposal's manifest, for this tenant.
+    expect(asked).toEqual([{ tenantId: TENANT, manifest: ctx.store.records.get(id)?.manifest }]);
+    // Nothing moved: the tenant goes on being served what it was served.
+    expect(ctx.store.records.get(id)?.status).toBe("draft");
+    expect(activated).toEqual([]);
+  });
+
+  it("asks the check only after the review gate, so an unreviewed proposal is told it needs review", async () => {
+    let checked = 0;
+    const ctx = {
+      ...makeCtx({
+        activationCheck: async () => {
+          checked += 1;
+          return refusal;
+        },
+      }),
+      reviewGate: { reviewStatusFor: async (): Promise<ReviewStatusLike | null> => "pending" },
+    };
+    const id = await draftId(ctx);
+    const out = (await findHandler(ctx, "ai.manifests.activate")(
+      input("tenant_admin", { params: { id } }),
+    )) as JsonOut;
+    expect(out.status).toBe(403);
+    expect(out.body["error"]).toBe("review_required");
+    expect(checked).toBe(0);
+  });
+
+  it("activates when the check admits it", async () => {
+    let checked = 0;
+    const ctx = makeCtx({
+      activationCheck: async () => {
+        checked += 1;
+        return null;
+      },
+    });
+    const id = await draftId(ctx);
+    const out = (await findHandler(ctx, "ai.manifests.activate")(
+      input("tenant_admin", { params: { id } }),
+    )) as JsonOut;
+    expect(out.status).toBe(200);
+    expect(checked).toBe(1);
+  });
+
+  // `unknown` establishes nothing about the manifest, so a 422 ("the manifest is wrong; retrying it
+  // unchanged cannot succeed") would contradict its own sentence ("try again").
+  it("503s with a retry, and writes nothing, when the check could not establish anything", async () => {
+    const activated: string[] = [];
+    const ctx = makeCtx({
+      onActivated: (t) => activated.push(t),
+      activationCheck: async () => ({ kind: "unknown", sentence: "could not be checked; try again", issues: [] }),
+    });
+    const id = await draftId(ctx);
+    const out = (await findHandler(ctx, "ai.manifests.activate")(
+      input("tenant_admin", { params: { id } }),
+    )) as JsonOut;
+    expect(out.status).toBe(503);
+    expect(out.body["error"]).toBe("activation_check_unavailable");
+    expect(out.headers?.["retry-after"]).toBe("5");
+    expect(ctx.store.records.get(id)?.status).toBe("draft");
+    expect(activated).toEqual([]);
+  });
+});
+
 describe("ai-design-routes — activation review gate", () => {
   interface GateHarness {
     readonly ctx: AiDesignContext & { store: FakeStore };
@@ -777,7 +883,8 @@ describe("ai-design routes — spend ceiling", () => {
     const ctx = {
       ...base,
       budget: {
-        check: async () => ({ allowed, spentUsd: allowed ? 1 : 30, limitUsd: 25 }),
+        check: async (): Promise<BudgetCheckLike> =>
+          allowed ? budgetOk(1) : budgetSpent(30),
         record: async (tenantId: string, costUsd: number) => {
           recorded.push({ tenantId, costUsd });
           return costUsd;
@@ -828,7 +935,7 @@ describe("ai-design routes — spend ceiling", () => {
       }),
     });
     const out = await design(
-      { ...base, budget: { check: async () => ({ allowed: true, spentUsd: 24.9, limitUsd: 25 }) } },
+      { ...base, budget: { check: async () => budgetOk(24.9) } },
       { description: "a coffee shop" },
     );
     expect(out.status).toBe(402);
@@ -885,7 +992,7 @@ describe("ai-design routes — provider residency", () => {
   it("asks residency before the month, so the remedy named is the one that applies", async () => {
     const { ctx } = gated({ allowed: false, refusal: { decision: "unresolved" } });
     const out = await design(
-      { ...ctx, budget: { check: async () => ({ allowed: false, spentUsd: 30, limitUsd: 25 }) } },
+      { ...ctx, budget: { check: async () => budgetSpent(30) } },
       { description: "a coffee shop" },
     );
     expect(out.status).toBe(503);
@@ -993,7 +1100,7 @@ describe("ai-design-routes — async job create", () => {
     const ctx = {
       ...base,
       budget: {
-        check: async () => ({ allowed: false, spentUsd: 30, limitUsd: 25 }),
+        check: async () => budgetSpent(30),
         record: async (_t: string, c: number) => c,
       },
     };
@@ -1005,12 +1112,35 @@ describe("ai-design-routes — async job create", () => {
     expect(started).toHaveLength(0);
   });
 
+  it("503s with a retry, and never enqueues, when the budget ledger cannot be read (ADR-0470)", async () => {
+    const { ctx: base, jobs, started } = makeJobCtx();
+    const ctx = {
+      ...base,
+      budget: {
+        check: async (): Promise<BudgetCheckLike> => ({
+          allowed: false,
+          reason: "unavailable",
+          limitUsd: 25,
+        }),
+        record: async (_t: string, c: number) => c,
+      },
+    };
+    const out = await createJob(ctx, { description: "A CRM" });
+    expect(out.status).toBe(503);
+    expect(out.body["error"]).toBe("ai_budget_unavailable");
+    expect(out.headers?.["retry-after"]).toBe("30");
+    // No spend figure: nobody read one, and a 402 claiming the month is spent would be invented.
+    expect(out.body["spentUsd"]).toBeUndefined();
+    expect(jobs.createCalls).toHaveLength(0);
+    expect(started).toHaveLength(0);
+  });
+
   it("202s when the budget allows", async () => {
     const { ctx: base, started } = makeJobCtx();
     const ctx = {
       ...base,
       budget: {
-        check: async () => ({ allowed: true, spentUsd: 1, limitUsd: 25 }),
+        check: async () => budgetOk(1),
         record: async (_t: string, c: number) => c,
       },
     };

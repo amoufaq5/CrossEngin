@@ -3,7 +3,7 @@ import { type IdempotencyRecord, type RouteDefinition } from "@crossengin/api-ga
 import { describe, expect, it } from "vitest";
 
 import { buildIncomingRequest } from "./adapters.js";
-import { InMemoryJwksProvider } from "./auth.js";
+import { InMemoryJwksProvider, REQUIRED_JWT_CLAIMS } from "./auth.js";
 import { type HandlerOutput, HandlerRegistry } from "./dispatcher.js";
 import { GatewayRuntime, IDEMPOTENT_REPLAY_BODY_HEADER } from "./runtime.js";
 import {
@@ -111,6 +111,7 @@ function rig(opts: {
         }
       : principals;
   const runtime = new GatewayRuntime({
+    requiredJwtClaims: new Set(REQUIRED_JWT_CLAIMS),
     routes: new InMemoryRouteRegistry()
       .register(route)
       .register({ ...route, id: "rt_route0002", operationId: "tenants.list", method: "GET", idempotencyRequired: false }),

@@ -518,8 +518,10 @@ describe("serve() — the [tax-remittance] line is said at boot and per tenant (
     expect(at).toBeGreaterThan(-1);
     // `served`, not `tenantManifest`: under `--store pg-columns` the registry may serve a different
     // applied manifest than the one just activated, and the effects gate on what is served.
-    const body = src.slice(at, at + 900);
+    // 1800 rather than 900: the callback first renders the per-tenant survey (ADR-0472).
+    const body = src.slice(at, at + 1800);
     expect(body).toContain("formatTenantTaxRemittanceWiring(tenantId, served)");
+    expect(body).toContain("surveyTenantManifest(served, report,");
     // Exactly one onSurvey: the boot literal must not survey (it would report the boot pack twice).
     expect([...src.matchAll(/onSurvey: \(report\): void =>/g)]).toHaveLength(1);
   });
@@ -1237,5 +1239,28 @@ describe("serve()'s starter-chart provisioner and tax remittance (ADR-0467)", ()
     const resolver = src.slice(src.indexOf("const resolveTenantServing"), src.indexOf("const resolveJobAccess"));
     expect(resolver).toMatch(/taxRemittance:\s*gateway\.taxRemittance/);
     expect(resolver).toMatch(/taxRemittance:\s*resolved\.server\.taxRemittance/);
+  });
+});
+
+describe("node.ts's file-taking flags (ADR-0472)", () => {
+  // Five flags parsed their file inline, so a missing file named the path and no flag and a
+  // malformed one named neither (ADR-0390 Q5). `readFlagJsonFile` is the one spelling; this fence
+  // keeps a sixth inline parse from arriving, and names the five so the loader has callers to lose.
+  const src = stripComments(readFileSync(resolve(import.meta.dirname, "./node.ts"), "utf8"));
+
+  it("parses no flag's file inline", () => {
+    expect(src).not.toMatch(/JSON\.parse\(\s*await\s+readFile\b/);
+  });
+
+  it("reads each of the five through readFlagJsonFile, naming its own flag", () => {
+    for (const flag of [
+      "--jwks-file",
+      "--plan-catalog",
+      "--deletion-capabilities",
+      "--deletion-escalation-config",
+      "--workflow-worker-config",
+    ]) {
+      expect(src).toContain(`readFlagJsonFile("${flag}", `);
+    }
   });
 });

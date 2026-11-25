@@ -681,3 +681,74 @@ describe("a stock level stored before the decimal wire type", () => {
     expect(await h.onHand(s.itemId, s.whId)).toBe("4.000");
   });
 });
+
+describe("a posting in another currency carries its rate (ADR-0475)", () => {
+  /** Net functional debit − credit per ledger account, in cents, and the rate on each line. */
+  async function functional(h: H): Promise<{ balances: Record<string, number>; rates: string[] }> {
+    const out: Record<string, number> = {};
+    const rates = new Set<string>();
+    for (const line of await h.store.list(TENANT, "JournalLine")) {
+      const acct = String(line["ledger_account_id"]);
+      out[acct] =
+        (out[acct] ?? 0) +
+        Math.round(Number(line["functional_debit"] ?? 0) * 100) -
+        Math.round(Number(line["functional_credit"] ?? 0) * 100);
+      rates.add(String(Number(line["fx_rate"])));
+    }
+    return { balances: out, rates: [...rates] };
+  }
+
+  async function eurSetup(h: H, rate: string | null) {
+    const usd = await h.ok("currency.create", { body: { code: "USD", name: "US Dollar", decimal_places: 2 } });
+    const eur = await h.ok("currency.create", { body: { code: "EUR", name: "Euro", decimal_places: 2 } });
+    if (rate !== null) {
+      await h.ok("exchangeRate.create", {
+        body: { from_currency_id: eur["id"], to_currency_id: usd["id"], rate_date: "2026-06-01", rate },
+      });
+    }
+    const item = await h.ok("item.create", {
+      body: { sku: "SKU-E", name: "Euro widget", item_type: "stock", standard_cost: "10.0000", currency: "EUR" },
+    });
+    const wh = await h.ok("warehouse.create", { body: { code: "WH1", name: "Main" } });
+    const vendor = await h.ok("vendor.create", { body: { vendor_code: "V1", name: "Acme" } });
+    const po = await h.ok("purchaseOrder.create", { body: { vendor_id: vendor["id"], order_date: "2026-06-01", currency: "EUR" } });
+    const poId = String(po["id"]);
+    await h.ok("purchaseOrderLine.create", { body: { purchase_order_id: poId, item_id: item["id"], quantity: "5", unit_price: "12.0000" } });
+    await h.ok("purchaseOrder.submit", { params: { id: poId } });
+    await h.ok("purchaseOrder.approve", { params: { id: poId } });
+    return { poId, whId: String(wh["id"]), itemId: String(item["id"]) };
+  }
+
+  it("converts a EUR receipt into the functional currency at the rate in force", async () => {
+    const h = harness({ defaults: { currency: "USD" } });
+    const s = await eurSetup(h, "1.1");
+    await receive(h, s.poId, s.whId);
+    // The transaction amounts are unchanged — EUR 50 at standard, EUR 60 at order, EUR 10 variance.
+    expect(await h.balances()).toEqual({ inventory: 5000, goods_received_not_invoiced: -6000, inventory_variance: 1000 });
+    // And the functional amounts are those at 1.1, where they used to equal the EUR figures at fx_rate 1.
+    const f = await functional(h);
+    expect(f.balances).toEqual({ inventory: 5500, goods_received_not_invoiced: -6600, inventory_variance: 1100 });
+    expect(f.rates).toEqual(["1.1"]);
+  });
+
+  it("refuses 409 exchange_rate_unresolved with no rate, and receives nothing", async () => {
+    const h = harness({ defaults: { currency: "USD" } });
+    const s = await eurSetup(h, null);
+    const r = await h.refused("goodsReceipt.create", {
+      body: { purchase_order_id: s.poId, warehouse_id: s.whId, received_date: "2026-06-15", status: "posted" },
+    });
+    expect(r).toEqual({ status: 409, error: "exchange_rate_unresolved" });
+    expect(await h.store.list(TENANT, "JournalEntry")).toEqual([]);
+    expect(await h.store.list(TENANT, "StockMovement")).toEqual([]);
+    expect(await h.onHand(s.itemId, s.whId)).toBeNull();
+  });
+
+  it("posts at 1 when the tenant declares no functional currency — the control", async () => {
+    const h = harness();
+    const s = await eurSetup(h, null);
+    await receive(h, s.poId, s.whId);
+    const f = await functional(h);
+    expect(f.balances).toEqual({ inventory: 5000, goods_received_not_invoiced: -6000, inventory_variance: 1000 });
+    expect(f.rates).toEqual(["1"]);
+  });
+});

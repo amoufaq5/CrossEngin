@@ -113,10 +113,7 @@ describe("check", () => {
     store.seed(TENANT, "2026-08", 10);
     const budget = buildAiDesignBudget({ store, maxUsdPerMonth: 25, now: fixedNow(FIXED) });
     const check = await budget.check(TENANT);
-    expect(check.allowed).toBe(true);
-    expect(check.reason).toBe("ok");
-    expect(check.spentUsd).toBe(10);
-    expect(check.remainingUsd).toBe(15);
+    expect(check).toEqual({ allowed: true, reason: "ok", spentUsd: 10, limitUsd: 25, remainingUsd: 15 });
   });
 
   it("denies at exactly the ceiling", async () => {
@@ -124,9 +121,13 @@ describe("check", () => {
     store.seed(TENANT, "2026-08", 25);
     const budget = buildAiDesignBudget({ store, maxUsdPerMonth: 25, now: fixedNow(FIXED) });
     const check = await budget.check(TENANT);
-    expect(check.allowed).toBe(false);
-    expect(check.reason).toBe("month_exceeded");
-    expect(check.remainingUsd).toBe(0);
+    expect(check).toEqual({
+      allowed: false,
+      reason: "month_exceeded",
+      spentUsd: 25,
+      limitUsd: 25,
+      remainingUsd: 0,
+    });
   });
 
   it("denies over the ceiling and never reports a negative remaining", async () => {
@@ -134,9 +135,7 @@ describe("check", () => {
     store.seed(TENANT, "2026-08", 40);
     const budget = buildAiDesignBudget({ store, maxUsdPerMonth: 25, now: fixedNow(FIXED) });
     const check = await budget.check(TENANT);
-    expect(check.allowed).toBe(false);
-    expect(check.spentUsd).toBe(40);
-    expect(check.remainingUsd).toBe(0);
+    expect(check).toMatchObject({ allowed: false, reason: "month_exceeded", spentUsd: 40, remainingUsd: 0 });
   });
 
   it("fires onDenied with the tenant, spend, and limit", async () => {
@@ -169,24 +168,26 @@ describe("check", () => {
     expect(calls).toBe(0);
   });
 
-  it("fails closed when the store throws", async () => {
+  // This test used to pin the defect as the specification: an unreadable ledger answered
+  // `month_exceeded` with `spentUsd: 25`, a figure nobody had read (ADR-0372's class; ADR-0470).
+  it("fails closed when the store throws, as unavailable and with no spend figure", async () => {
     const store = new FakeStore();
     store.failGet = true;
     const denials: Array<[string, number, number]> = [];
+    const unavailable: string[] = [];
     const budget = buildAiDesignBudget({
       store,
       maxUsdPerMonth: 25,
       now: fixedNow(FIXED),
       onDenied: (tenantId, spentUsd, limitUsd) => denials.push([tenantId, spentUsd, limitUsd]),
+      onUnavailable: (tenantId) => unavailable.push(tenantId),
     });
-    await expect(budget.check(TENANT)).resolves.toEqual({
-      allowed: false,
-      reason: "month_exceeded",
-      spentUsd: 25,
-      limitUsd: 25,
-      remainingUsd: 0,
-    });
-    expect(denials).toEqual([[TENANT, 25, 25]]);
+    const check = await budget.check(TENANT);
+    expect(check).toEqual({ allowed: false, reason: "unavailable", limitUsd: 25 });
+    expect("spentUsd" in check).toBe(false);
+    // Not reported as a spent month: the denial channel is for a figure that was read.
+    expect(denials).toEqual([]);
+    expect(unavailable).toEqual([TENANT]);
   });
 
   it("uses the default YYYY-MM period key in the store call", async () => {

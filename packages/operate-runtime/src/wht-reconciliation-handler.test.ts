@@ -27,11 +27,15 @@ function principal(role: string): ResolvedPrincipal {
   };
 }
 
-function buildHandler(store: InMemoryEntityStore, maxRows?: number) {
+const CREDIT_NOTE = { typeField: "document_type", typeValue: "credit_note", refField: "credit_note_of" } as const;
+
+function buildHandler(store: InMemoryEntityStore, maxRows?: number, opts: { creditNotes?: boolean } = {}) {
   return buildWhtReconciliationHandler({
     store,
     principalRoles,
     viewerRoles: new Set<RoleName>(["erp_admin" as RoleName]),
+    voidedStates: ["void"],
+    ...(opts.creditNotes === true ? { creditNote: CREDIT_NOTE } : {}),
     ...(maxRows !== undefined ? { maxRows } : {}),
   });
 }
@@ -353,5 +357,104 @@ describe("buildWhtReconciliationHandler — the bounded declaration", () => {
     await seedInvoices(store, { n: 10, prefix: "inv", issueDate: "2026-06-10", withheld: 10 });
     expect(bodyOf(await invoke(buildHandler(store, 10))).complete).toBe(true);
     expect(bodyOf(await invoke(buildHandler(store, 9))).complete).toBe(false);
+  });
+});
+
+// ADR-0475: a void issues a credit note that copies its invoice's `withholding_total`, so the two
+// together reported the withholding twice — once on a document that is void and once on a credit
+// note that reverses it — while the ledger held none of it.
+describe("buildWhtReconciliationHandler — voided invoices and their credit notes", () => {
+  async function voidedWithCreditNote(store: InMemoryEntityStore, opts: { readonly credited: number; readonly issueDate?: string }) {
+    await store.create(TENANT, "Invoice", {
+      id: "inv_v",
+      invoice_number: "INV-V",
+      state: "void",
+      document_type: "invoice",
+      withholding_total: 10,
+      issue_date: "2026-06-10",
+      currency: "USD",
+    });
+    await store.create(TENANT, "Invoice", {
+      id: "inv_v_cn",
+      invoice_number: "INV-V-CN",
+      state: "sent",
+      document_type: "credit_note",
+      credit_note_of: "inv_v",
+      withholding_total: opts.credited,
+      issue_date: opts.issueDate ?? "2026-06-20",
+      currency: "USD",
+    });
+  }
+
+  it("reports a fully voided invoice and its credit note as nothing withheld", async () => {
+    const store = new InMemoryEntityStore();
+    await voidedWithCreditNote(store, { credited: 10 });
+    await seedInvoices(store, { n: 1, prefix: "inv_live", issueDate: "2026-06-10", withheld: 7 });
+    const body = bodyOf(await invoke(buildHandler(store, undefined, { creditNotes: true })));
+    expect(body.rows.map((r) => r.invoiceId)).toEqual(["inv_live_00000"]);
+    expect(body.totals.withheld).toBe(7);
+  });
+
+  it("counted both before: the control without the credit-note shape doubles the void's withholding", async () => {
+    // The pre-fix reading, kept as a control: with no credit-note shape the credit note is just one
+    // more withholding invoice. 10 + 10 + 7 against the 7 that is really withheld.
+    const store = new InMemoryEntityStore();
+    await voidedWithCreditNote(store, { credited: 10 });
+    await seedInvoices(store, { n: 1, prefix: "inv_live", issueDate: "2026-06-10", withheld: 7 });
+    const handler = buildWhtReconciliationHandler({
+      store,
+      principalRoles,
+      viewerRoles: new Set<RoleName>(["erp_admin" as RoleName]),
+      voidedStates: [],
+    });
+    expect(bodyOf(await invoke(handler)).totals.withheld).toBe(27);
+  });
+
+  it("keeps the remainder of a partial credit, as the aging report does", async () => {
+    const store = new InMemoryEntityStore();
+    await voidedWithCreditNote(store, { credited: 4 });
+    const body = bodyOf(await invoke(buildHandler(store, undefined, { creditNotes: true })));
+    expect(body.rows).toEqual([expect.objectContaining({ invoiceId: "inv_v", withheld: 6, gap: 6 })]);
+  });
+
+  it("drops a voided invoice no credit note names: it was voided before it was issued", async () => {
+    const store = new InMemoryEntityStore();
+    await store.create(TENANT, "Invoice", { id: "inv_d", invoice_number: "INV-D", state: "void", withholding_total: 9, currency: "USD" });
+    expect(bodyOf(await invoke(buildHandler(store))).rows).toEqual([]);
+    // The same row in a live state is counted, so the drop is the state's and not the row's.
+    await store.update(TENANT, "Invoice", "inv_d", { state: "sent" });
+    expect(bodyOf(await invoke(buildHandler(store))).totals.withheld).toBe(9);
+  });
+
+  it("nets a credit note issued outside the period against the invoice inside it", async () => {
+    const store = new InMemoryEntityStore();
+    await voidedWithCreditNote(store, { credited: 10, issueDate: "2026-07-02" });
+    const june = bodyOf(await invoke(buildHandler(store, undefined, { creditNotes: true }), { from: "2026-06-01", to: "2026-06-30" }));
+    expect(june.rows).toEqual([]);
+    expect(june.totals.withheld).toBe(0);
+  });
+
+  it("does not net a credit note that was itself voided", async () => {
+    const store = new InMemoryEntityStore();
+    await voidedWithCreditNote(store, { credited: 10 });
+    await store.update(TENANT, "Invoice", "inv_v_cn", { state: "void" });
+    // The invoice is void and nothing credits it any more, so it is the voided-before-issue case.
+    const body = bodyOf(await invoke(buildHandler(store, undefined, { creditNotes: true })));
+    expect(body.rows).toEqual([]);
+  });
+
+  it("names the credit-note read when it hits the ceiling", async () => {
+    const store = new InMemoryEntityStore();
+    for (let i = 0; i < 12; i += 1) {
+      await store.create(TENANT, "Invoice", {
+        id: `cn_${String(i).padStart(3, "0")}`,
+        state: "sent",
+        document_type: "credit_note",
+        credit_note_of: "x",
+        withholding_total: 1,
+      });
+    }
+    const body = bodyOf(await invoke(buildHandler(store, 10, { creditNotes: true })));
+    expect(body.bounded).toContain("credit_notes");
   });
 });

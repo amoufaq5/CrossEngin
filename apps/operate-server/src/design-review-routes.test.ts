@@ -6,6 +6,9 @@ import { diffManifests, type ManifestDiffView } from "./manifest-diff.js";
 import {
   DesignerCannotApproveError,
   FOUR_EYES_OUTCOMES,
+  FOUR_EYES_UNVERIFIABLE_DETAIL,
+  MANIFEST_ACTIVE_DETAIL,
+  REVIEW_DECISION_FROM,
   buildDesignReviewRoutes,
   diffFragment,
   formatFourEyesLine,
@@ -16,6 +19,7 @@ import {
   type DesignDecisionNotifier,
   type DesignReviewCountsLike,
   type DesignApprovalInput,
+  type DesignDecisionOutcome,
   type DesignReviewDecisionInput,
   type DesignReviewListPageLike,
   type DesignReviewListQueryLike,
@@ -34,6 +38,7 @@ const TENANT = "00000000-0000-4000-8000-000000000001";
 const OTHER_TENANT = "00000000-0000-4000-8000-000000000002";
 const REVIEWER = "00000000-0000-4000-8000-0000000000aa";
 const DESIGNER = "00000000-0000-4000-8000-0000000000dd";
+const OTHER_REVIEWER = "00000000-0000-4000-8000-0000000000bb";
 
 const MANIFEST: Record<string, unknown> = {
   meta: { slug: "acme/crm" },
@@ -108,13 +113,29 @@ class FakeReviewStore implements DesignReviewStoreLike {
     return mutable;
   }
 
+  /**
+   * Set to make the next decision lose a race: the proposal moves to this review status between the
+   * route's read and the store's write, which is exactly the window the store's `UPDATE` predicate
+   * closes (ADR-0470).
+   */
+  raceTo: ReviewStatusLike | null = null;
+
+  /** The real store's predicate, modelled: the decision lands only from an allowed source status. */
   private decide(
     id: string,
-    reviewStatus: ReviewStatusLike,
+    reviewStatus: "approved" | "rejected",
     input: DesignReviewDecisionInput,
-  ): DesignReviewRecordLike | null {
-    const record = this.records.get(id);
-    if (record === undefined) return null;
+  ): DesignDecisionOutcome {
+    const before = this.records.get(id);
+    if (before === undefined) return { kind: "not_found" };
+    const record =
+      this.raceTo === null ? before : { ...before, reviewStatus: this.raceTo, reviewedBy: OTHER_REVIEWER };
+    this.raceTo = null;
+    this.records.set(id, record);
+    if (!REVIEW_DECISION_FROM[reviewStatus].includes(record.reviewStatus)) {
+      return { kind: "status_changed", current: record.reviewStatus };
+    }
+    if (reviewStatus === "rejected" && record.status === "active") return { kind: "manifest_active" };
     const next: DesignReviewRecordLike = {
       ...record,
       reviewStatus,
@@ -124,15 +145,15 @@ class FakeReviewStore implements DesignReviewStoreLike {
       updatedAt: "2026-06-02T00:00:00.000Z",
     };
     this.records.set(id, next);
-    return next;
+    return { kind: "decided", review: next };
   }
 
-  async approve(id: string, input: DesignApprovalInput): Promise<DesignReviewRecordLike | null> {
+  async approve(id: string, input: DesignApprovalInput): Promise<DesignDecisionOutcome> {
     this.approveCalls.push({ id, input });
     return this.decide(id, "approved", input);
   }
 
-  async reject(id: string, input: DesignReviewDecisionInput): Promise<DesignReviewRecordLike | null> {
+  async reject(id: string, input: DesignReviewDecisionInput): Promise<DesignDecisionOutcome> {
     this.rejectCalls.push({ id, input });
     return this.decide(id, "rejected", input);
   }
@@ -573,6 +594,118 @@ describe("design-review-routes — reject", () => {
     const again = await call(ctx, "platform.designReviews.reject", { params: { id: seeded.id } });
     expect(again.status).toBe(409);
     expect(again.body["detail"]).toBe("rejected -> rejected");
+  });
+});
+
+describe("design-review-routes — decisions under concurrency and on an active manifest (ADR-0470)", () => {
+  it("409s an approval that lost a race to a concurrent decision, rather than 404ing", async () => {
+    const { ctx, store } = makeCtx();
+    const seeded = store.seed({ reviewStatus: "pending" });
+    // The route reads `pending`; by the time the store's UPDATE runs another reviewer has rejected.
+    store.raceTo = "rejected";
+    const out = await call(ctx, "platform.designReviews.approve", { params: { id: seeded.id } });
+    expect(out.status).toBe(409);
+    expect(out.body).toEqual({
+      error: "illegal_transition",
+      detail: "rejected -> approved",
+      concurrent: true,
+    });
+    // The winner's decision stands; the loser wrote nothing.
+    expect(store.records.get(seeded.id)?.reviewStatus).toBe("rejected");
+    expect(store.records.get(seeded.id)?.reviewedBy).toBe(OTHER_REVIEWER);
+  });
+
+  it("409s the second of two approvals of one proposal", async () => {
+    const { ctx, store } = makeCtx();
+    const seeded = store.seed({ reviewStatus: "pending" });
+    store.raceTo = "approved";
+    const out = await call(ctx, "platform.designReviews.approve", { params: { id: seeded.id } });
+    expect(out.status).toBe(409);
+    expect(out.body["detail"]).toBe("approved -> approved");
+    expect(out.body["concurrent"]).toBe(true);
+  });
+
+  it("still 404s a proposal that does not exist", async () => {
+    const { ctx } = makeCtx();
+    const out = await call(ctx, "platform.designReviews.approve", { params: { id: "aim_9999" } });
+    expect(out.status).toBe(404);
+    expect(out.body["error"]).toBe("review_not_found");
+  });
+
+  it("409s rejecting an approved manifest the tenant is already served, and moves nothing", async () => {
+    const { ctx, store } = makeCtx();
+    const seeded = store.seed({ reviewStatus: "approved", status: "active", reviewedBy: REVIEWER });
+    const out = await call(ctx, "platform.designReviews.reject", { params: { id: seeded.id } });
+    expect(out.status).toBe(409);
+    expect(out.body).toEqual({ error: "manifest_active", detail: MANIFEST_ACTIVE_DETAIL });
+    expect(MANIFEST_ACTIVE_DETAIL).toContain("activate a replacement");
+    expect(store.rejectCalls).toHaveLength(0);
+    expect(store.records.get(seeded.id)?.reviewStatus).toBe("approved");
+    expect(store.records.get(seeded.id)?.status).toBe("active");
+  });
+
+  it("answers the store's manifest_active the same way when activation landed after the route read", async () => {
+    const { ctx, store } = makeCtx();
+    const seeded = store.seed({ reviewStatus: "approved", status: "draft", reviewedBy: REVIEWER });
+    store.reject = async () => ({ kind: "manifest_active" });
+    const out = await call(ctx, "platform.designReviews.reject", { params: { id: seeded.id } });
+    expect(out.status).toBe(409);
+    expect(out.body["error"]).toBe("manifest_active");
+  });
+
+  it("keeps the decidable source states in one map both layers read", () => {
+    expect(REVIEW_DECISION_FROM).toEqual({ approved: ["pending"], rejected: ["pending", "approved"] });
+  });
+});
+
+describe("design-review-routes — four-eyes needs a person (ADR-0470)", () => {
+  function asServiceAccount(seededId: string): HandlerInput {
+    return {
+      request: { query: {} } as never,
+      route: {} as never,
+      principal: {
+        principalId: "00000000-0000-4000-8000-000000000000",
+        tenantId: TENANT,
+        principalKind: "service_account",
+        authScheme: "api_key_header",
+        grantedScopes: ["platform_admin"],
+        mfaProofAgeSeconds: null,
+        resolvedAt: "2026-06-01T00:00:00.000Z",
+      } as ResolvedPrincipal,
+      params: { id: seededId },
+      parsedBody: null,
+    };
+  }
+
+  it("403s an approval by a credential that names no person while self-approval is refused", async () => {
+    const { ctx, store } = makeCtx();
+    const seeded = store.seed({ reviewStatus: "pending" });
+    const out = (await findHandler(ctx, "platform.designReviews.approve")(
+      asServiceAccount(seeded.id),
+    )) as JsonOut;
+    expect(out.status).toBe(403);
+    expect(out.body).toEqual({ error: "four_eyes_unverifiable", detail: FOUR_EYES_UNVERIFIABLE_DETAIL });
+    expect(store.approveCalls).toHaveLength(0);
+    expect(store.records.get(seeded.id)?.reviewStatus).toBe("pending");
+  });
+
+  it("admits the same credential when self-approval is permitted", async () => {
+    const { ctx, store } = makeCtx();
+    const seeded = store.seed({ reviewStatus: "pending" });
+    const permitted: DesignReviewContext = { ...ctx, selfApproval: "permitted" };
+    const out = (await findHandler(permitted, "platform.designReviews.approve")(
+      asServiceAccount(seeded.id),
+    )) as JsonOut;
+    expect(out.status).toBe(200);
+  });
+
+  it("lets the same credential reject, which withholds nothing", async () => {
+    const { ctx, store } = makeCtx();
+    const seeded = store.seed({ reviewStatus: "pending" });
+    const out = (await findHandler(ctx, "platform.designReviews.reject")(
+      asServiceAccount(seeded.id),
+    )) as JsonOut;
+    expect(out.status).toBe(200);
   });
 });
 

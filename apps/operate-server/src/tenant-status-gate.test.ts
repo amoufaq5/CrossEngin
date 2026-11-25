@@ -9,9 +9,14 @@ import {
   READ_BLOCKING_STATES,
   TENANT_GATE_DECISIONS,
   WRITE_BLOCKING_STATES,
+  TENANT_STATE_REFUSAL_REASONS,
   applyTenantStatusGate,
   surveyTenantStatusCoverage,
+  tenantStateProblem,
   tenantStatusDirectoryFromStore,
+  tenantStatusOpenApiDeclaration,
+  tenantStatusUnavailableProblem,
+  tenantUnknownProblem,
   withTenantStatus,
   type TenantGateDecision,
   type TenantStatusDirectory,
@@ -289,7 +294,10 @@ describe("applyTenantStatusGate", () => {
     registry.register("invoice.create", ok);
     registry.register("platform.tenants.list", ok);
     const wrapped = applyTenantStatusGate(registry, { directory: directoryOf("suspended") });
-    expect(wrapped).toBe(2);
+    // The set it returns is what the API description declares the gate's 403/503 on (ADR-0471): the
+    // two it wrapped, and not the exempt one it left identical.
+    expect([...wrapped].sort()).toEqual(["invoice.create", "invoice.list"]);
+    expect(wrapped.has("platform.tenants.list")).toBe(false);
     expect(registry.resolve("platform.tenants.list")).toBe(ok);
     expect(registry.resolve("invoice.create")).not.toBe(ok);
     const gatedCreate = registry.resolve("invoice.create");
@@ -300,7 +308,7 @@ describe("applyTenantStatusGate", () => {
   it("covers the whole registry, so a route added before it cannot be missed", () => {
     const registry = new HandlerRegistry();
     for (let i = 0; i < 25; i += 1) registry.register(`e${i.toString()}.list`, ok);
-    expect(applyTenantStatusGate(registry, { directory: directoryOf("active") })).toBe(25);
+    expect(applyTenantStatusGate(registry, { directory: directoryOf("active") }).size).toBe(25);
     expect(registry.size()).toBe(25);
     for (const id of registry.operationIds()) expect(registry.resolve(id)).not.toBe(ok);
   });
@@ -311,6 +319,67 @@ describe("applyTenantStatusGate", () => {
     registry.register("a.list", ok);
     applyTenantStatusGate(registry, { directory: directoryOf("active") });
     expect(registry.operationIds()).toEqual(["b.list", "a.list"]);
+  });
+
+  it("returns an empty set, not a count of zero, when every operation is exempt", () => {
+    const registry = new HandlerRegistry();
+    registry.register("platform.tenants.list", ok);
+    const wrapped = applyTenantStatusGate(registry, { directory: directoryOf("active") });
+    expect(wrapped.size).toBe(0);
+    expect(registry.resolve("platform.tenants.list")).toBe(ok);
+  });
+});
+
+describe("tenantStatusOpenApiDeclaration", () => {
+  const gated = new Set(["invoice.create"]);
+  const decl = tenantStatusOpenApiDeclaration(gated);
+  const bodyOf = (out: ReturnType<typeof tenantStateProblem>): Record<string, unknown> => {
+    if (out.kind !== "json") throw new Error("the gate's refusals are json");
+    return out.body as Record<string, unknown>;
+  };
+
+  it("carries the set the gate returned, unchanged", () => {
+    expect(decl.gatedOperationIds).toBe(gated);
+  });
+
+  it("describes every 403 body the gate can send: its type, its reason and its state", () => {
+    const bodies = [
+      ...WRITE_BLOCKING_STATES.map((st) => bodyOf(tenantStateProblem(st, true))),
+      ...READ_BLOCKING_STATES.map((st) => bodyOf(tenantStateProblem(st, false))),
+      bodyOf(tenantUnknownProblem()),
+    ];
+    expect(bodies.length).toBeGreaterThan(3);
+    for (const body of bodies) {
+      expect(body["type"]).toBe(decl.refused.type);
+      expect(body["status"]).toBe(403);
+      expect(decl.refused.reasons).toContain(body["reason"]);
+      const state = body["tenantStatus"];
+      if (state !== null) expect(decl.refused.states).toContain(state);
+    }
+    // Every declared reason is one a body can carry, so the enum is no wider than the gate.
+    const sent = new Set(bodies.map((b) => b["reason"]));
+    expect([...decl.refused.reasons].sort()).toEqual([...sent].sort());
+    expect(decl.refused.reasons).toEqual(TENANT_STATE_REFUSAL_REASONS);
+  });
+
+  it("names exactly the states the gate refuses in, never one it serves", () => {
+    const refused = new Set([...WRITE_BLOCKING_STATES, ...READ_BLOCKING_STATES]);
+    expect([...decl.refused.states].sort()).toEqual([...refused].sort());
+    expect(decl.refused.states).not.toContain("active");
+    // A state the gate admits for every method is absent: the declaration does not over-promise.
+    for (const st of TENANT_LIFECYCLE_STATES) {
+      expect(decl.refused.states.includes(st)).toBe(refused.has(st));
+    }
+  });
+
+  it("describes the 503 the gate sends, including the retry-after it always sets", () => {
+    const out = tenantStatusUnavailableProblem();
+    if (out.kind !== "json") throw new Error("json");
+    const body = out.body as Record<string, unknown>;
+    expect(out.status).toBe(503);
+    expect(body["type"]).toBe(decl.unavailable.type);
+    expect(body["reason"]).toBe(decl.unavailable.reason);
+    expect(out.headers?.["retry-after"]).toBe(String(decl.unavailable.retryAfterSeconds));
   });
 });
 

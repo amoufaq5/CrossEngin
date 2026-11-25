@@ -404,10 +404,30 @@ export function buildDesignSystemPrompt(opts: {
     "- Every reference target, relation endpoint, permission entity, workflow entity, and granted role must resolve to something declared in the same manifest.",
     "",
     parent !== null
-      ? "Example of a complete valid manifest. It is standalone — yours must also carry meta.extends, and must not reuse a parent entity name:"
+      ? `Example of a complete valid manifest extending "${parent.slug}". Its entity names are outside the parent's list; yours must be too:`
       : "Example of a complete valid manifest:",
-    JSON.stringify(DESIGN_EXAMPLE_MANIFEST, null, 2),
+    JSON.stringify(designExampleManifestFor(parent), null, 2),
   ].join("\n");
+}
+
+/**
+ * The worked example, as the prompt must show it (ADR-0470).
+ *
+ * With a parent in play the example **carries `meta.extends`**, where it used to be the standalone
+ * example with a sentence above it saying "yours must also carry meta.extends". That was the one rule
+ * the example contradicted, and a model resolves a disagreement between an instruction and an example
+ * by following the example — so the example was teaching the shape `parentLineageIssues` refuses, and
+ * every design that followed it cost a corrective retry. It is the example's own manifest with one key
+ * added, so the standalone bytes are unchanged and the extending one passes `parentLineageIssues`
+ * (its entity names are disjoint from every pack's, see `DESIGN_EXAMPLE_MANIFEST`).
+ */
+export function designExampleManifestFor(parent: DesignParentPack | null): Record<string, unknown> {
+  if (parent === null) return DESIGN_EXAMPLE_MANIFEST;
+  const meta = DESIGN_EXAMPLE_MANIFEST["meta"];
+  return {
+    ...DESIGN_EXAMPLE_MANIFEST,
+    meta: { ...(typeof meta === "object" && meta !== null ? meta : {}), extends: [parent.slug] },
+  };
 }
 
 /**

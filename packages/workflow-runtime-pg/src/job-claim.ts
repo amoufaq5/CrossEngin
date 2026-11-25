@@ -173,8 +173,23 @@ export async function claimDueJobs(
 }
 
 /**
+ * Every value this package writes into `meta.job_runs.status` — the enqueue's `pending`, and the
+ * four terminal values a finalize writes (`job-engine.ts`: `completed`, and `failed` /
+ * `dead-lettered` through `finalizeFailure`; `job-cancellation.ts`: `cancelled`).
+ *
+ * Exported so the serving binary can ask the live catalog whether it admits each one before it mounts
+ * the worker (ADR-0469): a database whose CHECK predates a value refuses that finalize `23514`
+ * *inside* the run's last statement, so the run stays `pending`, is re-claimed when its lease lapses,
+ * re-executes its handler and is refused again — a run that can never terminate while boot was quiet.
+ * A workspace test reads the three modules as text and asserts this list is exactly what they write.
+ */
+export const JOB_RUN_STATUSES_WRITTEN = ["pending", "completed", "failed", "dead-lettered", "cancelled"] as const;
+
+/**
  * The tenants whose queues a per-tenant claim visits. Every status but `deleted`: a suspended or
- * archived tenant's already-enqueued runs are still the platform's work to finish, while a deleted
+ * archived tenant's already-enqueued runs are still the platform's work to *finalize* — they are
+ * claimed so each one ends as a recorded `tenant_not_writable` failure the system writer raises
+ * (ADR-0469), rather than being skipped into a `pending` backlog nothing reports — while a deleted
  * tenant's queue rows were erased with it (`meta.job_runs` is not a retained table), so visiting one
  * would only cost a round trip. `meta.tenants` carries no row-level security, which is what lets a
  * confined session enumerate the tenants it then claims for one at a time.
@@ -205,13 +220,37 @@ export interface ClaimDueJobsPerTenantOptions extends Omit<ClaimDueJobsOptions, 
    * the cancellation reaper's per-tenant form, so it reaches the rows a confined session can see.
    */
   readonly beforeClaim?: (tx: PgConnection, tenantId: string) => Promise<void>;
+  /**
+   * Told about each tenant whose visit failed. **Required**: a visit runs under its own savepoint
+   * and is rolled back alone, so the poll goes on to the other tenants (ADR-0469) — and a failure
+   * that is survived must be said, or one tenant's broken queue would read exactly like an idle one.
+   */
+  readonly onTenantClaimFailed: (failure: TenantClaimFailure) => void;
 }
+
+/** One tenant's visit that raised and was rolled back to its savepoint. */
+export interface TenantClaimFailure {
+  readonly tenantId: string;
+  readonly error: unknown;
+  /**
+   * Whether the visit that failed was the tenant's first this poll — the one that runs
+   * `beforeClaim`. Only then was a reap rolled back with it: a tenant that filled its share in pass
+   * one and failed in pass two keeps everything its first, released visit committed, including the
+   * runs its reap swept, so a caller discarding those as rolled back would under-report a real reap.
+   */
+  readonly firstVisit: boolean;
+}
+
+/** The savepoint each tenant's visit runs under, so a raise costs that tenant alone. */
+export const JOB_CLAIM_TENANT_SAVEPOINT = "job_claim_tenant";
 
 export interface ClaimDueJobsPerTenantResult {
   readonly claimed: readonly ClaimedJob[];
+  /** The tenants whose visit failed this poll and was rolled back; reported through the callback too. */
+  readonly failedTenants: readonly string[];
   /** Where the next poll should start, so the head of the tenant list is not always served first. */
   readonly nextStartIndex: number;
-  /** How many tenants the first pass asked — the poll's cost is two statements per tenant asked. */
+  /** How many tenants the first pass asked — the poll's cost is four statements per tenant asked (the savepoint, the context, the claim, the release). */
   readonly tenantsVisited: number;
 }
 
@@ -225,10 +264,19 @@ export interface ClaimDueJobsPerTenantResult {
  * ADR-0409 removed from `meta.operate_tenant_manifests`. The tenant is a fact about the row, so the
  * claim takes it from the row's tenant — enumerated from `meta.tenants`, which has no RLS.
  *
- * **One transaction, two statements per tenant asked**, and the cost is stated rather than hidden: an
- * idle poll over N tenants is `2N + 2` round trips. `set_config(…, true)` is transaction-local and
+ * **One transaction, four statements per tenant asked**, and the cost is stated rather than hidden: an
+ * idle poll over N tenants is `4N + 2` round trips (savepoint, context, claim, release — ADR-0469
+ * added the two savepoint statements). `set_config(…, true)` is transaction-local and
  * re-settable, so the tenants share one `BEGIN`/`COMMIT`; the row locks the claims take are held only
  * until that commit.
+ *
+ * **One savepoint per visit.** Without it, one tenant's raise — a reaper statement its rows refuse, a
+ * claim the database rejects — aborted the whole transaction, so every tenant's claims for that
+ * poll were lost and the next statement answered `25P02`: one broken queue stopped the fleet. Each
+ * visit is now `SAVEPOINT` … `RELEASE`, and a raise is `ROLLBACK TO` + `RELEASE` (the savepoint
+ * survives `ROLLBACK TO`, so it is released too — ADR-0360's measured rule), reported through the
+ * required `onTenantClaimFailed`, and the poll continues. A failed tenant is not asked again in
+ * pass two. If the rollback itself raises, the connection is unusable and the poll throws.
  *
  * Fairness. Pass one asks each tenant, starting at `startIndex` and rotating, for at most
  * `ceil(limit / tenants)` runs, so one tenant's backlog cannot fill every slot; pass two gives any
@@ -244,20 +292,38 @@ export async function claimDueJobsPerTenant(
   const tenants = options.tenantIds;
   for (const t of tenants) assertScopeTenantId(t);
   const n = tenants.length;
-  if (n === 0) return { claimed: [], nextStartIndex: 0, tenantsVisited: 0 };
+  if (n === 0) return { claimed: [], failedTenants: [], nextStartIndex: 0, tenantsVisited: 0 };
   const start = (((options.startIndex ?? 0) % n) + n) % n;
   const share = Math.max(1, Math.ceil(limit / n));
-  const { tenantIds: _ignored, startIndex: _start, beforeClaim, ...claimOpts } = options;
+  const {
+    tenantIds: _ignored,
+    startIndex: _start,
+    beforeClaim,
+    onTenantClaimFailed,
+    ...claimOpts
+  } = options;
 
   return conn.transaction(async (tx) => {
     const claimed: ClaimedJob[] = [];
     const saturated: string[] = [];
+    const failed: string[] = [];
     let visited = 0;
     let nextStartIndex = start;
     const claimFor = async (tenantId: string, cap: number, first: boolean): Promise<number> => {
-      await tx.query(SET_TENANT_CONTEXT_SQL, [tenantId]);
-      if (first && beforeClaim !== undefined) await beforeClaim(tx, tenantId);
-      const got = await claimDueJobs(tx, { ...claimOpts, limit: cap, tenantId });
+      await tx.query(`SAVEPOINT ${JOB_CLAIM_TENANT_SAVEPOINT}`);
+      let got: readonly ClaimedJob[];
+      try {
+        await tx.query(SET_TENANT_CONTEXT_SQL, [tenantId]);
+        if (first && beforeClaim !== undefined) await beforeClaim(tx, tenantId);
+        got = await claimDueJobs(tx, { ...claimOpts, limit: cap, tenantId });
+      } catch (error) {
+        await tx.query(`ROLLBACK TO SAVEPOINT ${JOB_CLAIM_TENANT_SAVEPOINT}`);
+        await tx.query(`RELEASE SAVEPOINT ${JOB_CLAIM_TENANT_SAVEPOINT}`);
+        failed.push(tenantId);
+        onTenantClaimFailed({ tenantId, error, firstVisit: first });
+        return -1;
+      }
+      await tx.query(`RELEASE SAVEPOINT ${JOB_CLAIM_TENANT_SAVEPOINT}`);
       claimed.push(...got);
       return got.length;
     };
@@ -274,7 +340,7 @@ export async function claimDueJobsPerTenant(
       if (claimed.length >= limit) break;
       await claimFor(tenantId, limit - claimed.length, false);
     }
-    return { claimed, nextStartIndex, tenantsVisited: visited };
+    return { claimed, failedTenants: failed, nextStartIndex, tenantsVisited: visited };
   });
 }
 
@@ -342,10 +408,38 @@ export interface JobQueueVisibilityReport {
  * Intended for the boot path, beside the supervisor's own refusals: a worker fleet that cannot see
  * its queue should say so once, loudly, instead of polling in silence forever.
  */
+/**
+ * Who is asking, so the probe's sentence names the asker's own act and remedy (ADR-0469).
+ *
+ * The catalog question is the same for every cross-tenant reader of a tenant-isolated table; the
+ * sentence an operator reads is not. The replayer reused this probe and so told an operator that
+ * *"the job worker claims per tenant"* about the workflow projection tables — true of a different
+ * subsystem and naming a remedy that does not apply to them.
+ */
+export interface QueueVisibilitySubject {
+  /** What this reader does across tenants, as a noun phrase: "a cross-tenant claim". */
+  readonly act: string;
+  /** What an operator should know, or do, when the table's policies confine this role. */
+  readonly whenConfined: string;
+}
+
+export const JOB_WORKER_VISIBILITY_SUBJECT: QueueVisibilitySubject = {
+  act: "a cross-tenant claim",
+  whenConfined:
+    "The job worker claims per tenant under each tenant's own context (claimDueJobsPerTenant), " +
+    "which serves the queue for this role; granting it BYPASSRLS would end the confinement the " +
+    "serving role exists for (ADR-0424) and is not the remedy",
+};
+
 export async function probeJobQueueVisibility(
   conn: PgConnection,
-  options: { readonly schema?: string; readonly table?: string } = {},
+  options: {
+    readonly schema?: string;
+    readonly table?: string;
+    readonly subject?: QueueVisibilitySubject;
+  } = {},
 ): Promise<JobQueueVisibilityReport> {
+  const subject = options.subject ?? JOB_WORKER_VISIBILITY_SUBJECT;
   const schema = options.schema ?? DEFAULT_SCHEMA;
   if (!SCHEMA_RE.test(schema)) throw new Error(`invalid schema identifier: ${JSON.stringify(schema)}`);
   const table = options.table ?? "job_runs";
@@ -384,7 +478,7 @@ export async function probeJobQueueVisibility(
       bypassesRls,
       detail:
         `'${role}' is exempt from ${schema}.${table}'s policies (${sessionPolicyVisibilityReason(v)}), ` +
-        "so a cross-tenant claim sees every tenant's runs",
+        `so ${subject.act} sees every tenant's rows`,
     };
   }
   return {
@@ -395,13 +489,11 @@ export async function probeJobQueueVisibility(
     detail:
       `Postgres will apply ${schema}.${table}'s policies to '${role}' ` +
       `(${sessionPolicyVisibilityReason(v)}), and the table has only a tenant-isolation policy — so ` +
-      "a single cross-tenant claim with no app.current_tenant_id set matches nothing. " +
+      `${subject.act} with no app.current_tenant_id set matches nothing. ` +
       (v.rlsForced && isOwner
         ? "Owning the table is not enough here: FORCE ROW LEVEL SECURITY confines the owner too. "
         : "") +
-      "The job worker claims per tenant under each tenant's own context (claimDueJobsPerTenant), " +
-      "which serves the queue for this role; granting it BYPASSRLS would end the confinement the " +
-      "serving role exists for (ADR-0424) and is not the remedy",
+      subject.whenConfined,
   };
 }
 

@@ -17,15 +17,23 @@ import {
   type ListSqlAdapter,
   type UnserveableListSurface,
 } from "./list-sql.js";
-import { rawFoldCall, SEARCH_DICTIONARY, SEARCH_FUNCTION_BODY } from "./search-function.js";
+import {
+  rawFoldCall,
+  SEARCH_DICTIONARY,
+  SEARCH_FUNCTION_BODY,
+  searchFunctionCall,
+} from "./search-function.js";
 
-// A JSONB-style adapter: fields read from `document ->> 'field'`, text compares.
+// A JSONB-style adapter: fields read from `document ->> 'field'`, text compares. It declares the
+// indexable fold — the column store's declaration — so the fold tests below compare the two folds a
+// store can choose, now that the choice is required rather than defaulted (ADR-0474).
 const adapter: ListSqlAdapter = {
   columnExpr: (field) =>
     field === "unknown" ? columnUnavailable("not_a_column") : sqlColumn(`document ->> '${field}'`),
   castSuffix: () => "",
   valueType: () => "text",
   idExpr: "record_id",
+  foldText: (sql) => searchFunctionCall(sql),
 };
 
 /** The JSONB adapter `entity-ops` builds when the manifest declares `amount`/`qty` numeric. */
@@ -40,6 +48,7 @@ function typedAdapter(types: Readonly<Record<string, ListValueType>>): ListSqlAd
     castSuffix: (field) => (of(field) === "numeric" ? "::numeric" : ""),
     valueType: of,
     idExpr: "record_id",
+    foldText: (sql) => searchFunctionCall(sql),
   };
 }
 
@@ -577,9 +586,9 @@ describe("ListSqlAdapter.foldText — the declared accent fold", () => {
     foldText: (sql) => rawFoldCall(sql),
   };
 
-  it("defaults to the indexable wrapper when the store declares nothing", () => {
-    // The direction is deliberate: an absent declaration errs toward correct-and-slower, never
-    // toward fast-and-unindexable (ADR-0340's ordering argument).
+  it("uses the indexable wrapper when the store declares it", () => {
+    // There is no default to fall back to any more: a store says which fold it wants, and an
+    // adapter without `foldText` is a compile error (see the `@ts-expect-error` below).
     const params: unknown[] = [];
     const parts = buildListSql(query({ filters: [{ field: "name", op: "contains", value: "x" }] }), adapter, [], params);
     expect(parts.where).toContain("public.ce_unaccent(");
@@ -620,6 +629,14 @@ describe("ListSqlAdapter.foldText — the declared accent fold", () => {
   it("pins the same dictionary in both folds, so the two stores agree about which rows match", () => {
     expect(rawFoldCall("x")).toContain(`'${SEARCH_DICTIONARY}'::regdictionary`);
     expect(SEARCH_FUNCTION_BODY).toContain(`'${SEARCH_DICTIONARY}'::regdictionary`);
+  });
+
+  it("cannot be omitted: an adapter with no fold does not typecheck", () => {
+    // Evaluated by `tsconfig.typecheck.json` and not by vitest (ADR-0307's split): removing the
+    // `foldText` requirement makes this directive unused, which is `TS2578` and a red typecheck.
+    // @ts-expect-error — `foldText` is required on `ListSqlAdapter`.
+    const omitted: ListSqlAdapter = { columnExpr: adapter.columnExpr, castSuffix: () => "", idExpr: "id" };
+    expect(typeof omitted.columnExpr).toBe("function");
   });
 
   it("binds the needle exactly once however the fold is declared", () => {
@@ -669,9 +686,9 @@ describe("the real document-store adapter's fold", () => {
     expect(sql.split(`public.unaccent('${SEARCH_DICTIONARY}'::regdictionary,`).length - 1).toBe(4);
   });
 
-  it("would name it if the declaration were dropped, so the assertion above is not vacuous", () => {
-    // The same two surfaces built through the default fold, which is what `entity-ops.ts` would get
-    // by deleting its one `foldText` line. Four wrapper calls where the real store has none.
+  it("would name it under the column store's fold, so the assertion above is not vacuous", () => {
+    // The same two surfaces built through the indexable fold, which is what `entity-ops.ts` would
+    // get by declaring the column store's choice. Four wrapper calls where the real store has none.
     const params: unknown[] = [];
     const parts = buildListSql(
       query({ filters: [{ field: "name", op: "contains", value: "x" }], search: { term: "y", fields: ["notes"] } }),

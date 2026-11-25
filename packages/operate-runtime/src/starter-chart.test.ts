@@ -29,18 +29,20 @@ import {
 import type { TaxRemittanceWiring } from "./tax-remittance.js";
 import type { EntityRecord } from "./store.js";
 import { InMemoryEntityStore } from "./store.js";
-import type {
-  SystemActor,
-  SystemEntityAccess,
-  SystemReadQuery,
-  SystemWriteResult,
-  TenantEntityAccess,
+import {
+  NO_TENANT_REGISTRY_STANDING,
+  type SystemActor,
+  type SystemEntityAccess,
+  type SystemReadQuery,
+  type SystemWriteResult,
+  type TenantEntityAccess,
 } from "./system-writer.js";
 
 const TENANT = "11111111-1111-4111-8111-111111111111";
 const ACTOR: SystemActor = {
   roles: ["erp_admin"],
   origin: { kind: "provisioning", operation: "starter_chart", provisioningId: "areq_0001" },
+  standing: NO_TENANT_REGISTRY_STANDING,
 };
 
 function ledgerAccountEntity(): Entity {
@@ -97,6 +99,7 @@ function fakeAccess(options: FakeOptions = {}) {
   let readIndex = 0;
   const tenantAccess = (tenantId: string): TenantEntityAccess => ({
     tenantId,
+    assertWritable: () => Promise.resolve(),
     create(entity, body) {
       expect(entity).toBe(STARTER_CHART_ENTITY);
       bodies.push({ ...body });

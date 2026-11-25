@@ -1,3 +1,5 @@
+import { toTableName } from "@crossengin/kernel/ddl";
+import type { Manifest } from "@crossengin/kernel/manifest";
 import type { PgConnection } from "@crossengin/kernel-pg";
 
 /**
@@ -395,43 +397,106 @@ export async function ensureSearchFunction(conn: PgConnection): Promise<SearchFu
  * evaluate the predicate before the policy and the whole thing becomes a post-policy filter on a
  * sequential scan. Measured both ways on a 200,000-row table -- as the owner, `Bitmap Index Scan on
  * employee_family_name_utrgm`; as the non-owner `serving` role with tenant context, `Seq Scan …
- * Rows Removed by Filter: 199000`.
+ * Rows Removed by Filter: 199000`. It is **not fixable here**: `ALTER FUNCTION ce_unaccent(text)
+ * LEAKPROOF` leaves the plan a `Seq Scan`, measured, because `texticlike` is the non-leakproof half
+ * and marking a core text operator leakproof is not a thing a platform does to its operators'
+ * databases.
  *
- * Three facts make it worth reporting rather than fixing. It is **pre-existing**: a *bare*
- * `family_name ILIKE '%…%'` against the superseded plain-column index is a `Seq Scan` for the same
- * non-owner too, so the old indexes were dead for two independent reasons and this increment
- * removes one of them. It is **not fixable here**: `ALTER FUNCTION ce_unaccent(text) LEAKPROOF`
- * leaves the plan a `Seq Scan`, measured, because `texticlike` is the non-leakproof half and
- * marking a core text operator leakproof is not a thing a platform does to its operators' databases.
- * And it is **not a defect on the deployment this serves**: ADR-0349 records that a
- * `--store pg-columns` serving role must own its entity tables, since `ensureSchema` issues
- * owner-only `ALTER` and policy statements on every boot -- so for that role RLS is not the
- * confinement and the index is reached.
+ * **Asked of a served table, and no longer inferred from ownership** (ADR-0472). The previous probe
+ * read only `rolsuper OR rolbypassrls` and answered `owned_tables_only` for everything else, on an
+ * argument that has expired: *"ADR-0349 records that a `--store pg-columns` serving role must own its
+ * entity tables, since `ensureSchema` issues owner-only `ALTER` and policy statements on every boot
+ * -- so for that role RLS is not the confinement and the index is reached."* Since ADR-0424 the API
+ * connects as `crossengin_app`, which owns nothing, and since ADR-0440 `column-schema` is an owner
+ * one-shot and the API's `ensureSchema` only verifies. So on the shipped stack the clause *"reached
+ * on tables this role owns"* was printed for a role owning none -- a reach the role does not have.
+ * The question is `row_security_active` on one table the store serves, which is the executor's own
+ * answer (ADR-0362's rule) and exists by boot: `migrate` creates `meta.operate_entity_records`, and
+ * the owner's `column-schema` step creates the entity tables before the API starts.
+ *
+ *   - `rls_exempt` — the role is `SUPERUSER` or `BYPASSRLS`, so no table confines it.
+ *   - `not_confined` — Postgres says RLS does not apply to this session on the probed table (the
+ *     role owns it without `FORCE`), so the index is reachable there.
+ *   - `confined` — RLS applies, so `?q=` and `[contains]` are a sequential scan on that table.
+ *   - `unknown` — no table was named, the table does not exist yet, or the probe failed; nothing is
+ *     claimed about the plan.
  */
-export const SEARCH_INDEX_REACHES = ["every_table", "owned_tables_only", "unknown"] as const;
+export const SEARCH_INDEX_REACHES = ["rls_exempt", "not_confined", "confined", "unknown"] as const;
 export type SearchIndexReach = (typeof SEARCH_INDEX_REACHES)[number];
 
+export interface SearchIndexReachProbe {
+  readonly reach: SearchIndexReach;
+  /** The table `row_security_active` was asked about, or null when none was named. */
+  readonly table: string | null;
+  /** Why the answer is `unknown`, and null otherwise. */
+  readonly detail: string | null;
+}
+
+/** A schema-qualified relation name this module will hand to `to_regclass`, never to SQL text. */
+const QUALIFIED_TABLE_RE = /^[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*$/;
+
 /**
- * Asks the two role facts that are table-independent.
+ * The table a boot line's reach is asked of: the one the store's `?q=` reads.
  *
- * Deliberately **not** `row_security_active`, which `kernel-pg` exposes and which is the right
- * question one argument later: it needs a table, and this runs before `ensureSchema` has created
- * any. So the answer is bounded on purpose -- `every_table` is conclusive (an exempt role is never
- * confined), and `owned_tables_only` says the rest depends on ownership rather than claiming the
- * index is unreachable.
+ * `--store pg` serves every entity from `<schema>.operate_entity_records` (default `meta`), and
+ * `--store pg-columns` from one table per entity in `<schema>` (default `public`), all created by one
+ * owner and carrying one tenant policy shape — so one of them answers for the rest. The first entity
+ * in declaration order, because it is deterministic and every entity table is created together.
+ * `null` for a manifest declaring no entity, which leaves the reach `unknown` rather than guessing.
  */
-export async function probeSearchIndexReach(conn: PgConnection): Promise<SearchIndexReach> {
+export function searchReachTable(
+  store: SearchStoreKind,
+  manifest: Manifest,
+  schema: string | null,
+): string | null {
+  if (store === "pg") return `${schema ?? "meta"}.operate_entity_records`;
+  const first = (manifest.entities ?? [])[0];
+  return first === undefined ? null : `${schema ?? "public"}.${toTableName(first.name)}`;
+}
+
+/**
+ * Asks whether RLS confines this session on `table`, and whether the role is exempt everywhere.
+ *
+ * `to_regclass` answers NULL for a table that does not exist, and the `CASE` keeps
+ * `row_security_active` from being handed a NULL — which would raise rather than answer — so an
+ * absent table is `unknown` with that reason, not a refusal. The table name is a **bound parameter**
+ * to `to_regclass`, never interpolated, and refused here when it is not a plain `schema.table`.
+ */
+export async function probeSearchIndexReach(
+  conn: PgConnection,
+  table: string | null,
+): Promise<SearchIndexReachProbe> {
+  if (table !== null && !QUALIFIED_TABLE_RE.test(table)) {
+    return { reach: "unknown", table, detail: "not a schema-qualified table name" };
+  }
   try {
-    const res = await conn.query<{ readonly exempt: boolean }>(
-      "SELECT (rolsuper OR rolbypassrls) AS exempt FROM pg_roles WHERE rolname = current_user",
+    const res = await conn.query<{ readonly exempt: boolean; readonly present: boolean; readonly confined: boolean | null }>(
+      `SELECT (r.rolsuper OR r.rolbypassrls) AS exempt,
+              (to_regclass($1::text) IS NOT NULL) AS present,
+              CASE WHEN to_regclass($1::text) IS NULL THEN NULL
+                   ELSE row_security_active(to_regclass($1::text)) END AS confined
+         FROM pg_roles r WHERE r.rolname = current_user`,
+      [table],
     );
     const row = res.rows[0];
-    if (row === undefined) return "unknown";
-    return row.exempt ? "every_table" : "owned_tables_only";
-  } catch {
-    return "unknown";
+    if (row === undefined) return { reach: "unknown", table, detail: "current_user has no pg_roles row" };
+    if (row.exempt) return { reach: "rls_exempt", table, detail: null };
+    if (table === null) return { reach: "unknown", table, detail: "no served table was named" };
+    if (!row.present || row.confined === null) {
+      return { reach: "unknown", table, detail: "the table does not exist yet" };
+    }
+    return { reach: row.confined ? "confined" : "not_confined", table, detail: null };
+  } catch (err) {
+    return { reach: "unknown", table, detail: err instanceof Error ? err.message : String(err) };
   }
 }
+
+/** The answer a caller that asked nothing holds: no table, no claim. */
+export const SEARCH_INDEX_REACH_UNASKED: SearchIndexReachProbe = Object.freeze({
+  reach: "unknown",
+  table: null,
+  detail: null,
+});
 
 /**
  * The two stores `ensureSearchExtension` runs under (`--store memory` opens no connection).
@@ -459,18 +524,30 @@ const STORE_PREDICATE_CALLS_SEARCH_FUNCTION: Readonly<Record<SearchStoreKind, bo
   "pg-columns": true,
 });
 
-/** The clause appended to a healthy boot line, so it states a reach rather than claiming a plan. */
-function reachClause(reach: SearchIndexReach): string {
-  switch (reach) {
-    case "every_table":
-      return "the predicate and the trigram index are one expression, and this role is RLS-exempt";
-    case "owned_tables_only":
+/**
+ * The clause appended to a healthy boot line, so it states a reach rather than claiming a plan.
+ *
+ * A switch over the enum, so a fifth reach is a compile error here rather than a sentence that
+ * inherits whichever arm a chain ended on.
+ */
+function reachClause(probe: SearchIndexReachProbe): string {
+  const joined = "the predicate and the trigram index are one expression";
+  switch (probe.reach) {
+    case "rls_exempt":
+      return `${joined}, and this role is RLS-exempt`;
+    case "not_confined":
+      return `${joined}, and RLS does not confine this role on ${probe.table ?? "the probed table"}, so the index is reachable there`;
+    case "confined":
       return (
-        "the predicate and the trigram index are one expression, reached on tables this role owns" +
-        " — RLS confines ILIKE to a sequential scan because texticlike is not LEAKPROOF"
+        `${joined}, but RLS confines this role on ${probe.table ?? "the probed table"} — so ?q= and` +
+        " [contains] are a sequential scan on every entity table this store serves (each carries the" +
+        " same tenant policy and owner), because texticlike is not LEAKPROOF and cannot be evaluated" +
+        " ahead of the policy. The index serves only a session RLS does not confine."
       );
     case "unknown":
-      return "the predicate and the trigram index are one expression";
+      return probe.detail === null
+        ? joined
+        : `${joined}; whether RLS confines this role could not be established (${probe.detail}), so nothing is claimed about the plan`;
   }
 }
 
@@ -548,7 +625,7 @@ function dependentsClause(state: SearchFunctionState): string | null {
 export function searchFunctionLine(
   probe: SearchFunctionProbe,
   store: SearchStoreKind,
-  reach: SearchIndexReach = "unknown",
+  reach: SearchIndexReachProbe = SEARCH_INDEX_REACH_UNASKED,
 ): string {
   if (!STORE_PREDICATE_CALLS_SEARCH_FUNCTION[store]) return documentStoreLine(probe, store);
   const sentence = stateSentence(probe, reach);
@@ -576,11 +653,11 @@ function documentStoreLine(probe: SearchFunctionProbe, store: SearchStoreKind): 
   const state = probe.state;
   if (state === "dictionary_absent") {
     return (
-      `${stateSentence(probe, "unknown")} That includes --store ${store}: its own accent fold pins` +
+      `${stateSentence(probe, SEARCH_INDEX_REACH_UNASKED)} That includes --store ${store}: its own accent fold pins` +
       ` the same dictionary, so it raises exactly as this function would.`
     );
   }
-  if (state === "unreadable") return stateSentence(probe, "unknown");
+  if (state === "unreadable") return stateSentence(probe, SEARCH_INDEX_REACH_UNASKED);
   const cost =
     `unused by --store ${store}, whose predicate folds through ${SEARCH_DICTIONARY} directly and` +
     " names this function nowhere. That fold is not IMMUTABLE, so no index can serve it: every ?q=" +
@@ -603,7 +680,7 @@ function documentStoreLine(probe: SearchFunctionProbe, store: SearchStoreKind): 
   }
 }
 
-function stateSentence(probe: SearchFunctionProbe, reach: SearchIndexReach): string {
+function stateSentence(probe: SearchFunctionProbe, reach: SearchIndexReachProbe): string {
   switch (probe.state) {
     case "created":
       return `[search] ${SEARCH_FUNCTION}: created — ${reachClause(reach)}`;

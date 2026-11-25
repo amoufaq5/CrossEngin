@@ -111,6 +111,23 @@ describe("convertBalanced", () => {
     );
   });
 
+  it("rounds a half away from zero on either sign, convertUnits' rule (ADR-0475)", () => {
+    // −0.01 × 0.5 = −0.005: half away from zero is −0.01. The rule this replaced rounded every half
+    // up, so a negative half went to 0.00 while `convertUnits` answered −0.01 for the same product.
+    const half = positiveRate("0.5")!;
+    expect(convertUnits(-1n, half)).toBe(-1n);
+    expect(convertUnits(1n, half)).toBe(1n);
+    const out = convertBalanced([{ d: -1n, c: 0n }, { d: 0n, c: -1n }], half);
+    expect(out).toEqual([{ d: -1n, c: 0n }, { d: 0n, c: -1n }]);
+    expect(convertBalanced([{ d: 1n, c: 0n }, { d: 0n, c: 1n }], half)).toEqual([{ d: 1n, c: 0n }, { d: 0n, c: 1n }]);
+    // Agreement on every half-cent product over a range, both signs: each balanced pair's legs are
+    // exactly what `convertUnits` gives the same amount.
+    for (let a = -25n; a <= 25n; a += 1n) {
+      const [line] = convertBalanced([{ d: a, c: 0n }, { d: 0n, c: a }], half);
+      expect(line!.d, String(a)).toBe(convertUnits(a, half));
+    }
+  });
+
   it("is the identity at rate 1", () => {
     const lines = [{ d: 123n, c: 0n }, { d: 0n, c: 123n }];
     expect(convertBalanced(lines, RATE_ONE)).toEqual(lines);

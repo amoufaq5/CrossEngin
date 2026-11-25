@@ -1,5 +1,5 @@
 import { API_KEY_HEADER } from "@crossengin/api-gateway";
-import { verifyBearerJwt } from "@crossengin/api-gateway-runtime";
+import { canonicalTenantId, DEFAULT_JWT_CLOCK_SKEW_SECONDS, verifyBearerJwt } from "@crossengin/api-gateway-runtime";
 import {
   ManifestSchema,
   resolveManifest,
@@ -8,6 +8,7 @@ import {
 } from "@crossengin/kernel/manifest";
 
 import type { RawHttpRequest, RawHttpResponse } from "./http.js";
+import { preAuthLimitedResponse, type PreAuthLimiter } from "./pre-auth-limit.js";
 import type { ApiKeySpec, JwtVerifyConfig } from "./principals.js";
 import type { OperateHttpServer } from "./server.js";
 import { permittedParentSentence, type TenantManifestLineage } from "./tenant-manifest-lineage.js";
@@ -61,14 +62,6 @@ export type BearerTenantVerdict =
 export type BearerTenantVerifier = (token: string) => Promise<BearerTenantVerdict>;
 
 /**
- * The gateway's `clockSkewSeconds`, which `buildOperateGateway` does not forward and the runtime
- * fixes at 30. Restated rather than imported because the runtime does not export it; the cost of
- * the two drifting is bounded in the safe direction only if this one is no stricter, since a token
- * this check rejects and the gateway would accept is served by the deployment's manifest.
- */
-const GATEWAY_JWT_CLOCK_SKEW_SECONDS = 30;
-
-/**
  * Verifies a Bearer JWT with the **same** `JwtVerifyConfig` the tenant's gateway authenticates it
  * with — the same JWKS provider object, issuer, audience and required claims — so the tenant a
  * request is routed by is a fact the routing has checked rather than a claim it read.
@@ -102,7 +95,10 @@ export function bearerTenantVerifier(
           expectedIssuer: jwt.issuer,
           expectedAudience: jwt.audience,
           requiredClaims: jwt.requiredClaims,
-          clockSkewSeconds: GATEWAY_JWT_CLOCK_SKEW_SECONDS,
+          // The runtime's own constant, imported (ADR-0473, closing ADR-0434 Q5): it used to be
+          // restated here at 30 because the runtime did not export it, and a stricter copy would
+          // route a token the gateway accepts to the deployment's manifest.
+          clockSkewSeconds: DEFAULT_JWT_CLOCK_SKEW_SECONDS,
           nowSeconds: Math.floor(now() / 1000),
         },
       });
@@ -149,16 +145,20 @@ export async function resolveRequestTenant(
   if (bearer === null) {
     // No Bearer, so the gateway authenticates `x-api-key` if anything — and only then.
     const apiKey = headerValue(raw.headers, API_KEY_HEADER);
-    return apiKey === null ? null : (apiKeys.find((k) => k.key === apiKey.trim())?.tenantId ?? null);
+    const tenant = apiKey === null ? undefined : apiKeys.find((k) => k.key === apiKey.trim())?.tenantId;
+    return tenant === undefined ? null : canonicalTenantId(tenant);
   }
+  // Canonical, the gateway's own spelling (ADR-0473): a spec naming an uppercase uuid used to route
+  // by the spec's spelling while the gateway keyed the request on it verbatim too — agreeing only by
+  // accident, and disagreeing the moment either side lowercased.
   const spec = apiKeys.find((k) => k.key === bearer);
-  if (spec !== undefined) return spec.tenantId;
+  if (spec !== undefined) return canonicalTenantId(spec.tenantId);
   if (verifyBearer === null) return null;
   const verdict = await verifyBearer(bearer);
   if (verdict.kind === "unverified") return null;
   const tenant = verdict.tenantId ?? headerValue(raw.headers, "x-tenant-id");
   if (tenant === null || !UUID_RE.test(tenant)) return null;
-  return tenant.toLowerCase();
+  return canonicalTenantId(tenant);
 }
 
 /**
@@ -598,6 +598,24 @@ function gatewayUnavailableProblem(
 }
 
 /**
+ * Requests a pre-authentication decision has already been spent on, by object identity.
+ *
+ * A `WeakSet` and not a header, because a header is something a caller can send: `x-pre-auth-counted`
+ * on an inbound request would skip the limiter. The raw object this process built is the one thing
+ * a caller cannot forge, and the set holds no request past its own lifetime.
+ */
+const PRE_AUTH_COUNTED = new WeakSet<RawHttpRequest>();
+
+export function markPreAuthCounted(raw: RawHttpRequest): void {
+  PRE_AUTH_COUNTED.add(raw);
+}
+
+/** Whether an outer layer already spent this request's pre-authentication decision. */
+export function preAuthAlreadyCounted(raw: RawHttpRequest): boolean {
+  return PRE_AUTH_COUNTED.has(raw);
+}
+
+/**
  * Wraps a default dispatch with per-tenant routing: the request's tenant is resolved
  * (`resolveRequestTenant`), that tenant's resolution is looked up in the cache, and the request
  * dispatches to their own compiled server.
@@ -621,8 +639,22 @@ export function buildPerTenantDispatch(opts: {
    * defect this parameter closes.
    */
   verifyBearer: BearerTenantVerifier | null;
+  /**
+   * Checked **before** `resolveRequestTenant`, which is what verifies a Bearer's Ed25519 signature
+   * (ADR-0473, closing ADR-0449 Q6). The limiter used to run only inside whichever server the
+   * request reached, so under per-tenant manifests — implied by `--ai-design`, which the shipped
+   * compose passes — every unauthenticated request paid a signature verification before anything
+   * throttled it. Optional because a deployment with no limiter has nothing to check; when it is
+   * given, the request is marked counted so the server it reaches does not spend a second decision.
+   */
+  preAuthLimiter?: PreAuthLimiter;
 }): (raw: RawHttpRequest, body: Uint8Array | null) => Promise<RawHttpResponse> {
   return async (raw: RawHttpRequest, body: Uint8Array | null): Promise<RawHttpResponse> => {
+    if (opts.preAuthLimiter !== undefined && !preAuthAlreadyCounted(raw)) {
+      const decision = opts.preAuthLimiter.check(raw);
+      markPreAuthCounted(raw);
+      if (!decision.allowed) return preAuthLimitedResponse(decision.retryAfterSeconds);
+    }
     const tenantId = await resolveRequestTenant(raw, opts.apiKeys, opts.verifyBearer);
     if (tenantId === null) return opts.defaultDispatch(raw, body);
     const resolved = await opts.cache.serverFor(tenantId);

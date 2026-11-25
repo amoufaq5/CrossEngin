@@ -18,17 +18,24 @@ import {
   type ManifestRegistry,
 } from "@crossengin/kernel/manifest";
 import { buildErpRetailPack } from "@crossengin/pack-erp-retail";
+import { resolvedFields } from "@crossengin/kernel/ddl";
+import { buildIncomingRequest, type HandlerOutput } from "@crossengin/api-gateway-runtime";
+import type { ResolvedPrincipal } from "@crossengin/api-gateway";
 import { describe, expect, it } from "vitest";
 
-import { compileOperateServer } from "./compile.js";
-import { auditUnavailable } from "./entity-audit.js";
+import { compileOperateServer, type CompiledOperateServer } from "./compile.js";
+import { EntityAuditUnrecorded, auditUnavailable, type EntityWriteAuditor } from "./entity-audit.js";
 import {
+  ACTION_HANDLER_REFUSALS,
   OPENAPI_COVERAGE_KINDS,
   OPENAPI_MEDIA_TYPE,
+  OPENAPI_OPERATION_ID,
   buildOpenApiDocument,
   type OpenApiCoverageGap,
   type OpenApiEmitInput,
+  type OpenApiTenantStatusDeclaration,
 } from "./openapi.js";
+import { routeFromSpec, type RouteAction } from "./operations.js";
 import { InMemoryEntityStore } from "./store.js";
 
 // ---------------------------------------------------------------------------
@@ -42,6 +49,19 @@ import { InMemoryEntityStore } from "./store.js";
 // ---------------------------------------------------------------------------
 
 const CORE = buildErpCorePack();
+
+/** The entities with an `entityLifecycle` workflow — the state-conditioned set on a plain compile. */
+const lifecycleEntities = (manifest: Manifest): ReadonlySet<string> =>
+  new Set(
+    Object.values(manifest.workflows ?? {}).flatMap((w) => (w.kind === "entityLifecycle" ? [w.entity] : [])),
+  );
+
+/** No tenant-status gate, no write audit, no write checks: the claim each field's `null` makes. */
+const UNGATED = {
+  tenantStatus: null,
+  writeAudit: null,
+  writeRefusals: { checks: false, stateConditionedEntities: new Set<string>() },
+} as const satisfies Pick<OpenApiEmitInput, "tenantStatus" | "writeAudit" | "writeRefusals">;
 
 const emitFor = (manifest: Manifest, role: string, coverage: readonly OpenApiCoverageGap[] = []) => {
   const compiled = compileOperateServer(manifest, {
@@ -61,6 +81,8 @@ const emitFor = (manifest: Manifest, role: string, coverage: readonly OpenApiCov
       coverage,
       writeSurfaces: compiled.writeSurfaces,
       residency: null,
+      ...UNGATED,
+      writeRefusals: { checks: true, stateConditionedEntities: lifecycleEntities(manifest) },
     }),
   };
 };
@@ -88,6 +110,25 @@ const documentOperations = (
     }
   }
   return out;
+};
+
+/**
+ * A response entry with its `$ref` followed. Every refusal is a component now (ADR-0471), so a test
+ * reading an entry's content reads the component it names — and an unresolvable reference is an
+ * error here rather than an `undefined` the assertion would read as "absent".
+ */
+const resolveResponse = (
+  doc: Readonly<Record<string, unknown>>,
+  entry: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined => {
+  if (entry === undefined) return undefined;
+  const target = entry["$ref"];
+  if (typeof target !== "string") return entry;
+  const name = target.replace("#/components/responses/", "");
+  const responses = (doc["components"] as Record<string, Record<string, Record<string, unknown>>>)["responses"];
+  const found = responses?.[name];
+  if (found === undefined) throw new Error(`unresolvable response reference ${target}`);
+  return found;
 };
 
 const operationFor = (operationId: string): Record<string, unknown> => {
@@ -152,6 +193,7 @@ const fixtureInput = (routes: readonly RouteDefinition[]): OpenApiEmitInput => (
   coverage: [],
   writeSurfaces: new Map(),
   residency: null,
+  ...UNGATED,
 });
 
 // ---------------------------------------------------------------------------
@@ -586,7 +628,7 @@ describe("buildOpenApiDocument — what each action takes", () => {
     for (const o of documentOperations(PATHS)) {
       const r = o.operation["responses"] as Record<string, Record<string, unknown>>;
       for (const status of ["401", "403"]) {
-        const content = r[status]?.["content"] as Record<string, unknown> | undefined;
+        const content = resolveResponse(DOC, r[status])?.["content"] as Record<string, unknown> | undefined;
         // Two producers answer these statuses with two shapes: a gateway denial goes through
         // `problems.ts` as `application/problem+json`, and a handler refusal is preserved verbatim
         // as `application/json` with `{error, detail}`. This used to declare `problem+json` alone
@@ -837,6 +879,7 @@ describe("buildOpenApiDocument — the residency gate's responses", () => {
       coverage: [],
       writeSurfaces: compiled.writeSurfaces,
       residency,
+      ...UNGATED,
     });
   const gatedDoc = (() => {
     const d = emit({ gatedOperationIds: gated, tenantHintHeader: "x-tenant-id" }).document;
@@ -860,7 +903,9 @@ describe("buildOpenApiDocument — the residency gate's responses", () => {
       expect(responsesOf(operation)["503"]).toBeUndefined();
     }
     const components = ungatedDoc["components"] as Record<string, Record<string, unknown>>;
-    expect(components["responses"]).toBeUndefined();
+    // The role refusal and the 401 are components on every document now, so the claim is that no
+    // residency-shaped one is among them.
+    expect(Object.keys(components["responses"]!).filter((n) => /Residency/.test(n))).toEqual([]);
     expect(components["schemas"]!["ResidencyProblem"]).toBeUndefined();
     expect(JSON.stringify(ungatedDoc)).not.toContain("residency-");
   });
@@ -960,5 +1005,563 @@ describe("buildOpenApiDocument — the residency gate's responses", () => {
     for (const [, kind, name] of text.matchAll(/#\/components\/(schemas|responses)\/([A-Za-z0-9_]+)/g)) {
       expect(components[kind!]![name!], `${kind!}/${name!}`).toBeDefined();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ADR-0471: the tenant-status gate, the write audit and the handler refusals are declared exactly
+// where something wired on this server can answer them, and absent where nothing can.
+// ---------------------------------------------------------------------------
+
+/**
+ * A tenant-status declaration as a deployment would hand one over. The real facts come from the
+ * gate's own constants in `operate-server` (`tenantStatusOpenApiDeclaration`, whose test compares
+ * them with the gate's bodies); this package cannot import that one, so the fixture states them.
+ */
+const tenantStatusFixture = (gated: ReadonlySet<string>): OpenApiTenantStatusDeclaration => ({
+  gatedOperationIds: gated,
+  refused: {
+    type: "https://crossengin.dev/problems/tenant-lifecycle-state",
+    reasons: ["tenant_writes_blocked", "tenant_reads_blocked", "tenant_not_provisioned"],
+    states: ["suspended", "archived", "pending_deletion", "deleted"],
+  },
+  unavailable: {
+    type: "https://crossengin.dev/problems/tenant-status-unavailable",
+    reason: "tenant_status_unavailable",
+    retryAfterSeconds: 5,
+  },
+});
+
+describe("buildOpenApiDocument — every refusal declared resolves, and every component is referenced", () => {
+  const compiled = compileOperateServer(CORE, {
+    store: new InMemoryEntityStore(),
+    principalRoles: () => ({ primaryRole: "erp_admin" }),
+  });
+  const routes = compiled.routes.list();
+  const everyId = new Set(routes.map((r) => r.operationId));
+  const doc = buildOpenApiDocument({
+    manifest: CORE,
+    routes,
+    routeSpecs: compiled.routeSpecs,
+    title: "CrossEngin",
+    version: "manifest-hash",
+    coverage: [],
+    writeSurfaces: compiled.writeSurfaces,
+    residency: { gatedOperationIds: everyId, tenantHintHeader: "x-tenant-id" },
+    tenantStatus: tenantStatusFixture(everyId),
+    writeAudit: { associationWriteOperationIds: new Set() },
+    writeRefusals: { checks: true, stateConditionedEntities: lifecycleEntities(CORE) },
+  }).document!;
+
+  it("leaves no dead component and no unresolvable reference, with every producer declared", () => {
+    // ADR-0392's validity checks over the widest document this emitter can produce: every gate on.
+    const text = JSON.stringify(doc);
+    const components = doc["components"] as Record<string, Record<string, unknown>>;
+    const referenced = new Set<string>();
+    for (const [, kind, name] of text.matchAll(/#\/components\/(schemas|responses)\/([A-Za-z0-9_.]+)/g)) {
+      expect(components[kind!]![name!], `${kind!}/${name!}`).toBeDefined();
+      referenced.add(`${kind!}/${name!}`);
+    }
+    const responseNames = Object.keys(components["responses"]!);
+    expect(responseNames.length).toBeGreaterThan(8);
+    expect(responseNames.filter((n) => !referenced.has(`responses/${n}`))).toEqual([]);
+    // Every refusal-body schema is referenced by some response; the entity schemas by operations.
+    for (const name of ["Problem", "HandlerError", "ResidencyProblem", "TenantStateProblem", "TenantStatusUnavailableProblem", "ValidationFailed"]) {
+      expect(referenced.has(`schemas/${name}`), name).toBe(true);
+    }
+  });
+
+  it("keeps every (name, in) parameter pair unique on every operation", () => {
+    for (const { operation } of documentOperations(doc["paths"] as Record<string, Record<string, unknown>>)) {
+      const params = (operation["parameters"] ?? []) as { name: string; in: string }[];
+      const keys = params.map((p) => `${p.in}:${p.name}`);
+      expect(new Set(keys).size, String(operation["operationId"])).toBe(keys.length);
+    }
+  });
+});
+
+describe("buildOpenApiDocument — the tenant-status gate's responses (ADR-0471)", () => {
+  const compiled = compileOperateServer(CORE, {
+    store: new InMemoryEntityStore(),
+    principalRoles: () => ({ primaryRole: "erp_admin" }),
+  });
+  const routes = compiled.routes.list();
+  // The gate's own exemption rule lives in operate-server; the emitter answers from the set it is
+  // handed. One operation stands in for an exempt one.
+  const EXEMPT = "meta.schema.read";
+  const gated = new Set(routes.map((r) => r.operationId).filter((id) => id !== EXEMPT));
+  const emit = (
+    tenantStatus: OpenApiTenantStatusDeclaration | null,
+    residency: OpenApiEmitInput["residency"] = null,
+  ) => {
+    const d = buildOpenApiDocument({
+      manifest: CORE,
+      routes,
+      routeSpecs: compiled.routeSpecs,
+      title: "CrossEngin",
+      version: "manifest-hash",
+      coverage: [],
+      writeSurfaces: compiled.writeSurfaces,
+      residency,
+      ...UNGATED,
+      tenantStatus,
+    }).document;
+    if (d === null) throw new Error("refused");
+    return d;
+  };
+  const gatedDoc = emit(tenantStatusFixture(gated));
+  const ungatedDoc = emit(null);
+  const specIds = new Set(compiled.routeSpecs.map((s) => s.operationId));
+  const opsOf = (d: Readonly<Record<string, unknown>>) =>
+    documentOperations(d["paths"] as Record<string, Record<string, unknown>>);
+  const responsesOf = (op: Record<string, unknown>) => op["responses"] as Record<string, unknown>;
+
+  it("declares the gate's 403 and 503 on exactly the gated operations", () => {
+    const ops = opsOf(gatedDoc);
+    expect(ops.length).toBeGreaterThan(300);
+    let gatedSeen = 0;
+    for (const { operation } of ops) {
+      const id = operation["operationId"] as string;
+      const r = responsesOf(operation);
+      if (gated.has(id)) {
+        gatedSeen += 1;
+        expect(r["403"], id).toEqual({ $ref: "#/components/responses/ForbiddenOrTenantStateRefused" });
+        // A route that is not the entity handler answers 503s of its own (ADR-0471's review), so
+        // its entry admits that shape too and is a different component.
+        expect(r["503"], id).toEqual({
+          $ref: `#/components/responses/UnavailableOrTenantStatusUnresolved${specIds.has(id) ? "" : "OrRouteOwn"}`,
+        });
+      } else {
+        expect(r["403"], id).toEqual({ $ref: "#/components/responses/Forbidden" });
+        expect(r["503"], id).toBeUndefined();
+      }
+    }
+    // Non-vacuity on both arms: the exempt operation is present and kept the plain role refusal.
+    expect(gatedSeen).toBe(ops.length - 1);
+    expect(ops.some((o) => o.operation["operationId"] === EXEMPT)).toBe(true);
+  });
+
+  it("declares none of it, and carries no tenant-status schema, without the gate", () => {
+    for (const { operation } of opsOf(ungatedDoc)) {
+      const r = responsesOf(operation);
+      expect(r["403"]).toEqual({ $ref: "#/components/responses/Forbidden" });
+      expect(r["503"]).toBeUndefined();
+    }
+    const components = ungatedDoc["components"] as Record<string, Record<string, unknown>>;
+    expect(components["schemas"]!["TenantStateProblem"]).toBeUndefined();
+    expect(components["schemas"]!["TenantStatusUnavailableProblem"]).toBeUndefined();
+    expect(JSON.stringify(ungatedDoc)).not.toContain("tenant_status_unavailable");
+  });
+
+  it("describes the gate's bodies with its own types, reasons and states, top-level as sent", () => {
+    const decl = tenantStatusFixture(gated);
+    const schemas = (gatedDoc["components"] as Record<string, Record<string, Record<string, unknown>>>)["schemas"]!;
+    const refused = schemas["TenantStateProblem"] as {
+      properties: Record<string, { enum?: unknown[]; oneOf?: { enum?: unknown[]; type?: string }[] }>;
+      required: string[];
+    };
+    expect(refused.properties["type"]!.enum).toEqual([decl.refused.type]);
+    expect(refused.properties["reason"]!.enum).toEqual(decl.refused.reasons);
+    expect(refused.properties["status"]!.enum).toEqual([403]);
+    expect(refused.properties["tenantStatus"]!.oneOf).toEqual([
+      { type: "string", enum: decl.refused.states },
+      { type: "null" },
+    ]);
+    // `tenantStatus` and `reason` are top-level, because that is where the gate puts them.
+    expect(refused.required).toEqual(["type", "title", "status", "detail", "tenantStatus", "reason"]);
+    expect(refused.properties["extensions"]).toBeUndefined();
+    const unavailable = schemas["TenantStatusUnavailableProblem"] as {
+      properties: Record<string, { enum?: unknown[] }>;
+    };
+    expect(unavailable.properties["reason"]!.enum).toEqual([decl.unavailable.reason]);
+    expect(unavailable.properties["status"]!.enum).toEqual([503]);
+    const responses = (gatedDoc["components"] as Record<string, Record<string, Record<string, unknown>>>)["responses"]!;
+    const u = responses["UnavailableOrTenantStatusUnresolved"] as {
+      headers: Record<string, { required: boolean; description: string }>;
+      content: Record<string, { schema: unknown }>;
+    };
+    // The gate's own 503 always sends retry-after, and the gateway's own 503 does not always, so the
+    // entry names the figure and does not promise the header (ADR-0471's review).
+    expect(u.headers["retry-after"]!.required).toBe(false);
+    expect(u.headers["retry-after"]!.description).toContain("5");
+    // An entity route: the gate's body and the gateway's, and no application/json, because the
+    // entity handler answers no 503 of its own when no recorder is wired.
+    expect(Object.keys(u.content)).toEqual(["application/problem+json"]);
+    expect(u.content["application/problem+json"]!.schema).toEqual({
+      anyOf: [
+        { $ref: "#/components/schemas/TenantStatusUnavailableProblem" },
+        { $ref: "#/components/schemas/Problem" },
+      ],
+    });
+    // A route with no RouteSpec admits its own application/json 503 as well: the shipped compose's
+    // `POST /v1/ai/design` with no provider answers `503 {"error":"ai_unavailable"}`.
+    const own = responses["UnavailableOrTenantStatusUnresolvedOrRouteOwn"] as {
+      content: Record<string, { schema: unknown }>;
+    };
+    expect(own.content["application/json"]!.schema).toEqual({ $ref: "#/components/schemas/HandlerError" });
+  });
+
+  it("composes with the region gate into one 403 and one 503 admitting both bodies", () => {
+    const both = emit(tenantStatusFixture(gated), { gatedOperationIds: gated, tenantHintHeader: "x-tenant-id" });
+    const op = opsOf(both).find((o) => o.operation["operationId"] === "invoice.create")!.operation;
+    expect(responsesOf(op)["403"]).toEqual({
+      $ref: "#/components/responses/ForbiddenOrResidencyViolationOrTenantStateRefused",
+    });
+    expect(responsesOf(op)["503"]).toEqual({
+      $ref: "#/components/responses/UnavailableOrResidencyUnresolvedOrTenantStatusUnresolved",
+    });
+    const responses = (both["components"] as Record<string, Record<string, Record<string, unknown>>>)["responses"]!;
+    const forbidden = responses["ForbiddenOrResidencyViolationOrTenantStateRefused"] as {
+      content: Record<string, { schema: unknown }>;
+    };
+    expect(forbidden.content["application/problem+json"]!.schema).toEqual({
+      anyOf: [
+        { $ref: "#/components/schemas/Problem" },
+        { $ref: "#/components/schemas/ResidencyProblem" },
+        { $ref: "#/components/schemas/TenantStateProblem" },
+      ],
+    });
+    const unavailable = responses["UnavailableOrResidencyUnresolvedOrTenantStatusUnresolved"] as {
+      headers: Record<string, { required: boolean }>;
+    };
+    // The residency arm does not always send retry-after, so the composed entry cannot promise it.
+    expect(unavailable.headers["retry-after"]!.required).toBe(false);
+    // And the exempt operation keeps only the residency 403 arm, since the region's pre-auth check
+    // reaches every routed operation while the tenant gate does not reach this one.
+    const exempt = opsOf(both).find((o) => o.operation["operationId"] === EXEMPT)!.operation;
+    expect(responsesOf(exempt)["403"]).toEqual({ $ref: "#/components/responses/ForbiddenOrResidencyViolation" });
+    expect(responsesOf(exempt)["503"]).toBeUndefined();
+  });
+});
+
+describe("buildOpenApiDocument — the write audit's 503 (ADR-0471)", () => {
+  const compiled = compileOperateServer(CORE, {
+    store: new InMemoryEntityStore(),
+    principalRoles: () => ({ primaryRole: "erp_admin" }),
+  });
+  // `erp-core` declares no many-to-many relation, so the association half is exercised on a
+  // fixture route the registry would serve beside the entity routes.
+  const LINK = fixtureRoute("rt_fixturelink1", "widget.gadgets.link", "PUT", [
+    lit("v1"), lit("widgets"), param("id"), lit("gadgets"), param("relatedId"),
+  ]);
+  const routes = [...compiled.routes.list(), LINK];
+  const actionOf = new Map(compiled.routeSpecs.map((s) => [s.operationId, s.action]));
+  const emit = (writeAudit: OpenApiEmitInput["writeAudit"]) =>
+    buildOpenApiDocument({
+      manifest: CORE,
+      routes,
+      routeSpecs: compiled.routeSpecs,
+      title: "CrossEngin",
+      version: "manifest-hash",
+      coverage: [],
+      writeSurfaces: compiled.writeSurfaces,
+      residency: null,
+      ...UNGATED,
+      writeAudit,
+    }).document!;
+  const AUDITED: readonly RouteAction[] = ["create", "update", "delete", "transition"];
+
+  it("declares the 503 on exactly the entity writes and the association writes when a recorder is wired", () => {
+    const d = emit({ associationWriteOperationIds: new Set([LINK.operationId]) });
+    const counts = { audited: 0, other: 0 };
+    for (const { operation } of documentOperations(d["paths"] as Record<string, Record<string, unknown>>)) {
+      const id = operation["operationId"] as string;
+      const r = operation["responses"] as Record<string, unknown>;
+      const action = actionOf.get(id);
+      if ((action !== undefined && AUDITED.includes(action)) || id === LINK.operationId) {
+        counts.audited += 1;
+        expect(r["503"], id).toEqual({ $ref: "#/components/responses/UnavailableOrAuditUnrecorded" });
+      } else {
+        counts.other += 1;
+        expect(r["503"], id).toBeUndefined();
+      }
+    }
+    expect(counts.audited).toBeGreaterThan(150);
+    expect(counts.other).toBeGreaterThan(50);
+  });
+
+  it("declares no write-audit 503 anywhere when nothing records the write", () => {
+    const d = emit(null);
+    for (const { operation } of documentOperations(d["paths"] as Record<string, Record<string, unknown>>)) {
+      expect((operation["responses"] as Record<string, unknown>)["503"]).toBeUndefined();
+    }
+    expect(JSON.stringify(d)).not.toContain("audit_unavailable");
+  });
+
+  it("describes both audit outcomes, and the real bodies satisfy the declared shape", () => {
+    const d = emit({ associationWriteOperationIds: new Set() });
+    const components = d["components"] as Record<string, Record<string, Record<string, unknown>>>;
+    const response = components["responses"]!["UnavailableOrAuditUnrecorded"] as {
+      description: string;
+      headers?: unknown;
+      content: Record<string, { schema: unknown }>;
+    };
+    // The audit's body, and the gateway's own problem beside it: a 503 is never one producer's.
+    expect(response.content).toEqual({
+      "application/problem+json": { schema: { $ref: "#/components/schemas/Problem" } },
+      "application/json": { schema: { $ref: "#/components/schemas/HandlerError" } },
+    });
+    // Neither the audit 503 nor the gateway's sets retry-after unconditionally, so the entry declares none.
+    expect(response.headers).toBeUndefined();
+    expect(response.description).toContain("rolled back");
+    expect(response.description).toContain("the write was made");
+    const handlerError = components["schemas"]!["HandlerError"] as { required: string[]; properties: Record<string, unknown> };
+    for (const rolledBack of [true, false]) {
+      const out = auditUnavailable(rolledBack);
+      if (out.kind !== "json") throw new Error("auditUnavailable is a json output");
+      expect(out.status).toBe(503);
+      const body = out.body as Record<string, unknown>;
+      for (const key of handlerError.required) expect(body[key]).toBeTypeOf("string");
+      expect(Object.keys(body).every((k) => k in handlerError.properties)).toBe(true);
+    }
+  });
+});
+
+describe("buildOpenApiDocument — the handler's 404, 409 and 422 (ADR-0471)", () => {
+  const compiled = compileOperateServer(CORE, {
+    store: new InMemoryEntityStore(),
+    principalRoles: () => ({ primaryRole: "erp_admin" }),
+  });
+  const routes = compiled.routes.list();
+  const specOf = new Map(compiled.routeSpecs.map((s) => [s.operationId, s]));
+  const stateful = lifecycleEntities(CORE);
+  const emit = (checks: boolean) =>
+    buildOpenApiDocument({
+      manifest: CORE,
+      routes,
+      routeSpecs: compiled.routeSpecs,
+      title: "CrossEngin",
+      version: "manifest-hash",
+      coverage: [],
+      writeSurfaces: compiled.writeSurfaces,
+      residency: null,
+      ...UNGATED,
+      writeRefusals: { checks, stateConditionedEntities: stateful },
+    }).document!;
+  const checked = emit(true);
+  const unchecked = emit(false);
+  const statuses = (d: Readonly<Record<string, unknown>>, id: string): Record<string, unknown> => {
+    const found = documentOperations(d["paths"] as Record<string, Record<string, unknown>>).find(
+      (o) => o.operation["operationId"] === id,
+    );
+    if (found === undefined) throw new Error(id);
+    return found.operation["responses"] as Record<string, unknown>;
+  };
+
+  it("declares 404 on read/update/delete/transition and nowhere else", () => {
+    const wrong: string[] = [];
+    for (const route of routes) {
+      const spec = specOf.get(route.operationId);
+      const expected = spec !== undefined && ACTION_HANDLER_REFUSALS[spec.action].notFound;
+      const has = statuses(checked, route.operationId)["404"] !== undefined;
+      if (has !== expected) wrong.push(`${route.operationId}:${has ? "declared" : "absent"}`);
+    }
+    expect(wrong).toEqual([]);
+    expect(statuses(checked, "invoice.read")["404"]).toEqual({ $ref: "#/components/responses/NotFound" });
+  });
+
+  it("declares 422 on every create and update, on delete and transition only with write checks, never on read or list", () => {
+    for (const [id, spec] of specOf) {
+      for (const [doc, checks] of [[checked, true], [unchecked, false]] as const) {
+        const has = statuses(doc, id)["422"] !== undefined;
+        const expected =
+          spec.action === "create" || spec.action === "update" ||
+          ((spec.action === "delete" || spec.action === "transition") && checks);
+        expect(has, `${id}:${String(checks)}`).toBe(expected);
+      }
+    }
+    expect(statuses(checked, "invoice.create")["422"]).toEqual({ $ref: "#/components/responses/UnprocessableCreate" });
+    // A non-spec route carries none: its handler is not the entity handler.
+    expect(statuses(checked, OPENAPI_OPERATION_ID)["422"]).toBeUndefined();
+  });
+
+  it("declares 409 on create, update and transition, and on a delete only where something can refuse it", () => {
+    let undeclaredDeletes = 0;
+    for (const [id, spec] of specOf) {
+      const has = statuses(unchecked, id)["409"] !== undefined;
+      if (spec.action === "list" || spec.action === "read") expect(has, id).toBe(false);
+      else if (spec.action === "delete") {
+        const referenced = (CORE.entities ?? []).some((e) =>
+          resolvedFields(e, CORE.traits ?? []).some((f) => f.type.kind === "reference" && f.type.target === spec.entity),
+        );
+        // Both directions (ADR-0471's review): with no write checks, a delete of an entity nothing
+        // references and no lifecycle conditions has no 409 producer, so none is declared.
+        expect(has, id).toBe(stateful.has(spec.entity) || referenced);
+        if (!has) undeclaredDeletes += 1;
+      } else expect(has, id).toBe(true);
+    }
+    // Non-vacuity of the absence arm: some erp-core delete really has no 409 producer.
+    expect(undeclaredDeletes).toBeGreaterThan(0);
+    // A stateful, referenced document's delete names both conditional codes in its component.
+    expect(statuses(unchecked, "invoice.delete")["409"]).toEqual({
+      $ref: "#/components/responses/ConflictDeleteStateConditionedReferenced",
+    });
+  });
+
+  it("lets the validation body be told from a coded refusal on the 422", () => {
+    const components = checked["components"] as Record<string, Record<string, Record<string, unknown>>>;
+    const create = components["responses"]!["UnprocessableCreate"] as { content: Record<string, { schema: unknown }>; description: string };
+    expect(create.content["application/json"]!.schema).toEqual({
+      anyOf: [{ $ref: "#/components/schemas/HandlerError" }, { $ref: "#/components/schemas/ValidationFailed" }],
+    });
+    for (const code of ACTION_HANDLER_REFUSALS.create.unprocessable) expect(create.description).toContain(`\`${code}\``);
+    // The transition 422 has no validation body: a transition takes none.
+    const transition = components["responses"]!["UnprocessableTransition"] as { content: Record<string, { schema: unknown }> };
+    expect(transition.content["application/json"]!.schema).toEqual({ $ref: "#/components/schemas/HandlerError" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The declaration against the handlers: drive the real compiled server, and require that every
+// refusal it answers is declared on that operation with a shape that admits the body.
+// ---------------------------------------------------------------------------
+
+describe("the compiled server's own document declares the refusals its handlers answer (ADR-0471)", () => {
+  const TENANT = "11111111-1111-4111-8111-111111111111";
+  const principal: ResolvedPrincipal = {
+    principalId: "00000000-0000-4000-8000-0000000000aa",
+    tenantId: TENANT,
+    principalKind: "user",
+    authScheme: "api_key_header",
+    grantedScopes: ["erp_admin"],
+    mfaProofAgeSeconds: null,
+    resolvedAt: "2026-06-03T12:00:00.000Z",
+  };
+  const refusingAuditor: EntityWriteAuditor = {
+    record: async () => {
+      throw new EntityAuditUnrecorded("fixture refuses");
+    },
+  };
+  const build = (entityAudit: EntityWriteAuditor | undefined): CompiledOperateServer =>
+    compileOperateServer(CORE, {
+      store: new InMemoryEntityStore(),
+      principalRoles: () => ({ primaryRole: "erp_admin" }),
+      ...(entityAudit !== undefined ? { entityAudit } : {}),
+    });
+  const invoke = async (
+    server: CompiledOperateServer,
+    opId: string,
+    params: Record<string, string> = {},
+    body: Record<string, unknown> | null = null,
+  ): Promise<HandlerOutput> => {
+    const spec = server.routeSpecs.find((s) => s.operationId === opId);
+    const route = spec !== undefined ? routeFromSpec(spec) : server.routes.list().find((r) => r.operationId === opId)!;
+    const handler = server.handlers.resolve(opId);
+    if (handler === null) throw new Error(`no handler ${opId}`);
+    const request = buildIncomingRequest({
+      id: "req_s3openapi01",
+      receivedAt: "2026-06-03T12:00:00.000Z",
+      method: route.method,
+      path: "/v1/x",
+      headers: {},
+      host: "api.example.com",
+      scheme: "https",
+      bodyBytes: null,
+      clientIp: "203.0.113.1",
+      edgeTrust: "untrusted",
+    });
+    return handler({ request, route, principal, params, parsedBody: body });
+  };
+  const documentOf = async (server: CompiledOperateServer): Promise<Readonly<Record<string, unknown>>> => {
+    const out = await invoke(server, OPENAPI_OPERATION_ID);
+    if (out.kind !== "json" || out.status !== 200) throw new Error(`document refused: ${JSON.stringify(out)}`);
+    return out.body as Readonly<Record<string, unknown>>;
+  };
+  /** The declared status's schema names for the body's media type. */
+  const declaredSchemas = (doc: Readonly<Record<string, unknown>>, opId: string, status: number): string[] => {
+    const op = documentOperations(doc["paths"] as Record<string, Record<string, unknown>>).find(
+      (o) => o.operation["operationId"] === opId,
+    )!.operation;
+    const entry = resolveResponse(doc, (op["responses"] as Record<string, Record<string, unknown>>)[String(status)]);
+    if (entry === undefined) return [];
+    const schema = (entry["content"] as Record<string, { schema: Record<string, unknown> }>)["application/json"]?.schema;
+    if (schema === undefined) return [];
+    const refs = (schema["anyOf"] as { $ref: string }[] | undefined) ?? [schema as { $ref: string }];
+    return refs.map((r) => r.$ref.replace("#/components/schemas/", ""));
+  };
+  const admits = (doc: Readonly<Record<string, unknown>>, schemaName: string, body: Record<string, unknown>): boolean => {
+    const schema = (doc["components"] as Record<string, Record<string, { required?: string[]; properties: Record<string, unknown> }>>)["schemas"]![schemaName]!;
+    return (schema.required ?? []).every((k) => body[k] !== undefined);
+  };
+  const expectDeclared = (doc: Readonly<Record<string, unknown>>, opId: string, out: HandlerOutput, status: number) => {
+    expect(out.kind).toBe("json");
+    if (out.kind !== "json") return;
+    expect(out.status, `${opId} answered ${JSON.stringify(out.body)}`).toBe(status);
+    const names = declaredSchemas(doc, opId, status);
+    expect(names.length, `${opId} declares no ${String(status)}`).toBeGreaterThan(0);
+    expect(names.some((n) => admits(doc, n, out.body as Record<string, unknown>)), `${opId}:${String(status)}`).toBe(true);
+  };
+
+  it("declares the 404, 409 and 422 the entity handlers answer", async () => {
+    const server = build(undefined);
+    const doc = await documentOf(server);
+    expectDeclared(doc, "lead.read", await invoke(server, "lead.read", { id: "rec_missing" }), 404);
+    expectDeclared(doc, "lead.create", await invoke(server, "lead.create", {}, {}), 422);
+    expectDeclared(doc, "lead.create", await invoke(server, "lead.create", {}, { full_name: "A", nonsense: 1 }), 422);
+    const created = await invoke(server, "lead.create", {}, { id: "lead_fixed_1", full_name: "A" });
+    expect(created.status).toBe(201);
+    expectDeclared(doc, "lead.create", await invoke(server, "lead.create", {}, { id: "lead_fixed_1", full_name: "B" }), 409);
+    // A transition whose from-states exclude the record's state: the 409 the arm answers itself.
+    const leadInitial = server.routeSpecs.find((s) => s.entity === "Lead" && s.action === "transition")!.transition!.initialState;
+    const illegal = server.routeSpecs.find(
+      (s) => s.entity === "Lead" && s.action === "transition" && !s.transition!.fromStates.includes(leadInitial),
+    )!;
+    expectDeclared(doc, illegal.operationId, await invoke(server, illegal.operationId, { id: "lead_fixed_1" }), 409);
+  });
+
+  it("declares the write audit's 503 on the compiled server's own document only when a recorder is wired", async () => {
+    const audited = build(refusingAuditor);
+    const doc = await documentOf(audited);
+    expectDeclared(doc, "lead.create", await invoke(audited, "lead.create", {}, { full_name: "A" }), 503);
+    // The same server without a recorder: the write succeeds and the document declares no 503.
+    const plain = build(undefined);
+    const plainDoc = await documentOf(plain);
+    expect((await invoke(plain, "lead.create", {}, { full_name: "A" })).status).toBe(201);
+    expect(declaredSchemas(plainDoc, "lead.create", 503)).toEqual([]);
+  });
+
+  it("forwards a tenant-status declaration through compileOperateServer's thunk, read on the first request", async () => {
+    let declaration: OpenApiTenantStatusDeclaration | null = null;
+    const server = compileOperateServer(CORE, {
+      store: new InMemoryEntityStore(),
+      principalRoles: () => ({ primaryRole: "erp_admin" }),
+      openApiTenantStatus: () => declaration,
+    });
+    // Set after the compile returns, as `buildOperateHttpServer` does once the gate has run.
+    declaration = tenantStatusFixture(new Set(["lead.create"]));
+    const doc = await documentOf(server);
+    const op = documentOperations(doc["paths"] as Record<string, Record<string, unknown>>).find(
+      (o) => o.operation["operationId"] === "lead.create",
+    )!.operation;
+    expect((op["responses"] as Record<string, unknown>)["503"]).toEqual({
+      $ref: "#/components/responses/UnavailableOrTenantStatusUnresolved",
+    });
+  });
+});
+
+describe("buildOpenApiDocument — the 401 and 403 are components (ADR-0471, ADR-0462 open question 5)", () => {
+  it("references one shared entry per status, which is smaller than inlining it per operation", () => {
+    const responses = (DOC["components"] as Record<string, Record<string, unknown>>)["responses"] as Record<string, unknown>;
+    const inlined = JSON.parse(JSON.stringify(DOC)) as Record<string, unknown>;
+    let operations = 0;
+    for (const item of Object.values(inlined["paths"] as Record<string, Record<string, Record<string, unknown>>>)) {
+      for (const op of Object.values(item)) {
+        operations += 1;
+        const r = op["responses"] as Record<string, unknown>;
+        expect(r["401"]).toEqual({ $ref: "#/components/responses/Unauthenticated" });
+        expect(r["403"]).toEqual({ $ref: "#/components/responses/Forbidden" });
+        r["401"] = responses["Unauthenticated"];
+        r["403"] = responses["Forbidden"];
+      }
+    }
+    const sharedBytes = JSON.stringify(DOC).length;
+    const inlinedBytes = JSON.stringify(inlined).length;
+    // Measured on `erp-core` (343 operations, no residency, no tenant gate): 833,214 bytes with the
+    // two shared components against 1,020,835 with the same two entries inlined on every operation,
+    // a drop of 187,621 bytes (18.4 % of the inlined document, ~547 bytes per operation). The floor
+    // below is 500 per operation, so a sentence edit does not break it and a regression to inlining
+    // does.
+    expect(operations).toBeGreaterThan(300);
+    expect(inlinedBytes - sharedBytes).toBeGreaterThan(operations * 500);
   });
 });

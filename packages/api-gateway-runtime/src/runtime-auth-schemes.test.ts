@@ -17,7 +17,7 @@ import {
 } from "@crossengin/crypto";
 import { describe, expect, it } from "vitest";
 
-import { API_KEY_QUERY_PARAM } from "./auth.js";
+import { API_KEY_QUERY_PARAM, REQUIRED_JWT_CLAIMS } from "./auth.js";
 import { InMemoryJwksProvider } from "./auth.js";
 import { HandlerRegistry } from "./dispatcher.js";
 import {
@@ -123,6 +123,7 @@ function buildRuntime(
   } = {},
 ): GatewayRuntime {
   return new GatewayRuntime({
+    requiredJwtClaims: new Set(REQUIRED_JWT_CLAIMS),
     routes: new InMemoryRouteRegistry().register(openRoute()),
     handlers: new HandlerRegistry().register("tenants.create", () => ({
       kind: "json",

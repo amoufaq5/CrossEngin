@@ -72,9 +72,34 @@ export interface NotificationListPage {
   readonly nextCursor: string | null;
 }
 
+/**
+ * What an exact unread count is scoped by. The same inbox filters the listing applies, minus the
+ * paging ones: a count over a page is the scan this replaces.
+ */
+export interface UnreadCountQuery {
+  readonly channel?: string;
+  /** Restrict to dispatches delivered to one of these recipient address hashes. Empty ⇒ none. */
+  readonly recipientAddressSha256?: readonly string[];
+  /** Which delivery outcomes count as "in my inbox". Defaults to ["delivered"], as the listing. */
+  readonly outcomes?: readonly string[];
+}
+
+export interface UnreadCountViewer {
+  readonly tenantId: string;
+  readonly userId: string;
+}
+
+export interface UnreadCount {
+  /** Exact: every notice in scope that has no read row and sits past the watermark. */
+  readonly unread: number;
+  /** The viewer's watermark, or null when they have none. */
+  readonly readThroughAt: string | null;
+}
+
 export interface NotificationStore {
   record(input: DispatchInput): Promise<boolean>;
   listForTenant(tenantId: string, query?: NotificationListQuery): Promise<NotificationListPage>;
+  unreadCountFor(viewer: UnreadCountViewer, query?: UnreadCountQuery): Promise<UnreadCount>;
 }
 
 export interface PostgresNotificationStoreOptions {
@@ -102,7 +127,15 @@ const INSERT_VALUES =
   " $20, $21, $22, $23";
 
 const DEFAULT_LIMIT = 50;
-const MAX_LIMIT = 200;
+
+/**
+ * The most rows one `listForTenant` page returns. Exported because a caller sizing a page — the
+ * unread partition's window, `--read-state-unread-scan` — must not be able to ask for more than
+ * this and believe it got it: a value past the clamp is silently a 200, which is how 201–1000 came
+ * to be accepted and ineffective (ADR-0476).
+ */
+export const NOTIFICATION_LIST_MAX_LIMIT = 200;
+const MAX_LIMIT = NOTIFICATION_LIST_MAX_LIMIT;
 
 /** The dispatch table alias the EXISTS subquery correlates against. */
 const DISPATCH_ALIAS = "n";

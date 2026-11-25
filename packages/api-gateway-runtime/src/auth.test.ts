@@ -25,8 +25,12 @@ import {
   REQUIRED_JWT_CLAIMS,
   REQUIRED_JWT_CLAIM_COSTS,
   type RequiredJwtClaim,
+  DEFAULT_JWT_CLOCK_SKEW_SECONDS,
+  PrincipalDirectoryUnavailable,
   authSchemeToken,
   buildOpaqueCredentialMatcher,
+  canonicalTenantId,
+  isPrincipalDirectoryUnavailable,
   parseAuthHeader,
   parseJwt,
   resolvePrincipalForCredential,
@@ -328,10 +332,11 @@ describe("verifyBearerJwt", () => {
 
       expect((await verifyBearerJwt({ token, jwks, opts: { ...base, requiredClaims: ALL_CLAIMS } })).outcome)
         .toBe("required_claim_absent");
-      // The old behaviour, pinned so the hazard is legible: unrequired, a string `exp` is simply
-      // never compared.
+      // This pinned the hazard as the behaviour — unrequired, a string `exp` was simply never
+      // compared, so the token never expired — and it was the defect (ADR-0473's review): a
+      // relaxation admits an *absent* claim, not one present in a form no guard can read.
       expect((await verifyBearerJwt({ token, jwks, opts: { ...base, requiredClaims: NO_CLAIMS } })).outcome)
-        .toBe("authenticated");
+        .toBe("credential_malformed");
     });
 
     it("refuses an empty sub, which every such token would share as one principal id", async () => {
@@ -952,5 +957,202 @@ describe("the published bearer_jwt description names the claims this build requi
     // the future, so a description silent about it would understate what this gateway enforces.
     expect(description).toContain("nbf");
     expect(description).toMatch(/nbf.*honoured when present/);
+  });
+});
+
+/**
+ * ADR-0473. A token signed over a payload given as **raw JSON text**, because the two shapes these
+ * tests need cannot be produced by `JSON.stringify`: `Infinity` serialises as `null`, so `1e400` has
+ * to be written literally, and `nbf: "soon"` is a string where the builder above types a number.
+ */
+function signRawPayload(rawJson: string): { token: string; jwks: InMemoryJwksProvider } {
+  const kp = generateEd25519Keypair();
+  const kid = "raw-k1";
+  const header = base64UrlEncode(new TextEncoder().encode(JSON.stringify({ alg: "EdDSA", typ: "JWT", kid })));
+  const payload = base64UrlEncode(new TextEncoder().encode(rawJson));
+  const sig = signEd25519(kp.privateKeyBase64, kp.publicKeyBase64, new TextEncoder().encode(`${header}.${payload}`))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+  return {
+    token: `${header}.${payload}.${sig}`,
+    jwks: new InMemoryJwksProvider({ keys: [{ kid, publicKeyBase64: kp.publicKeyBase64 }] }),
+  };
+}
+
+describe("verifyBearerJwt: a present time claim must be a NumericDate (ADR-0473)", () => {
+  const iss = "https://issuer.example";
+  const aud = "https://api.crossengin.io";
+  const base = (extra: string): string =>
+    `{"iss":"${iss}","aud":"${aud}","sub":"${USER}","tenant_id":"${TENANT}","exp":${(NOW_SECONDS + 3_600).toString()}${extra}}`;
+  const verify = (rawJson: string) => {
+    const { token, jwks } = signRawPayload(rawJson);
+    return verifyBearerJwt({
+      token,
+      jwks,
+      opts: {
+        expectedIssuer: iss,
+        expectedAudience: aud,
+        requiredClaims: new Set(REQUIRED_JWT_CLAIMS),
+        clockSkewSeconds: 30,
+        nowSeconds: NOW_SECONDS,
+      },
+    });
+  };
+
+  it("accepts a token with no nbf at all: absence means valid from issuance", async () => {
+    expect((await verify(base(""))).outcome).toBe("authenticated");
+  });
+
+  it("accepts a numeric nbf in the past, so the control arm is not vacuous", async () => {
+    expect((await verify(base(`,"nbf":${(NOW_SECONDS - 60).toString()}`))).outcome).toBe("authenticated");
+  });
+
+  it("still refuses a numeric nbf in the future", async () => {
+    expect((await verify(base(`,"nbf":${(NOW_SECONDS + 3_600).toString()}`))).outcome).toBe("not_yet_valid_token");
+  });
+
+  it.each([
+    ['"soon"', "a string"],
+    ['"2099-01-01"', "an ISO date string"],
+    ["null", "an explicit null"],
+    ["1e400", "a number JSON parses to Infinity"],
+    ["{}", "an object"],
+  ])("refuses nbf %s (%s) as credential_malformed rather than skipping the comparison", async (nbf) => {
+    const result = await verify(base(`,"nbf":${nbf}`));
+    expect(result.outcome).toBe("credential_malformed");
+    expect(result.reason).toBe("nbf is present and is not a NumericDate");
+  });
+
+  it("refuses an exp that JSON parses to Infinity, which used to never expire", async () => {
+    const raw = `{"iss":"${iss}","aud":"${aud}","sub":"${USER}","tenant_id":"${TENANT}","exp":1e400}`;
+    const result = await verify(raw);
+    expect(result.outcome).toBe("required_claim_absent");
+    expect(result.reason).toBe("exp is absent or not usable");
+  });
+
+  // The review's finding: a relaxation (`--jwt-optional-claim`) declares that a token may omit the
+  // claim, and the guards below the required check skip a value they cannot use — so under a relaxed
+  // `exp` an `exp: "soon"` never expired, and under a relaxed `tenant_id` a `tenant_id: ""` set the
+  // request's tenant to the empty string. Present and unusable is malformed whether or not required.
+  const relaxed = (rawJson: string, relaxedClaim: RequiredJwtClaim) => {
+    const { token, jwks } = signRawPayload(rawJson);
+    return verifyBearerJwt({
+      token,
+      jwks,
+      opts: {
+        expectedIssuer: iss,
+        expectedAudience: aud,
+        requiredClaims: new Set(REQUIRED_JWT_CLAIMS.filter((c) => c !== relaxedClaim)),
+        clockSkewSeconds: 30,
+        nowSeconds: NOW_SECONDS,
+      },
+    });
+  };
+  const withClaim = (claim: RequiredJwtClaim, value: string): string => {
+    const fields: Record<RequiredJwtClaim, string> = {
+      iss: `"${iss}"`,
+      aud: `"${aud}"`,
+      sub: `"${USER}"`,
+      tenant_id: `"${TENANT}"`,
+      exp: (NOW_SECONDS + 3_600).toString(),
+    };
+    fields[claim] = value;
+    return `{${Object.entries(fields)
+      .map(([k, v]) => `"${k}":${v}`)
+      .join(",")}}`;
+  };
+  const without = (claim: RequiredJwtClaim): string => {
+    const raw = JSON.parse(withClaim(claim, "0")) as Record<string, unknown>;
+    delete raw[claim];
+    return JSON.stringify(raw);
+  };
+
+  it.each([
+    ["exp", '"soon"'],
+    ["exp", "1e400"],
+    ["iss", "42"],
+    ["aud", "{}"],
+    ["sub", '""'],
+    ["tenant_id", '""'],
+  ] as const)("refuses a relaxed %s that is present and unusable (%s) as credential_malformed", async (claim, value) => {
+    const result = await relaxed(withClaim(claim, value), claim);
+    expect(result.outcome).toBe("credential_malformed");
+    expect(result.reason).toBe(`${claim} is present and not usable`);
+  });
+
+  it.each(REQUIRED_JWT_CLAIMS.map((c) => [c] as const))(
+    "still accepts a token that omits a relaxed %s, which is what the relaxation declares",
+    async (claim) => {
+      expect((await relaxed(without(claim), claim)).outcome).toBe("authenticated");
+    },
+  );
+});
+
+describe("canonicalTenantId (ADR-0473)", () => {
+  it("lowercases a uuid-shaped id, so every string-keyed reader agrees with Postgres", () => {
+    expect(canonicalTenantId("00000000-0000-4000-8000-0000000000AB")).toBe("00000000-0000-4000-8000-0000000000ab");
+  });
+
+  it("leaves a lowercase uuid and a non-uuid id unchanged", () => {
+    expect(canonicalTenantId(TENANT)).toBe(TENANT);
+    // Not lowercased: nothing here can say whether `ACME` and `acme` are one tenant.
+    expect(canonicalTenantId("ACME")).toBe("ACME");
+    expect(canonicalTenantId(null)).toBeNull();
+  });
+
+  it("does not report a tenant_mismatch for one tenant named in two cases", async () => {
+    const resolver = new InMemoryPrincipalResolver();
+    resolver.register("ref1", {
+      principalId: USER,
+      tenantId: "00000000-0000-4000-8000-0000000000ab",
+      principalKind: "user",
+      authScheme: "bearer_jwt",
+      grantedScopes: [],
+      mfaProofAgeSeconds: null,
+      resolvedAt: "2026-05-16T12:00:00.000Z",
+    });
+    const result = await resolvePrincipalForCredential({
+      request: fixtureRequest({ tenantHint: "00000000-0000-4000-8000-0000000000ab" }),
+      scheme: "bearer_jwt",
+      principalRef: "ref1",
+      scopes: [],
+      resolver,
+      nowIso: "2026-05-16T12:00:00.000Z",
+      authenticatedTenantId: "00000000-0000-4000-8000-0000000000AB",
+    });
+    expect(result.outcome).toBe("authenticated");
+  });
+
+  it("still reports a tenant_mismatch for two different tenants, so the canonicalisation is not a bypass", async () => {
+    const result = await resolvePrincipalForCredential({
+      request: fixtureRequest({ tenantHint: "00000000-0000-4000-8000-0000000000ac" }),
+      scheme: "bearer_jwt",
+      principalRef: "ref1",
+      scopes: [],
+      resolver: new InMemoryPrincipalResolver(),
+      nowIso: "2026-05-16T12:00:00.000Z",
+      authenticatedTenantId: "00000000-0000-4000-8000-0000000000AB",
+    });
+    expect(result.outcome).toBe("tenant_mismatch");
+  });
+});
+
+describe("PrincipalDirectoryUnavailable (ADR-0473)", () => {
+  it("is recognised by instanceof and by name, so a second copy of the module through dist still maps to 503", () => {
+    const real = new PrincipalDirectoryUnavailable("membership directory", new Error("connection refused"));
+    expect(isPrincipalDirectoryUnavailable(real)).toBe(true);
+    expect(real.cause).toBeInstanceOf(Error);
+    const lookalike = new Error("x");
+    lookalike.name = "PrincipalDirectoryUnavailable";
+    expect(isPrincipalDirectoryUnavailable(lookalike)).toBe(true);
+    expect(isPrincipalDirectoryUnavailable(new Error("connection refused"))).toBe(false);
+    expect(isPrincipalDirectoryUnavailable("PrincipalDirectoryUnavailable")).toBe(false);
+  });
+});
+
+describe("DEFAULT_JWT_CLOCK_SKEW_SECONDS (ADR-0473)", () => {
+  it("is the figure the gateway applies when not told otherwise", () => {
+    expect(DEFAULT_JWT_CLOCK_SKEW_SECONDS).toBe(30);
   });
 });

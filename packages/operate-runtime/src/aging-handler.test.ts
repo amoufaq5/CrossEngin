@@ -99,19 +99,31 @@ describe("buildAgingHandler — ?asOf", () => {
     expect(bodyOf(out).asOf).toBe("2026-06-21");
   });
 
-  it("honors a valid ?asOf (historical snapshot)", async () => {
+  // These three pinned the defect as the specification: a past `asOf` was "honored" as a
+  // historical snapshot it never was, and a malformed one fell back to today in silence (ADR-0475).
+  it("refuses a past ?asOf by name — the open set and the payments are today's, not that day's", async () => {
     const out = await invoke(buildHandler(store), { asOf: "2026-04-15" });
-    expect(bodyOf(out).asOf).toBe("2026-04-15");
+    expect(out).toMatchObject({ status: 400, body: { error: "as_of_not_served" } });
+    // One day back is past too: the comparison is the clock's UTC date.
+    expect(await invoke(buildHandler(store), { asOf: "2026-06-20" })).toMatchObject({ status: 400, body: { error: "as_of_not_served" } });
   });
 
-  it("ignores a malformed ?asOf and falls back to the clock", async () => {
-    const out = await invoke(buildHandler(store), { asOf: "not-a-date" });
-    expect(bodyOf(out).asOf).toBe("2026-06-21");
+  it("serves today and a future ?asOf, which age today's open set", async () => {
+    expect(bodyOf(await invoke(buildHandler(store), { asOf: "2026-06-21" })).asOf).toBe("2026-06-21");
+    const ahead = bodyOf(await invoke(buildHandler(store), { asOf: "2026-08-01" }));
+    expect(ahead.asOf).toBe("2026-08-01");
+    // Due 2026-05-01: 92 days past due on 2026-08-01, so the forecast ages the same document further.
+    expect(ahead.sections["ar"]!.documents[0]).toMatchObject({ daysOverdue: 92 });
   });
 
-  it("ignores an out-of-shape ?asOf (year only) and falls back to the clock", async () => {
-    const out = await invoke(buildHandler(store), { asOf: "2026" });
-    expect(bodyOf(out).asOf).toBe("2026-06-21");
+  it("refuses a malformed ?asOf rather than answering for a date nobody asked about", async () => {
+    for (const asOf of ["not-a-date", "2026", "2026-02-30"]) {
+      expect(await invoke(buildHandler(store), { asOf }), asOf).toMatchObject({ status: 400, body: { error: "as_of_malformed" } });
+    }
+  });
+
+  it("treats an empty ?asOf as absent, as a form sends an unset field", async () => {
+    expect(bodyOf(await invoke(buildHandler(store), { asOf: "" })).asOf).toBe("2026-06-21");
   });
 });
 

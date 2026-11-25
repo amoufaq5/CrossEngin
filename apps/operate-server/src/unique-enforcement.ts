@@ -101,8 +101,10 @@ export const UNIQUE_ENFORCEMENT_REASONS = {
    */
   existing_duplicates: {
     withheld:
-      "the shared table already holds two records of this entity with the same value within a" +
-      " tenant, so the unique index could not be built",
+      // "the table", not "the shared table": since ADR-0474 the column store's per-entity tables
+      // report this reason too, and the document store's shared table is no longer the only one.
+      "the table already holds two records of this entity with the same value within a tenant," +
+      " so the unique index could not be built",
     remedy:
       "deduplicate those records (the CREATE statement is logged above), then restart — the index" +
       " is created at boot",
@@ -118,6 +120,22 @@ export const UNIQUE_ENFORCEMENT_REASONS = {
       "an index of this name exists and Postgres reports it invalid — a failed CREATE INDEX" +
       " CONCURRENTLY leaves one — so it enforces nothing",
     remedy: "DROP the logged index and restart, so the boot builds it again",
+  },
+  /**
+   * The index build was abandoned by a `lock_timeout` or `statement_timeout` (ADR-0425's bounds on
+   * boot DDL) rather than refused by the data. Its own member because `existing_duplicates`' remedy
+   * — deduplicate — is false of it: no row was read (ADR-0474).
+   */
+  index_timed_out: {
+    withheld:
+      "the CREATE UNIQUE INDEX waited on a lock or ran past the statement timeout and was abandoned;" +
+      " no row was read, so this says nothing about duplicates",
+    // Boot-only, and a boot's DDL runs under `applyBootStatement`'s fixed `SET LOCAL` bounds, which
+    // override `--pg-lock-timeout-ms` / `--pg-statement-timeout-ms` — so this names neither flag.
+    remedy:
+      "restart when nothing holds a lock on the table — the index is created at boot; the boot's" +
+      " DDL bounds are fixed, so a table too large to index within them needs the logged statement" +
+      " run by hand",
   },
   index_failed: {
     withheld: "Postgres refused the index for a reason logged above",
@@ -233,16 +251,18 @@ export const UNIQUE_SURVEY_STORE_KINDS: readonly StoreKind[] = Object.keys(
 ) as StoreKind[];
 
 /**
- * A field whose index the store could not establish at boot. Only `PostgresEntityStore` produces
- * these (its indexes are built at run time); the column store's refusals are logged by its own
- * callback, and the memory store has nothing to build.
+ * A field whose index the store could not establish at boot. `PostgresEntityStore` produces these
+ * from its boot build, and since ADR-0474 so does the column store's applying arm, through
+ * `onUniqueIndexRefused`'s facts — which this comment used to say were "logged by its own callback"
+ * and nothing else, which is why the line counted a refused index as enforced (ADR-0440 Q9). The
+ * memory store has nothing to build.
  */
 export interface ObservedUniqueRefusal {
   readonly entity: string;
   readonly field: string;
   readonly reason: Extract<
     UniqueEnforcementReason,
-    "existing_duplicates" | "index_not_owner" | "index_invalid" | "index_failed"
+    "existing_duplicates" | "index_not_owner" | "index_invalid" | "index_timed_out" | "index_failed"
   >;
 }
 

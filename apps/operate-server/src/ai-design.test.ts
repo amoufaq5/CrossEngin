@@ -34,6 +34,7 @@ import {
   buildDesignDesigner,
   buildDesignProviderFromEnv,
   buildDesignSystemPrompt,
+  designExampleManifestFor,
   designManifest,
   ensureRolesInManifest,
   extractJsonObject,
@@ -138,13 +139,42 @@ describe("DESIGN_EXAMPLE_MANIFEST fixture", () => {
     expect(tryValidateManifest(parsed)).toEqual({ ok: true });
   });
 
-  it("is embedded verbatim in the prompt, with and without a parent", () => {
+  it("is embedded verbatim in the standalone prompt, and as a child in the with-parent one", () => {
     const json = JSON.stringify(DESIGN_EXAMPLE_MANIFEST, null, 2);
     expect(buildDesignSystemPrompt({ parentPack: null })).toContain(json);
-    expect(
-      buildDesignSystemPrompt({ parentPack: { slug: "operate-erp/core", entityNames: ["Invoice"] } }),
-    ).toContain(json);
+    const parent = { slug: "operate-erp/core", entityNames: ["Invoice"] };
+    const withParent = buildDesignSystemPrompt({ parentPack: parent });
+    // The with-parent prompt shows the example extending its parent rather than the standalone
+    // one with a sentence beside it saying the reply must differ (ADR-0470).
+    expect(withParent).not.toContain(json);
+    expect(withParent).toContain(JSON.stringify(designExampleManifestFor(parent), null, 2));
     expect(buildDesignSystemPrompt({ parentPack: null })).toContain("ONLY a single JSON object");
+  });
+
+  // The standalone prompt's bytes are part of every deployment that serves no pack; adding the
+  // with-parent example must not move them.
+  it("leaves the standalone example byte-identical", () => {
+    expect(designExampleManifestFor(null)).toBe(DESIGN_EXAMPLE_MANIFEST);
+    expect(JSON.stringify(designExampleManifestFor(null))).toBe(JSON.stringify(DESIGN_EXAMPLE_MANIFEST));
+  });
+
+  // The with-parent prompt's example is now a thing `designManifest` would accept and the
+  // deployment can serve: it passes the lineage check, validates alone, and resolves against the
+  // real parent. Before ADR-0470 the example the model was shown failed `parentLineageIssues`.
+  it("shows an example that extends the real parent and passes the lineage check", async () => {
+    const core = buildErpCorePack();
+    const parent = { slug: core.meta.slug, entityNames: (core.entities ?? []).map((e) => e.name) };
+    const shown = ManifestSchema.parse(designExampleManifestFor(parent));
+    expect(shown.meta.extends).toEqual([core.meta.slug]);
+    expect(parentLineageIssues(shown, parent)).toEqual([]);
+    expect(parentLineageIssues(ManifestSchema.parse(DESIGN_EXAMPLE_MANIFEST), parent)).toHaveLength(1);
+    expect(tryValidateManifest(shown)).toEqual({ ok: true });
+    const resolved = await resolveManifest(shown, {
+      registry: {
+        getManifest: async (id): Promise<Manifest | null> => (id === core.meta.slug ? core : null),
+      },
+    });
+    expect(tryValidateManifest(resolved)).toEqual({ ok: true });
   });
 
   it("declares a lifecycle whose transitions are all granted", () => {
@@ -279,10 +309,13 @@ describe("buildDesignSystemPrompt", () => {
     expect(prompt).toContain("A field pointing at a parent entity is refused.");
   });
 
-  it("tells the model the example is standalone while its own reply must not be", () => {
-    expect(buildDesignSystemPrompt({ parentPack })).toContain(
-      "It is standalone — yours must also carry meta.extends",
-    );
+  // This test pinned the contradiction as the specification: the prompt told the model the example
+  // was standalone and its reply must not be, and a model follows the example (ADR-0470).
+  it("introduces the example as extending the parent, not as standalone", () => {
+    const prompt = buildDesignSystemPrompt({ parentPack });
+    expect(prompt).not.toContain("It is standalone");
+    expect(prompt).toContain(`Example of a complete valid manifest extending "${CORE_SLUG}"`);
+    expect(prompt).toContain(`"extends": [\n      "${CORE_SLUG}"\n    ]`);
   });
 
   it("reports an empty parent entity list as the claim it is", () => {

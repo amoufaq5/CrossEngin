@@ -18,6 +18,7 @@ import {
   InMemoryRouteRegistry,
   MapRedactionRegistry,
   redactionRegistryFromManifest,
+  REQUIRED_JWT_CLAIMS,
   type GatewayRuntimeOptions,
   type Handler,
   type IdempotencyStore,
@@ -39,6 +40,7 @@ import {
   type AdminContext,
 } from "./admin-handlers.js";
 import { buildSpecHandler, type HandlerContext } from "./handlers.js";
+import { handlerFaultReporterFrom } from "./handler-fault.js";
 import { approvalContentFromManifest } from "./maker-checker.js";
 import { buildSystemEntityAccess, type SystemEntityAccess } from "./system-writer.js";
 import type { CursorSealer } from "./cursor-seal.js";
@@ -112,7 +114,11 @@ import {
   OPENAPI_OPERATION_ID,
   OPENAPI_PATH_SEGMENTS,
 } from "./openapi-handler.js";
-import type { OpenApiCoverageGap, OpenApiResidencyDeclaration } from "./openapi.js";
+import type {
+  OpenApiCoverageGap,
+  OpenApiResidencyDeclaration,
+  OpenApiTenantStatusDeclaration,
+} from "./openapi.js";
 import { buildAgingHandler, type AgingSpec } from "./aging-handler.js";
 import { buildEntitlementHandler } from "./entitlement-handler.js";
 import { buildUsageHandler } from "./usage-handler.js";
@@ -144,6 +150,18 @@ import { buildWriteSurfaces, type EffectStamp, type WriteSurface } from "./write
 
 export interface OperateRuntimeOptions {
   readonly store: EntityStore;
+  /**
+   * Where a stage or handler that **threw** is reported, with the request id the caller was given.
+   * Without it the cause survived only as a truncated stage reason, so a 500 from a thrown handler
+   * left its stack in no log.
+   *
+   * Declared here rather than on `OperateGatewayOptions` since ADR-0474, because the handlers read
+   * it too: a handler that *returns* a fixed 500 (`write_failed`, `page_unreadable`) never reaches
+   * the gateway's catch, so its cause is handed to this same reporter through the handler context's
+   * required `reportFault`, or to a `console.error` line in the same `[5xx] <requestId>` shape when
+   * no reporter is supplied.
+   */
+  readonly onInternalError?: GatewayRuntimeOptions["onInternalError"];
   /** Bridges the gateway's scope-bearing principal to its effective roles. */
   readonly principalRoles: (principal: ResolvedPrincipal | null) => PrincipalRoles;
   readonly policyForEntity?: (entity: string) => SensitiveFieldPolicy | undefined;
@@ -237,6 +255,11 @@ export interface OperateRuntimeOptions {
    * that applies none; `buildOperateHttpServer`, the one that may apply one, always supplies it.
    */
   readonly openApiResidency?: () => OpenApiResidencyDeclaration | null;
+  /**
+   * What the tenant-status gate wrapping this server's handlers covers, or `null` when there is none
+   * (ADR-0471). A thunk for `openApiResidency`'s reason: the gate is applied after this returns.
+   */
+  readonly openApiTenantStatus?: () => OpenApiTenantStatusDeclaration | null;
   /** Backs the admin settings endpoints + runtime numbering overrides. */
   readonly settingsStore?: SettingsStore;
   /**
@@ -888,6 +911,29 @@ function declaresField(manifest: Manifest, entityName: string, field: string): b
   return entity !== undefined && resolvedFields(entity, manifest.traits ?? []).some((f) => f.name === field);
 }
 
+/** The entity's lifecycle as the manifest declares it, or null when it has none (ADR-0475). */
+function lifecycleOf(
+  manifest: Manifest,
+  entity: string,
+): { readonly states: readonly string[]; readonly transitions: readonly { readonly name: string; readonly to: string }[] } | null {
+  for (const wf of Object.values(manifest.workflows ?? {})) {
+    if (wf.kind !== "entityLifecycle" || wf.entity !== entity) continue;
+    return { states: wf.states.map((st) => st.name), transitions: wf.transitions.map((t) => ({ name: t.name, to: t.to })) };
+  }
+  return null;
+}
+
+/**
+ * The states a document's `void` transition reaches, read off its lifecycle rather than spelled: the
+ * set a report excludes as cancelled. Empty when the lifecycle declares no `void` transition, which
+ * leaves such a report counting every document — the behaviour of a deployment with no way to void one.
+ */
+function voidedStatesOf(manifest: Manifest, entity: string): readonly string[] {
+  const lifecycle = lifecycleOf(manifest, entity);
+  if (lifecycle === null) return [];
+  return [...new Set(lifecycle.transitions.filter((t) => t.name === "void").map((t) => t.to))];
+}
+
 /**
  * The control-line description the bill recognition entry carries. Exported because a maintenance
  * reader identifying that line in a stored entry must use the spelling the effect wrote.
@@ -1071,13 +1117,11 @@ function defaultWriteEffectsWithStamps(
       // AR reversal on credit-note issuance: the mirror of the recognition entry above, tax included.
       effects.push(
         creditNoteGlPostingEffect({
+          // The mirror of the recognition entry: its accounts are the ones recognition resolved, so
+          // this effect resolves none of its own (ADR-0475 deleted the two-line pair that did).
           recognitionEntrySuffix: "-AR",
           ...clockOpt,
           ...periodsOpt,
-          ...codeResolver((f) => ({
-            ...(f.arAccountCode !== undefined ? { ar: f.arAccountCode } : {}),
-            ...(f.revenueAccountCode !== undefined ? { revenue: f.revenueAccountCode } : {}),
-          })),
         }),
       );
       if (invoiceWithholdingStamped) stamps.push({ entity: "Invoice", field: STAMPED_WITHHOLDING_FIELD });
@@ -1213,6 +1257,11 @@ function defaultWriteEffectsWithStamps(
         ...(withholdingStamped ? { withholdingField: STAMPED_WITHHOLDING_FIELD } : {}),
         refundedState: "refunded",
         reopenState: states.reopenState,
+        // A refund re-opens a past-due document as overdue, where its lifecycle has the state and
+        // the document a due date to compare; otherwise into `reopenState` as before (ADR-0475).
+        ...(lifecycleOf(manifest, doc.entity)?.states.includes("overdue") === true && declaresField(manifest, doc.entity, "due_date")
+          ? { overdueState: "overdue", dueDateField: "due_date" }
+          : {}),
         ...clockOpt,
       }),
     );
@@ -1270,7 +1319,14 @@ function defaultWriteEffectsWithStamps(
   // every entity and field it reads, so a tenant's own manifest lacking one gets no posting rather
   // than a refusal on every write.
   const inventory = inventoryShape(manifest);
-  const inventoryConfig: InventoryConfig = { ...clockOpt, ...periodsOpt, ...inventoryConfigFor(settingsStore) };
+  // The rate tables where the manifest declares them, so a foreign-currency item's stock postings
+  // convert into the functional currency rather than carrying their amounts across at 1 (ADR-0475).
+  const inventoryConfig: InventoryConfig = {
+    ...clockOpt,
+    ...periodsOpt,
+    ...inventoryConfigFor(settingsStore),
+    ...(hasFx ? { fx: { ...functionalResolver } } : {}),
+  };
   if (inventory.ledger) {
     effects.push(stockMovementEffect(inventoryConfig), stockLevelEditEffect(inventoryConfig));
     if (hasGl) effects.push(standardCostRevaluationEffect(inventoryConfig));
@@ -1593,6 +1649,7 @@ export function compileOperateServer(
       ? { abacBatchEvaluator: options.abacBatchEvaluator }
       : {}),
     ...(options.cursorSealer !== undefined ? { cursorSealer: options.cursorSealer } : {}),
+    reportFault: handlerFaultReporterFrom(options.onInternalError),
     ...(options.clock !== undefined ? { clock: options.clock } : {}),
   };
 
@@ -1676,6 +1733,20 @@ export function compileOperateServer(
         coverage: options.openApiCoverage?.() ?? [],
         writeSurfaces,
         residency: options.openApiResidency?.() ?? null,
+        tenantStatus: options.openApiTenantStatus?.() ?? null,
+        // The write audit refuses an unrecordable write with a 503 (ADR-0428), so the document
+        // declares it exactly when a recorder is wired; an association write has no `RouteSpec`.
+        writeAudit:
+          options.entityAudit !== undefined
+            ? { associationWriteOperationIds: new Set(associationWriteSpecs.map((s) => s.operationId)) }
+            : null,
+        writeRefusals: {
+          checks:
+            (ctx.writeGuards?.length ?? 0) > 0 ||
+            (ctx.writeEffects?.length ?? 0) > 0 ||
+            ctx.segregationOfDuties === true,
+          stateConditionedEntities: new Set(ctx.lifecycleStateFields?.keys() ?? []),
+        },
       }),
     }),
   );
@@ -1818,6 +1889,13 @@ export function compileOperateServer(
           viewerRoles: financeRoles,
           invoiceEntity,
           certificateEntity,
+          // A voided invoice withheld nothing, and a credit note's withholding_total is a copy of its
+          // invoice's that reduces it rather than a second withholding (ADR-0475): both read off the
+          // manifest, the credit-note shape being the aging report's.
+          voidedStates: voidedStatesOf(manifest, invoiceEntity),
+          ...(declaresField(manifest, invoiceEntity, "document_type") && declaresField(manifest, invoiceEntity, "credit_note_of")
+            ? { creditNote: { typeField: "document_type", typeValue: "credit_note", refField: "credit_note_of" } }
+            : {}),
         }),
         "read",
       ),
@@ -1939,12 +2017,6 @@ export interface OperateGatewayOptions extends OperateRuntimeOptions {
    */
   readonly idempotencyLeaseSeconds?: number;
   readonly idempotencyMaxStoredBodyBytes?: number;
-  /**
-   * Where a stage or handler that **threw** is reported, with the request id the caller was given.
-   * Without it the cause survived only as a truncated stage reason, so a 500 from a thrown handler
-   * left its stack in no log.
-   */
-  readonly onInternalError?: GatewayRuntimeOptions["onInternalError"];
 }
 
 export interface OperateServer extends CompiledOperateServer {
@@ -1979,7 +2051,10 @@ export function buildOperateGateway(
     ...(options.jwksProvider !== undefined ? { jwksProvider: options.jwksProvider } : {}),
     ...(options.jwtIssuer !== undefined ? { jwtIssuer: options.jwtIssuer } : {}),
     ...(options.jwtAudience !== undefined ? { jwtAudience: options.jwtAudience } : {}),
-    ...(options.requiredJwtClaims !== undefined ? { requiredJwtClaims: options.requiredJwtClaims } : {}),
+    // Always passed: `GatewayRuntimeOptions.requiredJwtClaims` is required since ADR-0473, so the
+    // strict default lives here, beside the one optional field it fills, rather than in the runtime
+    // where an omission was unobservable.
+    requiredJwtClaims: options.requiredJwtClaims ?? new Set(REQUIRED_JWT_CLAIMS),
     ...(options.idempotencyLeaseSeconds !== undefined
       ? { idempotencyLeaseSeconds: options.idempotencyLeaseSeconds }
       : {}),

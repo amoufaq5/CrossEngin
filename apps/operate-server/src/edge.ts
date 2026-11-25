@@ -17,6 +17,7 @@ import {
   internalErrorResponse,
   logServerError,
 } from "./server.js";
+import { finalizeOuterResponse, pathOfUrl, payloadTooLargeResponse } from "./outer-response.js";
 
 /**
  * Maps a Fetch API `Request` (Cloudflare Workers / edge runtimes / `undici`)
@@ -111,12 +112,24 @@ export function createFetchHandler(
     bytes: resolveMaxRequestBodyBytes(o.bytes),
   }));
   return async (request: Request): Promise<Response> => {
+    // Every exit goes through one finalizer (ADR-0473): the 413 and the read-failure 500 below are
+    // answered before the gateway, so they never passed its security-header stage.
+    const finalize = (response: RawHttpResponse): Response =>
+      rawToFetchResponse(
+        finalizeOuterResponse(response, {
+          method: request.method,
+          path: pathOfUrl(request.url),
+          onUnreportedServerError: logServerError,
+        }),
+      );
     let raw: RawHttpRequest;
     let body: Uint8Array | null;
     try {
       ({ raw, body } = await fetchToRaw(request, limit, overrides));
     } catch (err) {
-      if (err instanceof RequestBodyTooLargeError) return payloadTooLarge(err);
+      if (err instanceof RequestBodyTooLargeError) {
+        return finalize(payloadTooLargeResponse(err.message, err.limitBytes));
+      }
       // Rethrown before, so a body that failed mid-read reached the runtime as an uncaught error —
       // whatever page the host renders for that. The same answer the Node listener gives: a fixed
       // 500 and an id, with the cause in the log under that id. `dispatch` itself never throws.
@@ -125,31 +138,16 @@ export function createFetchHandler(
         requestId,
         status: 500,
         method: request.method,
-        path: new URL(request.url).pathname.slice(0, 512),
+        path: pathOfUrl(request.url).slice(0, 512),
         operationId: null,
         stage: "read_body",
         reason: err instanceof Error ? err.message.slice(0, 480) : "non_error_thrown",
         cause: err,
       });
-      return rawToFetchResponse(internalErrorResponse(requestId));
+      return finalize(internalErrorResponse(requestId));
     }
-    const response = await server.dispatch(raw, body);
-    return rawToFetchResponse(response);
+    return finalize(await server.dispatch(raw, body));
   };
-}
-
-/** The same RFC 9457 problem document the Node listener returns for an oversized body. */
-function payloadTooLarge(err: RequestBodyTooLargeError): Response {
-  return new Response(
-    JSON.stringify({
-      type: "https://crossengin.io/problems/payload-too-large",
-      title: "Payload too large",
-      status: 413,
-      detail: err.message,
-      extensions: { limitBytes: err.limitBytes },
-    }),
-    { status: 413, headers: { "content-type": "application/problem+json" } },
-  );
 }
 
 export interface BuildEdgeFetchHandlerOptions {

@@ -2,7 +2,12 @@ import type { PgConnection } from "@crossengin/kernel-pg";
 import { setTenantContextWithin, withTenantContext } from "@crossengin/operate-runtime-pg";
 import { z } from "zod";
 
-import { DesignerCannotApproveError, type SelfApprovalPolicy } from "./design-review-routes.js";
+import {
+  DesignerCannotApproveError,
+  REVIEW_DECISION_FROM,
+  type DesignDecisionOutcome,
+  type SelfApprovalPolicy,
+} from "./design-review-routes.js";
 
 const REVIEW_STATUSES = ["not_required", "pending", "approved", "rejected"] as const;
 
@@ -171,8 +176,13 @@ interface PostgresDesignReviewStoreOptions {
  * (list/getById/counts) run under `withPlatformReview`; `markPending` and
  * `reviewStatusFor` are a tenant's own operations and run under
  * `withTenantContext` with `tenant_id` bound as a WHERE predicate too — defense
- * in depth. The store never gates a transition: the route layer owns the review
- * state machine.
+ * in depth.
+ *
+ * The review state machine is **declared** by the route layer (`REVIEW_DECISION_FROM`) and
+ * **enforced** here, inside the statement that writes the decision. This said "the store never gates
+ * a transition" until ADR-0470, and that was the race: the route checked the current status on a
+ * read outside the transaction, so two reviewers deciding one proposal at once both passed the check
+ * and the second `UPDATE` overwrote the first — an approval landing on top of a rejection.
  *
  * `approve`/`reject` are the one method that spans both arms, and this comment
  * listed them among the cross-tenant methods until ADR-0409 narrowed the review
@@ -285,7 +295,7 @@ export class PostgresDesignReviewStore {
   async approve(
     id: string,
     input: { reviewedBy: string; notes?: string | null; selfApproval: SelfApprovalPolicy },
-  ): Promise<DesignReviewRecord | null> {
+  ): Promise<DesignDecisionOutcome<DesignReviewRecord>> {
     return this.decide(id, "approved", input, input.selfApproval);
   }
 
@@ -293,7 +303,7 @@ export class PostgresDesignReviewStore {
   async reject(
     id: string,
     input: { reviewedBy: string; notes?: string | null },
-  ): Promise<DesignReviewRecord | null> {
+  ): Promise<DesignDecisionOutcome<DesignReviewRecord>> {
     return this.decide(id, "rejected", input, "permitted");
   }
 
@@ -321,13 +331,34 @@ export class PostgresDesignReviewStore {
    * route (H-28): the route's check is the one a caller meets, and this one is what stops a store
    * reached some other way being talked past the rule. `designed_by` is written once at insert and
    * never updated, so reading it inside the transaction is not racing a writer.
+   *
+   * **The from-state is a predicate of the `UPDATE`, never a read beside it** (ADR-0470). The route
+   * reads the current review status first, and that read is outside this transaction, so two
+   * reviewers deciding one proposal at once both passed it and the second write overwrote the first.
+   * `review_status = ANY($6)` makes the check and the write one statement: under READ COMMITTED the
+   * second `UPDATE` waits on the first's row lock, re-evaluates its `WHERE` against the committed
+   * row, and matches nothing. A lock taken in the read would not do — `SELECT … FOR UPDATE` is
+   * governed by the `UPDATE` policies' `USING`, which under the review grant alone admits no row.
+   *
+   * A rejection also refuses a manifest that is **active**. `REVIEW_DECISION_FROM.rejected` admits `approved` so a
+   * reviewer can revoke an approval before it is used, and nothing stopped it after: the row read
+   * `rejected` while `activeManifestFor` went on serving it, a status that claimed a withdrawal no
+   * request saw. Taking it out of service is an activation of something else, which is the remedy the
+   * route names; this store does not deactivate.
+   *
+   * Zero rows is then classified by one more read under the row's own tenant context, so the route
+   * can tell *not there* from *no longer in a state to decide* (ADR-0342's distinction): the former is
+   * a 404, the latter a 409, and a 404 for a proposal a second reviewer just decided would send the
+   * first looking for a row that exists.
    */
   private async decide(
     id: string,
     reviewStatus: "approved" | "rejected",
     input: { reviewedBy: string; notes?: string | null },
     selfApproval: SelfApprovalPolicy,
-  ): Promise<DesignReviewRecord | null> {
+  ): Promise<DesignDecisionOutcome<DesignReviewRecord>> {
+    const allowedFrom = REVIEW_DECISION_FROM[reviewStatus];
+    const refuseActive = reviewStatus === "rejected";
     return withPlatformReview(this.conn, async (tx) => {
       const found = await tx.query(
         `SELECT tenant_id, designed_by FROM ${this.table} WHERE id = $1`,
@@ -336,7 +367,7 @@ export class PostgresDesignReviewStore {
       const owner = found.rows[0];
       // No row with that id in any tenant — the review arm admits every tenant's rows, so this is
       // conclusive rather than a scope miss, and the route answers 404 for it as it always has.
-      if (owner === undefined) return null;
+      if (owner === undefined) return { kind: "not_found" };
       if (
         reviewStatus === "approved" &&
         selfApproval === "refused" &&
@@ -350,11 +381,26 @@ export class PostgresDesignReviewStore {
       const result = await tx.query(
         `UPDATE ${this.table} SET review_status = $3, reviewed_by = $4, reviewed_at = now(),` +
           ` review_notes = $5, updated_at = now() WHERE id = $1 AND tenant_id = $2` +
+          ` AND review_status = ANY($6::text[])` +
+          (refuseActive ? ` AND status <> 'active'` : "") +
           ` RETURNING ${SELECT_COLUMNS}`,
-        [id, tenantId, reviewStatus, input.reviewedBy, input.notes ?? null],
+        [id, tenantId, reviewStatus, input.reviewedBy, input.notes ?? null, [...allowedFrom]],
       );
       const row = result.rows[0];
-      return row === undefined ? null : this.rowToRecord(row);
+      if (row !== undefined) return { kind: "decided", review: this.rowToRecord(row) };
+      const now = await tx.query(
+        `SELECT review_status, status FROM ${this.table} WHERE id = $1 AND tenant_id = $2`,
+        [id, tenantId],
+      );
+      const standing = now.rows[0];
+      if (standing === undefined) return { kind: "not_found" };
+      const current = ReviewStatusSchema.parse(String(standing["review_status"]));
+      if (refuseActive && allowedFrom.includes(current) && String(standing["status"]) === "active") {
+        return { kind: "manifest_active" };
+      }
+      // Either the status moved out of the allowed set, or it moved and moved back between the two
+      // statements; both are a conflict with a concurrent decision, and a retry re-reads the truth.
+      return { kind: "status_changed", current };
     });
   }
 

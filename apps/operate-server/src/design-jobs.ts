@@ -69,7 +69,6 @@ export interface DesignJobStore {
     id: string,
     input: { error: string; issues?: readonly string[]; providerLabel?: string | null },
   ): Promise<DesignJobRecord | null>;
-  deleteExpired(olderThanIso: string): Promise<number>;
 }
 
 export interface PostgresDesignJobStoreOptions {
@@ -79,9 +78,6 @@ export interface PostgresDesignJobStoreOptions {
 const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
 const SELECT_COLUMNS =
   "id, tenant_id, status, phase, attempt, max_attempts, name, description, output_chars, issues, proposal_id, provider_label, error, created_at, updated_at";
-
-/** Terminal statuses the retention sweep is allowed to reap; an in-flight run is never deleted. */
-const SWEEPABLE_STATUS_LIST = "'succeeded', 'failed'";
 
 function isoOf(value: unknown): string {
   if (value instanceof Date) return value.toISOString();
@@ -125,9 +121,16 @@ const PROGRESS_KEYS = ["status", "phase", "attempt", "outputChars", "issues"] as
  * progress instead of blocking on one long request. The table carries tenant
  * RLS, so every per-job method runs inside `withTenantContext` (which binds
  * `app.current_tenant_id` for the transaction) AND binds `tenant_id` as a WHERE
- * predicate — defense in depth. `deleteExpired` is the one exception: it is a
- * platform-wide retention sweep across tenants, so it deliberately runs outside
- * any tenant context (like `PostgresTenantSource`).
+ * predicate — defense in depth, and with no exception.
+ *
+ * There used to be one: `deleteExpired`, a platform-wide retention sweep that deliberately ran
+ * outside any tenant context. It had no caller anywhere, and it could not have worked if it had —
+ * this table carries only its isolation policy, so on the confined serving role every deployment
+ * ships (ADR-0424) the unscoped `DELETE` matched **0 rows** with no error code, and its own doc comment
+ * was the instruction that made it vacuous (ADR-0400's finding). `tenant_id` is NOT NULL, so a
+ * platform `DELETE` arm requiring `tenant_id IS NULL` would admit no row either (ADR-0389's proof).
+ * It is deleted rather than fixed (ADR-0470); a retention sweep for this table is an open question,
+ * and its honest shape is per-tenant iteration under each tenant's own context.
  */
 export class PostgresDesignJobStore implements DesignJobStore {
   private readonly conn: PgConnection;
@@ -264,14 +267,5 @@ export class PostgresDesignJobStore implements DesignJobStore {
       const row = result.rows[0];
       return row === undefined ? null : this.rowToRecord(row);
     });
-  }
-
-  /** Platform-wide retention sweep — spans tenants, so it must NOT run under a tenant RLS context. */
-  async deleteExpired(olderThanIso: string): Promise<number> {
-    const result = await this.conn.query(
-      `DELETE FROM ${this.table} WHERE updated_at < $1 AND status IN (${SWEEPABLE_STATUS_LIST})`,
-      [olderThanIso],
-    );
-    return result.rowCount;
   }
 }

@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildJobInvokeHandler,
+  JOB_QUEUE_RETRY_AFTER_SECONDS,
   type InvokedJobRun,
+  type JobInvocationOutcome,
   type JobInvocationRequest,
   type JobInvoker,
 } from "./job-invoke-handler.js";
@@ -17,7 +19,7 @@ function invokerOf(
   return {
     invoke: async (req) => {
       captured?.push(req);
-      return runs;
+      return runs.length === 0 ? { kind: "no_listener" } : { kind: "enqueued", runs, unservedJobIds: [] };
     },
   };
 }
@@ -140,6 +142,49 @@ describe("buildJobInvokeHandler", () => {
       expect((await handler(input({ principal: principalWithRole("cashier"), parsedBody: { action: "reindex-catalog" } }))).status).toBe(403);
       // un-listed action is open
       expect((await handler(input({ principal: principalWithRole("cashier"), parsedBody: { action: "free-action" } }))).status).toBe(202);
+    });
+  });
+
+  describe("an invocation that would be accepted for nothing, or not enqueued at all", () => {
+    const outcomeOf = (outcome: JobInvocationOutcome | (() => never)): JobInvoker => ({
+      invoke: async () => (typeof outcome === "function" ? outcome() : outcome),
+    });
+
+    it("409s job_not_served naming the action and the jobs, rather than a 202 for work nothing runs", async () => {
+      const handler = buildJobInvokeHandler(outcomeOf({ kind: "not_served", jobIds: ["reindex"] }));
+      const out = await handler(input({ parsedBody: { action: "reindex-catalog" } }));
+      expect(out.status).toBe(409);
+      expect(body(out)).toMatchObject({ error: "job_not_served", jobIds: ["reindex"] });
+      expect(JSON.stringify(body(out))).toContain("reindex-catalog");
+    });
+
+    it("503s job_queue_unavailable with a retry-after when the enqueue failed", async () => {
+      const handler = buildJobInvokeHandler(outcomeOf({ kind: "queue_unavailable" }));
+      const out = await handler(input({ parsedBody: { action: "run" } }));
+      expect(out.status).toBe(503);
+      expect(out.headers).toEqual({ "retry-after": JOB_QUEUE_RETRY_AFTER_SECONDS.toString() });
+      expect(body(out)).toMatchObject({ error: "job_queue_unavailable" });
+    });
+
+    it("lets an invoker that throws propagate, rather than dressing a defect as an unreported 503", async () => {
+      // The queue's own failure is the invoker's `queue_unavailable` (reported through its onError);
+      // a throw that reaches the handler is something else, and a silent retryable 503 would claim a
+      // queue outage and leave no record of what actually broke.
+      const handler = buildJobInvokeHandler(
+        outcomeOf(() => {
+          throw new Error("planner defect");
+        }),
+      );
+      await expect(handler(input({ parsedBody: { action: "run" } }))).rejects.toThrow("planner defect");
+    });
+
+    it("202s the served runs and names the unserved ones it did not enqueue", async () => {
+      const handler = buildJobInvokeHandler(
+        outcomeOf({ kind: "enqueued", runs: [{ jobId: "a", runId: "r", inserted: true }], unservedJobIds: ["b"] }),
+      );
+      const out = await handler(input({ parsedBody: { action: "run" } }));
+      expect(out.status).toBe(202);
+      expect(body(out)).toEqual({ action: "run", runs: [{ jobId: "a", runId: "r", inserted: true }], unservedJobIds: ["b"] });
     });
   });
 });

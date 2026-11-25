@@ -7,6 +7,7 @@ import {
   ensureSearchFunction,
   probeSearchFunction,
   probeSearchIndexReach,
+  searchReachTable,
   REPLACE_SEARCH_FUNCTION_SQL,
   SEARCH_INDEX_REACHES,
   SEARCH_DICTIONARY,
@@ -432,7 +433,7 @@ describe("searchFunctionLine — what the state reaches", () => {
 
   it("adds no clause to a healthy column-store line, so the normal boot says one sentence", () => {
     for (const state of ["created", "matches"] as const) {
-      const line = searchFunctionLine({ state, detail: null }, "pg-columns", "every_table");
+      const line = searchFunctionLine({ state, detail: null }, "pg-columns", { reach: "rls_exempt", table: "public.employee", detail: null });
       expect(line).not.toContain("--store");
       expect(line).toContain("RLS-exempt");
     }
@@ -446,7 +447,7 @@ describe("searchFunctionLine — on --store pg, whose predicate does not call th
     // `rawFoldCall`, no trigram index exists for it, and `pg_trgm` is never created for it.
     for (const state of ["created", "matches"] as const) {
       for (const reach of SEARCH_INDEX_REACHES) {
-        const line = searchFunctionLine({ state, detail: null }, "pg", reach);
+        const line = searchFunctionLine({ state, detail: null }, "pg", { reach, table: "meta.operate_entity_records", detail: null });
         expect(line).not.toContain("trigram index are one expression");
         expect(line).not.toContain("RLS-exempt");
         expect(line).not.toContain("LEAKPROOF");
@@ -457,8 +458,8 @@ describe("searchFunctionLine — on --store pg, whose predicate does not call th
   });
 
   it("differs from the column store's healthy line, so the store argument is not decorative", () => {
-    const pg = searchFunctionLine({ state: "matches", detail: null }, "pg", "every_table");
-    const columns = searchFunctionLine({ state: "matches", detail: null }, "pg-columns", "every_table");
+    const pg = searchFunctionLine({ state: "matches", detail: null }, "pg", { reach: "rls_exempt", table: "public.employee", detail: null });
+    const columns = searchFunctionLine({ state: "matches", detail: null }, "pg-columns", { reach: "rls_exempt", table: "public.employee", detail: null });
     expect(pg).not.toBe(columns);
     expect(columns).toContain("trigram index are one expression");
   });
@@ -551,38 +552,83 @@ describe("the store map against the SQL each store really issues", () => {
 });
 
 describe("probeSearchIndexReach", () => {
-  function roleConn(opts: { readonly exempt?: boolean; readonly rows?: 0; readonly throws?: string }): PgConnection {
-    return {
+  const TABLE = "public.employee";
+  function roleConn(opts: {
+    readonly exempt?: boolean;
+    readonly confined?: boolean | null;
+    readonly rows?: 0;
+    readonly throws?: string;
+  }): { conn: PgConnection; asked: unknown[][] } {
+    const asked: unknown[][] = [];
+    const conn: PgConnection = {
       query: (async (sql: string, params?: readonly unknown[]) => {
         assertBindArity(sql, params);
+        asked.push([...(params ?? [])]);
         if (opts.throws !== undefined) throw new Error(opts.throws);
         if (opts.rows === 0) return { rows: [], rowCount: 0 };
-        return { rows: [{ exempt: opts.exempt ?? false }], rowCount: 1 };
+        const table = params?.[0] ?? null;
+        const confined = table === null ? null : opts.confined === undefined ? true : opts.confined;
+        return { rows: [{ exempt: opts.exempt ?? false, present: confined !== null, confined }], rowCount: 1 };
       }) as PgConnection["query"],
-      transaction: (async <T,>(fn: (tx: PgConnection) => Promise<T>) => fn(roleConn(opts))) as PgConnection["transaction"],
+      transaction: (async <T,>(fn: (tx: PgConnection) => Promise<T>) => fn(conn)) as PgConnection["transaction"],
       withAdvisoryLock: vi.fn() as PgConnection["withAdvisoryLock"],
       close: vi.fn() as PgConnection["close"],
     };
+    return { conn, asked };
   }
 
-  it("answers every_table for a superuser or BYPASSRLS role, which is conclusive", async () => {
-    expect(await probeSearchIndexReach(roleConn({ exempt: true }))).toBe("every_table");
+  it("answers rls_exempt for a superuser or BYPASSRLS role, which is conclusive", async () => {
+    expect((await probeSearchIndexReach(roleConn({ exempt: true }).conn, TABLE)).reach).toBe("rls_exempt");
   });
 
-  it("answers owned_tables_only rather than claiming the index is unreachable", async () => {
-    // The rest depends on per-table ownership, which this probe cannot ask: it runs before
-    // `ensureSchema` has created any entity table. ADR-0349 records that a `--store pg-columns`
-    // serving role must own its tables, so for that deployment the index is reached.
-    expect(await probeSearchIndexReach(roleConn({ exempt: false }))).toBe("owned_tables_only");
+  it("answers confined when Postgres says RLS applies on the served table — the shipped crossengin_app", async () => {
+    expect(await probeSearchIndexReach(roleConn({ confined: true }).conn, TABLE)).toEqual({
+      reach: "confined",
+      table: TABLE,
+      detail: null,
+    });
   });
 
-  it("answers unknown when the role row is missing or the read fails", async () => {
-    expect(await probeSearchIndexReach(roleConn({ rows: 0 }))).toBe("unknown");
-    expect(await probeSearchIndexReach(roleConn({ throws: "boom" }))).toBe("unknown");
+  it("answers not_confined when Postgres says RLS does not apply there", async () => {
+    expect((await probeSearchIndexReach(roleConn({ confined: false }).conn, TABLE)).reach).toBe("not_confined");
+  });
+
+  it("answers unknown with its reason for an absent table, no table, a missing role row or a failed read", async () => {
+    expect(await probeSearchIndexReach(roleConn({ confined: null }).conn, TABLE)).toMatchObject({
+      reach: "unknown",
+      detail: "the table does not exist yet",
+    });
+    expect((await probeSearchIndexReach(roleConn({}).conn, null)).reach).toBe("unknown");
+    expect((await probeSearchIndexReach(roleConn({ rows: 0 }).conn, TABLE)).reach).toBe("unknown");
+    expect(await probeSearchIndexReach(roleConn({ throws: "boom" }).conn, TABLE)).toMatchObject({
+      reach: "unknown",
+      detail: "boom",
+    });
+  });
+
+  it("refuses a table name that is not a plain schema.table without issuing a statement", async () => {
+    const { conn, asked } = roleConn({});
+    expect((await probeSearchIndexReach(conn, "public.employee; DROP TABLE x")).reach).toBe("unknown");
+    expect(asked).toEqual([]);
   });
 
   it("is total over the reach enum", () => {
-    expect([...SEARCH_INDEX_REACHES].sort()).toEqual(["every_table", "owned_tables_only", "unknown"]);
+    expect([...SEARCH_INDEX_REACHES].sort()).toEqual(["confined", "not_confined", "rls_exempt", "unknown"]);
+  });
+});
+
+describe("searchReachTable", () => {
+  const manifest = { entities: [{ name: "Employee" }, { name: "Vendor" }] } as unknown as Parameters<
+    typeof searchReachTable
+  >[1];
+  it("names the document table on --store pg and the first entity table on --store pg-columns", () => {
+    expect(searchReachTable("pg", manifest, null)).toBe("meta.operate_entity_records");
+    expect(searchReachTable("pg", manifest, "tenant_s")).toBe("tenant_s.operate_entity_records");
+    expect(searchReachTable("pg-columns", manifest, null)).toBe("public.employee");
+    expect(searchReachTable("pg-columns", manifest, "app")).toBe("app.employee");
+  });
+  it("names nothing for a manifest declaring no entity", () => {
+    expect(searchReachTable("pg-columns", { entities: [] } as unknown as typeof manifest, null)).toBeNull();
   });
 });
 
