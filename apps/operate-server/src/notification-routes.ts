@@ -63,8 +63,21 @@ export type DigestNoticeResolver = (
 export interface NotificationRoutesContext {
   readonly source: TenantNotificationSourceLike;
   readonly principalRoles: (principal: ResolvedPrincipal | null) => PrincipalRoles;
-  /** Roles permitted to read the tenant's notifications. Fail-closed: empty ⇒ nobody. */
-  readonly allowedRoles: ReadonlySet<string>;
+  /**
+   * Roles permitted to list **their own** notices. Fail-closed: empty ⇒ nobody.
+   *
+   * This used to be one `allowedRoles` gating the whole list — and the deployment passed the AI
+   * design grant into it, so whether a person could read their own inbox depended on whether they
+   * could design manifests (ADR-0476). The self list is a principal reading its own rows, which is
+   * the read-state routes' question (the viewer is the credential, ADR-0364/0376), so it is granted
+   * by the same set: the badge and the list it counts cannot disagree about who may see the page.
+   *
+   * It grants nothing beyond the caller's own rows, and that is only true while `resolveIdentity`
+   * is wired: without a resolver the list cannot be narrowed to a recipient and every answer is the
+   * tenant's, so a caller holding only this grant is **refused** there rather than handed the tenant
+   * list (`self_scope_unavailable`).
+   */
+  readonly selfRoles: ReadonlySet<string>;
   /** Resolves the human-readable content for a notification's correlated proposal. */
   readonly resolveProposal?: ProposalNoticeResolver;
   /** Renders the copy for a digest notification from the pool it correlates to. */
@@ -76,7 +89,11 @@ export interface NotificationRoutesContext {
    * Wiring this switches the inbox from tenant-wide to per-recipient.
    */
   readonly resolveIdentity?: NotificationIdentityResolver;
-  /** Roles permitted to ask for the whole tenant's notifications via `?scope=tenant`. */
+  /**
+   * Roles permitted to read the whole tenant's notifications — via `?scope=tenant`, or by any list
+   * at all when no `resolveIdentity` is wired (then nothing narrows the answer to one recipient).
+   * Its own grant, deliberately not the self one: reading other people's notices is an escalation.
+   */
   readonly tenantScopeRoles?: ReadonlySet<string>;
   /**
    * Records an attempt to read beyond one's own inbox. When wired, a *granted* escalation is
@@ -118,18 +135,28 @@ function json(status: number, body: unknown): HandlerOutput {
   return { kind: "json", status, body };
 }
 
-function hasRole(ctx: NotificationRoutesContext, principal: ResolvedPrincipal | null): boolean {
+function holdsAny(
+  ctx: NotificationRoutesContext,
+  principal: ResolvedPrincipal | null,
+  allowed: ReadonlySet<string> | undefined,
+): boolean {
+  if (allowed === undefined || allowed.size === 0) return false;
   const { primaryRole, secondaryRoles } = ctx.principalRoles(principal);
-  return [primaryRole, ...(secondaryRoles ?? [])].some((r) => ctx.allowedRoles.has(r));
+  return [primaryRole, ...(secondaryRoles ?? [])].some((r) => allowed.has(r));
 }
 
-/** 401 when unauthenticated, 403 when the caller lacks an allowed role, else null (allowed). */
+/**
+ * 401 when unauthenticated, 403 when the caller holds neither grant, else null (allowed).
+ *
+ * Either grant admits: the tenant-scope grant strictly widens the self one, so a caller holding
+ * only it may still list (and the scope decision below decides what).
+ */
 function guard(
   ctx: NotificationRoutesContext,
   principal: ResolvedPrincipal | null,
 ): HandlerOutput | null {
   if (principal === null) return json(401, { error: "authentication_required" });
-  if (!hasRole(ctx, principal)) {
+  if (!holdsAny(ctx, principal, ctx.selfRoles) && !holdsAny(ctx, principal, ctx.tenantScopeRoles)) {
     return json(403, { error: "forbidden", detail: "insufficient role" });
   }
   return null;
@@ -231,10 +258,7 @@ export function canReadTenantScope(
   ctx: NotificationRoutesContext,
   principal: ResolvedPrincipal | null,
 ): boolean {
-  const allowed = ctx.tenantScopeRoles;
-  if (allowed === undefined || allowed.size === 0) return false;
-  const { primaryRole, secondaryRoles } = ctx.principalRoles(principal);
-  return [primaryRole, ...(secondaryRoles ?? [])].some((r) => allowed.has(r));
+  return holdsAny(ctx, principal, ctx.tenantScopeRoles);
 }
 
 /**
@@ -268,6 +292,15 @@ function buildListHandler(ctx: NotificationRoutesContext): Handler {
     if (denial !== null) return denial;
     const tenant = tenantOf(input.principal);
     if (tenant === null) return json(400, { error: "tenant_required" });
+    // With no resolver every list is the tenant's, so the self grant has nothing it can serve.
+    // Refused by name rather than widened: handing a self-only caller the tenant list is the leak
+    // the recipient filter exists to close, and answering an empty list would read as "no notices".
+    if (ctx.resolveIdentity === undefined && !canReadTenantScope(ctx, input.principal)) {
+      return json(403, {
+        error: "self_scope_unavailable",
+        detail: "no recipient identity is wired, so the only list is the tenant's, which needs the tenant-scope grant",
+      });
+    }
     const scope = requestedScope(
       firstQueryValue(
         (input.request as { query?: Record<string, string | string[]> } | undefined)?.query?.[
@@ -383,5 +416,55 @@ function route(
     idempotencyRequired: false,
     requestSchemaSha256: null,
     responseSchemaSha256: null,
+  };
+}
+
+/** Which grant governs the self-scoped list, as the deployment wired it. */
+export const NOTIFICATION_LIST_GRANT_SOURCES = ["read_state", "ai_design"] as const;
+export type NotificationListGrantSource = (typeof NOTIFICATION_LIST_GRANT_SOURCES)[number];
+
+export interface NotificationListGrant {
+  readonly roles: readonly string[];
+  readonly source: NotificationListGrantSource;
+}
+
+/**
+ * The roles that may list their own notices (ADR-0476).
+ *
+ * The read-state roles when the deployment grants read state — the page's other half, so one set
+ * governs the list and the badge counting it. Only when no read-state role is granted does the
+ * list fall back to the AI design grant, which is what governed it before; that is not a policy but
+ * the absence of one, and the boot line says which governs so an operator can see it.
+ */
+export function notificationListGrant(
+  readStateRoles: readonly string[],
+  aiDesignRoles: readonly string[],
+): NotificationListGrant {
+  return readStateRoles.length > 0
+    ? { roles: [...readStateRoles], source: "read_state" }
+    : { roles: [...aiDesignRoles], source: "ai_design" };
+}
+
+export function formatNotificationListGrant(
+  grant: NotificationListGrant,
+  tenantScopeRoles: readonly string[],
+): { readonly level: "info" | "warn"; readonly line: string } {
+  const roles = grant.roles.length === 0 ? "(none: every request is refused)" : grant.roles.join(", ");
+  const tenant =
+    tenantScopeRoles.length === 0 ? "nobody" : tenantScopeRoles.join(", ");
+  if (grant.source === "read_state") {
+    return {
+      level: "info",
+      line:
+        `[notifications] own-inbox list granted to the read-state roles: ${roles}` +
+        ` (tenant-wide list: ${tenant})`,
+    };
+  }
+  return {
+    level: "warn",
+    line:
+      `[notifications] own-inbox list granted to the --ai-design-role roles: ${roles}, because no` +
+      ` --read-state-role is granted; pass --read-state-role so the inbox and its badge share one grant` +
+      ` (tenant-wide list: ${tenant})`,
   };
 }

@@ -45,6 +45,15 @@ class FakeStore implements DeliveryStoreLike {
   claims: ClaimedDispatch[] = [];
   claimCalls = 0;
   readonly advances: DispatchAdvanceUpdate[] = [];
+  /** The lease the drain paces its heartbeat by; the default, as the real store's. */
+  claimLeaseMs = 600_000;
+  readonly renewals: string[] = [];
+  /** `true` unless a test says the claim was taken away. */
+  renewalOutcome = true;
+  async renewClaim(_t: string, rowId: string): Promise<boolean> {
+    this.renewals.push(rowId);
+    return this.renewalOutcome;
+  }
   async claimQueued(): Promise<readonly ClaimedDispatch[]> {
     this.claimCalls += 1;
     return this.claims;
@@ -246,6 +255,7 @@ describe("delivery-scheduler", () => {
       reconcile: () => store.reconcile(),
       attemptedRecipients: () => store.attemptedRecipients(),
       unsettledSending: () => store.unsettledSending(),
+      renewClaim: (t, r) => store.renewClaim(t, r),
     };
     const s = new DeliveryScheduler({
       drain: drainOptions(slow),

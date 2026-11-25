@@ -50,6 +50,14 @@ export interface DeliveryStoreLike {
   ): Promise<readonly ClaimedDispatch[]>;
   recordAttempt(tenantId: string, rowId: string, attempt: DeliveryAttempt): Promise<boolean>;
   advance(tenantId: string, rowId: string, update: DispatchAdvanceUpdate): Promise<boolean>;
+  /**
+   * The claim lease and its renewal. **Required**, both: a drain that cannot renew a claim lets a
+   * long fan-out outlive its lease, and another drain then takes the dispatch and sends it again
+   * (ADR-0476). The lease is the store's, read here so the heartbeat cannot be paced against a
+   * different figure than the one the claim predicate ages rows by.
+   */
+  readonly claimLeaseMs: number;
+  renewClaim(tenantId: string, rowId: string): Promise<boolean>;
   dueRetries(
     tenantId: string,
     now: Date,
@@ -398,10 +406,69 @@ async function batchRelease(
   }
 }
 
+/** The heartbeat interval as a fraction of the lease: three renewals fit in one lease. */
+export const CLAIM_HEARTBEAT_FRACTION = 3;
+
+/**
+ * Renews the batch's claims whenever a third of the lease has passed since the last renewal.
+ *
+ * **Every row the batch still holds is renewed, not only the one being drained.** A batch is claimed
+ * together and drained one dispatch at a time, so while one dispatch's fan-out runs, the rows behind
+ * it in the batch age too — renewing only the current row lets a later row lapse and be taken by a
+ * second drain before this one reaches it, which is the duplicate delivery the lease exists to
+ * prevent (ADR-0476 review; the first version renewed the current row only). A row leaves the held
+ * set once its dispatch has been drained.
+ *
+ * Paced by the drain's clock between steps rather than by a timer, so it cannot fire into a
+ * statement in flight and is deterministic under a test clock. The bound that leaves is stated
+ * rather than hidden: one step longer than two-thirds of the lease (a single send is capped by
+ * `sendTimeoutMs`, 10 s against a 10-minute lease) still lets the lease lapse. A renewal that finds
+ * the row no longer `rendering` answers `false`; that is reported through `onError`, not thrown,
+ * because the sends already made are on record and stopping half way would strand the rest.
+ */
+export interface BatchClaimHeartbeat {
+  /** Renews every held row if a third of the lease has passed since the last renewal. */
+  beat(): Promise<void>;
+  /** The row's dispatch has been drained; it is no longer this batch's to renew. */
+  release(rowId: string): void;
+}
+
+function batchClaimHeartbeat(
+  opts: DeliveryDrainOptions,
+  tenantId: string,
+  rowIds: readonly string[],
+  now: () => Date,
+  claimedAtMs: number,
+): BatchClaimHeartbeat {
+  const interval = Math.max(1, Math.floor(opts.store.claimLeaseMs / CLAIM_HEARTBEAT_FRACTION));
+  const held = new Set(rowIds);
+  let last = claimedAtMs;
+  return {
+    release: (rowId) => {
+      held.delete(rowId);
+    },
+    beat: async () => {
+      const at = now().getTime();
+      if (at - last < interval) return;
+      last = at;
+      for (const rowId of [...held]) {
+        const renewed = await opts.store.renewClaim(tenantId, rowId);
+        if (!renewed) {
+          opts.onError?.(
+            new Error(`claim on dispatch row ${rowId} was not renewed: it is no longer rendering`),
+            tenantId,
+          );
+        }
+      }
+    },
+  };
+}
+
 async function drainDispatch(
   opts: DeliveryDrainOptions,
   tenantId: string,
   claimed: ClaimedDispatch,
+  batchHeartbeat: BatchClaimHeartbeat,
 ): Promise<{
   attempts: readonly DeliveryAttempt[];
   suppressed: number;
@@ -413,6 +480,10 @@ async function drainDispatch(
   const now = opts.clock ?? ((): Date => new Date());
   const startedAt = now().toISOString();
   const dispatch = claimed.dispatch;
+  // Aged from the batch's claim and not from this dispatch's turn, and renewing every row the batch
+  // still holds: the rows behind this one in the batch age while it drains.
+  const heartbeat = (): Promise<void> => batchHeartbeat.beat();
+  await heartbeat();
 
   const resolved = await opts.resolver.resolveAudience(tenantId, dispatch.audienceJson);
   const preferences = await opts.resolver.preferencesFor(
@@ -451,10 +522,13 @@ async function drainDispatch(
   const provider = providerFor(opts.senders, dispatch.channel);
   const attempts: DeliveryAttempt[] = [];
   // Each attempt is written as soon as it exists rather than after the whole fan-out, so a process
-  // that dies part-way leaves a record of exactly who was already sent to.
+  // that dies part-way leaves a record of exactly who was already sent to. The heartbeat rides the
+  // same step: one recipient at a time is the fan-out's unit of progress, so it is where a third of
+  // the lease can have gone by.
   const record = async (attempt: DeliveryAttempt): Promise<void> => {
     attempts.push(attempt);
     await opts.store.recordAttempt(tenantId, claimed.rowId, attempt);
+    await heartbeat();
   };
 
   for (const userId of [...new Set(unaddressable)]) {
@@ -546,6 +620,9 @@ async function drainDispatch(
       else deferred += 1;
       continue;
     }
+    // Also before the send, which is the one step whose duration is the provider's: the lease must
+    // be fresh when a send that may take `sendTimeoutMs` begins, not only after it.
+    await heartbeat();
     const sentAt = now().toISOString();
     content ??= { value: await contentFor(opts, dispatch) };
     const result = await sendOnce(opts, dispatch, target.recipient.address, 1, content.value);
@@ -725,8 +802,20 @@ export async function drainTenant(
     (row) => opts.onUnreadable(row, tenantId),
     batch,
   );
+  const heartbeat = batchClaimHeartbeat(
+    opts,
+    tenantId,
+    claimed.map((c) => c.rowId),
+    now,
+    now().getTime(),
+  );
   for (const one of claimed) {
-    const result = await drainDispatch(opts, tenantId, one);
+    let result: Awaited<ReturnType<typeof drainDispatch>>;
+    try {
+      result = await drainDispatch(opts, tenantId, one, heartbeat);
+    } finally {
+      heartbeat.release(one.rowId);
+    }
     for (const a of result.attempts) {
       if (a.outcome === "delivered") delivered += 1;
       else if (a.outcome !== "suppressed" && a.nextRetryAt === null) failed += 1;

@@ -757,7 +757,8 @@ a time. What such a script meets, each measured against a running server
   references between imported records. It must be 1–200 letters, digits, `_` or `-` (else **422**
   `record_id_malformed`), and a second `POST` with an `id` that already exists answers **409**
   `id_conflict` and leaves the first record untouched. Two concurrent `POST`s of one new `id` can
-  still both pass that check, and the loser answers **500** `write_failed`.
+  both pass that check, and the loser answers **409** `id_conflict` too, from the database's
+  refusal rather than the check (ADR-0474).
 - **Only the entity's declared fields may be sent.** A key the manifest does not declare is **422**
   `field_not_declared`, and a field the server writes — `tenant_id`, `created_at`, `updated_at`,
   `created_by`/`updated_by` on an auditable entity, and a booking rate, withholding total or

@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 147 meta-schema tables, 24,674 tests**, all green, no
+**87 packages + 3 apps, 147 meta-schema tables, 24,985 tests**, all green, no
 type errors — and since ADR-0382 that is **checked by CI and a pre-commit hook** rather than only
 when someone runs the sweep by hand. The test figure moves every increment, so re-derive it from a
 sweep rather than quoting this line: `pnpm -r test` and sum the `Tests N passed` lines (88 packages
@@ -16069,7 +16069,82 @@ order with the API as `crossengin_app`:
   declares the 421 (with `x-crossengin-region`), the 403 and the 503 as shared problem components on
   exactly the operations the gate covers, and none of them without a gate; the AI-provider residency
   refusal is a registered problem keeping its code in `extensions.error`. Open: the tenant-status gate's
-  403/503 are still undeclared, same class.
+  403/503 are still undeclared, same class (closed by ADR-0471).
+
+**The remaining-open-items run, batch A (ADR-0469 – ADR-0476).** A scout pass re-measured **731** open
+items from ADRs 0380–0468 and the register against the tree: 151 already closed, 144 latent or
+vacuous, 49 owner decisions, 35 subsystems, and 352 actionable or settled by the repo's own rules,
+grouped into 16 slices with disjoint files. Batch A is the first eight, each implemented, adversarially
+reviewed and fixed (every reviewer found real defects), and verified live on PG 16 as the confined
+role where the slice touched SQL or the request path:
+
+- **ADR-0469, a job writes only into a tenant whose state admits a write.** `SystemActor.standing` is a
+  required reader: a blocked tenant is `TenantNotWritable` (dead-lettered), an unknown state
+  `TenantStandingUnknown` (retried), and with `--tenant-status-gate` it reads the gate's own directory.
+  The per-tenant claim runs each tenant in a savepoint, and only a first-visit failure drops that
+  tenant's reaped runs. **The job worker serves `executableJobIds`** (every declaration with a handler)
+  rather than `servedJobIds` (handled *and* produced here) — found live: a worker-only replica refused
+  `no_job_handlers` and left another replica's runs pending for ever. `POST /v1/meta/jobs/invoke` is
+  409 `job_not_served` before any write and 503 only for the invoker's own store failure; a lost lease
+  aborts a handler only on a definite `renew = false`.
+- **ADR-0470, a design is decided once and activated only if it can be served.** The decision
+  `UPDATE` carries `review_status = ANY($6)` from the total map `REVIEW_DECISION_FROM`, so two
+  concurrent reviewers get 200 and 409 `concurrent: true` rather than an overwrite; rejecting the
+  active manifest is 409 `manifest_active`; a self-approval check over a credential naming nobody is
+  403 `four_eyes_unverifiable`. Activation calls a **required** `activationCheck` (a one-shot
+  `TenantGatewayCache` with a sentinel build, so the refusal classification is the cache's own code):
+  422 `activation_unservable`, 503 for `unknown`. It does not cover `ColumnEncryptionUnavailable` or
+  `TenantSchemaStranded`. Risk and the diff fallback read resolved fields. Open: activation can still
+  race a rejection, and nothing sweeps design jobs.
+- **ADR-0471, the API description declares the refusals its producers can answer.** The tenant-status
+  gate returns the operation ids it wrapped and the document declares its 403/503 on exactly those; the
+  write audit's 503 only when `entityAudit` is wired; the handler's 404/409/422 from
+  `ACTION_HANDLER_REFUSALS`, a total map over `RouteAction`. Every declared 503 also admits the
+  gateway's own `Problem` — the review found the first draft refused the real `ai_unavailable` body.
+  Open: the gate's problem types are on `crossengin.dev/problems`, and the 402 is undeclared.
+- **ADR-0472, the boot surveys describe the session and the tenant they run for.** `[search]` asks
+  `row_security_active` on a served table rather than inferring reach from ownership, so as
+  `crossengin_app` on `pg-columns` it says `?q=` is a sequential scan (measured owner Bitmap Index Scan
+  vs app Seq Scan, `texticlike` being not LEAKPROOF); a connection-level error answers `unreachable`
+  with no remedy; `SEARCH_EXTENSION_SERVES` is deleted. `surveyTenantManifest` gained twelve finding
+  kinds, each holding only where the tenant contributes something the deployment's answer lacks,
+  including `servedFrom` and document-store gaps. `readFlagJsonFile` names the flag and path for the
+  five inline file loaders; `document-indexes` builds only missing indexes; **`RegionRouter` is
+  deleted** (callerless, and its answer differed from the live gate's). Open: tenant PHI on the shared
+  store is reported, not refused.
+- **ADR-0473, every response leaves through one finalizer.** `finalizeOuterResponse` runs on both
+  transports, so `/health`, the login, the per-tenant 503, residency refusals, webhooks and the
+  listener's 413/500 carry the six security headers and an `x-request-id`. `requiredJwtClaims` is
+  required on the runtime; a time claim must be a finite NumericDate, and a relaxed claim may be absent
+  but not present-and-unusable. An unreadable membership directory is 503 `principal_directory_unavailable`
+  with `retry-after: 5`; tenant ids are lowercased; the pre-auth limiter counts a request once. Open:
+  the session-standing directory still answers 500 during an outage after `forget()`.
+- **ADR-0474, a fixed 500 body has its cause in the log.** `HandlerContext.reportFault` is required:
+  `writeTxn`'s `write_failed` (whose comment claimed a log line that never existed) now files a redacted
+  line — SQLSTATE, constraint, table, a ZodError's path and code, never a value — under the caller's
+  request id. Two concurrent creates of one new id are 201 and 409 `id_conflict` on both stores; a page
+  holding an unreadable row is 500 `page_unreadable` naming the entity; a refused unique index carries
+  its cause, and a lock-timed-out boot DDL names its table and a `pg_locks` query.
+- **ADR-0475, money effects lock what they decide from.** A payment's paid mark and a refund's re-open
+  take `FOR NO KEY UPDATE` on the document first and stamp `updated_by`; a refund re-opens a past-due
+  document as `overdue`; inventory postings convert at the entry date's rate or refuse 409
+  `exchange_rate_unresolved`; the credit-note fx_rate-1 fallback is deleted; `convertBalanced` rounds
+  half away from zero; the WHT report nets credit notes and drops voided invoices; aging refuses a past
+  or malformed `asOf` (400 `as_of_not_served` / `as_of_malformed`) rather than answering a historical
+  question it cannot. Open: the inventory/GRNI functional residue posts to no variance account, and the
+  aging 400s are undeclared in the API description.
+- **ADR-0476, the unread badge is an exact count.** `unreadCountFor` is one SQL statement mirroring
+  `isUnread` (an anti-join plus `queued_at >= date_trunc('milliseconds', watermark) + 1ms`), answering
+  `exact: true` — measured 227 over 253 notices as `crossengin_app`, where the old page scan stopped at
+  200 whatever `--read-state-unread-scan` said; that flag is refused by name. The inbox list is granted
+  by the read-state roles for one's own notices and `tenantScopeRoles` for the tenant-wide list, not by
+  `--ai-design-role`. A `rendering` row with a NULL `started_at` is stamped under `SKIP LOCKED` and the
+  drain renews every row the batch holds every lease/3. Template authoring refuses a placeholder in a
+  tag name or outside a quoted attribute. Open: `renewClaim` can renew another drain's retaken claim
+  (needs a claim token), and `operate-web` still calls the figure a floor.
+
+A tracked file named `--tenant-status-gate` (a `--help` dump from an argv slip in `be8d55b`) was
+deleted from the repository root.
 
 ### Demoted, with the measurement that demoted them
 
@@ -16094,7 +16169,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 462 records; 383 Accepted, 79 Proposed (the
+title or status change cannot drift. 470 records; 391 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

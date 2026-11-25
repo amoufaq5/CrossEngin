@@ -298,9 +298,11 @@ import { buildLoginAuditRecorder } from "./login-audit.js";
 import {
   TENANT_SCOPE_DENIED_OPERATION,
   TENANT_SCOPE_GRANTED_OPERATION,
+  formatNotificationListGrant,
+  notificationListGrant,
 } from "./notification-routes.js";
 import { randomUUID } from "node:crypto";
-import { renderDigest } from "./digest-template.js";
+import { onceDigestOverrideReporter, renderDigest } from "./digest-template.js";
 import { memberFromItem } from "./digest-assembler.js";
 import {
   backfillRefusedAnything,
@@ -4099,7 +4101,6 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
           allowedRoles: new Set(options.readStateRoles),
           backfillRoles: new Set(options.readStateBackfillRoles),
-          unreadScanLimit: options.readStateUnreadScan,
           // Per-recipient, the same resolver the inbox listing uses. Unwired, an unread count is
           // tenant-wide — exactly how the listing already behaves, so the two agree either way.
           ...(recipientResolver !== null
@@ -4201,11 +4202,29 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // the message variables, so the readable content is joined from the proposal at read time.
   if (notificationStore !== null && manifestStore !== null) {
     const proposals = manifestStore;
+    // The own-inbox list is granted by the read-state roles — the page's badge is gated by them,
+    // and the two halves of one page must not disagree about who may see it (ADR-0476). The
+    // tenant-wide list keeps its own grant below.
+    const listGrant = notificationListGrant(options.readStateRoles, options.aiDesignRoles);
+    const listGrantLine = formatNotificationListGrant(listGrant, options.notificationAuditRoles);
+    if (listGrantLine.level === "warn") console.warn(listGrantLine.line);
+    else console.info(listGrantLine.line);
+    // One report per broken authored digest template and version, not one per inbox read.
+    const reportDigestOverride = onceDigestOverrideReporter((event) =>
+      console.warn(
+        `[notifications] tenant ${event.tenantId} digest template ${event.templateRecordId}` +
+          ` v${event.version} (${event.locale}) is not rendered: ${event.reason}` +
+          (event.missingVariableCount > 0
+            ? ` (${event.missingVariableCount.toString()} variable(s) this digest does not supply)`
+            : "") +
+          "; the platform default digest is shown instead",
+      ),
+    );
     extraRouteList.push(
       ...buildNotificationRoutes({
         source: notificationStore,
         principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
-        allowedRoles: new Set(options.aiDesignRoles),
+        selfRoles: new Set(listGrant.roles),
         digestTemplateId: DIGEST_TEMPLATE_ID,
         // Per-recipient by default: a person's inbox is what the delivery ledger actually
         // delivered to one of their addresses. An unidentifiable principal therefore sees
@@ -4264,7 +4283,19 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
                   digest,
                   members,
                   locale,
-                  ...(override !== null ? { content: override.content } : {}),
+                  ...(override !== null
+                    ? {
+                        override: {
+                          template: {
+                            content: override.content,
+                            templateRecordId: override.id,
+                            version: override.version,
+                            locale: override.locale,
+                          },
+                          onRefused: reportDigestOverride,
+                        },
+                      }
+                    : {}),
                 });
               },
             }

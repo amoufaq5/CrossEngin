@@ -91,7 +91,7 @@ import {
 } from "./operational-retention.js";
 import { DEFAULT_ADMIN_ROLES } from "./recipient-resolver.js";
 import { MIN_FAX_SUPPRESSION_THRESHOLD } from "@crossengin/notification-providers";
-import { DEFAULT_UNREAD_SCAN_LIMIT, MAX_UNREAD_SCAN_LIMIT } from "./read-state-routes.js";
+import { UNREAD_PARTITION_WINDOW_MAX } from "./read-state-routes.js";
 import { parseRequestBodyLimit, parseRouteBodyLimits } from "./request-body-limit.js";
 import type { RekeyOptions } from "./rekey.js";
 import type { BillWithholdingBackfillOptions } from "./bill-withholding-backfill.js";
@@ -675,8 +675,6 @@ export interface ServeOptions {
    * the write; it therefore also requires an audit emitter, i.e. `--store pg`.
    */
   readonly readStateBackfillRoles: readonly string[];
-  /** How many dispatches the unread count examines in one page (default 200, 1–1000). The response reports `examined` and `truncated` rather than a quietly wrong total. */
-  readonly readStateUnreadScan: number;
   /** Maximum queryable time range in days; null uses the route default. */
   readonly auditReadMaxRangeDays: number | null;
   /** Expose the tenant-schema survey and erasure under /v1/platform/tenants/{id} — the step that makes a tenant deletion true, since ADR-0314's per-tenant schema was never removed (needs --store pg + --audit-chain-config). */
@@ -1003,7 +1001,6 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let readStateRoutes = false;
   const readStateRoles: string[] = [];
   const readStateBackfillRoles: string[] = [];
-  let readStateUnreadScan = DEFAULT_UNREAD_SCAN_LIMIT;
   let tenantErasureRoutes = false;
   const tenantErasureRoles: string[] = [];
   let tenantDeletionRoutes = false;
@@ -1833,18 +1830,15 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       i += consumed();
       readStateRoutes = true;
     } else if (arg === "--read-state-unread-scan" || arg.startsWith("--read-state-unread-scan=")) {
-      const raw = takeValue(arg, next, "--read-state-unread-scan");
-      const n = Number(raw);
-      // Refused out of band rather than clamped, which is ADR-0312's rule: a deployment that asked
-      // for 5000 and silently got 1000 would render a badge it believes is exact.
-      if (!Number.isInteger(n) || n < 1 || n > MAX_UNREAD_SCAN_LIMIT) {
-        throw new CliUsageError(
-          `invalid --read-state-unread-scan: ${raw} (1–${MAX_UNREAD_SCAN_LIMIT.toString()})`,
-        );
-      }
-      readStateUnreadScan = n;
-      i += consumed();
-      readStateRoutes = true;
+      // Removed by name rather than ignored (ADR-0476). It sized a page the unread count was read
+      // from, and accepted 1..1000 while the store returns at most 200 — so 201..1000 did nothing.
+      // The count is an exact store-side anti-join now and examines no page; silently accepting the
+      // flag would tell an operator their setting still governs something.
+      throw new CliUsageError(
+        `--read-state-unread-scan was removed (ADR-0476): the unread count is exact and reads no ` +
+          `page, and the partition window is GET /v1/notifications/unread?detail=partition&limit= ` +
+          `(1-${UNREAD_PARTITION_WINDOW_MAX.toString()}, paged with &cursor=)`,
+      );
     } else if (arg === "--tenant-erasure-routes") {
       tenantErasureRoutes = true;
     } else if (arg === "--tenant-erasure-role" || arg.startsWith("--tenant-erasure-role=")) {
@@ -2995,7 +2989,6 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     readStateRoutes,
     readStateRoles,
     readStateBackfillRoles,
-    readStateUnreadScan,
     tenantErasureRoutes,
     // No default: irreversibly destroying a tenant's business data is nobody's privilege until it is
     // granted by name, not even the platform admin's by inheritance.
@@ -3911,15 +3904,15 @@ Options:
                        is ALWAYS the credential — a body naming one is refused, not ignored. Closes
                        ADR-0309's gap, where the web badge stood in recency for unread. Needs --store pg
   --read-state-role <r>  Role permitted to record its own read state and read its own unread count
-                       (repeatable). Default none ⇒ the routes refuse everyone
+                       (repeatable). Default none ⇒ the routes refuse everyone. Also grants listing
+                       one's OWN notices (GET /v1/meta/notifications), so the inbox and its badge
+                       share one grant; with none given, that list falls back to --ai-design-role
+                       and the boot line says so. The tenant-wide list stays --notification-audit-role
   --read-state-backfill-role <r>  Role permitted to assert source=system_backfill on the watermark
                        route (repeatable). Default none ⇒ nobody. ADDITIVE on top of
                        --read-state-role, which is checked first. A backfill marks a whole backlog
                        read in one call, so it is recorded BEFORE the write and an unrecordable one
                        is refused. Watermark only: a row-wise backfill is unbounded
-  --read-state-unread-scan <n>  Notices one unread answer may examine (1-${MAX_UNREAD_SCAN_LIMIT.toString()}, default ${DEFAULT_UNREAD_SCAN_LIMIT.toString()}).
-                       The answer reports examined + truncated, so a client renders "200+" rather
-                       than a quietly wrong total; an exact count needs a store-side anti-join
   --tenant-erasure-routes  Expose GET /v1/platform/tenants/{id}/schema and POST .../erase-schema —
                        survey exactly what a tenant's own schema holds, then drop it. ADR-0314 gave a
                        tenant its own schema and nothing removed it, so a GDPR Article 17 tombstone

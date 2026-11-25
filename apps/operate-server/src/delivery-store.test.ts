@@ -1,5 +1,6 @@
 import type { PgConnection, UnreadableRow, UnreadableRowReporter } from "@crossengin/kernel-pg";
 import { NotificationDispatchSchema, type DeliveryAttempt } from "@crossengin/notifications";
+import { assertBindArity } from "@crossengin/testing";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -105,6 +106,11 @@ function advanceUpdate(overrides: Partial<DispatchAdvanceUpdate> = {}): Dispatch
   };
 }
 
+/** The claim's flip to `rendering` — distinct from the ADR-0476 stamp UPDATE that precedes it. */
+function isClaimFlip(captured: Captured): boolean {
+  return captured.sql.startsWith("UPDATE") && captured.sql.includes("ANY($2::uuid[])");
+}
+
 /** The tenant-context `SELECT set_config(...)` also starts with SELECT. */
 function isSelect(captured: Captured): boolean {
   return captured.sql.startsWith("SELECT ") && !captured.sql.includes("set_config");
@@ -140,6 +146,7 @@ function fakeDeliveryDb(): {
     inTx: boolean,
   ): Promise<{ rows: Row[]; rowCount: number }> => {
     const p = params ?? [];
+    assertBindArity(sql, p);
     captured.push({ sql, params: p, inTx });
 
     if (sql.includes("set_config")) {
@@ -151,7 +158,29 @@ function fakeDeliveryDb(): {
     const visible = (r: Row): boolean =>
       r["tenant_id"] === currentTenant && r["tenant_id"] === tenantId;
 
-    if (sql.includes("FOR UPDATE SKIP LOCKED")) {
+    if (sql.startsWith("UPDATE") && sql.includes("started_at IS NULL FOR UPDATE SKIP LOCKED")) {
+      // ADR-0476: a `rendering` row with no claim time gets one now, so its lease starts here
+      // rather than reading as already lapsed.
+      let n = 0;
+      for (const row of dispatches) {
+        if (visible(row) && row["status"] === "rendering" && row["started_at"] == null) {
+          row["started_at"] = new Date().toISOString();
+          n += 1;
+        }
+      }
+      return { rows: [], rowCount: n };
+    }
+
+    if (sql.startsWith("UPDATE") && sql.includes("SET started_at = now() WHERE id = $2")) {
+      const target = dispatches.find(
+        (r) => visible(r) && r["id"] === String(p[1]) && r["status"] === "rendering",
+      );
+      if (target === undefined) return { rows: [], rowCount: 0 };
+      target["started_at"] = new Date().toISOString();
+      return { rows: [], rowCount: 1 };
+    }
+
+    if (sql.startsWith("SELECT") && sql.includes("FOR UPDATE SKIP LOCKED")) {
       const columns = sql
         .slice("SELECT ".length, sql.indexOf(" FROM "))
         .split(",")
@@ -160,7 +189,8 @@ function fakeDeliveryDb(): {
       const leaseMs = Number(p[2]);
       const lapsed = (r: Row): boolean =>
         r["status"] === "rendering" &&
-        (r["started_at"] == null || toMillis(r["started_at"]) < Date.now() - leaseMs);
+        r["started_at"] != null &&
+        toMillis(r["started_at"]) < Date.now() - leaseMs;
       const matched = dispatches
         .filter((r) => visible(r) && (r["status"] === "queued" || lapsed(r)))
         .sort((a, b) => {
@@ -534,7 +564,7 @@ describe("delivery-store — claimQueued", () => {
     const claimed = await store.claimQueued(TENANT_A, noUnreadable);
     expect(claimed.map((c) => c.dispatch.status)).toEqual(["queued", "queued"]);
     expect(dispatches.map((r) => r["status"])).toEqual(["rendering", "rendering"]);
-    const update = captured.find((c) => c.sql.startsWith("UPDATE"));
+    const update = captured.find((c) => isClaimFlip(c));
     expect(update?.sql).toContain("SET status = 'rendering'");
     expect(update?.inTx).toBe(true);
     const second = await store.claimQueued(TENANT_A, noUnreadable);
@@ -546,7 +576,7 @@ describe("delivery-store — claimQueued", () => {
     dispatches.push(dispatchRow({ id: "aaaa1111-1111-4111-8111-000000000009" }));
     const store = new PostgresDeliveryStore(conn);
     await store.claimQueued(TENANT_A, noUnreadable);
-    const update = captured.find((c) => c.sql.startsWith("UPDATE"));
+    const update = captured.find((c) => isClaimFlip(c));
     expect(update?.sql).toContain("WHERE tenant_id = $1 AND id = ANY($2::uuid[])");
     expect(update?.params).toEqual([TENANT_A, ["aaaa1111-1111-4111-8111-000000000009"]]);
     expect(update?.sql).not.toContain("aaaa1111");
@@ -564,11 +594,11 @@ describe("delivery-store — claimQueued", () => {
     expect(selects.map((s) => s.params[1])).toEqual([25, 200, 1, 2]);
   });
 
-  it("issues no UPDATE when nothing is queued", async () => {
+  it("issues no claiming UPDATE when nothing is queued", async () => {
     const { conn, captured } = fakeDeliveryDb();
     const store = new PostgresDeliveryStore(conn);
     expect(await store.claimQueued(TENANT_A, noUnreadable)).toEqual([]);
-    expect(captured.some((c) => c.sql.startsWith("UPDATE"))).toBe(false);
+    expect(captured.some((c) => isClaimFlip(c))).toBe(false);
   });
 
   it("never claims another tenant's queued dispatches", async () => {
@@ -639,7 +669,7 @@ describe("delivery-store — claimQueued", () => {
     const store = new PostgresDeliveryStore(conn);
     await store.claimQueued(TENANT_A, noUnreadable);
 
-    const update = captured.find((c) => /^\s*UPDATE/i.test(c.sql));
+    const update = captured.find((c) => isClaimFlip(c));
     expect(update).toBeDefined();
     expect(JSON.stringify(update?.params)).toContain("aaaa1111-1111-4111-8111-00000000000d");
     expect(JSON.stringify(update?.params)).not.toContain("aaaa1111-1111-4111-8111-00000000000e");
@@ -1635,14 +1665,51 @@ describe("delivery-store — crash recovery and retry leases (H-31)", () => {
     const { conn, dispatches } = fakeDeliveryDb();
     const lapsed = dispatchRow({ status: "rendering", started_at: "2020-01-01T00:00:00.000Z" });
     const fresh = dispatchRow({ status: "rendering", started_at: new Date().toISOString() });
-    const unstamped = dispatchRow({ status: "rendering", started_at: null });
-    dispatches.push(lapsed, fresh, unstamped);
+    dispatches.push(lapsed, fresh);
     const store = new PostgresDeliveryStore(conn);
     const claimed = await store.claimQueued(TENANT_A, noUnreadable);
-    expect(claimed.map((c) => c.rowId).sort()).toEqual(
-      [String(lapsed["id"]), String(unstamped["id"])].sort(),
-    );
+    expect(claimed.map((c) => c.rowId)).toEqual([String(lapsed["id"])]);
     expect(toMillis(lapsed["started_at"])).toBeGreaterThan(Date.parse("2020-01-02T00:00:00Z"));
+  });
+
+  it("does not reclaim a rendering row with no claim time; it stamps one so its lease starts now (ADR-0476)", async () => {
+    const { conn, captured, dispatches } = fakeDeliveryDb();
+    const unstamped = dispatchRow({ status: "rendering", started_at: null });
+    dispatches.push(unstamped);
+    const store = new PostgresDeliveryStore(conn, { claimLeaseMs: 60_000 });
+    expect(await store.claimQueued(TENANT_A, noUnreadable)).toEqual([]);
+    expect(unstamped["started_at"]).not.toBeNull();
+    const stamp = captured.find((c) => c.sql.includes("started_at IS NULL FOR UPDATE SKIP LOCKED"));
+    expect(stamp?.params).toEqual([TENANT_A]);
+    // and once the stamped lease has lapsed it is reclaimed like any other
+    unstamped["started_at"] = "2020-01-01T00:00:00.000Z";
+    const later = await store.claimQueued(TENANT_A, noUnreadable);
+    expect(later.map((c) => c.rowId)).toEqual([String(unstamped["id"])]);
+  });
+
+  it("the claim predicate requires a claim time before it calls a lease lapsed", async () => {
+    const { conn, captured, dispatches } = fakeDeliveryDb();
+    dispatches.push(dispatchRow());
+    await new PostgresDeliveryStore(conn).claimQueued(TENANT_A, noUnreadable);
+    const select = captured.find(
+      (c) => c.sql.startsWith("SELECT") && c.sql.includes("FOR UPDATE SKIP LOCKED"),
+    );
+    expect(select?.sql).toContain("started_at IS NOT NULL AND started_at < now()");
+    expect(select?.sql).not.toContain("started_at IS NULL OR");
+  });
+
+  it("renewClaim moves the lease of a rendering row and refuses one that is no longer rendering", async () => {
+    const { conn, dispatches } = fakeDeliveryDb();
+    const rendering = dispatchRow({ status: "rendering", started_at: "2020-01-01T00:00:00.000Z" });
+    const sending = dispatchRow({ status: "sending", started_at: "2020-01-01T00:00:00.000Z" });
+    dispatches.push(rendering, sending);
+    const store = new PostgresDeliveryStore(conn);
+    expect(await store.renewClaim(TENANT_A, String(rendering["id"]))).toBe(true);
+    expect(toMillis(rendering["started_at"])).toBeGreaterThan(Date.parse("2025-01-01T00:00:00Z"));
+    expect(await store.renewClaim(TENANT_A, String(sending["id"]))).toBe(false);
+    expect(sending["started_at"]).toBe("2020-01-01T00:00:00.000Z");
+    // a renewal is tenant-scoped: another tenant's id renews nothing
+    expect(await store.renewClaim(TENANT_B, String(rendering["id"]))).toBe(false);
   });
 
   it("stamps started_at in the claim so the lease can lapse", async () => {
@@ -1650,7 +1717,9 @@ describe("delivery-store — crash recovery and retry leases (H-31)", () => {
     dispatches.push(dispatchRow());
     const store = new PostgresDeliveryStore(conn, { claimLeaseMs: 60_000 });
     await store.claimQueued(TENANT_A, noUnreadable);
-    const select = captured.find((c) => c.sql.includes("FOR UPDATE SKIP LOCKED"));
+    const select = captured.find(
+      (c) => c.sql.startsWith("SELECT") && c.sql.includes("FOR UPDATE SKIP LOCKED"),
+    );
     expect(select?.params).toEqual([TENANT_A, 25, 60_000]);
     const update = captured.find((c) => c.sql.includes("ANY($2::uuid[])"));
     expect(update?.sql).toContain("SET status = 'rendering', started_at = now()");

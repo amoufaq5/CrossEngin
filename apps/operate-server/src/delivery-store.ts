@@ -248,7 +248,8 @@ export function dispatchFromRow(row: Record<string, unknown>): NotificationDispa
 export class PostgresDeliveryStore {
   private readonly conn: PgConnection;
   private readonly schema: string;
-  private readonly claimLeaseMs: number;
+  /** Read by the drain to pace its heartbeat (`renewClaim`) at a third of the lease. */
+  readonly claimLeaseMs: number;
   private readonly retryLeaseMs: number;
 
   constructor(conn: PgConnection, opts: DeliveryStoreOptions = {}) {
@@ -300,11 +301,26 @@ export class PostgresDeliveryStore {
   ): Promise<readonly ClaimedDispatch[]> {
     const batch = clampLimit(limit);
     return withTenantContext(this.conn, tenantId, async (tx) => {
+      // A `rendering` row with no `started_at` records no claim time at all — a pre-ADR-0451
+      // replica claimed it during a rolling upgrade, setting the status and nothing else. It used to
+      // be reclaimable **at once** (`started_at IS NULL OR …`), so a dispatch an old replica was
+      // fanning out that second was taken again and sent twice. Nor is there a column to age it
+      // from: `queued_at` is when it was queued, which for a backlog is long before the claim, so
+      // `COALESCE(started_at, queued_at)` would reclaim exactly the same rows (ADR-0476). What can
+      // be said is "the lease starts now": the clock is stamped here, under `SKIP LOCKED` so a
+      // claim in flight is not waited on, and the row becomes reclaimable one full lease later.
+      await tx.query(
+        `UPDATE ${this.dispatchTable} SET started_at = now()` +
+          ` WHERE id IN (SELECT id FROM ${this.dispatchTable}` +
+          ` WHERE tenant_id = $1 AND status = '${CLAIM_TO_STATUS}' AND started_at IS NULL` +
+          ` FOR UPDATE SKIP LOCKED)`,
+        [tenantId],
+      );
       const selectSql =
         `SELECT ${dispatchColumnList(null)} FROM ${this.dispatchTable}` +
         ` WHERE tenant_id = $1 AND (status = '${CLAIM_FROM_STATUS}'` +
         ` OR (status = '${CLAIM_TO_STATUS}'` +
-        ` AND (started_at IS NULL OR started_at < now() - ($3::bigint * interval '1 millisecond'))))` +
+        ` AND started_at IS NOT NULL AND started_at < now() - ($3::bigint * interval '1 millisecond')))` +
         ` ORDER BY ${PRIORITY_RANK_SQL}, queued_at ASC, dispatch_id ASC` +
         ` LIMIT $2 FOR UPDATE SKIP LOCKED`;
       const selected = await tx.query(selectSql, [tenantId, batch, this.claimLeaseMs]);
@@ -324,6 +340,25 @@ export class PostgresDeliveryStore {
         claimed.map((c) => c.rowId),
       ]);
       return claimed;
+    });
+  }
+
+  /**
+   * Renews a claim's lease: the heartbeat a long fan-out sends so the claim it holds is not taken
+   * by another drain while it is still sending (ADR-0476).
+   *
+   * Only a row still `rendering` is renewed — a row that has advanced (or been reclaimed and
+   * advanced by another drain) is not this caller's to extend, and `false` says so. The lease is
+   * aged from `started_at`, so moving it to `now()` is the whole renewal.
+   */
+  async renewClaim(tenantId: string, rowId: string): Promise<boolean> {
+    return withTenantContext(this.conn, tenantId, async (tx) => {
+      const result = await tx.query(
+        `UPDATE ${this.dispatchTable} SET started_at = now()` +
+          ` WHERE id = $2 AND tenant_id = $1 AND status = '${CLAIM_TO_STATUS}'`,
+        [tenantId, rowId],
+      );
+      return result.rowCount > 0;
     });
   }
 

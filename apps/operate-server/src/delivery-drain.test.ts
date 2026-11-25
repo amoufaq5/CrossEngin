@@ -94,6 +94,15 @@ class FakeStore implements DeliveryStoreLike {
   retries: DueRetry[] = [];
   claimCalls = 0;
 
+  /** The lease the drain paces its heartbeat by; the default, as the real store's. */
+  claimLeaseMs = 600_000;
+  readonly renewals: string[] = [];
+  /** `true` unless a test says the claim was taken away. */
+  renewalOutcome = true;
+  async renewClaim(_t: string, rowId: string): Promise<boolean> {
+    this.renewals.push(rowId);
+    return this.renewalOutcome;
+  }
   async claimQueued(): Promise<readonly ClaimedDispatch[]> {
     this.claimCalls += 1;
     return this.claims;
@@ -777,6 +786,7 @@ describe("delivery-drain — drainTenants", () => {
       reconcile: (t, r) => store.reconcile(t, r),
       attemptedRecipients: () => store.attemptedRecipients(),
       unsettledSending: () => store.unsettledSending(),
+      renewClaim: (t, r) => store.renewClaim(t, r),
     };
 
     const report = await drainTenants(
@@ -1178,5 +1188,107 @@ describe("delivery-drain — a digest summary is never re-pooled", () => {
 
     expect(report.retriesAttempted).toBe(1);
     expect(store.attempts[0]?.outcome).toBe("delivered");
+  });
+});
+
+describe("delivery-drain — claim heartbeat (ADR-0476)", () => {
+  /** A clock that advances `stepMs` on every read, so a fan-out takes measurable time. */
+  function steppingClock(stepMs: number): () => Date {
+    let t = NOW.getTime();
+    return () => {
+      const d = new Date(t);
+      t += stepMs;
+      return d;
+    };
+  }
+
+  it("issues no heartbeat while the fan-out stays inside a third of the lease", async () => {
+    const store = new FakeStore();
+    store.claims = [{ rowId: "row-1", dispatch: dispatch() }];
+    const resolver = new FakeResolver([recipient(USER_A, "a@x.test"), recipient(USER_B, "b@x.test")]);
+    await drainTenant({ ...opts(store, resolver), clock: steppingClock(1) }, TENANT);
+    expect(store.attempts).toHaveLength(2);
+    expect(store.renewals).toEqual([]);
+  });
+
+  it("renews the claim once a third of the lease has passed, during the fan-out", async () => {
+    const store = new FakeStore();
+    store.claimLeaseMs = 30_000;
+    store.claims = [{ rowId: "row-1", dispatch: dispatch() }];
+    const recipients = Array.from({ length: 6 }, (_, i) =>
+      recipient(`4444444${i.toString()}-4444-4444-8444-444444444444`, `u${i.toString()}@x.test`),
+    );
+    const resolver = new FakeResolver(recipients);
+    // Every clock read is 2 s: a recipient step reads the clock a handful of times, so a 10 s
+    // heartbeat interval (30 s / 3) is crossed more than once across six recipients.
+    await drainTenant({ ...opts(store, resolver), clock: steppingClock(2_000) }, TENANT);
+    expect(store.attempts).toHaveLength(6);
+    expect(store.renewals.length).toBeGreaterThanOrEqual(2);
+    expect(new Set(store.renewals)).toEqual(new Set(["row-1"]));
+  });
+
+  it("renews a dispatch whose turn comes after most of the batch's lease is spent", async () => {
+    // The batch is claimed together and drained one dispatch at a time, so a later dispatch's lease
+    // is aged from the batch's claim — it is renewed on its first step, before any send.
+    const store = new FakeStore();
+    store.claimLeaseMs = 9_000;
+    store.claims = [
+      { rowId: "row-1", dispatch: dispatch() },
+      { rowId: "row-2", dispatch: dispatch({ id: `disp_${"b".repeat(32)}` }) },
+    ];
+    const resolver = new FakeResolver([recipient(USER_A, "a@x.test")]);
+    await drainTenant({ ...opts(store, resolver), clock: steppingClock(1_000) }, TENANT);
+    expect(store.renewals).toContain("row-2");
+  });
+
+  it("renews the rows still waiting in the batch while an earlier dispatch fans out (review)", async () => {
+    // A long fan-out on row-1 ages row-2's claim too. Renewing only the row being drained lets
+    // row-2 lapse and be taken by a second drain before this one reaches it.
+    const log: string[] = [];
+    class LoggingStore extends FakeStore {
+      override async renewClaim(t: string, rowId: string): Promise<boolean> {
+        log.push(`renew:${rowId}`);
+        return super.renewClaim(t, rowId);
+      }
+      override async advance(t: string, rowId: string, update: DispatchAdvanceUpdate): Promise<boolean> {
+        log.push(`advance:${rowId}`);
+        return super.advance(t, rowId, update);
+      }
+    }
+    const store = new LoggingStore();
+    store.claimLeaseMs = 30_000;
+    store.claims = [
+      { rowId: "row-1", dispatch: dispatch() },
+      { rowId: "row-2", dispatch: dispatch({ id: `disp_${"b".repeat(32)}` }) },
+    ];
+    const recipients = Array.from({ length: 6 }, (_, i) =>
+      recipient(`4444444${i.toString()}-4444-4444-8444-444444444444`, `u${i.toString()}@x.test`),
+    );
+    await drainTenant({ ...opts(store, new FakeResolver(recipients)), clock: steppingClock(2_000) }, TENANT);
+    const firstAdvance = log.indexOf("advance:row-1");
+    expect(firstAdvance).toBeGreaterThan(0);
+    expect(log.slice(0, firstAdvance)).toContain("renew:row-2");
+    // and a drained row is released: nothing renews row-1 after its dispatch has been advanced
+    expect(log.slice(firstAdvance + 1)).not.toContain("renew:row-1");
+  });
+
+  it("reports a renewal that finds the claim gone, and keeps sending", async () => {
+    const store = new FakeStore();
+    store.claimLeaseMs = 3;
+    store.renewalOutcome = false;
+    store.claims = [{ rowId: "row-1", dispatch: dispatch() }];
+    const resolver = new FakeResolver([recipient(USER_A, "a@x.test"), recipient(USER_B, "b@x.test")]);
+    const errors: string[] = [];
+    await drainTenant(
+      {
+        ...opts(store, resolver),
+        clock: steppingClock(10),
+        onError: (e) => errors.push(e instanceof Error ? e.message : String(e)),
+      },
+      TENANT,
+    );
+    expect(store.attempts).toHaveLength(2);
+    expect(errors.length).toBeGreaterThan(0);
+    expect(errors[0]).toMatch(/claim on dispatch row row-1 was not renewed/);
   });
 });

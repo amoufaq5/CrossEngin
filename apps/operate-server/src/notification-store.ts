@@ -130,9 +130,9 @@ const DEFAULT_LIMIT = 50;
 
 /**
  * The most rows one `listForTenant` page returns. Exported because a caller sizing a page — the
- * unread partition's window, `--read-state-unread-scan` — must not be able to ask for more than
- * this and believe it got it: a value past the clamp is silently a 200, which is how 201–1000 came
- * to be accepted and ineffective (ADR-0476).
+ * unread partition's window — must not be able to ask for more than this and believe it got it: a
+ * value past the clamp is silently a 200, which is how the removed `--read-state-unread-scan`
+ * accepted 201–1000 and served 200 (ADR-0476).
  */
 export const NOTIFICATION_LIST_MAX_LIMIT = 200;
 const MAX_LIMIT = NOTIFICATION_LIST_MAX_LIMIT;
@@ -189,14 +189,21 @@ function encodeCursor(offset: number): string {
 
 function decodeCursor(cursor: string | undefined): number {
   if (cursor === undefined || cursor.length === 0) return 0;
-  try {
-    const decoded = Buffer.from(cursor, "base64url").toString("utf8");
-    const match = /^o:(\d+)$/.exec(decoded);
-    if (match === null) return 0;
-    return Number.parseInt(match[1] ?? "0", 10);
-  } catch {
-    return 0;
-  }
+  return parseNotificationListCursor(cursor) ?? 0;
+}
+
+/**
+ * The offset a `listForTenant` cursor names, or `null` for a string that is not one.
+ *
+ * Exported for a caller that must *refuse* an unreadable cursor rather than take the first page
+ * for it: `listForTenant` itself reads garbage as offset 0, which answers page 1 to a caller who
+ * asked for page 5 (ADR-0365's class). The unread partition's window is such a caller.
+ */
+export function parseNotificationListCursor(cursor: string): number | null {
+  const decoded = Buffer.from(cursor, "base64url").toString("utf8");
+  const match = /^o:(\d{1,9})$/.exec(decoded);
+  if (match === null) return null;
+  return Number.parseInt(match[1] ?? "0", 10);
 }
 
 function clampLimit(limit: number | undefined): number {
@@ -342,4 +349,111 @@ export class PostgresNotificationStore implements NotificationStore {
       return { data, nextCursor: hasMore ? encodeCursor(offset + limit) : null };
     });
   }
+
+  /**
+   * The viewer's unread count, **exact**, in one statement (ADR-0476).
+   *
+   * It replaces a scan: the unread route used to read one `listForTenant` page and count the unread
+   * notices in it, so the figure was a floor that stopped at the page clamp (200) — a viewer with
+   * 253 unread notices saw 200, with nothing in the number saying so beyond a `truncated` flag the
+   * client rendered as "200+". The rule is the contract's `isUnread`, restated in SQL rather than
+   * approximated: a notice is unread iff no read-state row names it for this viewer **and** it was
+   * queued after the viewer's watermark.
+   *
+   * Three details carry the exactness:
+   *
+   * - **The watermark comparison is at millisecond precision, the way the contract reads it.**
+   *   `isUnread` compares `Date.parse(queuedAt) > readThroughMs`, and both sides reach it through a
+   *   JS `Date` — truncated to the millisecond. `n.queued_at >= date_trunc('milliseconds', w) +
+   *   1 ms` is that comparison exactly (`trunc(q) > trunc(w)` ⟺ `q >= trunc(w) + 1 ms`), and unlike
+   *   truncating `queued_at` it leaves the column bare, so `(tenant_id, queued_at)` can serve it.
+   * - **The read-state anti-join is keyed on the full unique key** `(tenant_id, user_id,
+   *   dispatch_id)`, which `notification_read_states_tenant_user_dispatch_key` indexes — both halves
+   *   of the viewer, for `indexReadState`'s reason: one user id can exist in two tenants.
+   * - **The inbox filters are the listing's own.** A count over a different set than the one the
+   *   page lists is two answers to one question. An empty recipient list is zero, never the tenant
+   *   (`listForTenant`'s rule), and the outcome default is the listing's `["delivered"]`.
+   *
+   * The watermark is read in the same statement, so the figure and the `readThroughAt` returned
+   * beside it describe one snapshot.
+   */
+  async unreadCountFor(
+    viewer: UnreadCountViewer,
+    query: UnreadCountQuery = {},
+  ): Promise<UnreadCount> {
+    if (!UUID_RE.test(viewer.tenantId)) {
+      throw new Error(`tenantId must be a uuid, got ${JSON.stringify(viewer.tenantId)}`);
+    }
+    if (!UUID_RE.test(viewer.userId)) {
+      throw new Error(`userId must be a uuid, got ${JSON.stringify(viewer.userId)}`);
+    }
+    const recipients = query.recipientAddressSha256;
+    return withTenantContext(this.conn, viewer.tenantId, async (tx) => {
+      const params: unknown[] = [viewer.tenantId, viewer.userId];
+      const conditions: string[] = [`${DISPATCH_ALIAS}.tenant_id = $1::uuid`];
+      if (query.channel !== undefined) {
+        params.push(query.channel);
+        conditions.push(`${DISPATCH_ALIAS}.channel = $${params.length}`);
+      }
+      if (recipients !== undefined) {
+        params.push([...recipients]);
+        const recipientParam = params.length;
+        params.push([...resolveOutcomes(query.outcomes)]);
+        const outcomeParam = params.length;
+        conditions.push(
+          `EXISTS (SELECT 1 FROM ${this.deliveryTable} d` +
+            ` WHERE d.dispatch_id = ${DISPATCH_ALIAS}.id AND d.tenant_id = $1::uuid` +
+            ` AND d.recipient_address_sha256 = ANY($${recipientParam}::text[])` +
+            ` AND d.outcome = ANY($${outcomeParam}::text[]))`,
+        );
+      }
+      conditions.push(
+        `NOT EXISTS (SELECT 1 FROM ${this.readStateTable} r` +
+          ` WHERE r.tenant_id = $1::uuid AND r.user_id = $2::uuid` +
+          ` AND r.dispatch_id = ${DISPATCH_ALIAS}.dispatch_id)`,
+      );
+      conditions.push(
+        `(w.read_through_at IS NULL OR ${DISPATCH_ALIAS}.queued_at >=` +
+          ` date_trunc('milliseconds', w.read_through_at) + interval '1 millisecond')`,
+      );
+      const sql =
+        `WITH w AS (SELECT (SELECT read_through_at FROM ${this.watermarkTable}` +
+        ` WHERE tenant_id = $1::uuid AND user_id = $2::uuid) AS read_through_at)` +
+        ` SELECT w.read_through_at,` +
+        ` (SELECT count(*) FROM ${this.table} ${DISPATCH_ALIAS} WHERE ${conditions.join(" AND ")})` +
+        ` AS unread FROM w`;
+      const result = await tx.query(sql, params);
+      const row = result.rows[0];
+      if (row === undefined) {
+        // The CTE always yields exactly one row, whatever the tables hold; no row means the
+        // statement did not run as written, and a zero here would be a badge that lies.
+        throw new Error("unread count produced no row");
+      }
+      // `count(*)` is `bigint`, which node-postgres hands back as a string (ADR-0331).
+      const unread = Number(row["unread"]);
+      if (!Number.isSafeInteger(unread) || unread < 0) {
+        throw new Error("unread count is not a non-negative integer");
+      }
+      // An empty recipient list was bound as an empty array: `= ANY('{}')` is false for every row,
+      // so the count is 0 by the statement and not by a short-circuit here — one path for both.
+      const watermark = row["read_through_at"];
+      return {
+        unread,
+        readThroughAt:
+          watermark === null || watermark === undefined
+            ? null
+            : new Date(isoOf(watermark)).toISOString(),
+      };
+    });
+  }
+
+  private get readStateTable(): string {
+    return `${this.schema}.notification_read_states`;
+  }
+
+  private get watermarkTable(): string {
+    return `${this.schema}.notification_read_watermarks`;
+  }
 }
+
+const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;

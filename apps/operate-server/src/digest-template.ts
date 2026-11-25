@@ -165,19 +165,70 @@ export interface RenderedDigest {
   readonly body: string;
   readonly severity: string;
   readonly itemCount: number;
+  /**
+   * Why a tenant's override was not used, or `null` when there was none or it rendered. The
+   * fallback to the platform default is the right *answer* — a half-rendered notice or one that
+   * fails the markup allowlist is worse than the default — but it used to be a silent one, so a
+   * tenant whose authored digest never once rendered was told nothing and the operator neither
+   * (ADR-0476).
+   */
+  readonly overrideRefusal: DigestOverrideRefusal | null;
 }
+
+/**
+ * Why an authored digest override fell back to the default. Checked in this order, and the first
+ * true one is the reason: a body written for another channel is never rendered here at all, a
+ * source the authoring allowlist refuses is not worth substituting into, a rendered body that still
+ * carries a placeholder is half a notice, and a rendered body is re-checked because only there is
+ * a placeholder in a tag or attribute name visible as markup.
+ */
+export const DIGEST_OVERRIDE_REFUSALS = [
+  "override_channel_not_rendered",
+  "override_refused_source",
+  "override_missing_variables",
+  "override_refused_rendered",
+] as const;
+export type DigestOverrideRefusal = (typeof DIGEST_OVERRIDE_REFUSALS)[number];
+
+/** A tenant's authored override, with the identity its refusal is reported under. */
+export interface DigestOverride {
+  readonly content: TemplateContent;
+  /** The authored template row's id — what an operator looks the template up by. */
+  readonly templateRecordId: string;
+  readonly version: string;
+  readonly locale: string;
+}
+
+/**
+ * What a refusal report carries: **no body content** — not the source, not the rendered body, not
+ * the names of the missing variables (they are tenant-authored text too). The template's identity,
+ * the reason and a count are enough to find and fix it.
+ */
+export interface DigestOverrideRefusedEvent {
+  readonly tenantId: string;
+  readonly templateRecordId: string;
+  readonly version: string;
+  readonly locale: string;
+  readonly reason: DigestOverrideRefusal;
+  readonly missingVariableCount: number;
+}
+
+export type DigestOverrideReporter = (event: DigestOverrideRefusedEvent) => void;
 
 const DEFAULT_SEVERITY = "info";
 
-export function renderDigest(input: {
-  readonly digest: DigestBatch;
-  readonly members: readonly DigestMember[];
-  readonly content?: TemplateContent;
-  readonly locale?: string;
-}): RenderedDigest {
-  const context = digestRenderContext(input);
-  const itemCount = input.members.length;
+type OverrideOutcome =
+  | { readonly kind: "applied"; readonly rendered: { title: string; body: string; severity: string } }
+  | { readonly kind: "refused"; readonly reason: DigestOverrideRefusal; readonly missing: number };
 
+/**
+ * Whether an authored override renders, and if not, why. Pure: the one place the four refusals are
+ * decided, so the reason a reporter is told is the reason the body fell back.
+ */
+export function decideDigestOverride(
+  content: TemplateContent,
+  context: RenderContext,
+): OverrideOutcome {
   // INVARIANT: an override is tenant-authored, untrusted copy. It may reference variables this
   // digest never supplies, or be written for another channel entirely. A half-rendered notice
   // still carrying `{{...}}` is worse than the platform default, so any such override is dropped
@@ -192,21 +243,60 @@ export function renderDigest(input: {
   // parses, and only there is a placeholder in a tag or attribute name visible as markup. Dropped
   // to the default rather than sanitised, for the authoring route's reason — a sanitiser that
   // rewrites the body shows the tenant something they did not write.
-  const override = input.content;
-  if (
-    override !== undefined &&
-    override.channel === "in_app" &&
-    htmlMarkupRefusals("htmlBody", override.htmlBody).length === 0
-  ) {
-    const attempt = renderTemplateContent(override, context);
-    if (attempt.missing.length === 0 && htmlMarkupRefusals("htmlBody", attempt.rendered.body).length === 0) {
-      return {
-        title: attempt.rendered.title,
-        body: attempt.rendered.body,
-        severity: attempt.rendered.severity ?? DEFAULT_SEVERITY,
-        itemCount,
-      };
+  if (content.channel !== "in_app") {
+    return { kind: "refused", reason: "override_channel_not_rendered", missing: 0 };
+  }
+  if (htmlMarkupRefusals("htmlBody", content.htmlBody).length > 0) {
+    return { kind: "refused", reason: "override_refused_source", missing: 0 };
+  }
+  const attempt = renderTemplateContent(content, context);
+  if (attempt.missing.length > 0) {
+    return { kind: "refused", reason: "override_missing_variables", missing: attempt.missing.length };
+  }
+  if (htmlMarkupRefusals("htmlBody", attempt.rendered.body).length > 0) {
+    return { kind: "refused", reason: "override_refused_rendered", missing: 0 };
+  }
+  return {
+    kind: "applied",
+    rendered: {
+      title: attempt.rendered.title,
+      body: attempt.rendered.body,
+      severity: attempt.rendered.severity ?? DEFAULT_SEVERITY,
+    },
+  };
+}
+
+export function renderDigest(input: {
+  readonly digest: DigestBatch;
+  readonly members: readonly DigestMember[];
+  /**
+   * The override and its reporter travel together, so an override cannot be rendered without a
+   * place its refusal is said: the reporter is required by the shape rather than by a convention.
+   */
+  readonly override?: {
+    readonly template: DigestOverride;
+    readonly onRefused: DigestOverrideReporter;
+  };
+  readonly locale?: string;
+}): RenderedDigest {
+  const context = digestRenderContext(input);
+  const itemCount = input.members.length;
+
+  let overrideRefusal: DigestOverrideRefusal | null = null;
+  if (input.override !== undefined) {
+    const outcome = decideDigestOverride(input.override.template.content, context);
+    if (outcome.kind === "applied") {
+      return { ...outcome.rendered, itemCount, overrideRefusal: null };
     }
+    overrideRefusal = outcome.reason;
+    input.override.onRefused({
+      tenantId: input.digest.tenantId,
+      templateRecordId: input.override.template.templateRecordId,
+      version: input.override.template.version,
+      locale: input.override.template.locale,
+      reason: outcome.reason,
+      missingVariableCount: outcome.missing,
+    });
   }
 
   const fallback = renderTemplateContent(DEFAULT_DIGEST_CONTENT, context);
@@ -215,5 +305,38 @@ export function renderDigest(input: {
     body: fallback.rendered.body,
     severity: fallback.rendered.severity ?? DEFAULT_SEVERITY,
     itemCount,
+    overrideRefusal,
+  };
+}
+
+/** The most distinct refusals remembered before the memory is cleared and they are said again. */
+export const DIGEST_OVERRIDE_REPORT_MEMORY = 1024;
+
+/**
+ * A reporter that says each refusal **once per template version and reason**, not once per read.
+ *
+ * The digest copy is rendered on every inbox read, so an unconditional reporter would log the same
+ * broken template on every poll of every viewer — noise an operator filters, taking the finding
+ * with it. The key is the authored row, its version and the reason, so editing the template (a new
+ * version) or breaking it differently is said again. The memory is bounded and, when full, is
+ * **cleared** rather than frozen: a cleared memory repeats a report, a frozen one would silence every
+ * refusal after the 1024th — repetition is the honest failure, silence is not.
+ */
+export function onceDigestOverrideReporter(
+  sink: DigestOverrideReporter,
+  memory: number = DIGEST_OVERRIDE_REPORT_MEMORY,
+): DigestOverrideReporter {
+  const seen = new Set<string>();
+  return (event) => {
+    const key = JSON.stringify([
+      event.tenantId,
+      event.templateRecordId,
+      event.version,
+      event.reason,
+    ]);
+    if (seen.has(key)) return;
+    if (seen.size >= memory) seen.clear();
+    seen.add(key);
+    sink(event);
   };
 }

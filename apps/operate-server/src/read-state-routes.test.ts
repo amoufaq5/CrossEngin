@@ -1,15 +1,16 @@
 import { describe, expect, it } from "vitest";
 import type { ResolvedPrincipal } from "@crossengin/api-gateway";
 import type { Handler, HandlerInput } from "@crossengin/api-gateway-runtime";
-import { EMPTY_READ_STATE_INDEX, type ReadStateIndex } from "@crossengin/notifications";
+import { EMPTY_READ_STATE_INDEX, partitionByRead, type ReadStateIndex } from "@crossengin/notifications";
 
 import {
   ASSERTABLE_READ_SOURCES,
-  DEFAULT_UNREAD_SCAN_LIMIT,
   PRIVILEGED_READ_SOURCES,
+  UNREAD_PARTITION_WINDOW_MAX,
   VIEWER_BODY_KEYS,
   bodyNamesAViewer,
   buildReadStateRoutes,
+  decidePartitionWindow,
   decidePosition,
   decideSource,
   newReadStateId,
@@ -105,14 +106,24 @@ function recordingStore(
 
 function noticeSource(
   notices: readonly InboxNoticeLike[],
-  over: { readonly throws?: boolean; readonly nextCursor?: string | null } = {},
+  over: {
+    readonly throws?: boolean;
+    readonly countThrows?: boolean;
+    readonly nextCursor?: string | null;
+    /** The read state the store-side count reads beside the notices (ADR-0476). */
+    readonly index?: ReadStateIndex;
+  } = {},
 ): {
   readonly notices: ReadStateRoutesContext["notices"];
   readonly queries: InboxNoticeQueryLike[];
+  readonly countCalls: Array<Record<string, unknown>>;
 } {
   const queries: InboxNoticeQueryLike[] = [];
+  const countCalls: Array<Record<string, unknown>> = [];
+  const index = over.index ?? EMPTY_READ_STATE_INDEX;
   return {
     queries,
+    countCalls,
     notices: {
       listForTenant: async (_tenantId, query) => {
         queries.push(query ?? {});
@@ -122,6 +133,18 @@ function noticeSource(
             ? notices
             : notices.filter((n) => n.dispatchId === query.dispatchId);
         return { data, nextCursor: over.nextCursor ?? null };
+      },
+      // Models the store's exact count over EVERY notice, never a page: the contract's own
+      // partition over the whole set, so the fake and the SQL agree on what "unread" means.
+      unreadCountFor: async (viewer, query) => {
+        countCalls.push({ ...viewer, ...(query ?? {}) });
+        if (over.countThrows === true) throw new Error("boom");
+        const probes = notices.map((n) => ({ id: n.dispatchId, queuedAt: n.queuedAt }));
+        return {
+          unread: partitionByRead(probes, index).unread.length,
+          readThroughAt:
+            index.readThroughMs === null ? null : new Date(index.readThroughMs).toISOString(),
+        };
       },
     },
   };
@@ -278,10 +301,10 @@ describe("the viewer is the credential", () => {
   });
 
   it("reads the unread count for the credential's viewer only", async () => {
-    const store = recordingStore();
-    const res = await call(ctxFor({ store: store.store }), UNREAD);
+    const source = noticeSource([{ dispatchId: DISPATCH, queuedAt: "2026-05-01T00:00:00.000Z" }]);
+    const res = await call(ctxFor({ notices: source.notices }), UNREAD);
     expect(res.status).toBe(200);
-    expect(store.indexCalls).toEqual([{ tenantId: TENANT, userId: USER }]);
+    expect(source.countCalls).toEqual([{ tenantId: TENANT, userId: USER }]);
     expect(res.body["viewer"]).toEqual({ tenantId: TENANT, userId: USER });
   });
 });
@@ -525,11 +548,36 @@ describe("the unread count consults the notices", () => {
     { dispatchId: "disp_oooooooo3333", queuedAt: "2026-05-30T00:00:00.000Z" },
   ];
 
-  it("counts every notice unread when nothing has been read", async () => {
+  it("counts every notice unread when nothing has been read, and says the figure is exact", async () => {
     const res = await call(ctxFor({ notices: noticeSource(notices).notices }), UNREAD);
     expect(res.body["unread"]).toBe(3);
-    expect(res.body["examined"]).toBe(3);
+    expect(res.body["exact"]).toBe(true);
     expect(res.body["readThroughAt"]).toBeNull();
+    // The count reads no page, so nothing about it is a window.
+    expect(res.body["examined"]).toBeUndefined();
+    expect(res.body["truncated"]).toBeUndefined();
+  });
+
+  it("takes the count from the store, not from a page of notices (ADR-0476)", async () => {
+    const source = noticeSource(notices);
+    const store = recordingStore();
+    await call(ctxFor({ notices: source.notices, store: store.store }), UNREAD);
+    expect(source.queries).toEqual([]);
+    expect(store.indexCalls).toEqual([]);
+    expect(source.countCalls).toHaveLength(1);
+  });
+
+  it("counts past any page: 253 notices with 3 read is 250 unread, not a 200-row floor", async () => {
+    const many: InboxNoticeLike[] = Array.from({ length: 253 }, (_, i) => ({
+      dispatchId: `disp_many${String(i).padStart(12, "0")}`,
+      queuedAt: new Date(Date.parse("2026-05-01T00:00:00.000Z") + i * 60_000).toISOString(),
+    }));
+    const index: ReadStateIndex = {
+      readDispatchIds: new Set([many[10]!.dispatchId, many[100]!.dispatchId, many[250]!.dispatchId]),
+      readThroughMs: null,
+    };
+    const res = await call(ctxFor({ notices: noticeSource(many, { index }).notices }), UNREAD);
+    expect(res.body["unread"]).toBe(250);
   });
 
   it("honours the per-notice rows and the watermark together", async () => {
@@ -537,16 +585,13 @@ describe("the unread count consults the notices", () => {
       readDispatchIds: new Set(["disp_oooooooo3333"]),
       readThroughMs: Date.parse("2026-05-10T00:00:00.000Z"),
     };
-    const res = await call(
-      ctxFor({ notices: noticeSource(notices).notices, store: recordingStore({ index }).store }),
-      UNREAD,
-    );
+    const res = await call(ctxFor({ notices: noticeSource(notices, { index }).notices }), UNREAD);
     // The watermark covers the 1st; the row covers the 3rd; only the 2nd is left.
     expect(res.body["unread"]).toBe(1);
     expect(res.body["readThroughAt"]).toBe("2026-05-10T00:00:00.000Z");
   });
 
-  it("shows a notice whose queuedAt cannot be parsed, preserving the fail-open direction", async () => {
+  it("the partition shows a notice whose queuedAt cannot be parsed, preserving the fail-open direction", async () => {
     const index: ReadStateIndex = {
       readDispatchIds: new Set(),
       readThroughMs: Date.parse("2030-01-01T00:00:00.000Z"),
@@ -555,9 +600,10 @@ describe("the unread count consults the notices", () => {
     const res = await call(
       ctxFor({ notices: noticeSource(broken).notices, store: recordingStore({ index }).store }),
       UNREAD,
+      withQuery({ detail: "partition" }),
     );
     // A watermark four years ahead of it would file it read if the timestamp were trusted.
-    expect(res.body["unread"]).toBe(1);
+    expect((res.body["notices"] as { unread: string[] }).unread).toEqual(["disp_brokenbroken11"]);
   });
 
   it("returns the partition only when asked for it", async () => {
@@ -566,7 +612,7 @@ describe("the unread count consults the notices", () => {
       readThroughMs: null,
     };
     const base = {
-      notices: noticeSource(notices).notices,
+      notices: noticeSource(notices, { index }).notices,
       store: recordingStore({ index }).store,
     };
     const counted = await call(ctxFor(base), UNREAD);
@@ -576,16 +622,69 @@ describe("the unread count consults the notices", () => {
       read: ["disp_oooooooo1111"],
       unread: ["disp_oooooooo2222", "disp_oooooooo3333"],
     });
+    expect(split.body["unread"]).toBe(2);
+    expect(split.body["examined"]).toBe(3);
+    expect(split.body["nextCursor"]).toBeNull();
+    expect(split.body["truncated"]).toBe(false);
     expect(requestedDetail(undefined)).toBe("count");
     expect(requestedDetail("nonsense")).toBe("count");
     expect(requestedDetail("partition")).toBe("partition");
   });
 
-  it("says when the page it examined was not the whole inbox", async () => {
-    const source = noticeSource(notices, { nextCursor: "c2" });
-    const res = await call(ctxFor({ notices: source.notices }), UNREAD);
+  it("pages the partition window with the listing's own cursor", async () => {
+    const source = noticeSource(notices, { nextCursor: "bzoyMDA" });
+    const res = await call(
+      ctxFor({ notices: source.notices }),
+      UNREAD,
+      withQuery({ detail: "partition", limit: "2", cursor: "bzoyMDA" }),
+    );
+    expect(res.status).toBe(200);
+    expect(source.queries[0]?.limit).toBe(2);
+    expect(source.queries[0]?.cursor).toBe("bzoyMDA");
+    expect(res.body["nextCursor"]).toBe("bzoyMDA");
+    // The window is a page, so the partition still says it is one: the web page's "Unknown"
+    // explanation reads this flag (ADR-0476 review).
     expect(res.body["truncated"]).toBe(true);
-    expect(source.queries[0]?.limit).toBe(DEFAULT_UNREAD_SCAN_LIMIT);
+    const defaulted = noticeSource(notices);
+    await call(ctxFor({ notices: defaulted.notices }), UNREAD, withQuery({ detail: "partition" }));
+    expect(defaulted.queries[0]?.limit).toBe(UNREAD_PARTITION_WINDOW_MAX);
+    expect(defaulted.queries[0]?.cursor).toBeUndefined();
+  });
+
+  it.each([["0"], ["201"], ["-1"], ["abc"], ["1.5"], ["99999"]])(
+    "400s a partition limit of %s rather than clamping it",
+    async (limit) => {
+      const source = noticeSource(notices);
+      const res = await call(
+        ctxFor({ notices: source.notices }),
+        UNREAD,
+        withQuery({ detail: "partition", limit }),
+      );
+      expect(res.status).toBe(400);
+      expect(source.queries).toEqual([]);
+      expect(source.countCalls).toEqual([]);
+    },
+  );
+
+  it("400s a cursor that is not a notification list cursor", async () => {
+    const res = await call(ctxFor(), UNREAD, withQuery({ detail: "partition", cursor: "garbage" }));
+    expect(res.status).toBe(400);
+  });
+
+  it("400s limit or cursor on the count, which is exact and takes neither", async () => {
+    expect((await call(ctxFor(), UNREAD, withQuery({ limit: "50" }))).status).toBe(400);
+    expect((await call(ctxFor(), UNREAD, withQuery({ cursor: "bzoyMDA" }))).status).toBe(400);
+  });
+
+  it("decidePartitionWindow defaults to the listing's own maximum", () => {
+    expect(decidePartitionWindow(undefined, undefined)).toEqual({
+      kind: "ok",
+      limit: UNREAD_PARTITION_WINDOW_MAX,
+      cursor: undefined,
+    });
+    expect(UNREAD_PARTITION_WINDOW_MAX).toBe(200);
+    expect(decidePartitionWindow("", "")).toEqual({ kind: "ok", limit: 200, cursor: undefined });
+    expect(decidePartitionWindow("1", undefined)).toEqual({ kind: "ok", limit: 1, cursor: undefined });
   });
 
   it("counts nothing and reports self scope when the viewer's identity cannot resolve", async () => {
@@ -600,7 +699,7 @@ describe("the unread count consults the notices", () => {
       UNREAD,
     );
     // An empty hash list means "no addresses", never "every address".
-    expect(source.queries[0]?.recipientAddressSha256).toEqual([]);
+    expect(source.countCalls[0]?.["recipientAddressSha256"]).toEqual([]);
     expect(res.body["scope"]).toBe("self");
   });
 
@@ -611,11 +710,11 @@ describe("the unread count consults the notices", () => {
       UNREAD,
       withQuery({ channel: "in_app" }),
     );
-    expect(source.queries[0]?.channel).toBe("in_app");
+    expect(source.countCalls[0]?.["channel"]).toBe("in_app");
     expect(res.body["channel"]).toBe("in_app");
     const all = noticeSource(notices);
     await call(ctxFor({ notices: all.notices }), UNREAD, withQuery({ channel: "" }));
-    expect(all.queries[0]?.channel).toBeUndefined();
+    expect(all.countCalls[0]?.["channel"]).toBeUndefined();
   });
 
   it("reports tenant scope when no identity resolver is wired at all", async () => {
@@ -623,9 +722,18 @@ describe("the unread count consults the notices", () => {
     expect(res.body["scope"]).toBe("tenant");
   });
 
-  it("503s when the read state cannot be read", async () => {
-    const res = await call(ctxFor({ store: recordingStore({ indexThrows: true }).store }), UNREAD);
-    expect(res.status).toBe(503);
+  it("503s when the count cannot be read, and when the partition's read state cannot", async () => {
+    const counted = await call(
+      ctxFor({ notices: noticeSource(notices, { countThrows: true }).notices }),
+      UNREAD,
+    );
+    expect(counted.status).toBe(503);
+    const split = await call(
+      ctxFor({ store: recordingStore({ indexThrows: true }).store }),
+      UNREAD,
+      withQuery({ detail: "partition" }),
+    );
+    expect(split.status).toBe(503);
   });
 
   it("401s and 403s the unread route on the same terms as the writes", async () => {

@@ -4,6 +4,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildNotificationRoutes,
+  formatNotificationListGrant,
+  notificationListGrant,
   type NotificationRoutesContext,
   type ProposalNoticeContentLike,
   type ProposalNoticeResolver,
@@ -98,7 +100,10 @@ function makeCtx(): Harness {
   const ctx = {
     source,
     principalRoles: (p: ResolvedPrincipal | null) => ({ primaryRole: p?.grantedScopes[0] ?? "anon" }),
-    allowedRoles: new Set(["tenant_admin"]),
+    // No identity resolver here, so the only list is the tenant's — which the self grant alone may
+    // not read (ADR-0476). These tests are about the tenant list, so the role holds both grants.
+    selfRoles: new Set(["tenant_admin"]),
+    tenantScopeRoles: new Set(["tenant_admin"]),
   };
   return { ctx, source };
 }
@@ -189,7 +194,11 @@ describe("notification-routes — auth gating", () => {
 
   it("is fail-closed when no role is configured", async () => {
     const { ctx } = makeCtx();
-    const closed: NotificationRoutesContext = { ...ctx, allowedRoles: new Set<string>() };
+    const closed: NotificationRoutesContext = {
+      ...ctx,
+      selfRoles: new Set<string>(),
+      tenantScopeRoles: new Set<string>(),
+    };
     expect((await call(closed)).status).toBe(403);
   });
 
@@ -506,7 +515,7 @@ describe("notification-routes — recipient scoping", () => {
     return {
       source: { listForTenant: async () => ({ data: [], nextCursor: null }) },
       principalRoles: () => ({ primaryRole: "erp_admin", secondaryRoles: [] }),
-      allowedRoles: new Set(["erp_admin"]),
+      selfRoles: new Set(["erp_admin"]),
       ...over,
     };
   }
@@ -617,7 +626,7 @@ describe("notification-routes — tenant-scope audit", () => {
     const ctx: NotificationRoutesContext = {
       source: { listForTenant: async () => ({ data: [], nextCursor: null }) },
       principalRoles: (p) => ({ primaryRole: p?.grantedScopes[0] ?? "anon", secondaryRoles: [] }),
-      allowedRoles: new Set([AUDITED_ROLE, "tenant_admin"]),
+      selfRoles: new Set([AUDITED_ROLE, "tenant_admin"]),
       resolveIdentity: async () => ({ addressHashes: ["a".repeat(64)] }),
       tenantScopeRoles: new Set([AUDITED_ROLE]),
       auditTenantScope: async (e) => {
@@ -728,5 +737,95 @@ describe("notification-routes — tenant-scope audit", () => {
     const { ctx, events } = auditedCtx();
     await call(ctx, { query: { scope: "tenant" } }, AUDITED_ROLE);
     expect(events[0]?.filters["paged"]).toBe(false);
+  });
+});
+
+describe("notification-routes — own-inbox grant (ADR-0476)", () => {
+  const HASH = "c".repeat(64);
+  function identityCtx(over: Partial<NotificationRoutesContext> = {}): {
+    ctx: NotificationRoutesContext;
+    seen: Array<TenantNotificationListQueryLike>;
+  } {
+    const seen: TenantNotificationListQueryLike[] = [];
+    const ctx: NotificationRoutesContext = {
+      source: {
+        listForTenant: async (_t, q) => {
+          seen.push(q ?? {});
+          return { data: [], nextCursor: null };
+        },
+      },
+      principalRoles: (p) => ({ primaryRole: p?.grantedScopes[0] ?? "anon", secondaryRoles: [] }),
+      selfRoles: new Set(["erp_viewer", "erp_admin"]),
+      tenantScopeRoles: new Set(["auditor"]),
+      resolveIdentity: async () => ({ addressHashes: [HASH] }),
+      ...over,
+    };
+    return { ctx, seen };
+  }
+
+  it("lets a self-grant role list its own notices, narrowed to its own addresses", async () => {
+    const { ctx, seen } = identityCtx();
+    const out = await call(ctx, {}, "erp_viewer");
+    expect(out.status).toBe(200);
+    expect(out.body["scope"]).toBe("self");
+    expect(seen[0]?.recipientAddressSha256).toEqual([HASH]);
+  });
+
+  it("refuses a role holding neither grant (control)", async () => {
+    const { ctx, seen } = identityCtx();
+    expect((await call(ctx, {}, "ap_clerk")).status).toBe(403);
+    expect(seen).toHaveLength(0);
+  });
+
+  it("a self-grant role asking for the tenant keeps its own list — the escalation does not widen it", async () => {
+    const { ctx, seen } = identityCtx();
+    const out = await call(ctx, { query: { scope: "tenant" } }, "erp_viewer");
+    expect(out.status).toBe(200);
+    expect(out.body["scope"]).toBe("self");
+    expect(seen[0]?.recipientAddressSha256).toEqual([HASH]);
+  });
+
+  it("a tenant-scope role is admitted without the self grant and reads the tenant", async () => {
+    const { ctx, seen } = identityCtx();
+    const out = await call(ctx, { query: { scope: "tenant" } }, "auditor");
+    expect(out.status).toBe(200);
+    expect(out.body["scope"]).toBe("tenant");
+    expect(seen[0]?.recipientAddressSha256).toBeUndefined();
+  });
+
+  it("with no identity resolver a self-only caller is refused by name rather than handed the tenant", async () => {
+    const { ctx, seen } = identityCtx();
+    const { resolveIdentity: _dropped, ...rest } = ctx;
+    const out = await call(rest, {}, "erp_viewer");
+    expect(out.status).toBe(403);
+    expect(out.body["error"]).toBe("self_scope_unavailable");
+    expect(seen).toHaveLength(0);
+    // and a tenant-scope holder still gets the list it is entitled to
+    expect((await call(rest, {}, "auditor")).status).toBe(200);
+  });
+
+  it("is granted by the read-state roles when any are granted", () => {
+    expect(notificationListGrant(["erp_viewer"], ["erp_admin"])).toEqual({
+      roles: ["erp_viewer"],
+      source: "read_state",
+    });
+  });
+
+  it("falls back to the AI design roles only when no read-state role is granted", () => {
+    expect(notificationListGrant([], ["erp_admin"])).toEqual({ roles: ["erp_admin"], source: "ai_design" });
+  });
+
+  it("says which grant governs at boot, and warns on the fallback", () => {
+    const rs = formatNotificationListGrant(notificationListGrant(["erp_viewer"], []), ["auditor"]);
+    expect(rs.level).toBe("info");
+    expect(rs.line).toContain("read-state roles: erp_viewer");
+    expect(rs.line).toContain("tenant-wide list: auditor");
+    const ai = formatNotificationListGrant(notificationListGrant([], ["erp_admin"]), []);
+    expect(ai.level).toBe("warn");
+    expect(ai.line).toContain("--ai-design-role roles: erp_admin");
+    expect(ai.line).toContain("--read-state-role");
+    expect(ai.line).toContain("tenant-wide list: nobody");
+    const none = formatNotificationListGrant(notificationListGrant([], []), []);
+    expect(none.line).toContain("(none: every request is refused)");
   });
 });

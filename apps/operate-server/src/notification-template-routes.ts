@@ -256,6 +256,20 @@ const TAG_RE = /<\s*(\/?)\s*([A-Za-z][A-Za-z0-9:-]*)((?:"[^"]*"|'[^']*'|[^>"'])*
 const ATTR_RE = /([A-Za-z_:][A-Za-z0-9_:.-]*)\s*(?:=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
 
 /**
+ * A placeholder where a tag's **name** belongs: `<{{x}}>`, `</{{x}}>`, `< {{x}}`.
+ *
+ * `TAG_RE` requires a letter after `<`, so these were never read as tags at all — they were text,
+ * and so passed the allowlist — and rendering made them tags: `x = "script"` turns `<{{x}}>` into
+ * `<script>`, and `escapeMarkupValue` cannot help because the value contains nothing it escapes
+ * (ADR-0476). A scanner that reads tokens cannot know what a placeholder will render to, so the
+ * position itself is refused.
+ */
+const PLACEHOLDER_TAG_NAME_RE = /<\s*\/?\s*\{\{/;
+
+/** A tag's attribute text with its quoted values removed, which is where a placeholder is inert. */
+const QUOTED_VALUE_RE = /"[^"]*"|'[^']*'/g;
+
+/**
  * A scheme that executes, or that carries a document. Checked across the whole field as a backstop
  * to the attribute allowlist: whitespace and an entity-encoded colon are both legal inside an
  * attribute value, so the scheme is matched loosely on purpose.
@@ -310,6 +324,17 @@ function scanAttributes(
   allowedAttrs: ReadonlySet<string>,
 ): readonly ContentRefusal[] {
   const out: ContentRefusal[] = [];
+  // Inside a quoted value a placeholder is substituted escaped — `"` included — so it cannot leave
+  // the value. Anywhere else in a tag it can: `<a {{x}}=1>` renders an attribute the author never
+  // named (`ATTR_RE` read only `x`, and a placeholder named after an allowed attribute passed),
+  // and `<a title={{x}}>` renders `title=a onmouseover=…` because a space is not escaped.
+  if (raw.replace(QUOTED_VALUE_RE, "").includes("{{")) {
+    out.push({
+      code: "unsafe_markup",
+      field: path,
+      detail: "placeholder in a tag outside a quoted attribute value",
+    });
+  }
   for (const match of raw.matchAll(ATTR_RE)) {
     const name = (match[1] ?? "").toLowerCase();
     if (name.length === 0) continue;
@@ -344,6 +369,9 @@ export function markupRefusals(
   }
   if (DATA_URI_RE.test(text)) {
     out.push({ code: "unsafe_markup", field: path, detail: "data: uri" });
+  }
+  if (PLACEHOLDER_TAG_NAME_RE.test(text)) {
+    out.push({ code: "unsafe_markup", field: path, detail: "placeholder in a tag name" });
   }
   for (const match of text.matchAll(TAG_RE)) {
     const closing = (match[1] ?? "") === "/";

@@ -1,10 +1,10 @@
 # ADR index
 
-462 records. Generated from the ADR files themselves — regenerate rather than
+470 records. Generated from the ADR files themselves — regenerate rather than
 hand-edit, so a title or status change in an ADR cannot silently drift from this table:
 `python3 docs/adr/generate-index.py`.
 
-- **Accepted:** 383  **Proposed:** 79
+- **Accepted:** 391  **Proposed:** 79
 - ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never written;
   those milestones landed under other numbers. The gap is permanent and intentional.
 - ADR-0046 is the Phase 2 plan; **ADR-0077 is the Phase 3 plan (P1–P8)**. Phase 4 has no
@@ -474,3 +474,11 @@ hand-edit, so a title or status change in an ADR cannot silently drift from this
 | [0466](0466-a-withheld-bill-is-owed-and-settles-at-the-net.md) | A withheld bill is owed, aged, revalued and settled at the net, and legacy bills are stamped from their own ledger entry | — | Accepted | 2026-11-23 |
 | [0467](0467-a-tax-return-marked-paid-posts-its-remittance-bounded-by-the-books.md) | A tax return marked paid posts its remittance, typed and bounded by the books, per tenant and opt-in | — | Accepted | 2026-11-24 |
 | [0468](0468-a-payment-settles-only-the-document-its-direction-posts-to.md) | A payment settles only the document its direction posts to, once, in that document's currency, and never by a negative amount | — | Accepted | 2026-11-24 |
+| [0469](0469-a-job-writes-only-into-a-tenant-whose-state-admits-a-write.md) | A job writes only into a tenant whose state admits a write, and the queue around it says what it does | — | Accepted | 2026-11-25 |
+| [0470](0470-a-design-is-decided-once-activated-only-if-it-can-be-served-and-reviewed-over-the-manifest-it-is.md) | A design is decided once, activated only if it can be served, and reviewed over the manifest it is | — | Accepted | 2026-11-25 |
+| [0471](0471-the-api-description-declares-the-tenant-gate-the-write-audit-and-the-handler-refusals.md) | The API description declares the tenant-status gate, the write audit and the handler's own refusals, on exactly the operations that can answer them | — | Accepted | 2026-11-25 |
+| [0472](0472-the-boot-surveys-describe-the-session-and-the-tenant-they-run-for.md) | The boot surveys describe the session and the tenant they run for | — | Accepted | 2026-11-25 |
+| [0473](0473-every-response-leaves-through-one-finalizer-and-an-unreadable-directory-is-a-503.md) | Every response leaves through one finalizer, and a principal directory that cannot answer is a 503 | — | Accepted | 2026-11-25 |
+| [0474](0474-a-fixed-500-body-has-its-cause-in-the-log-and-a-race-or-an-unreadable-row-has-its-own-code.md) | A fixed 500 body has its cause in the log, and a create race or an unreadable row has its own code | — | Accepted | 2026-11-25 |
+| [0475](0475-a-money-effect-locks-what-it-decides-from-converts-what-it-posts-and-a-report-refuses-a-question-it-cannot-answer.md) | A money effect locks what it decides from, converts what it posts, and a report refuses a question it cannot answer | — | Accepted | 2026-11-25 |
+| [0476](0476-the-unread-badge-is-an-exact-count-the-inbox-list-has-its-own-grant-and-a-claim-lease-starts-when-it-is-seen.md) | The unread badge is an exact count, the inbox list has its own grant, and a claim lease starts when it is seen | — | Accepted | 2026-11-25 |

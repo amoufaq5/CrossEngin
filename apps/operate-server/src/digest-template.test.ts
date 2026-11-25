@@ -24,12 +24,31 @@ import {
   digestLines,
   digestRenderContext,
   digestSummaryLine,
+  DIGEST_OVERRIDE_REFUSALS,
+  decideDigestOverride,
+  onceDigestOverrideReporter,
   renderDigest,
   templateLabel,
+  type DigestOverrideRefusedEvent,
 } from "./digest-template.js";
 import { htmlMarkupRefusals } from "./notification-template-routes.js";
 
 const TENANT = "11111111-1111-4111-8111-111111111111";
+const TEMPLATE_ROW = "55555555-5555-4555-8555-555555555555";
+
+/** An override and a reporter that records what it is told (ADR-0476). */
+function withOverride(
+  content: TemplateContent,
+  reports: DigestOverrideRefusedEvent[] = [],
+  version = "1.0.0",
+) {
+  return {
+    template: { content, templateRecordId: TEMPLATE_ROW, version, locale: "en" },
+    onRefused: (event: DigestOverrideRefusedEvent) => {
+      reports.push(event);
+    },
+  };
+}
 const USER = "22222222-2222-4222-8222-222222222222";
 const AUTHOR = "44444444-4444-4444-8444-444444444444";
 
@@ -373,7 +392,7 @@ describe("renderDigest", () => {
     const rendered = renderDigest({
       digest: digest(),
       members: [member(1)],
-      content: override,
+      override: withOverride(override),
     });
     expect(rendered.title).toBe("Digest: 1");
     expect(rendered.severity).toBe("warning");
@@ -389,7 +408,7 @@ describe("renderDigest", () => {
     const rendered = renderDigest({
       digest: digest(),
       members: [member(1), member(2)],
-      content: override,
+      override: withOverride(override),
     });
     expect(rendered.title).toBe("2 notifications");
     expect(rendered.severity).toBe("info");
@@ -404,7 +423,7 @@ describe("renderDigest", () => {
     const rendered = renderDigest({
       digest: digest(),
       members: [member(1)],
-      content: override,
+      override: withOverride(override),
     });
     expect(rendered.title).toBe("1 notifications");
     expect(rendered.severity).toBe("info");
@@ -422,7 +441,7 @@ describe("renderDigest", () => {
     ["a data: URI", '<p><a href="data:text/html,x">{{summaryLine}}</a></p>'],
   ])("falls back to the built-in content for an override carrying %s", (_name, htmlBody) => {
     const override = TemplateContentSchema.parse({ channel: "in_app", title: "Mine", htmlBody, severity: "warning" });
-    const rendered = renderDigest({ digest: digest(), members: [member(1), member(2)], content: override });
+    const rendered = renderDigest({ digest: digest(), members: [member(1), member(2)], override: withOverride(override) });
     expect(rendered.title).toBe("2 notifications");
     expect(rendered.severity).toBe("info");
     expect(rendered.body).toBe(renderDigest({ digest: digest(), members: [member(1), member(2)] }).body);
@@ -436,20 +455,26 @@ describe("renderDigest", () => {
     const override = TemplateContentSchema.parse({ channel: "in_app", title: "Mine", htmlBody, severity: "warning" });
     const asRendered = renderTemplateContent(override, digestRenderContext({ digest: digest(), members: [member(1)] }));
     expect(htmlMarkupRefusals("htmlBody", asRendered.rendered.body)).toEqual([]);
-    const rendered = renderDigest({ digest: digest(), members: [member(1)], content: override });
+    const rendered = renderDigest({ digest: digest(), members: [member(1)], override: withOverride(override) });
     expect(rendered.title).toBe("1 notifications");
     expect(rendered.body).not.toContain("https://app");
   });
 
   // And the case only the rendering can see: a placeholder in a tag-name position is not a tag in
   // the source (`<{` opens nothing), and becomes one once substituted.
-  it("falls back for a placeholder that renders into a tag name the source scan cannot read", () => {
+  // A placeholder in a tag-name position was invisible to the source scan before ADR-0476 (`<{`
+  // opens nothing) and only the rendering caught it. The source scan refuses it now, so the reason
+  // a reporter is told is the source one.
+  it("falls back for a placeholder in a tag-name position, refused from the source", () => {
     const htmlBody = "<p>{{summaryLine}}</p><{{channelLabel}}>";
-    expect(htmlMarkupRefusals("htmlBody", htmlBody)).toEqual([]);
+    expect(htmlMarkupRefusals("htmlBody", htmlBody).map((r) => r.code)).toEqual(["unsafe_markup"]);
     const override = TemplateContentSchema.parse({ channel: "in_app", title: "Mine", htmlBody, severity: "warning" });
-    const rendered = renderDigest({ digest: digest(), members: [member(1)], content: override });
+    const reports: DigestOverrideRefusedEvent[] = [];
+    const rendered = renderDigest({ digest: digest(), members: [member(1)], override: withOverride(override, reports) });
     expect(rendered.title).toBe("1 notifications");
     expect(rendered.body).not.toContain("<Email>");
+    expect(rendered.overrideRefusal).toBe("override_refused_source");
+    expect(reports.map((r) => r.reason)).toEqual(["override_refused_source"]);
   });
 
   it("keeps an override whose markup is all on the authoring allowlist", () => {
@@ -461,7 +486,7 @@ describe("renderDigest", () => {
         '<p><a href="https://app.example.test/notifications" rel="noopener">Open</a></p>',
       severity: "warning",
     });
-    const rendered = renderDigest({ digest: digest(), members: [member(1)], content: override });
+    const rendered = renderDigest({ digest: digest(), members: [member(1)], override: withOverride(override) });
     expect(rendered.title).toBe("Mine");
     expect(rendered.body).toContain('<a href="https://app.example.test/notifications"');
   });
@@ -485,5 +510,170 @@ describe("renderDigest", () => {
     expect(() => renderDigest({ digest: digest(), members: [] })).toThrow(
       /no members to render/,
     );
+  });
+});
+
+describe("digest override refusals are returned and reported (ADR-0476)", () => {
+  const inApp = (htmlBody: string, title = "Mine") =>
+    TemplateContentSchema.parse({ channel: "in_app", title, htmlBody, severity: "warning" });
+
+  it("names the four refusals once each", () => {
+    expect(DIGEST_OVERRIDE_REFUSALS).toEqual([
+      "override_channel_not_rendered",
+      "override_refused_source",
+      "override_missing_variables",
+      "override_refused_rendered",
+    ]);
+  });
+
+  it.each([
+    ["override_channel_not_rendered", TemplateContentSchema.parse({ channel: "sms", body: "{{summaryLine}}" }), 0],
+    ["override_refused_source", inApp("<p>{{summaryLine}}</p><script>x()</script>"), 0],
+    ["override_missing_variables", inApp("<p>{{tenantSlogan}} {{motto}} {{summaryLine}}</p>"), 2],
+  ] as const)("returns and reports %s with the template's identity", (reason, content, missing) => {
+    const reports: DigestOverrideRefusedEvent[] = [];
+    const rendered = renderDigest({
+      digest: digest(),
+      members: [member(1)],
+      override: withOverride(content, reports, "2.1.0"),
+    });
+    expect(rendered.overrideRefusal).toBe(reason);
+    expect(rendered.title).toBe("1 notifications");
+    expect(reports).toEqual([
+      {
+        tenantId: TENANT,
+        templateRecordId: TEMPLATE_ROW,
+        version: "2.1.0",
+        locale: "en",
+        reason,
+        missingVariableCount: missing,
+      },
+    ]);
+  });
+
+  it("carries no body content in the report — not the source, the rendering or a variable name", () => {
+    const reports: DigestOverrideRefusedEvent[] = [];
+    renderDigest({
+      digest: digest(),
+      members: [member(1)],
+      override: withOverride(inApp("<p>SECRET-COPY {{tenantSlogan}}</p>", "SECRET-TITLE"), reports),
+    });
+    const said = JSON.stringify(reports);
+    expect(said).not.toContain("SECRET-COPY");
+    expect(said).not.toContain("SECRET-TITLE");
+    expect(said).not.toContain("tenantSlogan");
+    expect(Object.keys(reports[0] ?? {}).sort()).toEqual([
+      "locale",
+      "missingVariableCount",
+      "reason",
+      "templateRecordId",
+      "tenantId",
+      "version",
+    ]);
+  });
+
+  it("an applied override reports nothing and returns a null refusal", () => {
+    const reports: DigestOverrideRefusedEvent[] = [];
+    const rendered = renderDigest({
+      digest: digest(),
+      members: [member(1)],
+      override: withOverride(inApp("<p>{{summaryLine}}</p>"), reports),
+    });
+    expect(rendered.overrideRefusal).toBeNull();
+    expect(reports).toEqual([]);
+  });
+
+  it("no override at all is a null refusal, not a fallback", () => {
+    expect(renderDigest({ digest: digest(), members: [member(1)] }).overrideRefusal).toBeNull();
+  });
+
+  // The rendered scan is not dead after the source scan learned placeholder positions: a value is
+  // substituted escaped for markup (`<`, `>`, quotes) but not for a scheme, and the whole-body
+  // scheme check only sees `javascript:` once it is in the body. A digest member's `templateId`
+  // reaches `itemLines` and comes from a stored dispatch row, whose column constrains only length.
+  it("reaches override_refused_rendered when a substituted value carries an executable scheme", () => {
+    const reports: DigestOverrideRefusedEvent[] = [];
+    const rendered = renderDigest({
+      digest: digest(),
+      members: [member(1, { templateId: "javascript:alert" })],
+      override: withOverride(inApp("<p>{{itemLines}}</p>"), reports),
+    });
+    expect(rendered.overrideRefusal).toBe("override_refused_rendered");
+    expect(reports.map((r) => r.reason)).toEqual(["override_refused_rendered"]);
+    // control: the same override over an ordinary template id renders
+    expect(
+      renderDigest({
+        digest: digest(),
+        members: [member(1)],
+        override: withOverride(inApp("<p>{{itemLines}}</p>")),
+      }).overrideRefusal,
+    ).toBeNull();
+  });
+
+  it("decideDigestOverride is the one decision the render and the report share", () => {
+    const content = inApp("<p>{{tenantSlogan}}</p>");
+    const context = digestRenderContext({ digest: digest(), members: [member(1)] });
+    const decided = decideDigestOverride(content, context);
+    expect(decided).toEqual({ kind: "refused", reason: "override_missing_variables", missing: 1 });
+  });
+
+  it("onceDigestOverrideReporter says a refusal once per template version and reason", () => {
+    const sink: DigestOverrideRefusedEvent[] = [];
+    const once = onceDigestOverrideReporter((e) => sink.push(e));
+    const broken = inApp("<p>{{tenantSlogan}}</p>");
+    for (let i = 0; i < 50; i += 1) {
+      renderDigest({ digest: digest(), members: [member(1)], override: { ...withOverride(broken), onRefused: once } });
+    }
+    expect(sink).toHaveLength(1);
+    // a new version is a new template, so it is said again
+    renderDigest({ digest: digest(), members: [member(1)], override: { ...withOverride(broken, [], "1.0.1"), onRefused: once } });
+    expect(sink).toHaveLength(2);
+    // and the same version broken differently is a different finding
+    renderDigest({
+      digest: digest(),
+      members: [member(1)],
+      override: { ...withOverride(inApp("<p>{{summaryLine}}</p><script>x()</script>")), onRefused: once },
+    });
+    expect(sink.map((e) => e.reason)).toEqual([
+      "override_missing_variables",
+      "override_missing_variables",
+      "override_refused_source",
+    ]);
+  });
+
+  it("clears rather than freezes when its memory is full, so a refusal past the cap is still said", () => {
+    const sink: DigestOverrideRefusedEvent[] = [];
+    const once = onceDigestOverrideReporter((e) => sink.push(e), 2);
+    const event = (templateRecordId: string): DigestOverrideRefusedEvent => ({
+      tenantId: TENANT,
+      templateRecordId,
+      version: "1.0.0",
+      locale: "en",
+      reason: "override_missing_variables",
+      missingVariableCount: 1,
+    });
+    once(event("a"));
+    once(event("b"));
+    once(event("c"));
+    expect(sink.map((e) => e.templateRecordId)).toEqual(["a", "b", "c"]);
+    once(event("c"));
+    expect(sink).toHaveLength(3);
+    once(event("a"));
+    expect(sink).toHaveLength(4);
+  });
+
+  it("keys a report on the tenant, so two tenants' broken copies are each said", () => {
+    const sink: DigestOverrideRefusedEvent[] = [];
+    const once = onceDigestOverrideReporter((e) => sink.push(e));
+    const base = {
+      templateRecordId: TEMPLATE_ROW,
+      version: "1.0.0",
+      locale: "en",
+      reason: "override_missing_variables" as const,
+      missingVariableCount: 1,
+    };
+    once({ ...base, tenantId: TENANT });
+    once({ ...base, tenantId: "99999999-9999-4999-8999-999999999999" });
+    expect(sink).toHaveLength(2);
   });
 });

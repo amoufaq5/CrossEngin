@@ -2,8 +2,11 @@ import { sha256 } from "@crossengin/crypto";
 import type { PgConnection } from "@crossengin/kernel-pg";
 import { describe, expect, it } from "vitest";
 
+import { assertBindArity } from "@crossengin/testing";
+
 import {
   PostgresNotificationStore,
+  parseNotificationListCursor,
   recipientAddressHash,
   type DispatchInput,
   type NotificationRecord,
@@ -1132,5 +1135,131 @@ describe("notification-store — store construction", () => {
       /invalid tenantId/,
     );
     expect(captured).toHaveLength(0);
+  });
+});
+
+describe("notification-store — unreadCountFor (ADR-0476)", () => {
+  const USER = "00000000-0000-4000-8000-0000000000bb";
+
+  /** Answers the tenant-context statement and the count; anything else is a test asserting the wrong thing. */
+  function countDb(answer: Record<string, unknown> | null): { conn: PgConnection; captured: Captured[] } {
+    const captured: Captured[] = [];
+    let inTx = false;
+    const query = async (sql: string, params?: readonly unknown[]) => {
+      const p = params ?? [];
+      assertBindArity(sql, p);
+      captured.push({ sql, params: p, inTx });
+      if (sql.includes("set_config")) return { rows: [], rowCount: 0 };
+      if (sql.startsWith("WITH w AS")) {
+        return answer === null ? { rows: [], rowCount: 0 } : { rows: [answer], rowCount: 1 };
+      }
+      throw new Error(`unexpected statement: ${sql.slice(0, 60)}`);
+    };
+    const conn = {
+      query,
+      transaction: async <T,>(fn: (tx: PgConnection) => Promise<T>): Promise<T> => {
+        inTx = true;
+        try {
+          return await fn(conn);
+        } finally {
+          inTx = false;
+        }
+      },
+      close: async () => undefined,
+    } as unknown as PgConnection;
+    return { conn, captured };
+  }
+
+  function countStatement(captured: readonly Captured[]): Captured {
+    const found = captured.find((c) => c.sql.startsWith("WITH w AS"));
+    if (found === undefined) throw new Error("no count statement");
+    return found;
+  }
+
+  it("is one statement over the whole set — no LIMIT, no OFFSET — under the viewer's tenant", async () => {
+    const { conn, captured } = countDb({ unread: "253", read_through_at: null });
+    const out = await new PostgresNotificationStore(conn).unreadCountFor({ tenantId: TENANT_A, userId: USER });
+    expect(out).toEqual({ unread: 253, readThroughAt: null });
+    const stmt = countStatement(captured);
+    expect(stmt.inTx).toBe(true);
+    expect(stmt.params).toEqual([TENANT_A, USER]);
+    expect(stmt.sql).not.toMatch(/\bLIMIT\b|\bOFFSET\b/);
+    expect(stmt.sql).toContain("count(*)");
+    expect(captured.filter((c) => c.sql.includes("set_config"))).toHaveLength(1);
+  });
+
+  it("mirrors the contract's isUnread: no row for the notice AND queued after the watermark", async () => {
+    const { conn, captured } = countDb({ unread: "0", read_through_at: null });
+    await new PostgresNotificationStore(conn).unreadCountFor({ tenantId: TENANT_A, userId: USER });
+    const sql = countStatement(captured).sql;
+    expect(sql).toContain(
+      "NOT EXISTS (SELECT 1 FROM meta.notification_read_states r WHERE r.tenant_id = $1::uuid AND r.user_id = $2::uuid AND r.dispatch_id = n.dispatch_id)",
+    );
+    // ms-truncated on both sides, as the contract compares Date.parse values: q_ms > w_ms.
+    expect(sql).toContain(
+      "(w.read_through_at IS NULL OR n.queued_at >= date_trunc('milliseconds', w.read_through_at) + interval '1 millisecond')",
+    );
+    expect(sql).toContain(
+      "FROM meta.notification_read_watermarks WHERE tenant_id = $1::uuid AND user_id = $2::uuid",
+    );
+  });
+
+  it("binds a channel and a recipient scope as parameters, never as text", async () => {
+    const { conn, captured } = countDb({ unread: "4", read_through_at: null });
+    await new PostgresNotificationStore(conn).unreadCountFor(
+      { tenantId: TENANT_A, userId: USER },
+      { channel: "in_app", recipientAddressSha256: [SHA] },
+    );
+    const stmt = countStatement(captured);
+    expect(stmt.params).toEqual([TENANT_A, USER, "in_app", [SHA], ["delivered"]]);
+    expect(stmt.sql).toContain("n.channel = $3");
+    expect(stmt.sql).toContain("d.recipient_address_sha256 = ANY($4::text[])");
+    expect(stmt.sql).toContain("d.outcome = ANY($5::text[])");
+    expect(stmt.sql).not.toContain("in_app");
+    expect(stmt.sql).not.toContain(SHA);
+  });
+
+  it("binds an empty recipient scope as an empty array, so the statement answers 0 rather than everything", async () => {
+    const { conn, captured } = countDb({ unread: "0", read_through_at: null });
+    await new PostgresNotificationStore(conn).unreadCountFor(
+      { tenantId: TENANT_A, userId: USER },
+      { recipientAddressSha256: [] },
+    );
+    expect(countStatement(captured).params[2]).toEqual([]);
+  });
+
+  it("reads the watermark back as an ISO instant", async () => {
+    const { conn } = countDb({ unread: 7, read_through_at: new Date("2026-08-01T00:00:00.123Z") });
+    const out = await new PostgresNotificationStore(conn).unreadCountFor({ tenantId: TENANT_A, userId: USER });
+    expect(out).toEqual({ unread: 7, readThroughAt: "2026-08-01T00:00:00.123Z" });
+  });
+
+  it.each([
+    ["no row", null],
+    ["a negative count", { unread: "-1", read_through_at: null }],
+    ["a non-numeric count", { unread: "lots", read_through_at: null }],
+    ["a fractional count", { unread: "1.5", read_through_at: null }],
+  ])("throws rather than answering a figure for %s", async (_name, answer) => {
+    const { conn } = countDb(answer);
+    await expect(
+      new PostgresNotificationStore(conn).unreadCountFor({ tenantId: TENANT_A, userId: USER }),
+    ).rejects.toThrow(/unread count/);
+  });
+
+  it("refuses a non-uuid tenant or user before issuing anything", async () => {
+    const { conn, captured } = countDb({ unread: "0", read_through_at: null });
+    const store = new PostgresNotificationStore(conn);
+    await expect(store.unreadCountFor({ tenantId: "t", userId: USER })).rejects.toThrow(/tenantId/);
+    await expect(store.unreadCountFor({ tenantId: TENANT_A, userId: "u" })).rejects.toThrow(/userId/);
+    expect(captured).toEqual([]);
+  });
+
+  it("parseNotificationListCursor reads only the listing's own offset cursor", () => {
+    expect(parseNotificationListCursor(Buffer.from("o:200").toString("base64url"))).toBe(200);
+    expect(parseNotificationListCursor(Buffer.from("o:0").toString("base64url"))).toBe(0);
+    expect(parseNotificationListCursor("garbage")).toBeNull();
+    expect(parseNotificationListCursor(Buffer.from("o:-1").toString("base64url"))).toBeNull();
+    expect(parseNotificationListCursor(Buffer.from("o:1e3").toString("base64url"))).toBeNull();
+    expect(parseNotificationListCursor(Buffer.from("k:5").toString("base64url"))).toBeNull();
   });
 });

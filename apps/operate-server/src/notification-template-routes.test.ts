@@ -11,6 +11,7 @@ import {
   TEMPLATE_TRANSITION_ROUTES,
   buildNotificationTemplateRoutes,
   derivedBodySizeBytes,
+  htmlMarkupRefusals,
   markupRefusals,
   pinsTrustedOrigin,
   resolveTemplateGrant,
@@ -562,6 +563,51 @@ describe("validateTemplateContent helpers", () => {
     expect(new Set(refusals.map((r) => r.code))).toEqual(
       new Set(["category_not_permitted", "undeclared_placeholder", "unsafe_markup", "untrusted_url"]),
     );
+  });
+});
+
+describe("a placeholder may only sit where it is substituted escaped (ADR-0476)", () => {
+  const codes = (html: string) => htmlMarkupRefusals("content.htmlBody", html).map((r) => r.code);
+  const details = (html: string) => htmlMarkupRefusals("content.htmlBody", html).map((r) => r.detail);
+
+  it.each([
+    ["an opening tag name", "<p>ok</p><{{x}}>"],
+    ["a closing tag name", "<p>ok</{{x}}>"],
+    ["a spaced tag name", "< {{x}}>"],
+    ["an attribute name", "<a {{x}}=1>link</a>"],
+    ["an attribute name spelled like an allowed one", "<a {{title}}=1>link</a>"],
+    ["an unquoted attribute value", "<a title={{x}}>link</a>"],
+    ["a bare attribute", "<p {{x}}>text</p>"],
+  ])("refuses a placeholder in %s", (_name, html) => {
+    expect(codes(html)).toContain("unsafe_markup");
+  });
+
+  it("names the construct rather than echoing the markup", () => {
+    expect(details("<p>ok</p><{{x}}>")).toContain("placeholder in a tag name");
+    expect(details("<a {{x}}=1>l</a>")).toContain("placeholder in a tag outside a quoted attribute value");
+    expect(details("<a title={{x}}>l</a>")).toContain(
+      "placeholder in a tag outside a quoted attribute value",
+    );
+  });
+
+  it.each([
+    ["element text", "<p>{{x}}</p>"],
+    ["a double-quoted attribute value", '<p title="{{x}}">t</p>'],
+    ["a single-quoted attribute value", "<p title='{{x}}'>t</p>"],
+    ["text beside markup", "<p>Hello {{name}}, you have {{n}} items</p>"],
+  ])("keeps a placeholder in %s", (_name, html) => {
+    expect(htmlMarkupRefusals("content.htmlBody", html)).toEqual([]);
+  });
+
+  it("refuses through the authoring validator, which is what the routes call", () => {
+    const refusals = validateTemplateContent({
+      content: { channel: "in_app", title: "Hi", htmlBody: "<a {{x}}=1>l</a>", severity: "info" },
+      variables: [{ name: "x", type: "string", required: true, redactInLogs: false }],
+      channel: "in_app",
+      category: "transactional",
+      mayAuthorNonSuppressible: false,
+    });
+    expect(refusals.map((r) => r.code)).toContain("unsafe_markup");
   });
 });
 

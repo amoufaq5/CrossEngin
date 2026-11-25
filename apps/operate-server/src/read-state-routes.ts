@@ -10,7 +10,6 @@ import type { Handler, HandlerOutput, PrincipalRoles } from "@crossengin/api-gat
 import type { ExtraGatewayRoute } from "@crossengin/operate-runtime";
 import {
   READ_STATE_SOURCES,
-  countUnread,
   markAllReadUpTo,
   partitionByRead,
   type InboxViewer,
@@ -23,6 +22,10 @@ import type {
   WatermarkWriteResult,
 } from "./read-state-store.js";
 import type { NotificationIdentityResolver } from "./notification-routes.js";
+import {
+  NOTIFICATION_LIST_MAX_LIMIT,
+  parseNotificationListCursor,
+} from "./notification-store.js";
 
 /**
  * The three routes an inbox needs to say "I have seen this".
@@ -48,10 +51,15 @@ import type { NotificationIdentityResolver } from "./notification-routes.js";
  * - **The watermark position is clamped to the server's clock.** The body proposes; `markAllReadUpTo`
  *   clamps to `now` and the store's `GREATEST` refuses a retreat. ADR-0321's rule, where the Article
  *   12(3) deadline is computed from the deployment rather than accepted from the body.
- * - **An unread count consults the notices, not only the watermark.** `isUnread` fails *open* — a
- *   notice with an unparseable `queuedAt` is shown rather than hidden — and the only way to preserve
- *   that is to hand the real notices to the contract's own `countUnread`/`partitionByRead` rather
- *   than deriving a number from the watermark alone.
+ * - **An unread count consults the notices, not only the watermark — and all of them.** The figure
+ *   is the store's exact anti-join (`unreadCountFor`: no read-state row for this viewer *and* queued
+ *   after the watermark), which is the contract's `isUnread` restated over the whole table rather
+ *   than over a page. It used to be `countUnread` over one `listForTenant` page, so it stopped at
+ *   the page clamp and a badge read "200+" for 253 (ADR-0476). `isUnread`'s fail-open arm — an
+ *   unparseable `queuedAt` shows the notice — has no SQL counterpart because the column is a
+ *   `TIMESTAMPTZ NOT NULL`, so there is no unparseable value for the statement to meet. The
+ *   per-notice partition (`?detail=partition`) is still computed by the contract's own
+ *   `partitionByRead`, over a window the caller pages through.
  *
  * **These reads are not themselves audited, deliberately.** ADR-0313 records an audit-trail read
  * before serving it and refuses one it cannot record, because that read crosses a boundary the
@@ -75,7 +83,13 @@ export interface InboxNoticeQueryLike {
   readonly dispatchId?: string;
   readonly channel?: string;
   readonly limit?: number;
+  readonly cursor?: string;
   readonly recipientAddressSha256?: readonly string[];
+}
+
+export interface InboxUnreadCountLike {
+  readonly unread: number;
+  readonly readThroughAt: string | null;
 }
 
 /** Structurally satisfied by `PostgresNotificationStore`; the inbox projection is all this needs. */
@@ -84,6 +98,17 @@ export interface InboxNoticeSourceLike {
     tenantId: string,
     query?: InboxNoticeQueryLike,
   ): Promise<{ data: readonly InboxNoticeLike[]; nextCursor: string | null }>;
+  /**
+   * The exact count. **Required**: a source that can only page would put the scan back, and the
+   * scan is the defect this replaced.
+   */
+  unreadCountFor(
+    viewer: InboxViewer,
+    query?: {
+      readonly channel?: string;
+      readonly recipientAddressSha256?: readonly string[];
+    },
+  ): Promise<InboxUnreadCountLike>;
 }
 
 /** Structurally satisfied by `PostgresReadStateStore`. */
@@ -144,24 +169,20 @@ export interface ReadStateRoutesContext {
    * tenant's, exactly as the inbox listing behaves without it.
    */
   readonly resolveIdentity?: NotificationIdentityResolver;
-  /** How many notices one unread answer may examine. The count is reported with `truncated`. */
-  readonly unreadScanLimit?: number;
   readonly newReadStateId?: () => string;
   readonly clock?: () => Date;
 }
 
-/** Enough for any real inbox, and bounded because an exact count would need a store-side anti-join. */
-export const DEFAULT_UNREAD_SCAN_LIMIT = 200;
-
 /**
- * The most a deployment may raise the scan to.
+ * The most notices one `?detail=partition` answer partitions, and its default.
  *
- * The ceiling exists because the page is read to answer a **badge**, which is polled on every page
- * load: a count that examines ten thousand rows per poll is a self-inflicted load problem, and it
- * still would not be exact. Raising the number buys a larger floor under `unread`, never certainty —
- * the honest fix is the anti-join nobody has written, not a bigger page.
+ * It is the store's own page clamp and not a figure of this module's: the partition is computed
+ * over one `listForTenant` page, and a window wider than that clamp is silently that clamp. The
+ * scan this replaced had exactly that defect — `--read-state-unread-scan` accepted 1..1000 while
+ * the store returned at most 200, so 201..1000 were accepted and did nothing (ADR-0476). A caller
+ * wanting the notices past the window pages with `?cursor=`, which is the listing's own cursor.
  */
-export const MAX_UNREAD_SCAN_LIMIT = 1000;
+export const UNREAD_PARTITION_WINDOW_MAX = NOTIFICATION_LIST_MAX_LIMIT;
 
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 const DISPATCH_ID_RE = /^disp_[A-Za-z0-9_-]{8,40}$/;
@@ -566,6 +587,39 @@ export function requestedDetail(raw: string | undefined): UnreadDetail {
   return raw === "partition" ? "partition" : "count";
 }
 
+export type PartitionWindowDecision =
+  | { readonly kind: "ok"; readonly limit: number; readonly cursor: string | undefined }
+  | { readonly kind: "invalid"; readonly detail: string };
+
+/**
+ * The window a partition answers over, refused rather than clamped or dropped when it cannot be
+ * served — the registry lists' rule (ADR-0365): `?limit=500` silently answering 200, or
+ * `?cursor=garbage` silently answering page 1, is a wrong answer under a 200.
+ */
+export function decidePartitionWindow(
+  limitRaw: string | undefined,
+  cursorRaw: string | undefined,
+): PartitionWindowDecision {
+  let limit = UNREAD_PARTITION_WINDOW_MAX;
+  if (limitRaw !== undefined && limitRaw.length > 0) {
+    if (!/^\d{1,4}$/.test(limitRaw)) {
+      return { kind: "invalid", detail: `limit must be an integer 1-${UNREAD_PARTITION_WINDOW_MAX}` };
+    }
+    limit = Number.parseInt(limitRaw, 10);
+    if (limit < 1 || limit > UNREAD_PARTITION_WINDOW_MAX) {
+      return {
+        kind: "invalid",
+        detail: `limit must be an integer 1-${UNREAD_PARTITION_WINDOW_MAX}; a wider partition is paged with cursor`,
+      };
+    }
+  }
+  if (cursorRaw === undefined || cursorRaw.length === 0) return { kind: "ok", limit, cursor: undefined };
+  if (parseNotificationListCursor(cursorRaw) === null) {
+    return { kind: "invalid", detail: "cursor is not a notification list cursor" };
+  }
+  return { kind: "ok", limit, cursor: cursorRaw };
+}
+
 function buildUnreadHandler(ctx: ReadStateRoutesContext): Handler {
   return async (input) => {
     const resolved = resolveViewer(ctx, input.principal);
@@ -580,48 +634,77 @@ function buildUnreadHandler(ctx: ReadStateRoutesContext): Handler {
     // to reject, not this route's to enumerate.
     const channelRaw = firstQueryValue(query["channel"]);
     const channel = channelRaw === undefined || channelRaw.length === 0 ? undefined : channelRaw;
-    const limit = ctx.unreadScanLimit ?? DEFAULT_UNREAD_SCAN_LIMIT;
-    const hashes = await selfNoticeFilter(ctx, input.principal, viewer.tenantId);
-
-    let index: ReadStateIndex;
-    let notices: readonly InboxNoticeLike[];
-    let truncated: boolean;
-    try {
-      // Both halves, because neither answers alone: the notices say what exists for this viewer and
-      // the index says what they have seen. Deriving the badge from the watermark alone would lose
-      // every notice marked read individually *and* lose `isUnread`'s fail-open, which shows a
-      // notice whose `queuedAt` cannot be parsed rather than hiding it.
-      index = await ctx.store.indexFor(viewer);
-      const page = await ctx.notices.listForTenant(viewer.tenantId, {
-        limit,
-        ...(channel !== undefined ? { channel } : {}),
-        ...(hashes !== null ? { recipientAddressSha256: hashes } : {}),
+    const window = decidePartitionWindow(
+      firstQueryValue(query["limit"]),
+      firstQueryValue(query["cursor"]),
+    );
+    // Refused for the count detail too: a parameter the count cannot use is still a parameter the
+    // caller believes did something.
+    if (window.kind === "invalid") return json(400, { error: "invalid_request", detail: window.detail });
+    if (detail === "count" && (window.cursor !== undefined || firstQueryValue(query["limit"]) !== undefined)) {
+      return json(400, {
+        error: "invalid_request",
+        detail: "limit and cursor page the partition; the count is exact and takes neither",
       });
-      notices = page.data;
-      truncated = page.nextCursor !== null;
+    }
+    const hashes = await selfNoticeFilter(ctx, input.principal, viewer.tenantId);
+    const scopeQuery = {
+      ...(channel !== undefined ? { channel } : {}),
+      ...(hashes !== null ? { recipientAddressSha256: hashes } : {}),
+    };
+
+    let count: InboxUnreadCountLike;
+    try {
+      count = await ctx.notices.unreadCountFor(viewer, scopeQuery);
     } catch {
       return json(503, { error: "read_state_unavailable", detail: "the unread count could not be read" });
     }
 
-    const probes = notices.map((n) => ({ id: n.dispatchId, queuedAt: n.queuedAt }));
     const body: Record<string, unknown> = {
       viewer: { tenantId: viewer.tenantId, userId: viewer.userId },
       scope: hashes === null ? "tenant" : "self",
       channel: channel ?? null,
-      unread: countUnread(probes, index),
-      examined: probes.length,
-      // An exact count would need a store-side anti-join; this one examined a page. Said out loud so
-      // a client renders "200+" rather than a number that is quietly wrong.
-      truncated,
-      readThroughAt:
-        index.readThroughMs === null ? null : new Date(index.readThroughMs).toISOString(),
+      unread: count.unread,
+      // Said rather than implied: the client rendered "N+" off a `truncated` flag that is gone,
+      // because nothing about this figure is a floor any more.
+      exact: true,
+      readThroughAt: count.readThroughAt,
     };
     if (detail === "partition") {
+      let index: ReadStateIndex;
+      let notices: readonly InboxNoticeLike[];
+      let nextCursor: string | null;
+      try {
+        // Both halves, because neither answers alone: the notices say what exists for this viewer
+        // and the index says what they have seen. Partitioned by the contract's own
+        // `partitionByRead`, not by a second SQL statement, so the per-notice answer and its
+        // fail-open arm have one definition.
+        index = await ctx.store.indexFor(viewer);
+        const page = await ctx.notices.listForTenant(viewer.tenantId, {
+          ...scopeQuery,
+          limit: window.limit,
+          ...(window.cursor !== undefined ? { cursor: window.cursor } : {}),
+        });
+        notices = page.data;
+        nextCursor = page.nextCursor;
+      } catch {
+        return json(503, { error: "read_state_unavailable", detail: "the partition could not be read" });
+      }
+      const probes = notices.map((n) => ({ id: n.dispatchId, queuedAt: n.queuedAt }));
       const split = partitionByRead(probes, index);
       body["notices"] = {
         read: split.read.map((p) => p.id),
         unread: split.unread.map((p) => p.id),
       };
+      // `examined` and `nextCursor` describe the **partition** window only; `unread` above does not
+      // depend on them. A notice past the window is reached with `?cursor=`, the listing's cursor.
+      body["examined"] = probes.length;
+      body["nextCursor"] = nextCursor;
+      // Kept on the partition, where it is still true: the window is a page, so notices past it have
+      // no answer here, and `apps/operate-web` renders its "read state Unknown" explanation off this
+      // flag. Dropping it with the count's would have silenced that explanation while the rows it
+      // explains still read Unknown (ADR-0476 review).
+      body["truncated"] = nextCursor !== null;
     }
     return json(200, body);
   };

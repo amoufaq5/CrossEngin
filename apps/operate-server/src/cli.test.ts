@@ -1390,12 +1390,12 @@ describe("parseServeArgs — --audit-read-sensitive-class", () => {
 describe("parseServeArgs — --read-state-routes", () => {
   const PG = ["--pack", "erp-core", "--store", "pg"];
 
-  it("is off, ungranted and default-scanned unless asked for", () => {
+  it("is off and ungranted unless asked for", () => {
     const o = parseServeArgs([...PG]);
     expect(o.readStateRoutes).toBe(false);
     expect(o.readStateRoles).toEqual([]);
     expect(o.readStateBackfillRoles).toEqual([]);
-    expect(o.readStateUnreadScan).toBe(200);
+    expect("readStateUnreadScan" in o).toBe(false);
   });
 
   it("a role turns the routes on, the way every sibling flag does", () => {
@@ -1429,13 +1429,16 @@ describe("parseServeArgs — --read-state-routes", () => {
     expect(o.readStateBackfillRoles).toEqual(["migrator"]);
   });
 
-  it("takes a scan limit in band and refuses one out of it, rather than clamping", () => {
-    // ADR-0312's rule: a deployment that asked for 5000 and silently got 1000 would render a badge
-    // it believes is exact.
-    expect(parseServeArgs([...PG, "--read-state-unread-scan=750"]).readStateUnreadScan).toBe(750);
-    expect(() => parseServeArgs([...PG, "--read-state-unread-scan=0"])).toThrow(/1–1000/);
-    expect(() => parseServeArgs([...PG, "--read-state-unread-scan=5000"])).toThrow(/1–1000/);
-    expect(() => parseServeArgs([...PG, "--read-state-unread-scan=1.5"])).toThrow(/1–1000/);
+  it("refuses the removed scan flag by name, at every value it used to accept", () => {
+    // ADR-0476: the count is exact and reads no page, so the flag governs nothing. It accepted
+    // 1..1000 while the store returned at most 200; accepting it silently now would be that defect
+    // a second time. Every former value is refused, including the in-band 200 and 750.
+    for (const v of ["1", "200", "750", "1000"]) {
+      expect(() => parseServeArgs([...PG, `--read-state-unread-scan=${v}`])).toThrow(
+        /--read-state-unread-scan was removed \(ADR-0476\).*limit= \(1-200/,
+      );
+      expect(() => parseServeArgs([...PG, "--read-state-unread-scan", v])).toThrow(/was removed/);
+    }
   });
 });
 
