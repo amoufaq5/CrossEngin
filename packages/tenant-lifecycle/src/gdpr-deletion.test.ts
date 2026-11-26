@@ -620,6 +620,14 @@ describe("DEADLINE_STANDING_FACTS", () => {
       reported: true,
     });
   });
+
+  it("reports a record whose deadline cannot be read, calling it neither a breach nor meetable", () => {
+    expect(DEADLINE_STANDING_FACTS.deadline_unstated).toEqual({
+      breached: false,
+      deadlineCanStillBeMet: false,
+      reported: true,
+    });
+  });
 });
 
 describe("assessDeadline", () => {
@@ -696,6 +704,38 @@ describe("assessDeadline", () => {
     );
     expect(a.standing).toBe("answer_time_unstated");
     // `0` would read as "answered exactly at the deadline" and `NaN` would propagate into figures.
+    expect(a.msPastDeadline).toBeNull();
+  });
+
+  it("reports a deadline this runtime cannot read, on both branches, instead of failing open", () => {
+    // Measured: the contract's `datetime({offset: true})` admits an offset of `+99:00`, which
+    // `new Date()` answers NaN for, and every comparison against NaN is false — so before
+    // `deadline_unstated` such a request read `within_deadline` waiting and `answered_in_time`
+    // answered, neither reported (ADR-0477).
+    const deadlineAt = "2026-05-31T00:00:00+99:00";
+    expect(Number.isNaN(new Date(deadlineAt).getTime())).toBe(true);
+    const waiting = assessDeadline(requestIn("verified", { deadlineAt }), {
+      now: new Date("2030-01-01T00:00:00Z"),
+      warningDays,
+    });
+    expect(waiting.standing).toBe("deadline_unstated");
+    expect(waiting.msPastDeadline).toBeNull();
+    expect(isDeadlineFinding(waiting.standing)).toBe(true);
+    const answered = assessDeadline(
+      requestIn("completed", { deadlineAt, completedAt: "2026-06-15T00:00:00.000Z" }),
+      { now: new Date("2030-01-01T00:00:00Z"), warningDays },
+    );
+    expect(answered.standing).toBe("deadline_unstated");
+    expect(answered.answeredAt).toBe("2026-06-15T00:00:00.000Z");
+    expect(answered.msPastDeadline).toBeNull();
+  });
+
+  it("reads an unreadable answer instant as unstated rather than in time", () => {
+    const a = assessDeadline(
+      requestIn("completed", { completedAt: "2026-06-15T00:00:00+99:00" }),
+      { now: new Date("2030-01-01T00:00:00Z"), warningDays },
+    );
+    expect(a.standing).toBe("answer_time_unstated");
     expect(a.msPastDeadline).toBeNull();
   });
 

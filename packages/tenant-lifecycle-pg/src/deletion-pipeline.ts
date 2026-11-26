@@ -2,6 +2,7 @@ import type { PgConnection } from "@crossengin/kernel-pg";
 import {
   SELF_EXEMPTION_BY_DISPOSITION,
   assembleTombstone,
+  requiredSubsystemsFor,
   tenantWideErasureRefusal,
   type ActionTrigger,
   type AssemblyRefusal,
@@ -83,6 +84,22 @@ export const PIPELINE_REFUSAL_STAGES = [
    * about work this pipeline performs itself.
    */
   "input",
+  /**
+   * The transaction could not be opened at all (ADR-0477), so nothing in it ran — the connection's
+   * `transaction` failed before it invoked the callback. Its own stage because it is a fact about
+   * the deletion's **connection**, not about the request or the data: the owner credential is wrong,
+   * the role is gone, the database is down. Before it existed such a failure escaped as an unknown
+   * throw and the runner filed the request `aborted`, stranding it `in_progress` for a human, though
+   * provably nothing had been attempted.
+   */
+  "connect",
+  /**
+   * Inside the transaction and **before the first destructive statement** (ADR-0477): the schema
+   * erasure's own refusals asked ahead of the shared-table `DELETE`s, through a caller-injected
+   * `PipelinePreflightWithin`, so a deployment-fixable refusal there releases the request rather
+   * than rolling back a full erasure and rejecting it.
+   */
+  "preflight",
   "erase",
   "assemble",
   "store",
@@ -108,6 +125,7 @@ export const PIPELINE_INPUT_REFUSAL_REASONS = [
   "kind_claims_a_narrower_subject",
   "subject_named_on_a_tenant_wide_erasure",
   "tenant_state_unresolvable",
+  "declared_subsystem_unattested",
 ] as const;
 export type PipelineInputRefusalReason = (typeof PIPELINE_INPUT_REFUSAL_REASONS)[number];
 
@@ -116,6 +134,59 @@ type InputPipelineRefusal = PipelineRefusal & {
   readonly stage: "input";
   readonly reason: PipelineInputRefusalReason;
 };
+
+/** The `connect` stage's one reason. */
+export const PIPELINE_CONNECT_REFUSAL_REASONS = ["owner_connection_unavailable"] as const;
+export type PipelineConnectRefusalReason = (typeof PIPELINE_CONNECT_REFUSAL_REASONS)[number];
+
+/**
+ * The `preflight` stage's vocabulary (ADR-0477): what `PipelinePreflightWithin` may answer.
+ *
+ * Every one is established **before the first destructive statement**, which is what lets
+ * `DELETION_REFUSAL_RETRYABILITY` mark them `retry` without breaking its type rule — the same
+ * conditions raised later by the schema eraser are typed `final` there and stay so, because by then
+ * the shared erasure has deleted.
+ *
+ * - `schema_name_refused`: the tenant's schema name, resolved from this deployment's prefix, is not
+ *   one the eraser will drop (`not_a_tenant_schema` / `schema_not_this_tenant` asked early). A
+ *   prefix is configuration.
+ * - `schema_not_droppable`: the deletion connection's role does not own or inherit the schema's
+ *   owner, so `DROP SCHEMA` would raise `42501` — after the shared erasure, as an unknown throw that
+ *   stranded the request. A grant the deployment makes.
+ * - `external_dependents`: the trial cascade, run here under the per-tenant lock, would reach
+ *   objects outside the schema. An object an operator can drop.
+ * - `preflight_failed`: the preflight itself threw; nothing destructive had run. The throw is re-raised
+ *   as a `DeletionPipelineAborted` carrying this refusal — a throw may leave the transaction aborted,
+ *   so it cannot be returned for a COMMIT — and the runner, which reads an aborted pipeline as a
+ *   proven rollback, releases the request rather than stranding it.
+ */
+export const PIPELINE_PREFLIGHT_REFUSAL_REASONS = [
+  "schema_name_refused",
+  "schema_not_droppable",
+  "external_dependents",
+  "preflight_failed",
+] as const;
+export type PipelinePreflightRefusalReason = (typeof PIPELINE_PREFLIGHT_REFUSAL_REASONS)[number];
+
+/**
+ * Checks the schema erasure can be expected to pass, run inside the deletion's transaction before
+ * the shared-table erasure's first `DELETE` (ADR-0477).
+ *
+ * Injected for `SchemaEraserWithin`'s reason: the schema erasure lives in `operate-runtime-pg`,
+ * which this package does not depend on. A preflight must **write nothing that commits** — a probe
+ * that trial-drops inside a savepoint and rolls back is the expected shape — and it answers refusals
+ * rather than throwing; a throw is converted to `preflight_failed`.
+ *
+ * It does not replace the eraser's own checks, which still run under the same lock and stay `final`:
+ * an object created against a tenant table between the preflight and the drop is still refused, and
+ * the cost of the preflight is a second trial cascade per deletion, which happens once per tenant.
+ */
+export interface PipelinePreflightWithin {
+  (
+    tx: PgConnection,
+    tenantId: string,
+  ): Promise<readonly { readonly reason: PipelinePreflightRefusalReason; readonly detail: string }[]>;
+}
 
 /**
  * The schema eraser's refusal vocabulary, **restated** at the seam because this package must not
@@ -268,6 +339,13 @@ export interface DeleteTenantInput {
    * which ADR-0321's runner records as `aborted` and leaves `in_progress` for a human.
    */
   readonly bootSchema: BootSchemaDeletionInput;
+  /**
+   * The schema erasure's refusals asked early (ADR-0477), before the first destructive statement.
+   * Optional so the two call sites in `node.ts` compile until they pass one; absent, the pipeline
+   * behaves exactly as before — a schema refusal arrives from the eraser after the shared `DELETE`s,
+   * typed `final`, and a `42501` from an undroppable schema strands the request.
+   */
+  readonly preflight?: PipelinePreflightWithin;
   readonly clock?: () => Date;
   /**
    * Where to record the `… -> deleted` transition, and what to say about it.
@@ -468,6 +546,33 @@ function inputRefusals(input: DeleteTenantInput): readonly InputPipelineRefusal[
     });
   }
   /*
+   * Every subsystem the capabilities require an attestation from, that this pipeline does not
+   * perform, must have one in hand (ADR-0477).
+   *
+   * `assembleTombstone` refuses the same fact as `subsystem_unattested` — after both erasures, as a
+   * throw, so the request was rejected though the cause is a property of the deployment's
+   * declaration (or of the synchronous route's body), and the runner supplies no attestations at all
+   * so for it the refusal was certain on every request. Static, so decidable here, before the
+   * transaction opens; the assembler's check stays as the backstop and stays `final`.
+   */
+  const performedOrAttested = new Set<DeletionSubsystem>([
+    ...PIPELINE_PERFORMED_SUBSYSTEMS,
+    ...(input.attestations ?? []).map((a) => a.subsystem),
+  ]);
+  const unattested = requiredSubsystemsFor(input.capabilities).filter(
+    (s) => !performedOrAttested.has(s),
+  );
+  if (unattested.length > 0) {
+    out.push({
+      stage: "input",
+      reason: "declared_subsystem_unattested",
+      detail:
+        `the deployment declares ${unattested.join(", ")} as holding this tenant's data, and no` +
+        " attestation for it was supplied; declare each absent or present_not_erased as is true" +
+        " of this deployment, or supply its attestation",
+    });
+  }
+  /*
    * The kind has to be one a tenant-wide erasure can truthfully perform.
    *
    * This function destroys **every** table carrying the tenant's id and drops its schema. That is
@@ -535,196 +640,258 @@ export async function deleteTenantAtomically(
   const attestedBy = `tenant-lifecycle-pg/deletion:${input.executedBy}`;
   const authority = { executedBy: input.executedBy, approvedBy: input.approvedBy };
 
-  return conn.transaction(async (tx) => {
-    /**
-     * The tenant's state, read **before the first destructive statement**, so an unresolvable one is
-     * a *returned* refusal and not a throw.
-     *
-     * That placement is the whole ordering argument on this side. The `fromState` has to be read
-     * while `meta.tenants` still holds the row, and the row is retired by the caller *after* this
-     * pipeline commits (ADR-0316, because the audit record's `tenant_id` references it) — so the
-     * only window in which the source state is knowable is inside this transaction and before the
-     * erasures. Reading it first also keeps the pipeline's own rule intact: a refusal is returned
-     * only while nothing has been destroyed.
-     */
-    let fromState: TenantLifecycleState | null = null;
-    if (input.lifecycle !== undefined) {
-      fromState = await readTenantState(
-        tx,
-        input.tenantId,
-        input.schema ?? "meta",
-      );
-      if (fromState === null) {
-        const unresolvable: InputPipelineRefusal = {
-          stage: "input",
-          reason: "tenant_state_unresolvable",
-          detail:
-            `${input.schema ?? "meta"}.tenants holds no row for ${input.tenantId}, so the` +
-            " transition this deletion performs has no source state; substituting one would" +
-            " put a fabricated fact in the only record that outlives the tenant",
-        };
-        return { ok: false, refusals: [unresolvable] };
+  // Set by the first statement of the callback, so a throw out of `conn.transaction` with this still
+  // false is a transaction that never opened — `pool.connect()` or `BEGIN` failed, and nothing in
+  // the callback ran. That is the one throw here which provably destroyed nothing, and it is
+  // returned as a refusal rather than escaping as an unknown (ADR-0477). Every other throw is
+  // re-raised unchanged: once the callback has started, only a `DeletionPipelineAborted` proves a
+  // rollback.
+  let entered = false;
+  try {
+    return await conn.transaction(async (tx) => {
+      entered = true;
+      /**
+       * The tenant's state, read **before the first destructive statement**, so an unresolvable one is
+       * a *returned* refusal and not a throw.
+       *
+       * That placement is the whole ordering argument on this side. The `fromState` has to be read
+       * while `meta.tenants` still holds the row, and the row is retired by the caller *after* this
+       * pipeline commits (ADR-0316, because the audit record's `tenant_id` references it) — so the
+       * only window in which the source state is knowable is inside this transaction and before the
+       * erasures. Reading it first also keeps the pipeline's own rule intact: a refusal is returned
+       * only while nothing has been destroyed.
+       */
+      let fromState: TenantLifecycleState | null = null;
+      if (input.lifecycle !== undefined) {
+        fromState = await readTenantState(
+          tx,
+          input.tenantId,
+          input.schema ?? "meta",
+        );
+        if (fromState === null) {
+          const unresolvable: InputPipelineRefusal = {
+            stage: "input",
+            reason: "tenant_state_unresolvable",
+            detail:
+              `${input.schema ?? "meta"}.tenants holds no row for ${input.tenantId}, so the` +
+              " transition this deletion performs has no source state; substituting one would" +
+              " put a fabricated fact in the only record that outlives the tenant",
+          };
+          return { ok: false, refusals: [unresolvable] };
+        }
       }
-    }
 
-    // First, because every one of its refusals is established before it writes anything — so the one
-    // ordering that keeps "a returned refusal means nothing was destroyed" true for both erasures.
-    const shared = await eraseSharedTablesWithin(tx, input.tenantId, authority, {
-      ...(input.schema !== undefined ? { schema: input.schema } : {}),
-      // The erasure's own two fields, named rather than spread: it has no use for the record-storage
-      // model and must not start reading one, since what the proof says about a group is a different
-      // question from which relations to empty.
-      bootSchema: {
-        targets: input.bootSchema.targets,
-        blockingCycle: input.bootSchema.blockingCycle,
-      },
-      clock,
-      // What this pipeline goes on to read and append, so a missing grant is refused before the
-      // first DELETE (ADR-0458). The state read and the lifecycle append happen only with a
-      // lifecycle block, so they are asked only then.
-      pipelinePrivileges: DELETION_PIPELINE_PRIVILEGES.filter(
-        (p) =>
-          input.lifecycle !== undefined ||
-          (p.table !== "tenants" && p.table !== "tenant_lifecycle_events"),
-      ),
-    });
-    if (shared.refusals.length > 0) {
-      return { ok: false, refusals: eraseRefusals(shared.refusals) };
-    }
+      // The schema erasure's refusals, asked before anything is destroyed (ADR-0477). Returned, not
+      // thrown, for the same reason the shared erasure's are: nothing has been written yet.
+      if (input.preflight !== undefined) {
+        let preflightRefusals: Awaited<ReturnType<PipelinePreflightWithin>>;
+        try {
+          preflightRefusals = await input.preflight(tx, input.tenantId);
+        } catch (err) {
+          // A throw here may leave the transaction aborted, so it is re-raised as the
+          // proven-rollback exception rather than returned: returning would ask the caller to
+          // COMMIT. Its detail is the SQLSTATE alone, never the message, which can carry a relation
+          // or role name into a log line and a stored `last_attempt_refusal`.
+          throw new DeletionPipelineAborted([
+            {
+              stage: "preflight",
+              reason: "preflight_failed",
+              detail: `the deletion preflight could not complete${sqlStateClause(err)}; nothing was destroyed`,
+            },
+          ]);
+        }
+        if (preflightRefusals.length > 0) {
+          return {
+            ok: false,
+            refusals: preflightRefusals.map((r) => ({
+              stage: "preflight" as const,
+              reason: r.reason,
+              detail: r.detail,
+            })),
+          };
+        }
+      }
 
-    const erasure = await eraseWithin(tx, input.tenantId, authority);
-    if (erasure.refusals.length > 0) {
-      // Throws, unlike the shared erasure's refusal above: by here rows have been deleted in this
-      // transaction, and returning would commit a destruction with no tombstone describing it. The
-      // refusals ride along on the exception, so a caller still learns why without having to
-      // distinguish this from a connection failure.
-      //
-      // Unconditionally, and not only when the shared erasure actually removed something: whether a
-      // refusal is reported as a return or a throw must not depend on how much data the tenant
-      // happened to hold, or one condition answers two shapes for reasons the caller cannot see.
-      throw new DeletionPipelineAborted(eraseRefusals(erasure.refusals));
-    }
-
-    const attestations = [
-      ATTESTERS.tenant_schema(erasure, attestedBy),
-      ATTESTERS.shared_tables(shared, attestedBy),
-      ...(input.attestations ?? []),
-    ];
-    // Nothing is filtered out of the caller's attestations any more: one for a performed subsystem is
-    // refused at the `input` stage, before this transaction opened.
-    const assembled = assembleTombstone({
-      id: input.tombstoneId,
-      kind: input.kind,
-      tenantId: input.tenantId,
-      ...(input.subjectIdentifier !== undefined ? { subjectIdentifier: input.subjectIdentifier } : {}),
-      ...(input.relatedDeletionRequestId !== undefined
-        ? { relatedDeletionRequestId: input.relatedDeletionRequestId }
-        : {}),
-      deletedAt: now,
-      executedBy: input.executedBy,
-      approvedBy: input.approvedBy,
-      // Replaced by the store with the chain entry it appends; present only because the contract
-      // requires one to parse (ADR-0318).
-      anchors: [PLACEHOLDER_ANCHOR(now)],
-      capabilities: input.capabilities,
-      // The count comes from the list the erasure was just handed, never from the caller — so the
-      // figure the v4 bytes commit to is the number of relations this deletion actually targeted.
-      recordStorage: {
-        ...input.bootSchema.recordStorage,
-        relationCount: input.bootSchema.targets.length,
-      },
-      attestations,
-    });
-    if (!assembled.ok) {
-      // Throws for the same reason the erase refusal above does: destruction has happened inside this
-      // transaction, so the only correct response is to abort it. Returning would commit a deletion
-      // with no tombstone, which is the state this whole pipeline exists to make unreachable.
-      throw new DeletionPipelineAborted(assemblyRefusals(assembled.refusals));
-    }
-
-    const stored = await store.writeWithin(tx, assembled.record, attestations);
-
-    /**
-     * The transition, appended **last and in the same transaction**.
-     *
-     * Last, because the tombstone is the proof and this is the index to it: an event naming a
-     * tombstone that the assembler then refused would be a trail pointing at nothing. Inside the
-     * transaction, because of what was measured — `tenant_id` is `ON DELETE CASCADE` into
-     * `meta.tenants`, so an event written before the tenant row is retired is destroyed *with* it
-     * and one written after raises a foreign-key violation. There is no point *outside* this
-     * transaction at which a durable `… -> deleted` event exists, and the patch that removes the
-     * reference (following `meta.tenant_tombstones`, which carries none for exactly this reason) is
-     * what makes *inside* durable rather than merely atomic.
-     *
-     * **It throws rather than reporting.** This is the opposite of ADR-0320's `tenantRetired: false`
-     * and the difference is where the work sits: retiring the tenant row happens *after* the
-     * pipeline commits, so the deletion has already happened and a 5xx would claim otherwise. Here
-     * nothing has committed, so a failed append rolls the erasures back and the tenant is exactly as
-     * it was — and the alternative is committing a destruction whose trail the caller was told would
-     * exist. The append's own refusals (contract, four-eyes, id shape) are raised before any
-     * statement is sent, so they cost nothing.
-     */
-    let lifecycleEvent: {
-      readonly id: string;
-      readonly fromState: TenantLifecycleState;
-      readonly toState: TenantLifecycleState;
-      readonly transitionLegal: boolean;
-    } | null = null;
-    if (input.lifecycle !== undefined && fromState !== null) {
-      const event = lifecycleEventFor({
-        id: input.lifecycle.eventId,
-        tenantId: input.tenantId,
-        action: "execute_deletion",
-        fromState,
-        trigger: input.lifecycle.trigger,
-        occurredAt: now,
-        reason: input.lifecycle.reason,
-        // The executor and the approver, which the tombstone store has already refused as equal
-        // (`four_eyes_violated`) — so the event's own four-eyes check cannot fail here, and is kept
-        // as the second of the three layers rather than removed because it is currently redundant.
-        actorUserId: input.executedBy,
-        approvedByUserId: input.approvedBy,
-        approvedAt: now,
-        ...(input.lifecycle.relatedIncidentId !== undefined
-          ? { relatedIncidentId: input.lifecycle.relatedIncidentId }
-          : {}),
-        ...(input.lifecycle.notificationChannel !== undefined
-          ? { notificationChannel: input.lifecycle.notificationChannel }
-          : {}),
-        ...(input.lifecycle.notes !== undefined ? { notes: input.lifecycle.notes } : {}),
+      // First, because every one of its refusals is established before it writes anything — so the one
+      // ordering that keeps "a returned refusal means nothing was destroyed" true for both erasures.
+      const shared = await eraseSharedTablesWithin(tx, input.tenantId, authority, {
+        ...(input.schema !== undefined ? { schema: input.schema } : {}),
+        // The erasure's own two fields, named rather than spread: it has no use for the record-storage
+        // model and must not start reading one, since what the proof says about a group is a different
+        // question from which relations to empty.
+        bootSchema: {
+          targets: input.bootSchema.targets,
+          blockingCycle: input.bootSchema.blockingCycle,
+        },
+        clock,
+        // What this pipeline goes on to read and append, so a missing grant is refused before the
+        // first DELETE (ADR-0458). The state read and the lifecycle append happen only with a
+        // lifecycle block, so they are asked only then.
+        pipelinePrivileges: DELETION_PIPELINE_PRIVILEGES.filter(
+          (p) =>
+            input.lifecycle !== undefined ||
+            (p.table !== "tenants" && p.table !== "tenant_lifecycle_events"),
+        ),
       });
-      await input.lifecycle.store.appendWithin(tx, event);
-      lifecycleEvent = {
-        id: event.id,
-        fromState: event.fromState,
-        toState: event.toState,
-        transitionLegal: transitionWasLegal(event),
-      };
-    }
+      if (shared.refusals.length > 0) {
+        return { ok: false, refusals: eraseRefusals(shared.refusals) };
+      }
 
-    const sharedScope = sharedTableErasureScope(shared);
-    return {
-      ok: true,
-      stored,
-      lifecycleEvent,
-      erased: {
-        schema: erasure.schema,
-        tables: erasure.erasedRelations.map((r) => `${erasure.schema}.${r.table}`),
-        rowCount: erasure.rowCount,
-        storageBytes: erasure.storageBytes,
-        alreadyAbsent: erasure.alreadyAbsent,
-      },
-      erasedSharedTables: {
-        schema: shared.schema,
-        tables: sharedScope.tables,
-        rowCount: sharedScope.rowCount,
-        storageBytes: sharedScope.storageBytes,
-        examinedTables: shared.examinedTables,
-        retainedTables: shared.retainedTables,
-        statutoryRetained: sharedTableRetention(shared),
-      },
+      const erasure = await eraseWithin(tx, input.tenantId, authority);
+      if (erasure.refusals.length > 0) {
+        // Throws, unlike the shared erasure's refusal above: by here rows have been deleted in this
+        // transaction, and returning would commit a destruction with no tombstone describing it. The
+        // refusals ride along on the exception, so a caller still learns why without having to
+        // distinguish this from a connection failure.
+        //
+        // Unconditionally, and not only when the shared erasure actually removed something: whether a
+        // refusal is reported as a return or a throw must not depend on how much data the tenant
+        // happened to hold, or one condition answers two shapes for reasons the caller cannot see.
+        throw new DeletionPipelineAborted(eraseRefusals(erasure.refusals));
+      }
+
+      const attestations = [
+        ATTESTERS.tenant_schema(erasure, attestedBy),
+        ATTESTERS.shared_tables(shared, attestedBy),
+        ...(input.attestations ?? []),
+      ];
+      // Nothing is filtered out of the caller's attestations any more: one for a performed subsystem is
+      // refused at the `input` stage, before this transaction opened.
+      const assembled = assembleTombstone({
+        id: input.tombstoneId,
+        kind: input.kind,
+        tenantId: input.tenantId,
+        ...(input.subjectIdentifier !== undefined ? { subjectIdentifier: input.subjectIdentifier } : {}),
+        ...(input.relatedDeletionRequestId !== undefined
+          ? { relatedDeletionRequestId: input.relatedDeletionRequestId }
+          : {}),
+        deletedAt: now,
+        executedBy: input.executedBy,
+        approvedBy: input.approvedBy,
+        // Replaced by the store with the chain entry it appends; present only because the contract
+        // requires one to parse (ADR-0318).
+        anchors: [PLACEHOLDER_ANCHOR(now)],
+        capabilities: input.capabilities,
+        // The count comes from the list the erasure was just handed, never from the caller — so the
+        // figure the v4 bytes commit to is the number of relations this deletion actually targeted.
+        recordStorage: {
+          ...input.bootSchema.recordStorage,
+          relationCount: input.bootSchema.targets.length,
+        },
+        attestations,
+      });
+      if (!assembled.ok) {
+        // Throws for the same reason the erase refusal above does: destruction has happened inside this
+        // transaction, so the only correct response is to abort it. Returning would commit a deletion
+        // with no tombstone, which is the state this whole pipeline exists to make unreachable.
+        throw new DeletionPipelineAborted(assemblyRefusals(assembled.refusals));
+      }
+
+      const stored = await store.writeWithin(tx, assembled.record, attestations);
+
+      /**
+       * The transition, appended **last and in the same transaction**.
+       *
+       * Last, because the tombstone is the proof and this is the index to it: an event naming a
+       * tombstone that the assembler then refused would be a trail pointing at nothing. Inside the
+       * transaction, because of what was measured — `tenant_id` is `ON DELETE CASCADE` into
+       * `meta.tenants`, so an event written before the tenant row is retired is destroyed *with* it
+       * and one written after raises a foreign-key violation. There is no point *outside* this
+       * transaction at which a durable `… -> deleted` event exists, and the patch that removes the
+       * reference (following `meta.tenant_tombstones`, which carries none for exactly this reason) is
+       * what makes *inside* durable rather than merely atomic.
+       *
+       * **It throws rather than reporting.** This is the opposite of ADR-0320's `tenantRetired: false`
+       * and the difference is where the work sits: retiring the tenant row happens *after* the
+       * pipeline commits, so the deletion has already happened and a 5xx would claim otherwise. Here
+       * nothing has committed, so a failed append rolls the erasures back and the tenant is exactly as
+       * it was — and the alternative is committing a destruction whose trail the caller was told would
+       * exist. The append's own refusals (contract, four-eyes, id shape) are raised before any
+       * statement is sent, so they cost nothing.
+       */
+      let lifecycleEvent: {
+        readonly id: string;
+        readonly fromState: TenantLifecycleState;
+        readonly toState: TenantLifecycleState;
+        readonly transitionLegal: boolean;
+      } | null = null;
+      if (input.lifecycle !== undefined && fromState !== null) {
+        const event = lifecycleEventFor({
+          id: input.lifecycle.eventId,
+          tenantId: input.tenantId,
+          action: "execute_deletion",
+          fromState,
+          trigger: input.lifecycle.trigger,
+          occurredAt: now,
+          reason: input.lifecycle.reason,
+          // The executor and the approver, which the tombstone store has already refused as equal
+          // (`four_eyes_violated`) — so the event's own four-eyes check cannot fail here, and is kept
+          // as the second of the three layers rather than removed because it is currently redundant.
+          actorUserId: input.executedBy,
+          approvedByUserId: input.approvedBy,
+          approvedAt: now,
+          ...(input.lifecycle.relatedIncidentId !== undefined
+            ? { relatedIncidentId: input.lifecycle.relatedIncidentId }
+            : {}),
+          ...(input.lifecycle.notificationChannel !== undefined
+            ? { notificationChannel: input.lifecycle.notificationChannel }
+            : {}),
+          ...(input.lifecycle.notes !== undefined ? { notes: input.lifecycle.notes } : {}),
+        });
+        await input.lifecycle.store.appendWithin(tx, event);
+        lifecycleEvent = {
+          id: event.id,
+          fromState: event.fromState,
+          toState: event.toState,
+          transitionLegal: transitionWasLegal(event),
+        };
+      }
+
+      const sharedScope = sharedTableErasureScope(shared);
+      return {
+        ok: true,
+        stored,
+        lifecycleEvent,
+        erased: {
+          schema: erasure.schema,
+          tables: erasure.erasedRelations.map((r) => `${erasure.schema}.${r.table}`),
+          rowCount: erasure.rowCount,
+          storageBytes: erasure.storageBytes,
+          alreadyAbsent: erasure.alreadyAbsent,
+        },
+        erasedSharedTables: {
+          schema: shared.schema,
+          tables: sharedScope.tables,
+          rowCount: sharedScope.rowCount,
+          storageBytes: sharedScope.storageBytes,
+          examinedTables: shared.examinedTables,
+          retainedTables: shared.retainedTables,
+          statutoryRetained: sharedTableRetention(shared),
+        },
+      };
+    });
+  } catch (err) {
+    if (entered) throw err;
+    const unavailable: PipelineRefusal = {
+      stage: "connect",
+      reason: "owner_connection_unavailable",
+      detail:
+        `the deletion connection could not open a transaction${sqlStateClause(err)}; nothing ran,` +
+        " so the request is released to be tried again once the connection is restored",
     };
-  });
+    return { ok: false, refusals: [unavailable] };
+  }
+}
+
+/**
+ * ` (SQLSTATE xxxxx)` when the error carries a Postgres code, otherwise nothing. The code and never
+ * the message: a connection error's message names the role, the host and sometimes the database,
+ * and this detail reaches a log line and the request's `last_attempt_refusal` column.
+ */
+function sqlStateClause(err: unknown): string {
+  const code =
+    typeof err === "object" && err !== null && "code" in err ? (err as { code: unknown }).code : null;
+  return typeof code === "string" && /^[0-9A-Z]{5}$/.test(code) ? ` (SQLSTATE ${code})` : "";
 }
 
 const PLACEHOLDER_ANCHOR = (at: string): TombstoneAnchor => ({

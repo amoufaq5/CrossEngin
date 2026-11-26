@@ -16,7 +16,7 @@ import { isAnchoredByChain } from "./deletion-pipeline.js";
 import { DeletionRequestCommittedUnreadable } from "./deletion-request-store.js";
 import type {
   PostgresDeletionRequestStore,
-  UnreadableRowReporter,
+  UnreadableRequestRowReporter,
 } from "./deletion-request-store.js";
 import {
   TOMBSTONE_SCAN_MAX_LIMIT,
@@ -338,7 +338,12 @@ export function formatDeadlineFinding(finding: DeadlineFinding): string {
   const where = `request ${finding.requestId} (tenant ${finding.tenantId}, status ${a.status})`;
   const deadline = a.extendedAt === null ? a.deadlineAt : `${a.deadlineAt}, extended ${a.extendedAt}`;
   if (a.msPastDeadline === null) {
-    return `${where} is ${a.status} and its record does not state when the data subject was answered; deadline ${deadline}`;
+    // Two standings land here and the data separates them, not their names: a deadline this runtime
+    // cannot read (ADR-0477's `deadline_unstated`) and an answer instant the record does not state.
+    // The first sentence used to be the only one, and it was false of the second case.
+    return Number.isFinite(new Date(a.deadlineAt).getTime())
+      ? `${where} is ${a.status} and its record does not state when the data subject was answered; deadline ${deadline}`
+      : `${where} is ${a.status} and its Article 12(3) deadline is not an instant this runtime can read, so its standing cannot be assessed; deadline ${deadline}`;
   }
   if (facts.breached) {
     return a.answeredAt === null
@@ -389,21 +394,21 @@ export interface ReconcilerOptions {
    * require a `requestId` and a `tenantId` and a row the contract refused supplies neither
    * trustworthily — ADR-0371's `onRefused` shape, for its reason.
    */
-  readonly onUnreadableRequest: UnreadableRowReporter;
+  readonly onUnreadableRequest: UnreadableRequestRowReporter;
   /**
    * What to do with a request whose Article 12(3) standing is a finding.
    *
-   * One reporter for both passes. `auditCompleted` emits it for a late *completion* from a walk that
-   * is already iterating exactly the completed requests — so that fact costs no second page read and
-   * the two pages cannot disagree about which requests were examined — and `auditDeadlines` emits it
-   * for everything else: a request still waiting past its deadline, one approaching it, a refusal
-   * recorded late, and a terminal record that does not state when it answered.
+   * **`auditDeadlines` is its only producer** (ADR-0477): a request still waiting past its deadline,
+   * one approaching it, a completion or a refusal recorded late, and a record whose deadline or
+   * answer instant cannot be read. `auditCompleted` used to emit the late-completion half from its
+   * own walk, and that walk reads the newest 100 completions and runs only under
+   * `--deletion-audit-every-ticks`, which is off by default — so on a default deployment a late
+   * completion was reported by nothing while the hourly deadline pass asked about every other breach
+   * shape. One producer also retires the duplicate that two producers made the moment both ran.
    *
    * Two reporters for one fact family was the alternative and is refused for the reason this whole
    * surface keeps finding: a deployment would wire one and not the other, and the half it wired
-   * would read as coverage. The two passes are disjoint by **status** — `auditCompleted` owns
-   * `completed` and `auditDeadlines` owns the other five — which is a property of the queries rather
-   * than of a filter either applies, so no finding is emitted twice.
+   * would read as coverage.
    *
    * Deliberately not emitted from `DeletionRunner` at the moment of completion as well: that would
    * be a second producer of one fact, and the sweeps cover every request including the one just
@@ -455,8 +460,8 @@ export class DeletionReconciler {
   /**
    * Assesses one request, emits the finding if its standing is one, and hands the same finding back.
    *
-   * The one place the reporting rule lives, so the two passes cannot disagree about which standings
-   * reach a caller: both call this and neither tests a standing by name. `isDeadlineFinding` reads
+   * The one place the reporting rule lives, and since ADR-0477 it has one caller, `auditDeadlines`
+   * — no code path tests a standing by name. `isDeadlineFinding` reads
    * `DEADLINE_STANDING_FACTS`, so a seventh standing is reported or not by what it declares rather
    * than by whichever branch an `if`-chain here ended on.
    *
@@ -495,6 +500,28 @@ export class DeletionReconciler {
    */
   private static readonly NOT_ASKED: RowRead<StoredTombstone> = { records: [], unreadable: [] };
 
+  /**
+   * **The read order here rests on a writer's ordering in another module**, which is the premise
+   * ADR-0407's register entry found recorded nowhere (ADR-0477 records it).
+   *
+   * The request is read first (`stranded`, or the caller's own `read`) and the tombstone second. That
+   * order is sound only because of how the two rows are **written**: `deleteTenantAtomically` writes
+   * the tombstone inside the deletion's own transaction, and `DeletionRunner` writes the request's
+   * `completed` status in a **later**, separate statement after that transaction commits. So at every
+   * instant `status = 'completed'` implies the tombstone is committed, while a committed tombstone may
+   * sit beside a request still `in_progress` — the stranded case itself. Given that, a request seen
+   * `in_progress` whose pipeline commits before the tombstone read is found **with** its tombstone,
+   * which is the true answer; and one that completes before the tombstone read is found with it too,
+   * after which the guarded `UPDATE … WHERE status = 'in_progress'` matches nothing and changes
+   * nothing. Reversed — evidence first, status second — the first window would read *no tombstone*
+   * for a request whose deletion committed, which is `never_committed`'s inference made from a
+   * stale absence.
+   *
+   * So the dependency is on the **writer**, not on anything in this file: were the runner ever to
+   * write `completed` inside the pipeline's transaction, or before the tombstone, this order would
+   * have to be re-argued. `assessWith` ranking a found tombstone above every status test is the half
+   * of the same premise that lives here.
+   */
   private async evidenceFor(request: GdprDeletionRequest): Promise<RowRead<StoredTombstone>> {
     return request.status === "in_progress"
       ? this.opts.tombstones.findForRequest(request.id)
@@ -759,19 +786,13 @@ export class DeletionReconciler {
    * row: this method's answer is *the absence of findings*, so a throw and a clean audit were the
    * same observation — a claim of "every completed deletion still verifies" that nothing had checked.
    *
-   * A request whose Article 12(3) standing is a finding goes to `onDeadlineFinding` and is not an
-   * `EvidenceAudit`, because the two questions are independent and only one of them is about the
-   * proof: a completion can be late and perfectly evidenced. This pass owns `completed` and
-   * `auditDeadlines` owns the other five statuses, which is what keeps one shared reporter from
-   * seeing a request twice — a property of the two queries rather than of a filter either applies.
-   *
-   * **Per snapshot**, which ADR-0408 had to narrow: the status sets really are disjoint, so no
-   * request is in both at one instant, and these are two separate passes on two cadences — so a
-   * request that completes between them reaches `reportDeadline` from each, under a *different*
-   * standing each time (waiting-and-breached, then completed-late). That is two true statements
-   * about two moments rather than a double-report, which is why nothing is de-duplicated across
-   * the passes where `auditDeadlines` now de-duplicates **within** its own two reads: there the two
-   * statements are about one moment and one of them is stale.
+   * It says **nothing** about a request's Article 12(3) standing (ADR-0477). A late completion is
+   * `auditDeadlines`' finding, read by `completedAfterDeadline` over every completed request rather
+   * than over this walk's newest page, and on the pass that runs by default rather than on this
+   * opt-in one. This walk used to emit it too, from inside a page bounded at 100 and newest-first,
+   * so its answer was both narrower than the deadline pass's and a duplicate of it whenever both ran.
+   * The proof question and the deadline question are independent — a completion can be late and
+   * perfectly evidenced — and one producer per question is what keeps them from disagreeing.
    */
   async auditCompleted(limit = 100): Promise<readonly EvidenceAudit[]> {
     const completed = await this.opts.requests.completedWithTombstone(
@@ -781,17 +802,6 @@ export class DeletionReconciler {
     const findings: EvidenceAudit[] = [];
     for (const request of completed) {
       const named = request.tombstoneId;
-      // **First in the loop body**, so no later `continue` can skip it — and the last of them is
-      // taken by every healthy request, which is the ordinary late completion. A deadline standing
-      // is independent of whether the proof stands up: a completion can be late and perfectly
-      // evidenced, and that case is the one the reading exists for.
-      //
-      // Through `reportDeadline`, which is the one emission rule both passes read. This site used
-      // to emit from a `completed`-only predicate (ADR-0372's `isCompletedLate`, deleted by
-      // ADR-0387 once it had become `status === "completed" && answeredAfterDeadline(…) === true`)
-      // while `auditDeadlines` emitted from `isDeadlineFinding` — two rules for one reporter, which
-      // is how two halves of one fact family come to disagree about one row.
-      this.reportDeadline(request);
       if (named === null) continue; // The contract forbids it; the store would have refused the row.
       const stored = await this.opts.tombstones.read(named);
       if (stored === null) {
@@ -827,8 +837,8 @@ export class DeletionReconciler {
   }
 
   /**
-   * The Article 12(3) pass: every request the data subject is still waiting on, and every refusal
-   * recorded late.
+   * The Article 12(3) pass: every request the data subject is still waiting on, and every
+   * completion or refusal recorded late (three reads since ADR-0477, which added the completions).
    *
    * **This is the direction nothing had.** The three existing ones all start from a request the
    * platform has already acted on — `reconcileStranded` walks `in_progress`, `auditCompleted` walks
@@ -842,11 +852,11 @@ export class DeletionReconciler {
    * approaching one is verifying or running the request, which is the runner's and an operator's,
    * and nothing cures a breach at all. ADR-0323's rule, one subject over.
    *
-   * Two reads because the two predicates are different in kind — the waiting set is compared against
-   * the **clock** and the late refusals against a second **stored** column — and each page is
-   * ordered for what it is: nearest deadline first, so a cut page drops the requests furthest from
-   * their deadline before it drops a breach, and newest refusal first. `complete` says whether
-   * either page was cut (ADR-0367's `declares` arm: a bounded reading that says how far it looked is
+   * Three reads because the predicates are different in kind — the waiting set is compared against
+   * the **clock** and the late answers against a second **stored** column, one per answer column —
+   * and each page is ordered for what it is: nearest deadline first, so a cut page drops the
+   * requests furthest from their deadline before it drops a breach, and newest answer first.
+   * `complete` says whether any page was cut (ADR-0367's `declares` arm: a bounded reading that says how far it looked is
    * honest where silence is not).
    *
    * `examined` is what this pass **assessed**, never what it hoped to: a row the contract refused was
@@ -873,17 +883,28 @@ export class DeletionReconciler {
   async auditDeadlines(limit = DEFAULT_DEADLINE_AUDIT_LIMIT): Promise<DeadlineAuditPage> {
     const bounded = Math.max(1, Math.min(500, Math.trunc(limit)));
     const waiting = await this.opts.requests.unanswered(bounded);
+    // Both answered reads **after** the waiting one, for the de-duplication's reason: both terminal
+    // statuses are absorbing, so a request that left the waiting set between the reads is seen again
+    // by the later read under the status it ended at, which is the one the Map below keeps.
+    const lateCompletions = await this.opts.requests.completedAfterDeadline(bounded);
     const lateRefusals = await this.opts.requests.rejectedAfterDeadline(bounded);
-    // Forwarded here rather than inside the two reads, which is what following `scanAll`'s shape
-    // buys: one place decides what a refused row does, and the count below cannot be derived from a
+    // Forwarded here rather than inside the reads, which is what following `scanAll`'s shape buys:
+    // one place decides what a refused row does, and the count below cannot be derived from a
     // different set than the one the reporter saw.
-    const unreadable = [...waiting.unreadable, ...lateRefusals.unreadable];
+    const unreadable = [
+      ...waiting.unreadable,
+      ...lateCompletions.unreadable,
+      ...lateRefusals.unreadable,
+    ];
     for (const row of unreadable) this.opts.onUnreadableRequest(row);
-    // The refusals **last**, so a request that moved between the two reads is assessed under the
+    // The answered reads **last**, so a request that moved between the reads is assessed under the
     // status it ended at. `Map` and not a `Set` of ids, because what has to survive is the record
-    // the later read returned and not merely the knowledge that it was seen twice.
+    // the later read returned and not merely the knowledge that it was seen twice. The two answered
+    // reads are disjoint by status within themselves and both absorbing, so their order between them
+    // cannot matter: a request is never `completed` and `rejected`.
     const assessable = new Map<string, GdprDeletionRequest>();
     for (const request of waiting.records) assessable.set(request.id, request);
+    for (const request of lateCompletions.records) assessable.set(request.id, request);
     for (const request of lateRefusals.records) assessable.set(request.id, request);
     const findings: DeadlineFinding[] = [];
     for (const request of assessable.values()) {
@@ -898,7 +919,10 @@ export class DeletionReconciler {
       // record count is short of the limit and this claimed the table had ended — measured at 3 of
       // 6 rows read with `complete: true`, which also dropped the page-cut clause from the
       // operator's line. `TombstoneScanPage`'s rule, which this pass had not followed.
-      complete: waiting.rowsRead < bounded && lateRefusals.rowsRead < bounded,
+      complete:
+        waiting.rowsRead < bounded &&
+        lateCompletions.rowsRead < bounded &&
+        lateRefusals.rowsRead < bounded,
       findings,
       warningDays: this.warningDays(),
     };

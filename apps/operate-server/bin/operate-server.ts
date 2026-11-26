@@ -20,13 +20,9 @@ import {
   setCredentialCliHelpText,
 } from "../src/cli.js";
 import { formatMultiTenantReport } from "../src/link-sweep.js";
-import { formatChainVerification } from "../src/chain-verify.js";
-import {
-  anchorAuditHasFindings,
-  formatAnchorAudit,
-  formatChainTruncation,
-  verificationExaminedNothing,
-} from "../src/anchor-audit.js";
+import { formatChainVerification, verifyChainVerdict } from "../src/chain-verify.js";
+import { formatAnchorAudit, formatChainTruncation } from "../src/anchor-audit.js";
+import { formatWitnessMemory } from "../src/witness-memory.js";
 import {
   runColumnSchema,
   runDocumentIndexes,
@@ -173,62 +169,27 @@ async function runVerify(argv: readonly string[]): Promise<number> {
     return 0;
   }
   const report = await runVerifyChain(options);
-  // The headline is this command's verdict, so it is composed here rather than taken from
-  // `formatChainVerification`, which can only speak for the fold. A fold over zero entries is
-  // vacuously valid on both halves, so that function printed `OK` for a scope whose history was
-  // destroyed — with `signatures: valid (0 checked)` one line below it, which is the honest half
-  // contradicting the headline.
-  const examinedNothing = verificationExaminedNothing(
-    report.chain.signatures.checked,
-    report.truncation,
-  );
-  const verdict = report.truncation.truncated
-    ? "TRUNCATED"
-    : examinedNothing
-      ? "NO HISTORY — nothing was examined"
-      : null;
+  // The headline and the exit code are one decision, `verifyChainVerdict`, composed over all four
+  // reports — the fold, the anchor table, the truncation check and (ADR-0481) the deployment's own
+  // newest baseline verdict. Before the fourth, a scope whose chain *and* checkpoints were both
+  // destroyed was byte-identical to a new one here and exited 0 as `NO HISTORY`, while the hourly
+  // pass — which has read the prior verdict since ADR-0399 — answered `compromised`. `NO HISTORY`
+  // keeps exit 0 only where the chain is empty and this deployment stored no verdict row of any kind
+  // for the scope (the census, because the baseline read is filtered on columns a tenant can write);
+  // see that function for the conjunction and why each arm is in it.
+  const { headline, exitCode } = verifyChainVerdict(report);
   process.stdout.write(
     options.format === "json"
       ? `${JSON.stringify(report, null, 2)}\n`
       : `${report.trust}\n${formatChainVerification(report.chain)}\n${[
-          ...formatAnchorAudit(report.anchors),
-          ...formatChainTruncation(report.truncation),
-        ]
-          .map((l) => `  ${l}`)
-          .join("\n")}\n${verdict === null ? "" : `  verdict: ${verdict}\n`}`,
+          ...[...formatAnchorAudit(report.anchors), ...formatChainTruncation(report.truncation)].map(
+            (l) => `  ${l}`,
+          ),
+          // Already indented, and silent on `consistent` — the integrity proof prints the same lines.
+          ...formatWitnessMemory(report.witnessMemory),
+        ].join("\n")}\n${headline === null ? "" : `  verdict: ${headline}\n`}`,
   );
-  // `chain.ok` is not the whole verdict, and ADR-0374's own Option B rejection says why: a full fold
-  // over a sound chain answers `ok: true`, so a pass whose stored **anchor** is a finding reads as a
-  // healthy verification. That increment closed it for the hourly `proveScopeIntegrity` and patched
-  // it here by reading `fullBecause` through `anchoringWouldBury` — which is a statement about the
-  // **newest** anchor alone, so a refused or relocated row anywhere else still exited 0 printing
-  // "OK", and `verify-chain` without `--from-checkpoint` could not see one at all, because
-  // `verifyChainFull` never read that table. The weaker command caught it and the stronger did not.
-  //
-  // `anchorAuditHasFindings` is the predicate, and it is the **wider** of the audit's two: this
-  // command is a by-hand auditor whose help text frames the exit code as the verdict, so a scan the
-  // ceiling stopped must not exit 0 either — it did not read the whole table, and reporting a
-  // verdict over a set it did not read is the claim ADR-0372 is about. `proveScopeIntegrity` grades
-  // the same condition `unproven` rather than `compromised`, for the same reason and with a third
-  // answer available to it that an exit code does not have.
-  // The truncation check joins the conjunction, and it is the one of the three that this command
-  // did not compute at all. A fold cannot see truncation and the anchor audit deliberately does not
-  // call a witness the chain fails to reach a *disagreement* (that is this check's subject), so the
-  // condition separating "nothing happened" from "the history was destroyed" fell between them:
-  // measured live, a scope with a checkpoint at sequence 7 and zero entries printed `witness 7`
-  // beside `signatures: valid (0 checked)` and exited 0 saying OK.
-  //
-  // `examinedNothing` deliberately does **not** join it. A scope with no witness and no entries is a
-  // question nobody can answer from these two tables — a new tenant and a tenant whose chain *and*
-  // checkpoints were deleted are byte-identical here — so it is named in the output and exits 0,
-  // because failing it would fail every scope before its first audited request and the repo's exit
-  // vocabulary has no third value (2 is a usage error). ADR-0375's open end 2 is what would close
-  // it, and it needs the chain's memory of a prior witness.
-  return report.chain.ok &&
-    !anchorAuditHasFindings(report.anchors) &&
-    !report.truncation.truncated
-    ? 0
-    : 1;
+  return exitCode;
 }
 
 async function runReplayCommand(argv: readonly string[]): Promise<number> {

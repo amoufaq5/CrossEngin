@@ -7,6 +7,7 @@ import {
   DELETION_APPLICATION_NAME,
   DELETION_PGPASSWORD_VAR,
   DELETION_PGUSER_VAR,
+  buildDeletionPreflight,
   formatDeletionConnectionLine,
   probeDeletionConnection,
   resolveDeletionOwnerConfig,
@@ -524,5 +525,80 @@ describe("the schema eraser's refusal vocabulary", () => {
     // tenant-lifecycle-pg cannot import operate-runtime-pg, so the mirror is checked here, where both
     // are in reach: a reason added there and not here would classify `final` by default.
     expect([...SCHEMA_ERASER_REFUSAL_REASONS].sort()).toEqual([...ERASURE_REFUSAL_REASONS].sort());
+  });
+});
+
+describe("buildDeletionPreflight (ADR-0477)", () => {
+  const TENANT = "01234567-89ab-cdef-0123-456789abcdef";
+  const SCHEMA = "t_0123456789abcdef0123456789abcdef";
+
+  /** A transaction fake for the preflight's four questions: the lock, the schema, and the trial. */
+  function preflightTx(opts: {
+    readonly schema?: { readonly droppable: boolean } | null;
+    readonly externalBefore?: number;
+    readonly externalAfter?: number;
+  }): { readonly tx: PgConnection; readonly sql: string[] } {
+    const sql: string[] = [];
+    let externalReads = 0;
+    const tx = {
+      query: async (text: string) => {
+        sql.push(text.trim());
+        if (text.includes("pg_advisory_xact_lock")) return { rows: [], rowCount: 1 };
+        if (text.includes("pg_has_role")) {
+          const s = opts.schema ?? null;
+          return { rows: s === null ? [] : [{ droppable: s.droppable }], rowCount: s === null ? 0 : 1 };
+        }
+        if (text.includes("n.nspname || '.' || c.relname")) {
+          externalReads += 1;
+          const n = externalReads === 1 ? (opts.externalBefore ?? 0) : (opts.externalAfter ?? opts.externalBefore ?? 0);
+          return {
+            rows: Array.from({ length: n }, (_v, i) => ({ oid: String(1000 + i), nspname: "public", ident: `public.v${i}`, relkind: "v" })),
+            rowCount: n,
+          };
+        }
+        if (/^(SAVEPOINT|ROLLBACK TO|RELEASE|DROP SCHEMA)/.test(text.trim())) return { rows: [], rowCount: 0 };
+        throw new Error(`unexpected statement: ${text}`);
+      },
+    } as unknown as PgConnection;
+    return { tx, sql };
+  }
+
+  it("answers nothing for a tenant with no schema, after taking the eraser's lock", async () => {
+    const t = preflightTx({ schema: null });
+    expect(await buildDeletionPreflight()(t.tx, TENANT)).toEqual([]);
+    expect(t.sql[0]).toContain("pg_advisory_xact_lock");
+    expect(t.sql.some((q) => q.startsWith("DROP SCHEMA"))).toBe(false);
+  });
+
+  it("refuses a schema the deletion role cannot drop, without trial-dropping it", async () => {
+    const t = preflightTx({ schema: { droppable: false } });
+    const refusals = await buildDeletionPreflight()(t.tx, TENANT);
+    expect(refusals.map((r) => r.reason)).toEqual(["schema_not_droppable"]);
+    expect(t.sql.some((q) => q.startsWith("DROP SCHEMA"))).toBe(false);
+    expect(refusals[0]?.detail).not.toContain(SCHEMA);
+  });
+
+  it("refuses external dependents by count, naming none of them", async () => {
+    const t = preflightTx({ schema: { droppable: true }, externalBefore: 2, externalAfter: 0 });
+    const refusals = await buildDeletionPreflight()(t.tx, TENANT);
+    expect(refusals.map((r) => r.reason)).toEqual(["external_dependents"]);
+    expect(refusals[0]?.detail).toContain("2 object(s)");
+    expect(refusals[0]?.detail).not.toContain("public.v0");
+    // The trial cascade was rolled back by the probe itself.
+    expect(t.sql.some((q) => q.startsWith("ROLLBACK TO"))).toBe(true);
+  });
+
+  it("passes a droppable schema with no collateral", async () => {
+    const t = preflightTx({ schema: { droppable: true }, externalBefore: 3, externalAfter: 3 });
+    expect(await buildDeletionPreflight()(t.tx, TENANT)).toEqual([]);
+  });
+
+  it("refuses a prefix the derivation rejects as schema_name_refused, before any statement", async () => {
+    // The eraser derives the same name after the shared erasure has deleted and would throw there —
+    // an unknown failure that strands the request. Asked here it is configuration, and released.
+    const t = preflightTx({ schema: { droppable: true } });
+    const refusals = await buildDeletionPreflight("T-")(t.tx, TENANT);
+    expect(refusals.map((r) => r.reason)).toEqual(["schema_name_refused"]);
+    expect(t.sql).toEqual([]);
   });
 });

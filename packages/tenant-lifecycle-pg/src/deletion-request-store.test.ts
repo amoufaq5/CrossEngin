@@ -1071,6 +1071,47 @@ describe("rejectedAfterDeadline", () => {
   });
 });
 
+describe("completedAfterDeadline", () => {
+  const completedLate = rowOf({
+    status: "completed",
+    in_progress_at: "2026-10-03T00:00:00.000Z",
+    completed_at: "2026-10-30T00:00:00.000Z",
+    completion_sha256: "a".repeat(64),
+    tombstone_id: "tomb_aaaabbbbccccdddd",
+  });
+
+  it("compares the completion instant with the deadline, both stored (ADR-0477)", async () => {
+    const { conn, calls } = fakePg([completedLate]);
+    const page = await new PostgresDeletionRequestStore(conn).completedAfterDeadline();
+    const select = calls.find((c) => c.sql.includes("completed_at >"));
+    expect(select?.sql).toContain("status = 'completed'");
+    expect(select?.sql).toContain("completed_at > deadline_at");
+    expect(select?.sql).toContain("ORDER BY completed_at DESC, request_id");
+    expect(select?.params).toEqual([100]);
+    expect(calls.some((c) => c.sql.includes("app.platform_audit"))).toBe(true);
+    expect(page.records.map((r) => r.completedAt)).toEqual(["2026-10-30T00:00:00.000Z"]);
+  });
+
+  it("clamps the limit to the store's cap", async () => {
+    const { conn, calls } = fakePg([]);
+    await new PostgresDeletionRequestStore(conn).completedAfterDeadline(9_999);
+    expect(calls.find((c) => c.sql.includes("completed_at >"))?.params).toEqual([500]);
+  });
+
+  it("returns a refused row beside the rest of a full page and counts it as read", async () => {
+    // The composed case: one unreadable row on a page that fills its limit. `rowsRead` is what the
+    // sweep derives `complete` from, so a page of 2 rows with 1 represented still reads as full.
+    const { conn } = fakePg([
+      { ...completedLate, request_id: "dreq_unreadable01", completion_sha256: null },
+      completedLate,
+    ]);
+    const page = await new PostgresDeletionRequestStore(conn).completedAfterDeadline(2);
+    expect(page.records).toHaveLength(1);
+    expect(page.unreadable.map((r) => r.requestId)).toEqual(["dreq_unreadable01"]);
+    expect(page.rowsRead).toBe(2);
+  });
+});
+
 describe("extendDeadline", () => {
   const EXTENSION = {
     deadlineAt: "2026-11-20T00:00:00.000Z",

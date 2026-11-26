@@ -80,7 +80,8 @@ export interface LatencySloEngineOptions {
   readonly killSwitchReleaser?: KillSwitchReleaser;
   readonly killSwitchTtlMs?: number;
   readonly regrader?: IncidentRegrader;
-  readonly onDeclarationError?: DeclarationErrorSink;
+  /** Required for the availability engine's reason (ADR-0483): an optional reporter is a silent one. */
+  readonly onDeclarationError: DeclarationErrorSink;
 }
 
 interface ActiveBreach {
@@ -148,7 +149,7 @@ export class LatencySloEngine {
   private readonly killSwitchReleaser: KillSwitchReleaser | undefined;
   private readonly killSwitchTtlMs: number;
   private readonly regrader: IncidentRegrader | undefined;
-  private readonly onDeclarationError: DeclarationErrorSink | undefined;
+  private readonly onDeclarationError: DeclarationErrorSink;
   private readonly active: Map<string, ActiveBreach> = new Map();
   /**
    * Surfaces with a declaration in flight. A breach is only recorded as active once its id comes
@@ -179,6 +180,11 @@ export class LatencySloEngine {
 
   recordOutcome(outcome: RequestOutcome): void {
     this.window.record(outcome);
+  }
+
+  /** The grades this engine can declare at, read off the thresholds it runs on — see the availability engine's. */
+  get declaredSeverities(): readonly Severity[] {
+    return [...new Set(this.thresholds.map((t) => t.severity))];
   }
 
   activeBreaches(): readonly { surface: string; breach: ActiveBreach }[] {

@@ -16,6 +16,8 @@ import {
 } from "./settings.js";
 import {
   ensureStarterChart,
+  formatStarterChartActorCapability,
+  starterChartActorCapability,
   STARTER_ACCOUNT_TYPES,
   STARTER_ACCOUNTS_BY_SETTING,
   STARTER_ACCOUNTS_WITHOUT_SETTING,
@@ -857,5 +859,38 @@ describe("ensureStarterChart", () => {
       expect(second.remittancePosting).toBe("skipped_returns_outstanding");
       expect((await withReturn.get(OTHER)).finance?.taxRemittancePosting).toBeUndefined();
     });
+  });
+});
+
+describe("starterChartActorCapability (ADR-0480)", () => {
+  const core = buildErpCorePack();
+
+  it("answers can_create for erp_admin on erp-core, said at info", () => {
+    const cap = starterChartActorCapability(core, ["erp_admin"]);
+    expect(cap).toEqual({ kind: "can_create", roles: ["erp_admin"] });
+    const out = formatStarterChartActorCapability(cap);
+    expect(out.level).toBe("info");
+    expect(out.line).toContain("may create LedgerAccount");
+  });
+
+  it("warns for erp_viewer, naming the flag that fixes it", () => {
+    const cap = starterChartActorCapability(core, ["erp_viewer"]);
+    expect(cap.kind).toBe("cannot_create");
+    const out = formatStarterChartActorCapability(cap);
+    expect(out.level).toBe("warn");
+    expect(out.line).toContain("erp_viewer");
+    expect(out.line).toContain("--job-actor-role");
+  });
+
+  it("reads a secondary role, as the system writer does", () => {
+    expect(starterChartActorCapability(core, ["erp_viewer", "erp_admin"]).kind).toBe("can_create");
+  });
+
+  it("warns when no role is configured, and is not_served without a LedgerAccount", () => {
+    expect(starterChartActorCapability(core, []).kind).toBe("cannot_create");
+    const bare = { ...core, entities: (core.entities ?? []).filter((e) => e.name !== "LedgerAccount") };
+    const cap = starterChartActorCapability(bare, ["erp_admin"]);
+    expect(cap).toEqual({ kind: "not_served" });
+    expect(formatStarterChartActorCapability(cap).level).toBe("info");
   });
 });

@@ -7,7 +7,7 @@ import { Topbar } from "@/components/Topbar";
 import { boundedReadNotice } from "@/lib/bounded-read";
 import { fetchWhtReconciliation } from "@/lib/api";
 import { formatCell } from "@/lib/format";
-import { requestFailureSentence } from "@/lib/request-failure";
+import { classifyRequestFailure, requestFailureSentence } from "@/lib/request-failure";
 import { slugForEntityName, useSchema } from "@/lib/schema";
 import type { WhtCurrencySubtotal, WhtReconciliation, WhtStatus } from "@/lib/wht";
 
@@ -41,8 +41,8 @@ export default function WhtReportPage() {
       })
       .catch((e: unknown) => {
         if (!alive) return;
-        const msg = e instanceof Error ? e.message : String(e);
-        if (msg.startsWith("403")) setForbidden(true);
+        // The role panel only for a role refusal: a tenant-status-gate 403 is not one (ADR-0478).
+        if (classifyRequestFailure(e).kind === "role_refused") setForbidden(true);
         else setError(requestFailureSentence(e));
         setLoading(false);
       });

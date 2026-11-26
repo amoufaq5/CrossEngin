@@ -201,22 +201,19 @@ only by a pack declaring `phi`/`regulated` fields on `--store pg-columns`.)
 > `verify-full` is the only mode this binding validates a certificate under, and
 > the API says which it got on every boot (`[pg] database channel: …`).
 >
-> **But it may not be reachable here, and that is this binding's limitation
-> rather than yours.** `PgConfig` carries no `ca` field and nothing reads
-> `PGSSLROOTCERT`, so `verify-full` validates against Node's own trust store and
-> nothing else — while [Supabase's documented path for
+> **Give it the project's root certificate.** [Supabase's documented path for
 > `verify-full`](https://supabase.com/docs/guides/database/psql) is to download
 > the project's **server root certificate** from the dashboard and pass it as
-> `sslrootcert`, which this binding cannot accept. So set `verify-full` and look
-> at the first boot: if the connection is refused for an untrusted certificate,
-> your options today are `require` — encrypted and unauthenticated, and now you
-> know it — or terminating TLS at something that can be given the CA. Adding CA
-> support is a named open end (ADR-0357), and this is the deployment it is for.
->
-> `verify-ca` is **refused** rather than served, for the same reason: with no CA
-> material it would validate nothing while naming the mode whose whole purpose
-> is to validate. It also would not be equivalent to `verify-full` if it were
-> implemented — it checks the chain and deliberately not the hostname.
+> `sslrootcert`. This binding reads libpq's `PGSSLROOTCERT` for exactly that
+> (ADR-0444): point it at the downloaded file inside the API container and node
+> then trusts **only** that root; leave it unset and `verify-full` validates
+> against node's bundled CA store, which a private root such as Supabase's is
+> not in, so the first boot refuses the connection for an untrusted certificate.
+> `verify-full` also checks that the certificate names `PGHOST`. `verify-ca`
+> checks the chain and **not** the hostname, so it needs `PGSSLROOTCERT` too and
+> is the weaker of the two; `require` ignores `PGSSLROOTCERT` altogether (libpq
+> would verify the chain there; this binding does not, and the boot line says
+> so).
 
 - **Railway:** New Project → Deploy from repo → set the Dockerfile path to
   `deploy/Dockerfile`, the start command above, and the env vars. Railway gives
@@ -348,6 +345,39 @@ Nothing about the AI needs to be deployed to Supabase or Vercel. If you later
 want an in-product AI endpoint, that's a new serving feature, not part of this
 deployment.
 
+## Backups
+
+On this path the database is Supabase's, so the backups are too: Supabase takes the
+project's backups and offers point-in-time recovery **according to your plan** — read
+*Database → Backups* in the dashboard for what your plan keeps and for how long, and
+whether point-in-time recovery is enabled, before you rely on either. **The compose
+stack's `backup` service is not on this path**: it runs beside a database in the same
+compose project ([README → Backups](./README.md#backups)), and nothing here starts it.
+
+The dump below is a second, portable copy and the way to **test a restore**, which a
+dashboard toggle does not do for you. Use the **direct** connection (not the pooler,
+which is transaction-scoped) and connect as the owner role, because `pg_dump` turns row
+security off and, as a role the RLS policies confine, **fails** on the first tenant table with
+`query would be affected by row-level security policy` rather than dumping it (`PROJECT_REF` is
+the id in your project's URL):
+
+```sh
+pg_dump --format=custom --no-owner -h db.PROJECT_REF.supabase.co -p 5432 -U postgres -d postgres \
+  > "$HOME/crossengin-$(date +%F-%H%M).dump"     # prompts for the password; not on argv
+pg_restore --list "$HOME/crossengin-<timestamp>.dump" | head   # the archive is readable
+```
+
+`pg_restore --list` proves the archive is readable and not that it restores. To prove the
+restore, create a scratch project (or a branch, if your plan has branching), run
+`deploy/supabase/00-uuidv7.sql` there first as in §1.2, `pg_restore --no-owner -d <scratch
+connection string>` into it, and compare the table count in `meta` with the source
+(`select count(*) from information_schema.tables where table_schema = 'meta'`) and a row count
+(`select count(*) from meta.operate_entity_records`). The dump holds the whole `postgres`
+database, so the restore also reports `already exists` errors for the objects every Supabase
+project creates for itself and for the function you just installed; those are expected, which is
+why the test is the two counts and not `pg_restore`'s exit status. Then delete the scratch
+project. A restore you have not run is a hope.
+
 ---
 
 ## Troubleshooting
@@ -357,12 +387,11 @@ deployment.
 - **API 500s with a connection error** → check `PGSSLMODE` and that you're using
   the **pooler** host/user for the long-lived API (§2), not the direct
   connection. If the error names a self-signed or untrusted certificate, that is
-  `verify-full` working: this binding accepts no CA material, so see §2's note.
-- **API refuses to start, naming `PGSSLMODE=verify-ca`** → that mode is refused
-  rather than served: no CA material is read anywhere in this binding, so it
-  would validate nothing under the name of the mode whose purpose is to
-  validate. Use `verify-full`, or `require` to say plainly that the channel is
-  encrypted and unauthenticated.
+  `verify-full` working against a root it was not given; see the next entry.
+- **API 500s naming an untrusted or self-signed certificate under `verify-full`
+  or `verify-ca`** → `PGSSLROOTCERT` is unset or names the wrong file. Point it
+  at the project's server root certificate (§2's note); both modes validate the
+  chain against that root and nothing else once it is set.
 - **UI shows `upstream_unreachable`** → `OPERATE_API_URL` is wrong or the API
   isn't public. It must be the API's external HTTPS URL, reachable from Vercel.
 - **UI 401 / empty lists** → you are not signed in, or your session expired.

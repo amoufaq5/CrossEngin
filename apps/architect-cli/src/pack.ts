@@ -10,10 +10,18 @@ import {
 } from "@crossengin/crypto";
 import {
   PackManifestSchema,
+  PackPublisherRegistry,
+  PackPublisherRegistryError,
   PackReleaseClaimSchema,
+  PackSignatureSchema,
+  parsePackPublisherSpec,
   signPackRelease,
+  verifyPackPublisher,
+  verifyStoredRelease,
   type PackManifest,
+  type PackPublisher,
   type PackSignature,
+  type PublisherRefusal,
 } from "@crossengin/marketplace";
 import { z } from "zod";
 
@@ -36,9 +44,15 @@ export const PACK_SIGNING_KEY_VAR = "PACK_SIGNING_KEY";
  * with whatever the environment holds (or refuses an absent variable the operator believes they
  * supplied). An allow-list closes every spelling where a deny-list closes only the ones it names.
  */
-export const PACK_ACTION_FLAGS: Readonly<Record<"keygen" | "sign", readonly string[]>> = Object.freeze({
+export const PACK_ACTIONS = ["keygen", "sign", "verify"] as const;
+export type PackAction = (typeof PACK_ACTIONS)[number];
+
+export const PACK_ACTION_FLAGS: Readonly<Record<PackAction, readonly string[]>> = Object.freeze({
   keygen: ["format"],
   sign: ["version", "bundle", "bundle-sha256", "signed-at", "format"],
+  // `--publisher-key` names a *public* key (the operator's `--pack-publisher-key` spec), so it is on
+  // the allow-list, which is checked before the key-material refusal.
+  verify: ["release", "publisher-key", "bundle", "format"],
 });
 
 /** A flag whose name says it carries key material, which gets the argv-exposure refusal by name. */
@@ -50,7 +64,7 @@ function namesKeyMaterial(flag: string): boolean {
  * The first flag `action` does not take, as a refusal message that never echoes the flag's value,
  * or `null` when every flag is one the action reads.
  */
-export function packFlagRefusal(action: "keygen" | "sign", flags: ReadonlyMap<string, string | true>): string | null {
+export function packFlagRefusal(action: PackAction, flags: ReadonlyMap<string, string | true>): string | null {
   const allowed = PACK_ACTION_FLAGS[action];
   for (const flag of flags.keys()) {
     if (allowed.includes(flag)) continue;
@@ -149,8 +163,10 @@ export async function runPack(command: ParsedCommand, ctx: RunContext): Promise<
       return runPackKeygen(command, ctx);
     case "sign":
       return runPackSign(command, ctx);
+    case "verify":
+      return runPackVerify(command, ctx);
     default:
-      printError(ctx.io, "pack: expected an action. usage: crossengin pack <keygen|sign>");
+      printError(ctx.io, "pack: expected an action. usage: crossengin pack <keygen|sign|verify>");
       return 2;
   }
 }
@@ -208,25 +224,25 @@ async function bundleFacts(
   return { bundleSha256: sha256(new Uint8Array(bytes)), bundleSizeBytes: bytes.length };
 }
 
-async function readPackManifest(path: string, ctx: RunContext): Promise<PackManifest | null> {
+async function readPackManifest(path: string, ctx: RunContext, action: PackAction = "sign"): Promise<PackManifest | null> {
   let raw: string;
   try {
     raw = await readFile(path, "utf8");
   } catch (err) {
-    printError(ctx.io, `pack sign: cannot read manifest ${path}: ${err instanceof Error ? err.message : String(err)}`);
+    printError(ctx.io, `pack ${action}: cannot read manifest ${path}: ${err instanceof Error ? err.message : String(err)}`);
     return null;
   }
   let json: unknown;
   try {
     json = JSON.parse(raw) as unknown;
   } catch {
-    printError(ctx.io, `pack sign: manifest ${path} is not valid JSON`);
+    printError(ctx.io, `pack ${action}: manifest ${path} is not valid JSON`);
     return null;
   }
   const parsed = PackManifestSchema.safeParse(json);
   if (!parsed.success) {
     const issues = parsed.error.issues.map((i) => `${i.path.join(".") || "<root>"}: ${i.message}`).join("; ");
-    printError(ctx.io, `pack sign: manifest ${path} is not a pack manifest: ${issues}`);
+    printError(ctx.io, `pack ${action}: manifest ${path} is not a pack manifest: ${issues}`);
     return null;
   }
   return parsed.data;
@@ -303,4 +319,137 @@ async function runPackSign(command: ParsedCommand, ctx: RunContext): Promise<num
     );
   }
   return 0;
+}
+
+/**
+ * The submission `pack sign` prints, as a verifier reads it back: the four facts a version row
+ * asserts and the signature they were submitted with. Read from either the whole sign output
+ * (`{submission, publisher}`) or the bare submission (a `POST /v1/authoring/packs` body), so a file a
+ * publisher is about to send can be checked as it is.
+ */
+const ReleaseSubmissionSchema = z.object({
+  packId: z.string().min(1),
+  version: PackReleaseClaimSchema.shape.version,
+  manifestSha256: z.string().regex(SHA256_HEX),
+  bundleSha256: z.string().regex(SHA256_HEX),
+  signature: PackSignatureSchema,
+});
+const ReleaseFileSchema = z.union([z.object({ submission: ReleaseSubmissionSchema }), ReleaseSubmissionSchema]);
+
+/** Refusals `pack verify` adds to the server's own, for inputs it could not read as a release. */
+export const PACK_VERIFY_INPUT_REFUSALS = ["manifest_unreadable", "release_unreadable", "bundle_unreadable"] as const;
+export type PackVerifyRefusal = PublisherRefusal | (typeof PACK_VERIFY_INPUT_REFUSALS)[number];
+
+export type PackVerifyResult =
+  | {
+      readonly ok: true;
+      readonly packId: string;
+      readonly version: string;
+      readonly publisher: { readonly namespace: string; readonly fingerprint: string };
+      /** Whether the bundle bytes were hashed, or only the digest the submission states was compared. */
+      readonly bundleChecked: boolean;
+    }
+  | { readonly ok: false; readonly refusal: PackVerifyRefusal; readonly detail: string };
+
+const VERIFY_USAGE =
+  "usage: crossengin pack verify <manifest.json> --release <sign-output.json> --publisher-key <namespace>:<authorKind>:<publicKeyBase64> [--bundle <file>]";
+
+/**
+ * `crossengin pack verify` — the platform's own check, run before submitting: the same
+ * `verifyPackPublisher` the authoring route calls, over the manifest and the release file, and then
+ * `verifyStoredRelease` over the submission's own stated facts, so a release file whose `packId` or
+ * `manifestSha256` was edited is refused as the version row it would become is (ADR-0459). Exit 0
+ * when both accept, 1 naming the first refusal, 2 for a command that could not be read.
+ */
+async function runPackVerify(command: ParsedCommand, ctx: RunContext): Promise<number> {
+  const refused = packFlagRefusal("verify", command.flags);
+  if (refused !== null) {
+    printError(ctx.io, refused);
+    return 2;
+  }
+  if (command.repeatedFlags.size > 0) {
+    printError(ctx.io, `pack verify: --${[...command.repeatedFlags].sort()[0]!} is given more than once`);
+    return 2;
+  }
+  const manifestPath = command.positional[1];
+  const releasePath = getStringFlag(command, "release");
+  const publisherSpec = getStringFlag(command, "publisher-key");
+  if (manifestPath === undefined || releasePath === null || publisherSpec === null || command.positional.length > 2) {
+    printError(ctx.io, `pack verify: ${VERIFY_USAGE}`);
+    return 2;
+  }
+  let publisher: PackPublisher;
+  try {
+    publisher = parsePackPublisherSpec(publisherSpec);
+  } catch (err) {
+    if (!(err instanceof PackPublisherRegistryError)) throw err;
+    printError(ctx.io, `pack verify: --publisher-key: ${err.message}`);
+    return 2;
+  }
+  const result = await verifyRelease(command, ctx, manifestPath, releasePath, publisher);
+  if (command.format === "json") {
+    printJson(ctx.io, result);
+  } else if (result.ok) {
+    ctx.io.stdout.write(
+      `verified ${result.packId}@${result.version}: signed by ${result.publisher.fingerprint} ` +
+        `under namespace '${result.publisher.namespace}'` +
+        (result.bundleChecked ? ", bundle bytes match\n" : "; bundle bytes not checked (pass --bundle)\n"),
+    );
+  } else {
+    printError(ctx.io, `pack verify: refused ${result.refusal}: ${result.detail}`);
+  }
+  return result.ok ? 0 : 1;
+}
+
+async function verifyRelease(
+  command: ParsedCommand,
+  ctx: RunContext,
+  manifestPath: string,
+  releasePath: string,
+  publisher: PackPublisher,
+): Promise<PackVerifyResult> {
+  const manifest = await readPackManifest(manifestPath, ctx, "verify");
+  if (manifest === null) {
+    return { ok: false, refusal: "manifest_unreadable", detail: `${manifestPath} could not be read as a pack manifest` };
+  }
+  let submission: z.infer<typeof ReleaseSubmissionSchema>;
+  try {
+    const parsed = ReleaseFileSchema.safeParse(JSON.parse(await readFile(releasePath, "utf8")) as unknown);
+    if (!parsed.success) {
+      return { ok: false, refusal: "release_unreadable", detail: `${releasePath} is not a pack sign output or submission` };
+    }
+    submission = "submission" in parsed.data ? parsed.data.submission : parsed.data;
+  } catch {
+    return { ok: false, refusal: "release_unreadable", detail: `${releasePath} could not be read as JSON` };
+  }
+  const bundlePath = getStringFlag(command, "bundle");
+  let bundleSha256 = submission.bundleSha256;
+  if (bundlePath !== null) {
+    let bytes: Buffer;
+    try {
+      bytes = await readFile(bundlePath);
+    } catch {
+      return { ok: false, refusal: "bundle_unreadable", detail: `${bundlePath} could not be read` };
+    }
+    bundleSha256 = sha256(new Uint8Array(bytes));
+  }
+  const registry = new PackPublisherRegistry([publisher]);
+  // The manifest-holding check first, because only it can say `author_kind_not_registered`; then the
+  // submission's own columns, which the first check does not read.
+  const byManifest = verifyPackPublisher({
+    manifest,
+    signature: submission.signature,
+    registry,
+    submitted: { version: submission.version, bundleSha256 },
+  });
+  if (!byManifest.ok) return byManifest;
+  const byRow = verifyStoredRelease({ stored: submission, registry });
+  if (!byRow.ok) return byRow;
+  return {
+    ok: true,
+    packId: submission.packId,
+    version: submission.version,
+    publisher: { namespace: byManifest.publisher.namespace, fingerprint: byManifest.publisher.fingerprint },
+    bundleChecked: bundlePath !== null,
+  };
 }

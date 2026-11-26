@@ -913,6 +913,24 @@ describe("runVerifyChain — the anchor audit's chain argument", () => {
     // truncation that really happened. Reversed, the window manufactures findings.
     expect(body.indexOf("auditAnchors(")).toBeLessThan(body.indexOf("reader.tail("));
   });
+
+  it("reads the prior verdict before the chain and hands the memory the fold's own chain (ADR-0481)", () => {
+    // The claim side first (ADR-0407): read after the chain, a verdict anchored in the window names
+    // an entry the chain was read too early to hold, and the command forges a contradiction.
+    const read = body.indexOf("attestedWitnessFrom(");
+    expect(read, "attestedWitnessFrom call").toBeGreaterThan(-1);
+    expect(read).toBeLessThan(body.indexOf("verifyChainForAudit("));
+    // The census of stored verdict rows is a claim side as well, and is read before the chain too.
+    const census = body.indexOf("storedVerdictCensusFrom(");
+    expect(census, "storedVerdictCensusFrom call").toBeGreaterThan(-1);
+    expect(census).toBeLessThan(body.indexOf("verifyChainForAudit("));
+    expect(body).toMatch(/return \{[^}]*storedVerdicts[^}]*\}/);
+    expect(body).toMatch(/new PostgresIntegrityVerdictStore\(conn, schemaOpt\)/);
+    expect(body).toMatch(
+      /verifyChainWitnessMemory\(\{[\s\S]*?correspondenceChain: verification\.correspondenceChain/,
+    );
+    expect(body).toMatch(/return \{[^}]*witnessMemory[^}]*\}/);
+  });
 });
 
 describe("both chain passes are pinned to the deployment's own key (H-18)", () => {

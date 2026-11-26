@@ -45,7 +45,18 @@ export const SloRegistrationConfigSchema = z
     slo: SloSchema,
     category: z.string().min(1).optional(),
     rollback: FlagRollbackSchema.optional(),
-    tenantId: z.string().min(1).nullable().optional(),
+    /**
+     * The tenant a breach's records are filed under. A **uuid** (ADR-0483): it was `min(1)`, so a
+     * config naming `"acme"` parsed, and every record the breach then wrote — the kill switch
+     * (`KillSwitchSchema.tenantId`), the enforcement action, the evaluation — refused it at the
+     * database, after the incident was declared. Nothing ever stored a non-uuid tenant here, so the
+     * refusal breaks no working config (ADR-0338's premise); `slo-defaults.ts` already says `uuid()`.
+     */
+    tenantId: z
+      .string()
+      .uuid({ message: "tenantId must be a tenant uuid (meta.tenants.id), or null for the platform" })
+      .nullable()
+      .optional(),
     /**
      * Re-grade and re-page a breach still open this long after it was declared (M-23). Absent, a
      * breach is paged once and stays at its declared grade however long it lasts.
@@ -156,9 +167,11 @@ export interface BuildSloEnforcementOptions {
   /**
    * Where an enforcement step that is reported rather than thrown goes: a failed lookup, declaration
    * or close-out, a rollback whose kill switch could not be planned or stored, and a projection row
-   * that could not be written. Unwired, all of them are silent.
+   * that could not be written. **Required** (ADR-0483): it was optional and spread in only when
+   * present, so every caller but `node.ts` built engines whose failures were silent — an optional
+   * reporter defaulting to silence is the defect restated as a default (ADR-0364).
    */
-  readonly onDeclarationError?: DeclarationErrorSink;
+  readonly onDeclarationError: DeclarationErrorSink;
   /**
    * With a connection the engines persist: each evaluation, each enforcement action, and the
    * declared `IncidentRecord` itself, whose id is allocated from the stored rows. Without one they
@@ -205,7 +218,7 @@ export interface SloEnforcement {
  */
 export function buildSloEnforcement(
   config: SloConfig,
-  opts: BuildSloEnforcementOptions = {},
+  opts: BuildSloEnforcementOptions,
 ): SloEnforcement {
   const clockOpt = opts.clock !== undefined ? { clock: opts.clock } : {};
   const availabilityRegs = (config.availability ?? []).map(toRegistration);
@@ -226,8 +239,6 @@ export function buildSloEnforcement(
     opts.declarer ??
     (opts.conn !== undefined ? new PostgresIncidentDeclarer({ conn: opts.conn }) : undefined);
   const declarerOpt = declarer !== undefined ? { declarer } : {};
-  const errorOpt =
-    opts.onDeclarationError !== undefined ? { onDeclarationError: opts.onDeclarationError } : {};
 
   const deliverOpt =
     opts.conn !== undefined && opts.deliverPages !== undefined
@@ -239,7 +250,7 @@ export function buildSloEnforcement(
     registrations: availabilityRegs,
     ...clockOpt,
     ...declarerOpt,
-    ...errorOpt,
+    onDeclarationError: opts.onDeclarationError,
   };
   const latencyOptions = {
     alertPolicy: config.alertPolicy,
@@ -247,7 +258,7 @@ export function buildSloEnforcement(
     registrations: latencyRegs,
     ...clockOpt,
     ...declarerOpt,
-    ...errorOpt,
+    onDeclarationError: opts.onDeclarationError,
   };
 
   let availability: SloEnforcementEngine | null = null;

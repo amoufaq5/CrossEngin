@@ -50,24 +50,45 @@ export const UsageRecordSchema = z.object({
 export type UsageRecord = z.infer<typeof UsageRecordSchema>;
 
 /**
- * The natural key of one usage record: a tenant's subscription, a meter, and the **instant** its
- * window starts.
+ * The writer segment's shape: a short opaque token (a uuid fits), so it cannot carry a `:` into the
+ * key's field grammar.
+ */
+export const USAGE_WRITER_REGEX = /^[A-Za-z0-9._-]{1,64}$/;
+
+/**
+ * The natural key of one usage record: a tenant's subscription, a meter, the **instant** its window
+ * starts, and — for a record a flush window wrote — **which writer cut the window**.
  *
  * It was the start's calendar day, so every window opening on one day shared a key — two flushes of
  * the request meter on one day upserted the same row and the second overwrote the first's quantity,
- * and two subscriptions of one tenant on one meter collided outright. Windows a single writer emits
- * never share a start, so the instant is unique per window and a retry of the same window carries
- * the same key, which is the only property an idempotency key needs. The start is canonicalised so
- * two spellings of one instant are one key.
+ * and two subscriptions of one tenant on one meter collided outright. The instant fixed that for one
+ * writer, and it is not unique across writers: two replicas metering one subscription each cut
+ * windows from their own clock, so two windows starting in the same millisecond carried one key and
+ * `recordWindow`'s `ON CONFLICT … DO NOTHING` silently dropped the second replica's usage — an
+ * under-billing nothing reported (ADR-0451 Q3, closed by ADR-0483). So a flush window's key carries
+ * its writer's id, which is stable within a process: a retry of the same window carries the same
+ * key, which is the only property an idempotency key needs.
+ *
+ * `writer` is **required** and `null` is the claim that the record is the period's own — one record
+ * per (subscription, meter, period) by construction, as `closePeriod` emits — where a second write
+ * is meant to collide with the first. An optional field defaulting to *no writer* would be the
+ * collision restated as a default. The start is canonicalised so two spellings of one instant are
+ * one key.
  */
 export function buildIdempotencyKey(input: {
   readonly tenantId: string;
   readonly subscriptionId: string;
   readonly meter: MeterId;
   readonly periodStart: string;
+  readonly writer: string | null;
 }): string {
   const start = new Date(input.periodStart).toISOString();
-  return `tenant=${input.tenantId}:subscription=${input.subscriptionId}:meter=${input.meter}:start=${start}`;
+  const base = `tenant=${input.tenantId}:subscription=${input.subscriptionId}:meter=${input.meter}:start=${start}`;
+  if (input.writer === null) return base;
+  if (!USAGE_WRITER_REGEX.test(input.writer)) {
+    throw new Error(`usage writer id must match ${USAGE_WRITER_REGEX.source}`);
+  }
+  return `${base}:writer=${input.writer}`;
 }
 
 export interface UsageRollupBucket {

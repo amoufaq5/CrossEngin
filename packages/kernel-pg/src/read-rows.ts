@@ -225,8 +225,9 @@ export function readRowsWithUnreadable<R extends object, T>(
  * identity helpers refused it, including through `readRows`' own `identify` callback, which is the
  * one position they exist to fill. A typed-row store was left two options: cast (ADR-0362's
  * annotation standing in for a check), or write a value-taking helper of its own —
- * `access-reviews-runtime-pg`'s `rowKey`, whose neighbouring comment names the cause outright
- * (*"contravariant, so no widening gets there"*). It was forced rather than chosen, and an
+ * `access-reviews-runtime-pg`'s `rowKey`, whose neighbouring comment named the cause outright
+ * (*"contravariant, so no widening gets there"*; deleted by ADR-0481 once these helpers took a typed
+ * row). It was forced rather than chosen, and an
  * independent measurement of ADR-0373's migration backlog reached the same forced choice from the
  * other end, on three `marketplace-runtime-pg` sites.
  *

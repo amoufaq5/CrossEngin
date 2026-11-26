@@ -29,7 +29,7 @@ import {
   resolveEffectiveRoles,
   validateRoleGraph,
   rbacCheck,
-  computeFieldRedaction,
+  computeClassifiedFieldRedaction,
   validateWriteMask,
 } from "@crossengin/auth";
 ```
@@ -95,9 +95,10 @@ the operation.
 
 ## Field-level rules
 
-`computeFieldRedaction(principal, entityPerms, roles, fieldNames)`
-returns `{ readable, redacted }`. Fields without a `fields.<name>.read`
-rule default to readable.
+`computeClassifiedFieldRedaction(principal, entityPerms, roles, fields, policy?, abac?)`
+returns `{ readable, redacted, deferred }`. An explicit `fields.<name>.read`
+rule decides; a classified field with no rule is redacted unless the principal
+is privileged for its class; anything else is readable.
 
 `validateWriteMask(principal, entityPerms, roles, patchFields)`
 returns `{ ok: true }` or `{ ok: false, rejectedField }`. The first

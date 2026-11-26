@@ -361,6 +361,7 @@ interface Harness {
   readonly findings: DeadlineFinding[];
   readonly unansweredCalls: (number | undefined)[];
   readonly lateRefusalCalls: (number | undefined)[];
+  readonly lateCompletionCalls: (number | undefined)[];
 }
 
 function harness(
@@ -396,6 +397,8 @@ function harness(
     /** What `rejectedAfterDeadline` returns — refusals recorded past their deadline. */
     readonly lateRefusals?: readonly GdprDeletionRequest[];
     readonly lateRefusalUnreadable?: readonly UnreadableRequestRow[];
+    /** What `completedAfterDeadline` returns — completions recorded past their deadline. */
+    readonly lateCompletions?: readonly GdprDeletionRequest[];
     /**
      * The two reads' row lists, readable and refused interleaved in query order.
      *
@@ -405,6 +408,7 @@ function harness(
      */
     readonly unansweredRows?: readonly RequestRow[];
     readonly lateRefusalRows?: readonly RequestRow[];
+    readonly lateCompletionRows?: readonly RequestRow[];
     /**
      * The targets whose `transition` commits and cannot read the row back.
      *
@@ -427,6 +431,7 @@ function harness(
   const findings: DeadlineFinding[] = [];
   const unansweredCalls: (number | undefined)[] = [];
   const lateRefusalCalls: (number | undefined)[] = [];
+  const lateCompletionCalls: (number | undefined)[] = [];
   const requests = {
     transition: async (
       id: string,
@@ -487,6 +492,13 @@ function harness(
             ...(behaviour.unanswered ?? []).map(readableRequestRow),
             ...(behaviour.unansweredUnreadable ?? []).map(refusedRequestRow),
           ],
+        limit,
+      );
+    },
+    completedAfterDeadline: async (limit?: number): Promise<DeadlineRequestPage> => {
+      lateCompletionCalls.push(limit);
+      return deadlinePage(
+        behaviour.lateCompletionRows ?? (behaviour.lateCompletions ?? []).map(readableRequestRow),
         limit,
       );
     },
@@ -564,6 +576,7 @@ function harness(
     findings,
     unansweredCalls,
     lateRefusalCalls,
+    lateCompletionCalls,
   };
 }
 
@@ -1207,60 +1220,23 @@ describe("auditCompleted", () => {
     tombstoneId: TOMB,
   });
 
-  it("reports a completion past its Article 12(3) deadline, and not as a finding", async () => {
+  it("says nothing about a late completion, which is auditDeadlines' finding (ADR-0477)", async () => {
+    // A **behaviour change**, and the reason is coverage: this walk reads the newest 100 completions
+    // and runs only under `--deletion-audit-every-ticks`, off by default, so the late-completion
+    // finding it emitted reached nobody on a default deployment and duplicated the deadline pass
+    // whenever both ran. One producer per question.
     const h = harness({ completed: [LATE], evidence: [tombstoneOf()] });
     const findings = await h.reconciler.auditCompleted();
-    // Not an `EvidenceAudit`: this proof stands up, so every field of a finding would say nothing is
-    // wrong — and every finding reaches the escalator, which pages a sev1 for a tamper.
     expect(findings).toEqual([]);
-    expect(h.findings).toHaveLength(1);
-    expect(h.findings[0]).toEqual({
-      requestId: LATE.id,
-      tenantId: TENANT,
-      tombstoneId: TOMB,
-      assessment: {
-        standing: "answered_late",
-        status: "completed",
-        deadlineAt: "2026-10-28T00:00:00.000Z",
-        answeredAt: "2026-10-30T00:00:00.000Z",
-        msPastDeadline: 2 * 86_400_000,
-        extendedAt: null,
-        warningDays: DEFAULT_DEADLINE_WARNING_DAYS,
-      },
-    });
-  });
-
-  it("says nothing about a completion that met its deadline", async () => {
-    const h = harness({ completed: [COMPLETED], evidence: [tombstoneOf()] });
-    await h.reconciler.auditCompleted();
     expect(h.findings).toEqual([]);
   });
 
-  it("reports the breach even when the proof is also broken, because neither answer is the other", async () => {
-    // The reason the emit is first in the loop body: the two questions are independent, and the
-    // `continue` for a missing tombstone is taken before any finding is pushed.
+  it("still reports a broken proof on a late completion, because neither question is the other", async () => {
     const h = harness({ completed: [LATE], storedMissing: true });
     const findings = await h.reconciler.auditCompleted();
     expect(findings).toHaveLength(1);
     expect(findings[0]?.present).toBe(false);
-    expect(h.findings).toHaveLength(1);
-    expect(h.findings[0]?.requestId).toBe(LATE.id);
-  });
-
-  it("reports a completed request that states no completion time, as neither late nor on time", async () => {
-    // A **behaviour change**, and the direction is the whole of it. The predicate this replaced
-    // answered `false` here and the pass said nothing, so a `completed` row whose `completed_at` the
-    // contract refuses read exactly like a compliant completion. `answer_time_unstated` is a
-    // declared standing that is `reported: true` and `breached: false`: a record that cannot say is
-    // a finding, and calling it either thing would be a claim nobody established.
-    const h = harness({
-      completed: [requestOf({ ...LATE, completedAt: null })],
-      evidence: [tombstoneOf()],
-    });
-    await h.reconciler.auditCompleted();
-    expect(h.findings).toHaveLength(1);
-    expect(h.findings[0]?.assessment.standing).toBe("answer_time_unstated");
-    expect(h.findings[0]?.assessment.msPastDeadline).toBeNull();
+    expect(h.findings).toEqual([]);
   });
 });
 
@@ -1411,10 +1387,11 @@ describe("auditDeadlines", () => {
     expect(h.retired).toEqual([]);
   });
 
-  it("forwards the limit to both reads and clamps it", async () => {
+  it("forwards the limit to all three reads and clamps it", async () => {
     const h = harness();
     await h.reconciler.auditDeadlines(7);
     expect(h.unansweredCalls).toEqual([7]);
+    expect(h.lateCompletionCalls).toEqual([7]);
     expect(h.lateRefusalCalls).toEqual([7]);
     const d = harness();
     await d.reconciler.auditDeadlines();
@@ -1494,21 +1471,80 @@ describe("auditDeadlines", () => {
     expect(page.findings[0]?.assessment.standing).toBe("approaching");
   });
 
-  it("is disjoint from auditCompleted by status, so no finding is emitted twice", async () => {
-    // The two passes share one reporter, and what keeps a finding from arriving twice is a property
-    // of the queries rather than a filter either applies: `completedWithTombstone` selects
-    // `completed` and neither of this pass's reads can return one.
+  /** A completion two days past its deadline, perfectly evidenced. */
+  const LATE_COMPLETION = requestOf({
+    id: "dreq_completed001",
+    status: "completed",
+    completedAt: "2026-10-30T00:00:00.000Z",
+    completionSha256: PROOF,
+    tombstoneId: TOMB,
+  });
+
+  it("reports a completion recorded past its deadline, which no default pass reported (ADR-0477)", async () => {
+    // Before: only `auditCompleted` emitted this, over its newest-100 page and only under
+    // `--deletion-audit-every-ticks`, which is off by default.
+    const h = harness({ lateCompletions: [LATE_COMPLETION] });
+    const page = await h.reconciler.auditDeadlines();
+    expect(page.findings).toHaveLength(1);
+    expect(page.findings[0]).toEqual({
+      requestId: LATE_COMPLETION.id,
+      tenantId: TENANT,
+      tombstoneId: TOMB,
+      assessment: {
+        standing: "answered_late",
+        status: "completed",
+        deadlineAt: "2026-10-28T00:00:00.000Z",
+        answeredAt: "2026-10-30T00:00:00.000Z",
+        msPastDeadline: 2 * 86_400_000,
+        extendedAt: null,
+        warningDays: DEFAULT_DEADLINE_WARNING_DAYS,
+      },
+    });
+    expect(h.findings).toEqual([...page.findings]);
+  });
+
+  it("assesses a request that completed between the waiting read and the completions read once", async () => {
+    // The same interleaving as the refusal case one column over: `completed` is absorbing, so the
+    // request is in both lists and the later read's view must win.
+    const WAITING = requestOf({ ...LATE_COMPLETION, status: "in_progress", completedAt: null, completionSha256: null, tombstoneId: null });
+    const h = harness({ unanswered: [WAITING], lateCompletions: [LATE_COMPLETION] });
+    const page = await h.reconciler.auditDeadlines();
+    expect(page.examined).toBe(1);
+    expect(page.findings.map((f) => f.assessment.status)).toEqual(["completed"]);
+  });
+
+  it("declares a bounded reading when the completions page fills its limit", async () => {
+    // Mutation-checked: dropping the completions clause from `complete` fails this test.
+    const page = await harness({ lateCompletions: [LATE_COMPLETION] }).reconciler.auditDeadlines(1);
+    expect(page.complete).toBe(false);
+    expect(
+      (await harness({ lateCompletions: [LATE_COMPLETION] }).reconciler.auditDeadlines(2)).complete,
+    ).toBe(true);
+  });
+
+  it("derives the completions page's coverage from rows read, with an unreadable row on a full page", async () => {
+    const h = harness({
+      lateCompletionRows: [
+        readableRequestRow(LATE_COMPLETION),
+        refusedRequestRow({ requestId: "dreq_unreadable02", detail: "completionSha256" }),
+      ],
+    });
+    const page = await h.reconciler.auditDeadlines(2);
+    expect(page.examined).toBe(1);
+    expect(page.unreadable).toBe(1);
+    expect(page.complete).toBe(false);
+    expect(h.unreadable.map((u) => u.requestId)).toEqual(["dreq_unreadable02"]);
+  });
+
+  it("is the only producer of a deadline finding, so auditCompleted adds none (ADR-0477)", async () => {
+    // The two passes used to share the reporter, and both reported a late completion whenever both
+    // ran — `auditCompleted` from its walk and nothing else from this one. Now this pass reads the
+    // late completions itself and `auditCompleted` emits no deadline finding at all.
     const h = harness({
       unanswered: [BREACHED],
       lateRefusals: [LATE_REFUSAL],
-      completed: [
-        requestOf({
-          status: "completed",
-          completedAt: "2026-10-30T00:00:00.000Z",
-          completionSha256: PROOF,
-          tombstoneId: TOMB,
-        }),
-      ],
+      lateCompletions: [LATE_COMPLETION],
+      completed: [LATE_COMPLETION],
       evidence: [tombstoneOf()],
     });
     await h.reconciler.auditDeadlines();
@@ -1543,7 +1579,14 @@ describe("formatDeadlineFinding", () => {
     // that a seventh standing gets a sentence from what it is obliged to declare.
     for (const standing of DEADLINE_STANDINGS) {
       const line = formatDeadlineFinding(
-        assessOf(standing, standing === "answer_time_unstated" ? { msPastDeadline: null } : {}),
+        assessOf(
+          standing,
+          standing === "answer_time_unstated"
+            ? { msPastDeadline: null }
+            : standing === "deadline_unstated"
+              ? { msPastDeadline: null, deadlineAt: "2026-10-28T00:00:00+99:00" }
+              : {},
+        ),
       );
       expect(line).toContain(REQ);
       expect(line.length).toBeGreaterThan(40);
@@ -1578,6 +1621,20 @@ describe("formatDeadlineFinding", () => {
     );
     expect(line).toContain("does not state when the data subject was answered");
     expect(line).not.toContain("NaN");
+  });
+
+  it("says a deadline cannot be read, rather than that the answer instant is missing", () => {
+    // The two `msPastDeadline: null` standings share their facts, so the data separates them: the
+    // old single sentence was false of a request whose answer instant is fine and whose deadline
+    // is not.
+    const line = formatDeadlineFinding(
+      assessOf("deadline_unstated", {
+        msPastDeadline: null,
+        deadlineAt: "2026-10-28T00:00:00+99:00",
+      }),
+    );
+    expect(line).toContain("deadline is not an instant this runtime can read");
+    expect(line).not.toContain("does not state when the data subject was answered");
   });
 
   it("says a met deadline was met, and whether anybody was answered", () => {

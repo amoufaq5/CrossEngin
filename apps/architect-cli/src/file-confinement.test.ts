@@ -1,8 +1,8 @@
-import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
+import { link, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { SECRET_PATTERN_KINDS, SECRET_PATTERNS } from "@crossengin/testing/strategy";
+import { requiresSubject, SECRET_PATTERN_KINDS, SECRET_PATTERNS } from "@crossengin/testing/strategy";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -48,6 +48,17 @@ describe("resolveFileRoot", () => {
     const { root } = await layout();
     expect(await reason(resolveFileRoot(join(root, "ok.json")))).toBe("path_invalid");
     expect(await reason(resolveFileRoot(join(root, "nope")))).toBe("not_found");
+  });
+
+  it("refuses an implicit root that is the home directory, and accepts the same root asked for", async () => {
+    const { root } = await layout();
+    const alias = join(await mkdtemp(join(tmpdir(), "home-alias-")), "h");
+    await symlink(root, alias);
+    expect(await reason(resolveFileRoot(root, { implicit: true, homeDir: alias }))).toBe("implicit_home_root");
+    expect(await resolveFileRoot(root, { implicit: false, homeDir: alias })).toBe(root);
+    expect(await resolveFileRoot(join(root, "sub"), { implicit: true, homeDir: root })).toBe(join(root, "sub"));
+    // An unresolvable home is not a home: nothing is refused on a guess.
+    expect(await resolveFileRoot(root, { implicit: true, homeDir: join(root, "missing") })).toBe(root);
   });
 
   it("resolves a symlinked root to its real path", async () => {
@@ -173,6 +184,33 @@ describe("readConfinedText / writeConfinedText", () => {
     expect(await reason(readConfinedText(c, 1024))).toBe("symlink_escape");
     expect(await reason(writeConfinedText(c, "{}"))).toBe("symlink_escape");
   });
+
+  it("refuses a hard link to a file outside the root on both paths, and leaves the file intact", async () => {
+    // Every name rule passes: the link has an innocent name, no symlink, and resolves to itself.
+    const { root, outside } = await layout();
+    await link(join(outside, "o.json"), join(root, "linked.json"));
+    const r = await confinePath(root, "linked.json", EXT, "read");
+    expect(r.real).toBe(join(root, "linked.json"));
+    expect(await reason(readConfinedText(r, 1024))).toBe("hard_link");
+    const w = await confinePath(root, "linked.json", EXT, "write");
+    expect(await reason(writeConfinedText(w, '{"overwritten":true}\n'))).toBe("hard_link");
+    // The refusal lands before anything is truncated: an O_TRUNC open would have emptied it first.
+    expect(await readFile(join(outside, "o.json"), "utf8")).toBe('{"outside":true}\n');
+  });
+
+  it("still reads and writes an ordinary single-name file, new or existing", async () => {
+    const { root } = await layout();
+    const existing = await confinePath(root, "ok.json", EXT, "write");
+    await writeConfinedText(existing, '{"a":1}\n');
+    expect(await readConfinedText(await confinePath(root, "ok.json", EXT, "read"), 1024)).toBe('{"a":1}\n');
+    const fresh = await confinePath(root, "fresh.json", EXT, "write");
+    expect(fresh.exists).toBe(false);
+    await writeConfinedText(fresh, "{}\n");
+    expect(await readFile(join(root, "fresh.json"), "utf8")).toBe("{}\n");
+    // A shorter write over a longer file leaves no tail of the old one.
+    await writeConfinedText(existing, "{}\n");
+    expect(await readFile(join(root, "ok.json"), "utf8")).toBe("{}\n");
+  });
 });
 
 describe("secretContentKind", () => {
@@ -184,6 +222,8 @@ describe("secretContentKind", () => {
     slack_token: `xoxb-${"1".repeat(12)}-${"Ab1".repeat(8)}`,
     github_token: `ghp_${"a".repeat(36)}`,
     stripe_live_key: `sk_live_${"a".repeat(24)}`,
+    stripe_webhook_secret: `whsec_${"Ab1".repeat(10)}`,
+    aws_secret_access_key: `aws_secret_access_key = ${"Ab1/".repeat(10)}`,
   };
 
   it("covers exactly the kinds the commit scanner knows, and agrees with it on every sample", () => {
@@ -198,7 +238,7 @@ describe("secretContentKind", () => {
       const sample = samples[kind]!;
       const scanner = SECRET_PATTERNS[kind];
       const scannerHit = [...sample.matchAll(new RegExp(scanner.pattern.source, "g"))].some((m) =>
-        (scanner.requires ?? []).every((r) => r.test(m[0])),
+        (scanner.requires ?? []).every((r) => r.test(requiresSubject(m))),
       );
       expect(scannerHit, kind).toBe(true);
       expect(secretContentKind(sample), kind).toBe(kind);
@@ -215,6 +255,12 @@ describe("secretContentKind", () => {
 
   it("still finds a key that follows a run of non-key sk- prefixes", () => {
     expect(secretContentKind(`${"sk-".repeat(100)} sk-proj-${"Ab1".repeat(14)}`)).toBe("openai_api_key");
+  });
+
+  it("tests an OpenAI key's body, not its sk- prefix, for the lower-case requirement", () => {
+    const upper = "QWERTYUIOP0123456789ASDFGHJKLZ0123456789";
+    expect(secretContentKind(`{"k":"sk-${upper}"}`)).toBeNull();
+    expect(secretContentKind(`{"k":"sk-${upper}q"}`)).toBe("openai_api_key");
   });
 
   it("answers null for an ordinary manifest and for an sk- prefixed kebab name", () => {

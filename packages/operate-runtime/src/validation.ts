@@ -24,6 +24,8 @@ export interface FieldRule {
   readonly maxLength?: number;
   /** A `decimal` field's declared precision/scale, so an over-precise literal can be refused. */
   readonly decimal?: DecimalSpec;
+  /** An `array` field's element rule: each element is checked as a value of this kind. */
+  readonly element?: FieldRule;
   /** Server-managed (e.g. a sequence default) — never client-validated. */
   readonly serverManaged: boolean;
 }
@@ -40,16 +42,19 @@ export interface FieldError {
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+interface FieldTypeLike {
+  readonly kind?: string;
+  readonly values?: readonly string[];
+  readonly maxLength?: number;
+  readonly precision?: number;
+  readonly scale?: number;
+  /** An `array` field's element type. */
+  readonly element?: FieldTypeLike;
+}
 interface FieldLike {
   readonly name: string;
   readonly required?: boolean;
-  readonly type?: {
-    readonly kind?: string;
-    readonly values?: readonly string[];
-    readonly maxLength?: number;
-    readonly precision?: number;
-    readonly scale?: number;
-  };
+  readonly type?: FieldTypeLike;
   readonly default?: { readonly kind?: string };
 }
 interface EntityLike {
@@ -67,6 +72,9 @@ function ruleOf(f: FieldLike): FieldRule {
     ...(f.type?.maxLength !== undefined ? { maxLength: f.type.maxLength } : {}),
     ...(f.type?.kind === "decimal" && f.type.precision !== undefined && f.type.scale !== undefined
       ? { decimal: { precision: f.type.precision, scale: f.type.scale } }
+      : {}),
+    ...(f.type?.kind === "array" && f.type.element !== undefined
+      ? { element: ruleOf({ name: f.name, type: f.type.element }) }
       : {}),
     serverManaged: f.default?.kind === "sequence",
   };
@@ -160,6 +168,11 @@ const checkEmail: FieldCheck = (rule, value) =>
     ? null
     : { field: rule.name, code: "type", message: `${rule.name} must be a valid email address` };
 
+/**
+ * Membership, after `checkString` (the map wires it through `stringThen`): a non-string sent to an
+ * enum field is a `type` error like one sent to a text field, where it used to answer `enum` — the
+ * same JSON number got two codes depending on which kind of string field it hit (ADR-0443 Q6).
+ */
 const checkEnum: FieldCheck = (rule, value) =>
   rule.enumValues === undefined || (typeof value === "string" && rule.enumValues.includes(value))
     ? null
@@ -283,7 +296,7 @@ const FIELD_TYPE_CHECKS: { readonly [K in PrimitiveFieldType["kind"]]: FieldChec
   datetime: checkDatetime,
   duration: acceptAny,
   uuid: checkString,
-  enum: checkEnum,
+  enum: stringThen(checkEnum),
   reference: checkString,
   json: acceptAny,
   file: acceptAny,
@@ -299,11 +312,38 @@ const FIELD_TYPE_CHECKS: { readonly [K in PrimitiveFieldType["kind"]]: FieldChec
 };
 
 /**
- * A kind the map does not name: an `array` field (whose `kind` is `array`, not a primitive), and
- * any kind a manifest that never went through `validateManifest` might carry. Accepting is correct
- * for the first — an array has no scalar rule — and is the only safe answer for the second.
+ * An `array<primitive>` field: the value must be an array and every element a legal value of the
+ * element kind, by that kind's own check in `FIELD_TYPE_CHECKS` (ADR-0443 Q5). Before this an array
+ * field took any JSON — a string, an object, `[1, {}]` into an `array<text>` — because `array` is not
+ * a primitive kind and fell to the unnamed-kind arm below. A `null` element is refused as `type`:
+ * an array of strings with a hole in it is not an array of strings. An element's error keeps its own
+ * code (an element outside an enum is `enum`), and names its index so a caller can find it.
+ */
+function checkArray(rule: FieldRule, value: unknown): FieldError | null {
+  if (!Array.isArray(value)) {
+    return { field: rule.name, code: "type", message: `${rule.name} must be an array` };
+  }
+  const element = rule.element;
+  if (element === undefined) return null;
+  for (let i = 0; i < value.length; i++) {
+    const item: unknown = value[i];
+    const at = `${rule.name}[${i.toString()}]`;
+    if (item === null || item === undefined) {
+      return { field: rule.name, code: "type", message: `${at} must not be null` };
+    }
+    const err = checkType({ ...element, name: at }, item);
+    if (err !== null) return { field: rule.name, code: err.code, message: err.message };
+  }
+  return null;
+}
+
+/**
+ * The kind's check. `array` is answered by `checkArray`; a kind the map does not name — one a
+ * manifest that never went through `validateManifest` might carry — is accepted, the only safe
+ * answer for a kind with no rule.
  */
 function checkType(rule: FieldRule, value: unknown): FieldError | null {
+  if (rule.kind === "array") return checkArray(rule, value);
   const check = FIELD_TYPE_CHECKS[rule.kind as PrimitiveFieldType["kind"]] as FieldCheck | undefined;
   return check === undefined ? null : check(rule, value);
 }

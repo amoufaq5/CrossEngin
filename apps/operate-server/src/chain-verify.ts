@@ -19,7 +19,21 @@ import {
   type PublicKeyResolver,
 } from "@crossengin/forensics-pg";
 
+import {
+  anchorAuditHasFindings,
+  verificationExaminedNothing,
+  type AnchorAuditReport,
+  type ChainTruncationCheck,
+} from "./anchor-audit.js";
 import { AUDIT_CHAIN_TRUSTED_PUBLIC_KEYS_VAR } from "./audit-chain-env.js";
+import type { StoredVerdictCensus } from "./integrity-verdict-store.js";
+import {
+  compareWitnessMemory,
+  witnessMemoryDisproves,
+  witnessMemoryUnproven,
+  type AttestedWitnessRead,
+  type WitnessMemoryCheck,
+} from "./witness-memory.js";
 
 /**
  * A forensics-pg `PublicKeyResolver` backed by the crypto-pg key registry: it resolves a chain entry's
@@ -520,4 +534,112 @@ export function formatChainVerification(report: ChainVerificationReport): string
     );
   }
   return lines.join("\n");
+}
+
+/**
+ * `verify-chain`'s fourth axis: this deployment's own newest **baseline** verdict, compared against
+ * what the command just read (ADR-0481, closing ADR-0380's open question 1).
+ *
+ * The hourly integrity proof has read the prior verdict since ADR-0399; the command an operator runs
+ * by hand did not, so a scope whose chain **and** checkpoints were both destroyed — byte-identical
+ * from those two tables to a scope that never had history — printed `NO HISTORY — nothing was
+ * examined` and exited 0. The prior verdict refutes "this scope is new": its own chain entry sits at
+ * a sequence the chain must still hold, and `record()` appends that entry before it stores the row,
+ * so an anchored baseline proves an entry existed.
+ *
+ * The mapping is `proveScopeIntegrity`'s exactly — the unfiltered `readableWitnessSequence` as the
+ * current witness, the correspondence chain the fold handed back, and the scan's completeness — so
+ * the hand-run command and the hourly pass cannot come to disagree about one scope. The **read** is
+ * the caller's and must come first, before the chain read: an attestation read after the chain can
+ * name an entry the chain was read too early to hold (ADR-0407's rule, one caller across).
+ */
+export function verifyChainWitnessMemory(input: {
+  readonly prior: AttestedWitnessRead;
+  readonly anchors: AnchorAuditReport;
+  readonly truncation: ChainTruncationCheck;
+  readonly correspondenceChain: readonly ChainedLogEntry[] | null;
+}): WitnessMemoryCheck {
+  return compareWitnessMemory({
+    read: input.prior,
+    current: { ...input.truncation, checkpointSequence: input.anchors.readableWitnessSequence },
+    chain: input.correspondenceChain,
+    currentScanComplete: input.anchors.complete,
+  });
+}
+
+/** What `verify-chain` concluded, and the exit code it carries. */
+export interface VerifyChainVerdict {
+  /** The `verdict:` line, or `null` when the fold's own `OK`/`FAILED` headline is the whole story. */
+  readonly headline: string | null;
+  readonly exitCode: 0 | 1;
+}
+
+/**
+ * The command's verdict over its four reports, plus the census of stored verdict rows.
+ *
+ * Exit 1 for a fold that failed, an anchor finding, a truncation, and — new — a witness memory that
+ * **disproves** (a prior verdict the chain now contradicts, or a witness that regressed) or leaves
+ * the question **unproven** (the newest stored verdict could not be read). The second is the wider
+ * reading for the same reason `anchorAuditHasFindings` is the wider of the audit's predicates: this
+ * is a by-hand auditor whose exit code is its verdict, and a run that could not read the baseline
+ * cannot say there was none.
+ *
+ * The census is the review's addition, and it closes a hole the memory alone left: the baseline is
+ * a **filtered** read (`verdict = 'verified' AND chain_sequence_number IS NOT NULL`) over columns a
+ * tenant-context session can `UPDATE`, so one write takes every row out of it, and a destroyed scope
+ * then read `NO HISTORY` with exit 0 under a headline claiming no stored verdict attested otherwise.
+ * Measured live as the confined role. A stored row of **any** verdict implies the scope's chain held
+ * an entry (`record()` appends to that scope's chain before it stores the row), so an empty chain
+ * beside a non-zero census is a contradiction whatever the rows' columns now say — and that is
+ * asked only when the chain is empty, so a column edit on a scope whose chain is intact is not
+ * reported here as a destruction it is not.
+ *
+ * `NO HISTORY` keeps exit 0 only where the chain is empty **and** the census counted no row, which
+ * is the one case these tables still cannot tell from a new scope (a scope whose verdict rows are
+ * also gone needs an owner's `DELETE` past the fence, and then a witness outside the database —
+ * ADR-0375's open end 2).
+ */
+export function verifyChainVerdict(input: {
+  readonly chain: Pick<ChainVerificationReport, "ok" | "signatures">;
+  readonly anchors: AnchorAuditReport;
+  readonly truncation: ChainTruncationCheck;
+  readonly witnessMemory: WitnessMemoryCheck;
+  readonly storedVerdicts: StoredVerdictCensus;
+}): VerifyChainVerdict {
+  const disproves = witnessMemoryDisproves(input.witnessMemory);
+  const unproven = witnessMemoryUnproven(input.witnessMemory);
+  const chainEmpty = input.truncation.tailSequence === null;
+  const census = input.storedVerdicts;
+  // The row count when the chain is empty and rows exist, else `null`.
+  const orphanedRows =
+    chainEmpty && census.kind === "counted" && census.rows > 0 ? census.rows : null;
+  const censusUnproven = chainEmpty && census.kind === "unreadable";
+  const examinedNothing = verificationExaminedNothing(
+    input.chain.signatures.checked,
+    input.truncation,
+  );
+  const headline = input.truncation.truncated
+    ? "TRUNCATED"
+    : disproves
+      ? "HISTORY CONTRADICTED — a verdict this deployment stored attests history this scope no longer holds"
+      : orphanedRows !== null
+        ? `HISTORY CONTRADICTED — this deployment stored ${orphanedRows.toString()} verdict row(s) for this scope, each recorded after appending its own entry to this scope's chain, and the chain now holds none`
+        : unproven
+          ? "UNPROVEN — the newest stored verdict could not be read, so whether this scope had history is not established"
+          : censusUnproven
+            ? "UNPROVEN — the chain is empty and whether this deployment stored verdicts for this scope could not be read"
+            : examinedNothing
+              ? chainEmpty && census.kind === "counted"
+                ? "NO HISTORY — the chain holds no entry, and this deployment stored no verdict for this scope"
+                : "NO HISTORY — nothing was examined"
+              : null;
+  const ok =
+    input.chain.ok &&
+    !anchorAuditHasFindings(input.anchors) &&
+    !input.truncation.truncated &&
+    !disproves &&
+    !unproven &&
+    orphanedRows === null &&
+    !censusUnproven;
+  return { headline, exitCode: ok ? 0 : 1 };
 }

@@ -3307,6 +3307,19 @@ const INSTANT_RANGE_CHECKED_COLUMNS: readonly string[] = [
   "access_requests.created_at",
   "access_requests.expires_at",
   "access_requests.decided_at",
+  // ADR-0481: the verdict store's mapper parses both, and ADR-0374 named the first as the sharpest
+  // remainder of the temporal class.
+  "audit_integrity_verdicts.verified_at",
+  "audit_integrity_verdicts.created_at",
+  "gdpr_deletion_requests.submitted_at",
+  "gdpr_deletion_requests.deadline_at",
+  "gdpr_deletion_requests.verified_at",
+  "gdpr_deletion_requests.in_progress_at",
+  "gdpr_deletion_requests.completed_at",
+  "gdpr_deletion_requests.rejected_at",
+  "gdpr_deletion_requests.deferred_until",
+  "gdpr_deletion_requests.deadline_extended_at",
+  "gdpr_deletion_requests.retry_not_before",
 ];
 
 const UUID_SHAPE_CHECKED_COLUMNS: readonly string[] = [

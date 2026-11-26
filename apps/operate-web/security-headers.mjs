@@ -1,6 +1,6 @@
 // The response headers every page of this app carries, read by next.config.mjs. Plain ESM rather
-// than TypeScript because next.config.mjs imports it, and import-free so it can be tested from
-// outside this app (packages/testing/src/operate-web.test.ts).
+// than TypeScript because next.config.mjs imports it, and import-free so next.config.mjs can load it
+// before any bundler runs. Tested by `security-headers.test.ts` beside it.
 
 /**
  * The page Content-Security-Policy, measured against the built app rather than assumed.

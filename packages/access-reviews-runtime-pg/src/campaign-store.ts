@@ -1,15 +1,15 @@
 import type { AccessReviewCampaign } from "@crossengin/access-reviews";
 import {
   readRowsWithUnreadable,
+  textIdentity,
   type PgConnection,
+  type RowRead,
 } from "@crossengin/kernel-pg";
 
 import { CampaignUuidResolver } from "./id-mapping.js";
 import {
-  rowKey,
   rowToCampaign,
   type CampaignRow,
-  type TypedRowRead,
 } from "./records.js";
 import { tenantScopePredicate, withTenantContext } from "./tenant-context.js";
 
@@ -147,7 +147,7 @@ export class PostgresAccessReviewCampaignStore {
    * NULL `scheduled_start_at`, `deadline_at` or `created_at`. See `AccessReviewReplayer` for why it
    * deliberately does not also parse.
    */
-  async listByTenant(tenantId: string): Promise<TypedRowRead<AccessReviewCampaign>> {
+  async listByTenant(tenantId: string): Promise<RowRead<AccessReviewCampaign>> {
     return withTenantContext(this.conn, tenantId, async (tx) => {
       const result = await tx.query<CampaignRow>(
         `SELECT ${SELECT_COLUMNS} FROM ${SCHEMA}.${TABLE} c
@@ -155,7 +155,7 @@ export class PostgresAccessReviewCampaignStore {
           ORDER BY c.created_at ASC, c.campaign_id ASC`,
         [tenantId],
       );
-      return readRowsWithUnreadable(result.rows, rowToCampaign, (row) => rowKey(row.campaign_id));
+      return readRowsWithUnreadable(result.rows, rowToCampaign, (row) => textIdentity(row, "campaign_id"));
     });
   }
 }

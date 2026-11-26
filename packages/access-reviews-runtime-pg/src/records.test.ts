@@ -1,11 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { readRowsWithUnreadable } from "@crossengin/kernel-pg";
+import { readRowsWithUnreadable, textIdentity } from "@crossengin/kernel-pg";
 
 import {
   recordsOrRefuse,
   requireIso,
   requireNumeric,
-  rowKey,
   rowToCampaign,
   rowToEvidence,
   rowToDecision,
@@ -380,7 +379,7 @@ describe("readRowsWithUnreadable", () => {
     if (row.value < 0) throw new Error("value must not be negative");
     return row.value;
   };
-  const identify = (row: Row): string | null => rowKey(row.key);
+  const identify = (row: Row): string | null => textIdentity(row, "key");
 
   it("keeps every row the mapper accepts", () => {
     const read = readRowsWithUnreadable([{ key: "a", value: 1 }, { key: "b", value: 2 }], map, identify);
@@ -418,7 +417,7 @@ describe("readRowsWithUnreadable", () => {
     // Shared with the primitive rather than restated, which is the half that must not diverge: a
     // `ZodError`'s own message quotes the stored value for an enum miss.
     const row = { ...evidenceRowFor(makeSealedEvidence()), framework: "iso_9001" } as never;
-    const read = readRowsWithUnreadable([row], rowToEvidence, (r) => rowKey(r.evidence_id));
+    const read = readRowsWithUnreadable([row], rowToEvidence, (r) => textIdentity(r, "evidence_id"));
     expect(read.records).toEqual([]);
     expect(read.unreadable[0]?.detail).toBe("framework: invalid_enum_value");
     expect(read.unreadable[0]?.detail).not.toContain("iso_9001");
@@ -453,14 +452,18 @@ describe("recordsOrRefuse", () => {
   });
 });
 
-describe("rowKey", () => {
-  it("answers null for everything that is not a non-empty string", () => {
-    // `null` says *this row does not name one* rather than inventing a handle, and an empty string
-    // is not a handle either — a `WHERE campaign_id = ''` sends an operator nowhere.
-    expect(rowKey("arc_1")).toBe("arc_1");
-    expect(rowKey("")).toBeNull();
-    expect(rowKey(null)).toBeNull();
-    expect(rowKey(undefined)).toBeNull();
-    expect(rowKey(7)).toBeNull();
+describe("the identity helper this package uses (ADR-0481)", () => {
+  it("is kernel-pg's textIdentity over a typed row, answering null for anything not a non-empty string", () => {
+    // What `rowKey` answered, kept as the contract now that the shared helper takes a typed row:
+    // `null` says *this row does not name one* rather than inventing a handle (ADR-0331).
+    interface KeyRow {
+      readonly evidence_id: unknown;
+    }
+    const id = (value: unknown): string | null => textIdentity<KeyRow>({ evidence_id: value }, "evidence_id");
+    expect(id("are_1")).toBe("are_1");
+    expect(id("")).toBeNull();
+    expect(id(null)).toBeNull();
+    expect(id(undefined)).toBeNull();
+    expect(id(7)).toBeNull();
   });
 });

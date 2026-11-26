@@ -418,6 +418,13 @@ describe("attachPostmortem", () => {
     expect(record.timeline[1]?.metadata).toEqual({ postmortemId: "PM-2026-0001" });
   });
 
+  it("refuses a postmortem id the postmortem table could never hold (ADR-0483)", () => {
+    const exec = executor();
+    expect(() =>
+      exec.attachPostmortem(exec.declare(BASE), { postmortemId: "anything", actorUserId: "alice", at: T1 }),
+    ).toThrow();
+  });
+
   it("unblocks closing a sev2 incident", () => {
     const exec = executor();
     const base = IncidentRecordSchema.parse({

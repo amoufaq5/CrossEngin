@@ -1,16 +1,16 @@
 import type { AccessReviewItem } from "@crossengin/access-reviews";
 import {
   readRowsWithUnreadable,
+  textIdentity,
   type PgConnection,
+  type RowRead,
 } from "@crossengin/kernel-pg";
 
 import { CampaignUuidResolver, ItemUuidResolver } from "./id-mapping.js";
 import {
   recordsOrRefuse,
-  rowKey,
   rowToItem,
   type ItemRow,
-  type TypedRowRead,
 } from "./records.js";
 import { tenantScopePredicate, withTenantContext } from "./tenant-context.js";
 
@@ -145,7 +145,7 @@ export class PostgresAccessReviewItemStore {
   async listByCampaignWithUnreadable(
     tenantId: string,
     campaignId: string,
-  ): Promise<TypedRowRead<AccessReviewItem>> {
+  ): Promise<RowRead<AccessReviewItem>> {
     return withTenantContext(this.conn, tenantId, async (tx) => {
       const result = await tx.query<ItemRow>(
         `${SELECT_JOINED}
@@ -155,7 +155,7 @@ export class PostgresAccessReviewItemStore {
           ORDER BY i.created_at ASC, i.item_id ASC`,
         [campaignId, tenantId],
       );
-      return readRowsWithUnreadable(result.rows, rowToItem, (row) => rowKey(row.item_id));
+      return readRowsWithUnreadable(result.rows, rowToItem, (row) => textIdentity(row, "item_id"));
     });
   }
 }

@@ -83,51 +83,6 @@ function obligationAdmits(discharge: AbacDischarge | null): boolean {
 }
 
 /**
- * Classification-unaware read redaction, superseded by {@link computeClassifiedFieldRedaction}.
- *
- * It takes no batch arm deliberately: it is callerless, so an arm here would equip dead code and
- * leave the two read paths with different costs for the same policy.
- */
-export function computeFieldRedaction(
-  principal: Principal,
-  entityPerms: EntityPermissions,
-  roles: ReadonlyMap<RoleName, RoleDefinition>,
-  fieldNames: readonly string[],
-  abac?: AbacEnforcement,
-): FieldRedactionResult {
-  const effective = resolveEffectiveRoles(principal, roles);
-  const fields = entityPerms.fields;
-  const readable: string[] = [];
-  const redacted: string[] = [];
-  const deferred: string[] = [];
-
-  for (const name of fieldNames) {
-    const rule = fields?.[name]?.read;
-    if (rule === undefined) {
-      readable.push(name);
-      continue;
-    }
-    if (!rule.roles.some((r) => effective.has(r))) {
-      redacted.push(name);
-      continue;
-    }
-    // Only after the roles check passes: there is nothing to learn from an evaluation that a
-    // redaction was already owed.
-    const discharge = dischargeFieldObligation(rule.abac, principal, "read", name, abac);
-    if (obligationAdmits(discharge)) readable.push(name);
-    else {
-      redacted.push(name);
-      // Reported from inside this arm, so only a field the roles admitted can ever be deferred:
-      // the roles refusal above returns before a discharge exists, which is what keeps `deferred`
-      // answering "a record could change this" rather than "something refused this".
-      if (isAbacDeferred(discharge)) deferred.push(name);
-    }
-  }
-
-  return { readable, redacted, deferred };
-}
-
-/**
  * Classification-unaware write mask, superseded by {@link validateClassifiedWriteMask}.
  *
  * It takes no batch arm, and that is a rule rather than an omission: first refusal wins, so a batch
@@ -336,10 +291,11 @@ function assembleRedaction(
 }
 
 /**
- * Like {@link computeFieldRedaction} but classification-aware: a sensitive
- * field (pii/phi/regulated/commercial_sensitive by default) with no explicit
- * `read` grant defaults to redacted unless the principal holds a privileged
- * role. Explicit per-field `read` rules still win.
+ * Field read redaction. A sensitive field (pii/phi/regulated/commercial_sensitive
+ * by default) with no explicit `read` grant defaults to redacted unless the
+ * principal holds a privileged role; an explicit per-field `read` rule wins; a
+ * field with neither is readable. It is the only read function here: the
+ * classification-unaware original had no caller and is deleted (P3.4).
  *
  * One record, so one plan and one pool — the same three steps the plural entry point takes, over the
  * record on `abac.record`. It is deliberately **not** a wrapper that re-enters

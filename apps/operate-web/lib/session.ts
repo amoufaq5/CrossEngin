@@ -26,6 +26,42 @@ export const REQUEST_ACCESS_PATH = "/request-access";
 /** The query parameter carrying where an unauthenticated request was going. */
 export const NEXT_PARAM = "next";
 
+/**
+ * The query parameter the login page reads to say how the last sign-out ended (ADR-0448 Q8, closed
+ * by ADR-0478). `/api/auth/logout` always clears this browser's cookie and answers `{ok, ended}`,
+ * where `ended` is whether operate-server also revoked the session server-side. When it did not,
+ * the token is still valid until its TTL for anyone holding a copy — so a person who signed out on a
+ * shared machine is told, rather than shown a login form that reads as "you are fully signed out".
+ */
+export const SIGNED_OUT_PARAM = "signed_out";
+
+/** The one value `SIGNED_OUT_PARAM` carries: signed out here, the server session still open. */
+export const SIGNED_OUT_SESSION_OPEN = "session_open";
+
+export const SIGNED_OUT_SESSION_OPEN_NOTICE =
+  "You are signed out in this browser, but the server session could not be ended. It stays valid " +
+  "until it expires at its time limit, so if this was a shared computer, sign in and out again, or " +
+  "ask an administrator to revoke your sessions.";
+
+/**
+ * Where a sign-out goes, from the logout handler's body. Only an explicit `ended: false` adds the
+ * notice: a body this build cannot read says nothing either way, and inventing a warning from it
+ * would be a claim about the server nobody made. The handler also answers `false` when the browser
+ * held no session cookie at all; the sign-out button is only reachable signed in, so that arm is not
+ * one a person meets from the shell.
+ */
+export function signOutDestination(body: unknown): string {
+  const ended = typeof body === "object" && body !== null && "ended" in body ? body.ended : undefined;
+  return ended === false ? `${LOGIN_PATH}?${SIGNED_OUT_PARAM}=${SIGNED_OUT_SESSION_OPEN}` : LOGIN_PATH;
+}
+
+/** The notice the login page shows for a `location.search`, or `null`. */
+export function signOutNotice(search: string): string | null {
+  return new URLSearchParams(search).get(SIGNED_OUT_PARAM) === SIGNED_OUT_SESSION_OPEN
+    ? SIGNED_OUT_SESSION_OPEN_NOTICE
+    : null;
+}
+
 export interface SessionCookieOptions {
   readonly httpOnly: true;
   readonly secure: boolean;

@@ -1,4 +1,8 @@
-import type { ValidationError } from "@crossengin/kernel/manifest";
+import type {
+  ManifestSectionChange,
+  ManifestSectionPresence,
+  ValidationError,
+} from "@crossengin/kernel/manifest";
 
 export interface IoStreams {
   readonly stdout: { write(chunk: string): void };
@@ -85,32 +89,46 @@ export function formatManifestSummary(summary: ManifestSummary): string {
   return lines.join("\n");
 }
 
-export interface DiffCounts {
-  readonly entitiesAdded: number;
-  readonly entitiesRemoved: number;
-  readonly entitiesModified: number;
-  readonly workflowsAdded: number;
-  readonly workflowsRemoved: number;
-  readonly workflowsModified: number;
-}
+/**
+ * What a section's presence change reads as, as a total map so a fourth presence is a compile error
+ * rather than a section silently rendered as an ordinary member change.
+ */
+const PRESENCE_LINE: Readonly<Record<ManifestSectionPresence, string | null>> = {
+  added: "section added",
+  removed: "section removed",
+  present: null,
+};
 
-export function formatDiff(counts: DiffCounts): string {
+/**
+ * One line per section the two manifests differ on, each followed by what that section's reach
+ * means, from `diffManifestSections` — the same census the reviewer's diff view reads, so this
+ * command and the console cannot disagree about whether two manifests differ.
+ *
+ * It replaced a counter that reported entities and hardcoded the workflow figures to zero, so a
+ * change confined to workflows, roles, permissions, jobs, views or `meta.extends` printed
+ * "(no changes)" for two manifests that were not the same.
+ */
+export function formatManifestSectionDiff(changes: readonly ManifestSectionChange[]): string {
   const lines: string[] = ["Manifest diff:"];
-  const sections: Array<readonly [string, number, number, number]> = [
-    ["entities", counts.entitiesAdded, counts.entitiesRemoved, counts.entitiesModified],
-    ["workflows", counts.workflowsAdded, counts.workflowsRemoved, counts.workflowsModified],
-  ];
-  let anyChange = false;
-  for (const [name, added, removed, modified] of sections) {
-    if (added + removed + modified > 0) {
-      anyChange = true;
-      lines.push(
-        `  ${name}: +${added.toString()} -${removed.toString()} ~${modified.toString()}`,
-      );
-    }
-  }
-  if (!anyChange) {
+  if (changes.length === 0) {
     lines.push("  (no changes)");
+    return lines.join("\n");
+  }
+  for (const change of changes) {
+    const presence = PRESENCE_LINE[change.presence];
+    const detail =
+      presence !== null
+        ? presence
+        : change.membersKeyed
+          ? `+${change.added.length.toString()} -${change.removed.length.toString()} ~${change.changed.length.toString()}`
+          : `changed (members unkeyed; ${change.countBefore.toString()} -> ${change.countAfter.toString()})`;
+    lines.push(`  ${change.section} [${change.reach}]: ${detail}`);
+    const named: string[] = [];
+    if (change.added.length > 0) named.push(`added ${change.added.join(", ")}`);
+    if (change.removed.length > 0) named.push(`removed ${change.removed.join(", ")}`);
+    if (change.changed.length > 0) named.push(`changed ${change.changed.join(", ")}`);
+    if (named.length > 0) lines.push(`    ${named.join("; ")}`);
+    lines.push(`    ${change.reachNote}`);
   }
   return lines.join("\n");
 }

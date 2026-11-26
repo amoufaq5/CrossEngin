@@ -1868,6 +1868,33 @@ export const UNREADABLE_ROW_SITES: readonly UnreadableRowDeclaration[] = Object.
       "ADR-0302 made both suppression readers fail closed on purpose: a suppression list short by one row mails the address that row exists to protect. The throw is bounded by design, because the drain catches per tenant and retries.",
   },
   {
+    file: "apps/operate-server/src/platform-users.ts",
+    scope: "membershipsOfUser",
+    conversion: "<inline>",
+    reason: "page_is_indivisible",
+    consumedBy: "subjectMemberships",
+    note:
+      "ADR-0479's takeover check reads every membership the subject holds across tenants and asks whether one carries a platform authority the caller lacks. A list short by one row is a pass for exactly the membership that row is, so the read throws and the credential route answers 503 subject_roles_unresolved.",
+  },
+  {
+    file: "apps/operate-server/src/platform-users.ts",
+    scope: "membershipsOfUser",
+    conversion: "rowToMembership",
+    reason: "page_is_indivisible",
+    consumedBy: "subjectMemberships",
+    note:
+      "The same read's per-row conversion: an unreadable membership row is a grant the takeover check cannot see, so it refuses (503 subject_roles_unresolved) rather than deciding over the readable rows alone.",
+  },
+  {
+    file: "apps/operate-server/src/credential-hash-admission.ts",
+    scope: "probeCredentialHashAdmission",
+    conversion: "<inline>",
+    reason: "page_is_indivisible",
+    consumedBy: "probeCredentialHashAdmission",
+    note:
+      "A boot probe over the live CHECK constraints on meta.users.credential_hash, not a page of records: the verdict is a property of the whole set (does any constraint refuse this binary's hash format), so a set short by one constraint is a wrong verdict. The throw is a rethrow after rolling the probe's savepoint back, and the boot reports it.",
+  },
+  {
     file: "apps/operate-server/src/suppression-store.ts",
     scope: "activeSuppressions",
     conversion: "suppressionFromRow",

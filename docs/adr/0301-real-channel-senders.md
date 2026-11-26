@@ -109,3 +109,15 @@ endpoint instead of only against a fake.
 - AWS SES v2 `SendEmail`; AWS SigV4.
 - Twilio Programmable Messaging `Messages` resource; messaging services.
 - ADR-0274, ADR-0280, ADR-0302.
+
+
+## Addendum (2026-11-25, ADR-0482)
+
+The sentence above that configuring the channel later and re-draining delivers the backlog is
+**false**, and was false when written. An unrouted dispatch is retried on the ladder — 30, 60, 120
+and 240 seconds apart — and the fifth attempt is `max_attempts_exhausted`, which
+`terminalOutcomeFor` records as `dropped`: about 450 seconds after it was queued, nothing is left to
+deliver. `node.ts` passes no `maxAttempts`, so no flag lengthens the ladder. What does hold is that
+the drain records a retryable outcome rather than dropping on the first attempt. Measured and
+corrected in the code comments by ADR-0416 and in the deployment documents by ADR-0417; this record
+is left as written and corrected here rather than rewritten, so the history of the claim survives.

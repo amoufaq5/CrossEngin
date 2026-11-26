@@ -1,4 +1,6 @@
-import type { Manifest } from "@crossengin/kernel/manifest";
+import { resolveManifest, type Manifest, type ManifestRegistry } from "@crossengin/kernel/manifest";
+import { buildErpCorePack, ERP_CORE_PACK_SLUG } from "@crossengin/pack-erp-core";
+import { buildErpRetailPack } from "@crossengin/pack-erp-retail";
 import { describe, expect, it } from "vitest";
 
 import { PrimitiveFieldTypeSchema } from "@crossengin/types/meta-schema";
@@ -209,9 +211,12 @@ describe("checkType is a total map over the field-type enum", () => {
       serverManaged: false,
       ...(kind === "enum" ? { enumValues: ["42", "x"] } : {}),
     };
+    // An enum is a string kind, so a non-string is a `type` refusal before membership is asked
+    // (ADR-0480, ADR-0443 Q6): the old `enum` code told a caller sending the JSON number 42 that
+    // 42 was not among ["42", "x"], which is true of neither reading.
     for (const v of [42, true, { a: 1 }, ["x"]]) {
       expect(validateBody([rule], { f: v }, "update")).toEqual([
-        { field: "f", code: kind === "enum" ? "enum" : "type", message: expect.any(String) as string },
+        { field: "f", code: "type", message: expect.any(String) as string },
       ]);
     }
     expect(validateBody([rule], { f: kind === "enum" ? "42" : "x" }, "update")).toEqual([]);
@@ -223,9 +228,32 @@ describe("checkType is a total map over the field-type enum", () => {
     expect(validateBody([rule], { f: 12345 }, "update").map((e) => e.code)).toEqual(["type"]);
   });
 
-  it("accepts anything on an array field, which has no scalar rule", () => {
+  it("accepts any array on an array field with no element rule, and refuses a non-array", () => {
     const rule = { name: "tags", required: false, kind: "array", serverManaged: false };
     expect(validateBody([rule], { tags: ["a", "b"] }, "update")).toEqual([]);
+    expect(validateBody([rule], { tags: "a" }, "update").map((e) => e.code)).toEqual(["type"]);
+  });
+
+  it("checks each element of an array<primitive> field against the element's kind", () => {
+    const rule = {
+      name: "qty",
+      required: false,
+      kind: "array",
+      serverManaged: false,
+      element: { name: "qty", required: false, kind: "integer", serverManaged: false },
+    };
+    expect(validateBody([rule], { qty: [1, 2, 3] }, "update")).toEqual([]);
+    const bad = validateBody([rule], { qty: [1, "two", 3] }, "update");
+    expect(bad).toEqual([{ field: "qty", code: "type", message: expect.stringContaining("qty[1]") as string }]);
+    const nul = validateBody([rule], { qty: [1, null] }, "update");
+    expect(nul).toEqual([{ field: "qty", code: "type", message: "qty[1] must not be null" }]);
+    const en = {
+      ...rule,
+      name: "tags",
+      element: { name: "tags", required: false, kind: "enum", enumValues: ["a", "b"], serverManaged: false },
+    };
+    expect(validateBody([en], { tags: ["a", "c"] }, "update").map((e) => e.code)).toEqual(["enum"]);
+    expect(validateBody([en], { tags: ["a", 7] }, "update").map((e) => e.code)).toEqual(["type"]);
   });
 });
 
@@ -376,5 +404,34 @@ describe("validateBody — a client numeral is a 422 and never a 500", () => {
       const accepted = validateBody(withSpec, { price: v }, "update").length === 0;
       if (accepted) expect(toDecimalWire(v, spec).ok).toBe(true);
     }
+  });
+});
+
+describe("the shipped packs under the element and enum-order checks (ADR-0480)", () => {
+  const registry: ManifestRegistry = {
+    async getManifest(id: string): Promise<Manifest | null> {
+      return id === ERP_CORE_PACK_SLUG ? buildErpCorePack() : null;
+    },
+  };
+
+  it("admits every declared enum value, refuses a number as `type`, and declares no array field", async () => {
+    const packs = [buildErpCorePack(), await resolveManifest(buildErpRetailPack(), { registry })];
+    let enums = 0;
+    let arrays = 0;
+    for (const pack of packs) {
+      for (const [, rules] of buildValidationPlans(pack)) {
+        for (const rule of rules) {
+          if (rule.kind === "array") arrays++;
+          if (rule.kind !== "enum" || rule.enumValues === undefined) continue;
+          enums++;
+          for (const v of rule.enumValues) expect(validateBody([rule], { [rule.name]: v }, "update")).toEqual([]);
+          expect(validateBody([rule], { [rule.name]: 7 }, "update").map((e) => e.code)).toEqual(["type"]);
+        }
+      }
+    }
+    // A floor so an empty plan cannot pass this; and the measured fact that the element check has no
+    // member in either pack, so its reach is a manifest a tenant or the Architect writes.
+    expect(enums).toBeGreaterThan(50);
+    expect(arrays).toBe(0);
   });
 });

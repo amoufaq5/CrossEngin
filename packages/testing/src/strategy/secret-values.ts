@@ -40,26 +40,43 @@ export const SECRET_PATTERN_KINDS = [
   "slack_token",
   "github_token",
   "stripe_live_key",
+  "stripe_webhook_secret",
+  "aws_secret_access_key",
 ] as const;
 export type SecretPatternKind = (typeof SECRET_PATTERN_KINDS)[number];
 
-export const SECRET_ASSIGNMENT_KINDS = ["secret_env_assignment", "secret_yaml_literal"] as const;
+export const SECRET_ASSIGNMENT_KINDS = [
+  "secret_env_assignment",
+  "secret_yaml_literal",
+  "secret_dockerfile_assignment",
+] as const;
 export type SecretAssignmentKind = (typeof SECRET_ASSIGNMENT_KINDS)[number];
 
 export type SecretFindingKind = SecretPatternKind | SecretAssignmentKind;
 
 /**
  * One pattern per kind, total over the enum. Lengths are the provider's real token lengths with
- * margin, so an identifier that merely begins `sk-` is not a key; `requires` is a second test on the
- * match for the one kind whose prefix is common in prose (`sk-` begins kebab-case names), since a
- * generated key is mixed-case with digits and a name is not.
+ * margin, so an identifier that merely begins `sk-` is not a key; `requires` is a second test for the
+ * kinds whose shape is common outside a credential (`sk-` begins kebab-case names; a 40-character
+ * run follows a secret-access-key name in fixtures), since a generated key is mixed-case with digits
+ * and a name is not.
+ *
+ * **`requires` tests the key's body — the pattern's first capture group — and never the whole
+ * match** (ADR-0484). It used to test `match[0]`, which for `openai_api_key` always begins `sk-`, so
+ * its lower-case requirement was satisfied by the prefix and a body of upper-case letters and digits
+ * passed all three tests. A pattern carrying `requires` must therefore capture the body;
+ * `requiresSubject` is the one place that says which text is tested.
+ *
+ * `aws_secret_access_key` is a **context** pattern: an AWS secret has no prefix of its own, so it is
+ * recognised only beside the name AWS gives it, assigned with `=` or `:`. A secret assigned to any
+ * other name, and a PEM body split across string concatenation, stay out of reach of a pattern.
  */
 export const SECRET_PATTERNS: Readonly<
   Record<SecretPatternKind, { readonly pattern: RegExp; readonly requires?: RegExp[] }>
 > = {
   anthropic_api_key: { pattern: /sk-ant-[A-Za-z0-9_-]{32,}/g },
   openai_api_key: {
-    pattern: /\bsk-(?!ant-)(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{32,}/g,
+    pattern: /\bsk-(?!ant-)(?:proj-|svcacct-|admin-)?([A-Za-z0-9_-]{32,})/g,
     requires: [/[0-9]/, /[A-Z]/, /[a-z]/],
   },
   aws_access_key_id: { pattern: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g },
@@ -71,7 +88,17 @@ export const SECRET_PATTERNS: Readonly<
   slack_token: { pattern: /\bxox[abposr]-[0-9]+-[0-9A-Za-z-]{10,}/g },
   github_token: { pattern: /\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{60,})/g },
   stripe_live_key: { pattern: /\b(?:sk|rk)_live_[0-9A-Za-z]{20,}/g },
+  stripe_webhook_secret: { pattern: /\bwhsec_[A-Za-z0-9]{24,}/g },
+  aws_secret_access_key: {
+    pattern: /(?<![A-Za-z0-9])aws_?secret_?access_?key["']?\s*[:=]\s*["']?([A-Za-z0-9/+]{40})(?![A-Za-z0-9/+=])/gi,
+    requires: [/[0-9]/, /[A-Z]/, /[a-z]/],
+  },
 };
+
+/** The text a pattern's `requires` is tested on: its first capture group, the key's body. */
+export function requiresSubject(match: RegExpMatchArray): string {
+  return match[1] ?? match[0];
+}
 
 /** A variable name that holds a credential. `_ID`/`_SID`/`_URL` name an identifier or an endpoint. */
 const SECRET_NAME = /SECRET|PASSWORD|PASSWD|TOKEN|PEPPER|PRIVATE|CREDENTIAL|KEY/;
@@ -122,6 +149,84 @@ export function isYamlFile(path: string): boolean {
   return /\.ya?ml$/.test(path);
 }
 
+/** `Dockerfile`, `Dockerfile.prod`, `api.Dockerfile`, `Containerfile` — by basename. */
+export function isDockerfile(path: string): boolean {
+  const base = path.slice(path.lastIndexOf("/") + 1);
+  return /^(?:Dockerfile|Containerfile)(?:\..+)?$/.test(base) || /\.(?:dockerfile|containerfile)$/i.test(base);
+}
+
+/**
+ * The whole value a placeholder may be: the prefix, then upper-case letters, digits and `_`, and
+ * nothing after — the shape every placeholder in `deploy/.env.example` is written in. A value that
+ * merely *begins* with the prefix is not a placeholder (ADR-0484).
+ */
+export function placeholderPattern(prefix: string): RegExp {
+  return new RegExp(`^${prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[A-Z0-9_]+$`);
+}
+
+type AssignmentFamily = "env" | "yaml" | "dockerfile";
+
+/** A total map, so a fourth file family is a compile error until it names its finding kind. */
+const ASSIGNMENT_KIND_OF_FAMILY: Readonly<Record<AssignmentFamily, SecretAssignmentKind>> = {
+  env: "secret_env_assignment",
+  yaml: "secret_yaml_literal",
+  dockerfile: "secret_dockerfile_assignment",
+};
+
+interface AssignmentCandidate {
+  readonly line: number;
+  readonly variable: string;
+  readonly raw: string;
+}
+
+/**
+ * Every `NAME=value` a file assigns, in the grammar of its family.
+ *
+ * A Dockerfile assigns through `ENV` and `ARG`, with the env file's own `NAME=value` grammar —
+ * several pairs on one `ENV`, quoted values, `\` continuing a line — plus the legacy one-pair
+ * `ENV NAME value` form. A commented instruction counts, as a commented env line does, but only in
+ * the `NAME=value` form: prose in a comment that happens to begin `# ENV` is not an assignment.
+ * JSON and TypeScript are deliberately not read for assignments: a key named like a secret there is
+ * usually a schema or a test fixture, and only the patterns apply (ADR-0420).
+ */
+function assignmentsIn(text: string, family: AssignmentFamily): readonly AssignmentCandidate[] {
+  const out: AssignmentCandidate[] = [];
+  if (family !== "dockerfile") {
+    text.split("\n").forEach((line, i) => {
+      // Commented-out lines count in an env file: a value is published whether or not it is live.
+      const a =
+        family === "env"
+          ? /^\s*#*\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/.exec(line)
+          : (/^\s*-?\s*([A-Za-z][A-Za-z0-9_]*)\s*:\s*(.*)$/.exec(line) ??
+            /^\s*-\s*([A-Za-z][A-Za-z0-9_]*)=(.*)$/.exec(line));
+      if (a !== null) out.push({ line: i + 1, variable: a[1] ?? "", raw: a[2] ?? "" });
+    });
+    return out;
+  }
+  const physical = text.split("\n");
+  for (let i = 0; i < physical.length; i += 1) {
+    const start = i;
+    let logical = physical[i] ?? "";
+    while (/\\\s*$/.test(logical) && i + 1 < physical.length) {
+      i += 1;
+      logical = `${logical.replace(/\\\s*$/, " ")}${physical[i] ?? ""}`;
+    }
+    const m = /^\s*(#\s*)?(ENV|ARG)\s+(.*)$/i.exec(logical);
+    if (m === null) continue;
+    const commented = m[1] !== undefined;
+    const rest = (m[3] ?? "").trim();
+    const pairs = [...rest.matchAll(/([A-Za-z_][A-Za-z0-9_]*)=("(?:[^"\\]|\\.)*"|'[^']*'|\S*)/g)];
+    if (pairs.length > 0) {
+      for (const p of pairs) out.push({ line: start + 1, variable: p[1] ?? "", raw: p[2] ?? "" });
+      continue;
+    }
+    if (commented || (m[2] ?? "").toUpperCase() !== "ENV") continue;
+    const legacy = /^([A-Za-z_][A-Za-z0-9_]*)\s+(.+)$/.exec(rest);
+    if (legacy !== null) out.push({ line: start + 1, variable: legacy[1] ?? "", raw: legacy[2] ?? "" });
+  }
+  return out;
+}
+
 export interface TrackedFile {
   readonly path: string;
   readonly text: string;
@@ -157,6 +262,16 @@ export const DECLARED_PLACEHOLDERS: readonly DeclaredPlaceholder[] = [
       "Postgres reads this variable directly and `refuseWeakSecret` never sees it, so it has no reason " +
       "to carry the prefix the binary refuses on; the file's own comment tells an operator to replace it " +
       "with `openssl rand -hex 24`. The exact value is what is declared, so a real password here is a finding.",
+  },
+  {
+    path: "deploy/.env.example",
+    variable: "OPERATE_ADMIN_API_KEY",
+    value: "REPLACE_WITH_STRONG_TOKEN:platform_admin:00000000-0000-4000-8000-000000000000",
+    reason:
+      "The value is an api-key spec, `<token>:<role>:<tenant>`, so only its first field is the placeholder and " +
+      "the role and the nil-UUID tenant after it are lower-case by necessity. A placeholder is the whole value " +
+      "in the prefixed shape (ADR-0484), so this one is declared by its exact text instead: a real token in the " +
+      "first field changes the value and is a finding.",
   },
 ];
 
@@ -233,12 +348,13 @@ export function scanForSecretValues(
   const matched = new Set<DeclaredPlaceholder>();
   let assignmentsExamined = 0;
   let placeholdersAccepted = 0;
+  const placeholderShape = placeholderPattern(options.placeholderPrefix);
 
   for (const file of files) {
     for (const kind of SECRET_PATTERN_KINDS) {
       const { pattern, requires } = SECRET_PATTERNS[kind];
       for (const m of file.text.matchAll(pattern)) {
-        if (requires !== undefined && !requires.every((r) => r.test(m[0]))) continue;
+        if (requires !== undefined && !requires.every((r) => r.test(requiresSubject(m)))) continue;
         findings.push({
           path: file.path,
           line: lineOf(file.text, m.index ?? 0),
@@ -251,44 +367,40 @@ export function scanForSecretValues(
 
     const env = isEnvFile(file.path);
     const yaml = isYamlFile(file.path);
-    if (!env && !yaml) continue;
+    const docker = isDockerfile(file.path);
+    if (!env && !yaml && !docker) continue;
+    const family: AssignmentFamily = env ? "env" : docker ? "dockerfile" : "yaml";
 
-    const lines = file.text.split("\n");
-    lines.forEach((text, i) => {
-      // Commented-out lines count in an env file: a value is published whether or not it is live.
-      const a = env
-        ? /^\s*#*\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/.exec(text)
-        : (/^\s*-?\s*([A-Za-z][A-Za-z0-9_]*)\s*:\s*(.*)$/.exec(text) ??
-          /^\s*-\s*([A-Za-z][A-Za-z0-9_]*)=(.*)$/.exec(text));
-      if (a === null) return;
-      const variable = a[1] ?? "";
-      if (!isSecretName(variable)) return;
+    for (const { line, variable, raw } of assignmentsIn(file.text, family)) {
+      if (!isSecretName(variable)) continue;
       assignmentsExamined += 1;
-      // `#` begins a comment only after whitespace, which is how compose's env-file parser reads it.
-      const value = unquote((a[2] ?? "").replace(/\s+#.*$/, ""));
-      if (value === "") return;
-      const isPrefixed = (v: string): boolean => env && v.startsWith(options.placeholderPrefix);
-      const accepts = (v: string): boolean => isPrefixed(v) || isReference(v, accepts);
+      const value = family === "dockerfile" ? unquote(raw) : unquote(raw.replace(/\s+#.*$/, ""));
+      if (value === "") continue;
+      // A placeholder is the prefix followed by the shape the repo writes placeholders in and nothing
+      // else (ADR-0484): `startsWith` admitted a real secret pasted after the prefix.
+      const isPrefixed = (v: string): boolean => family !== "yaml" && placeholderShape.test(v);
+      const accepts = (v: string): boolean =>
+        isPrefixed(v) || isReference(v, accepts) || (family === "dockerfile" && /^\$[A-Za-z_][A-Za-z0-9_]*$/.test(v));
       if (accepts(value)) {
         placeholdersAccepted += 1;
-        return;
+        continue;
       }
       const declared = placeholders.find(
         (p) => p.path === file.path && p.variable === variable && p.value === value,
       );
-      if (env && declared !== undefined) {
+      if (family !== "yaml" && declared !== undefined) {
         matched.add(declared);
         placeholdersAccepted += 1;
-        return;
+        continue;
       }
       findings.push({
         path: file.path,
-        line: i + 1,
-        kind: env ? "secret_env_assignment" : "secret_yaml_literal",
+        line,
+        kind: ASSIGNMENT_KIND_OF_FAMILY[family],
         variable,
         length: value.length,
       });
-    });
+    }
   }
 
   return {

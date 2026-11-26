@@ -2,7 +2,7 @@ import type { PathSegment, ResolvedPrincipal, RouteDefinition } from "@crossengi
 import type { Handler, HandlerOutput, PrincipalRoles } from "@crossengin/api-gateway-runtime";
 import { isoInstant, requireIsoInstant, scopeFilter, type PgConnection } from "@crossengin/kernel-pg";
 import type { ExtraGatewayRoute } from "@crossengin/operate-runtime";
-import { withTenantContext } from "@crossengin/operate-runtime-pg";
+import { setTenantContextWithin, withTenantContext } from "@crossengin/operate-runtime-pg";
 import { z } from "zod";
 
 import {
@@ -473,6 +473,7 @@ export interface PostgresUserStoreOptions {
 export class PostgresUserStore {
   private readonly users: string;
   private readonly memberships: string;
+  private readonly tenants: string;
 
   constructor(
     private readonly conn: PgConnection,
@@ -484,6 +485,7 @@ export class PostgresUserStore {
     }
     this.users = `${schema}.users`;
     this.memberships = `${schema}.user_tenant_membership`;
+    this.tenants = `${schema}.tenants`;
   }
 
   rowToUser(row: Record<string, unknown>): UserRecord {
@@ -643,6 +645,21 @@ export class PostgresUserStore {
   }
 
   /**
+   * Locks one user row `FOR SHARE` inside a caller's transaction and answers its status, or `null`
+   * for no row (ADR-0479). An approval attaching an existing user takes it so the user cannot be
+   * retired between the check that they are active and the commit of the membership that names
+   * them; `meta.users` carries no RLS, so no tenant context is needed.
+   */
+  async lockUserWithin(tx: PgConnection, id: string): Promise<string | null> {
+    const result = await tx.query<{ readonly status: unknown }>(
+      `SELECT status FROM ${this.users} WHERE id = $1::uuid FOR SHARE`,
+      [id],
+    );
+    const row = result.rows[0];
+    return row === undefined ? null : String(row.status);
+  }
+
+  /**
    * A status change whose **source** state is re-asserted inside the `UPDATE` predicate — the row is
    * the lock (ADR-0321), and stronger than reading first because a caller cannot defeat it by
    * reusing what it read. `null` conflates "no such user" with "not in one of `from`" on purpose,
@@ -762,6 +779,45 @@ export class PostgresUserStore {
     );
     const row = result.rows[0];
     return row === undefined ? null : this.rowToMembership(row);
+  }
+
+  /**
+   * Every membership one user holds, in every tenant, in **every** status (ADR-0479).
+   *
+   * This reverses, for one caller, the deliberate refusal this module states beside
+   * `buildPlatformUserRoutes`: there is no "which tenants does this user belong to" *route*, because
+   * such a read has no scope to name and so is owner-dependent by construction. The credential
+   * takeover check needs exactly that read — a principal resetting another's password acquires every
+   * grant the subject holds, in whichever tenant holds it — so it is answered here **without** the
+   * owner-dependence: `meta.tenants` carries no RLS, so the tenant ids enumerate for any role, and
+   * each tenant's memberships are then read under **that tenant's own context** with the strict
+   * scope predicate beside it (ADR-0333), all in one transaction so the answer is one snapshot's
+   * worth of statements rather than N connections'. A non-owner therefore reads what an owner does.
+   *
+   * Every status, not only `active`: a `revoked` or `invited` membership is one an operator can
+   * restore, so a takeover check that ignored it would let a reset precede a restore. It **throws**
+   * on any failure — the caller's answer to "could not establish" is a refusal (503), never a pass.
+   * Cost is one `SELECT` per tenant inside one transaction; a credential reset is rare.
+   */
+  async membershipsOfUser(userId: string): Promise<readonly MembershipRecord[]> {
+    return this.conn.transaction(async (tx) => {
+      const tenants = await tx.query<{ readonly id: unknown }>(
+        `SELECT id FROM ${this.tenants} ORDER BY id`,
+      );
+      const out: MembershipRecord[] = [];
+      for (const t of tenants.rows) {
+        const tenantId = String(t.id);
+        await setTenantContextWithin(tx, tenantId);
+        const scope = scopeFilter(tenantId, 1);
+        const result = await tx.query<Record<string, unknown>>(
+          `SELECT ${MEMBERSHIP_COLUMNS} FROM ${this.memberships}` +
+            ` WHERE ${scope.sql} AND user_id = $2::uuid`,
+          [...scope.params, userId],
+        );
+        for (const row of result.rows) out.push(this.rowToMembership(row));
+      }
+      return out;
+    });
   }
 
   async membershipsForTenant(
@@ -904,6 +960,15 @@ export interface PlatformUserRoutesContext {
    * the credential routes: a forgotten invalidation is the silent version of the defect.
    */
   readonly onUserStatusChanged: (userId: string) => void;
+  /**
+   * Called after a write that changes what `user-identity.ts` would answer for this id — a
+   * provision (which may name an id the resolver has cached as *absent*, since `provision` accepts
+   * a caller-supplied `id`) and a status move — so a cached name, email or absence is dropped on
+   * this replica at once rather than after the resolver's TTL (ADR-0479). Required for
+   * `onUserStatusChanged`'s reason, and separate from it because the two caches answer different
+   * questions: one is an authorization input, the other a display label.
+   */
+  readonly onUserIdentityChanged: (userId: string) => void;
   readonly clock?: () => Date;
 }
 
@@ -1304,6 +1369,7 @@ function buildProvisionHandler(ctx: PlatformUserRoutesContext): Handler {
     if (unrecordable !== null) return unrecordable;
     try {
       const created = await ctx.store.provision(user, membership);
+      ctx.onUserIdentityChanged(created.user.id);
       return json(201, { user: created.user, membership: created.membership, roleWarnings });
     } catch (err) {
       if (err instanceof DuplicateUserError) {
@@ -1370,7 +1436,10 @@ function buildUserTransitionHandler(
     // overwritten — and a no-match still leaves this response's claim true, because the only states
     // that could have replaced it are ones this transition is not legal from.
     const user = await ctx.store.transitionStatus(id, target, [current.status]);
-    if (user !== null) ctx.onUserStatusChanged(id);
+    if (user !== null) {
+      ctx.onUserStatusChanged(id);
+      ctx.onUserIdentityChanged(id);
+    }
     if (user === null) {
       return recordRefusal(
         ctx,

@@ -3,7 +3,12 @@ import { SeveritySchema } from "./severities.js";
 
 const Iso8601 = z.string().datetime({ offset: true });
 const INCIDENT_ID_REGEX = /^INC-\d{4}-\d{4,8}$/;
-const POSTMORTEM_ID_REGEX = /^PM-\d{4}-\d{4,8}$/;
+/**
+ * The one spelling of a postmortem id, read by the postmortem record and by the incident that cites
+ * it (ADR-0483): the incident field was `z.string().min(1)`, so a close could cite an id the
+ * postmortem table — whose column CHECK is `^PM-[0-9]{4}-[0-9]{4,8}$` — could never hold.
+ */
+export const POSTMORTEM_ID_REGEX = /^PM-\d{4}-\d{4,8}$/;
 
 export const POSTMORTEM_STATUSES = [
   "drafting",

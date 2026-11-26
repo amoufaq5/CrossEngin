@@ -3,7 +3,6 @@ import type { TenantId, UserId } from "@crossengin/types";
 import {
   computeClassifiedFieldRedaction,
   computeClassifiedFieldRedactionForRecords,
-  computeFieldRedaction,
   validateClassifiedWriteMask,
   validateWriteMask,
   type ClassifiedField,
@@ -11,6 +10,7 @@ import {
 import {
   ABAC_OUTCOME_ALLOWS,
   type AbacBatchEvaluator,
+  type AbacEnforcement,
   type AbacEvaluationInput,
   type AbacEvaluator,
 } from "./abac.js";
@@ -40,6 +40,25 @@ function principal(role: string): Principal {
   };
 }
 
+/**
+ * The read path over fields that carry no classification, through the one read function there is.
+ *
+ * These tests were written against `computeFieldRedaction`, the classification-unaware original,
+ * which had no caller outside them and did not know a field grant's third arm (P3.4); it is deleted.
+ * Over unclassified fields the classified function asks exactly the question it asked — an explicit
+ * `read` rule decides, and a field with no rule is readable — so the properties they pin still hold
+ * of the code that runs, which is the only reason to keep them.
+ */
+function readUnclassified(
+  p: Principal,
+  perms: EntityPermissions,
+  roles: ReadonlyMap<string, RoleDefinition>,
+  names: readonly string[],
+  abac?: AbacEnforcement,
+): ReturnType<typeof computeClassifiedFieldRedaction> {
+  return computeClassifiedFieldRedaction(p, perms, roles, names.map((name) => ({ name })), {}, abac);
+}
+
 const PERMS: EntityPermissions = {
   read: { roles: ["pharmacist", "technician", "manager"] },
   update: { roles: ["pharmacist", "manager"] },
@@ -55,15 +74,15 @@ const PERMS: EntityPermissions = {
   },
 };
 
-describe("computeFieldRedaction", () => {
+describe("the read path over unclassified fields", () => {
   it("returns fields without rules as readable", () => {
-    const r = computeFieldRedaction(principal("technician"), PERMS, ROLES, ["a", "b"]);
+    const r = readUnclassified(principal("technician"), PERMS, ROLES, ["a", "b"]);
     expect(r.readable).toEqual(["a", "b"]);
     expect(r.redacted).toEqual([]);
   });
 
   it("redacts a field a role cannot read", () => {
-    const r = computeFieldRedaction(
+    const r = readUnclassified(
       principal("technician"),
       PERMS,
       ROLES,
@@ -74,7 +93,7 @@ describe("computeFieldRedaction", () => {
   });
 
   it("respects inheritance (manager can read pharmacist-restricted fields)", () => {
-    const r = computeFieldRedaction(
+    const r = readUnclassified(
       principal("manager"),
       PERMS,
       ROLES,
@@ -85,7 +104,7 @@ describe("computeFieldRedaction", () => {
   });
 
   it("returns empty arrays for an empty field list", () => {
-    const r = computeFieldRedaction(principal("technician"), PERMS, ROLES, []);
+    const r = readUnclassified(principal("technician"), PERMS, ROLES, []);
     expect(r.readable).toEqual([]);
     expect(r.redacted).toEqual([]);
   });
@@ -429,17 +448,17 @@ function recordingEvaluator(outcome: AbacOutcome): {
   };
 }
 
-describe("computeFieldRedaction — abac obligations", () => {
+describe("the unclassified read path — abac obligations", () => {
   it("redacts an abac-qualified field when the parameter is omitted", () => {
-    const r = computeFieldRedaction(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"]);
+    const r = readUnclassified(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"]);
     // Omitting the parameter is a caller with no evaluator, not a way to skip the obligation.
     expect(r.redacted).toEqual(["mrn"]);
     expect(r.readable).toEqual([]);
   });
 
   it("redacts it identically when an entity is named with no evaluator", () => {
-    const omitted = computeFieldRedaction(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"]);
-    const named = computeFieldRedaction(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
+    const omitted = readUnclassified(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"]);
+    const named = readUnclassified(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
       entity: "Prescription",
     });
     expect(named).toEqual(omitted);
@@ -447,7 +466,7 @@ describe("computeFieldRedaction — abac obligations", () => {
   });
 
   it("reads the field when the evaluator answers satisfied", () => {
-    const r = computeFieldRedaction(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
+    const r = readUnclassified(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
       entity: "Prescription",
       evaluator: () => "satisfied",
     });
@@ -455,7 +474,7 @@ describe("computeFieldRedaction — abac obligations", () => {
   });
 
   it("redacts the field when the evaluator answers denied", () => {
-    const r = computeFieldRedaction(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
+    const r = readUnclassified(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
       entity: "Prescription",
       evaluator: () => "denied",
     });
@@ -463,7 +482,7 @@ describe("computeFieldRedaction — abac obligations", () => {
   });
 
   it("redacts the field when the evaluator throws", () => {
-    const r = computeFieldRedaction(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
+    const r = readUnclassified(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
       entity: "Prescription",
       evaluator: () => {
         throw new Error("down");
@@ -473,7 +492,7 @@ describe("computeFieldRedaction — abac obligations", () => {
   });
 
   it("leaves an unqualified field grant untouched", () => {
-    const r = computeFieldRedaction(principal("pharmacist"), ABAC_PERMS, ROLES, ["plain"], {
+    const r = readUnclassified(principal("pharmacist"), ABAC_PERMS, ROLES, ["plain"], {
       entity: "Prescription",
       evaluator: () => "denied",
     });
@@ -482,7 +501,7 @@ describe("computeFieldRedaction — abac obligations", () => {
 
   it("names the entity, the read operation and the field in the evaluation input", () => {
     const spy = recordingEvaluator("satisfied");
-    computeFieldRedaction(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
+    readUnclassified(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
       entity: "Prescription",
       evaluator: spy.fn,
     });
@@ -499,7 +518,7 @@ describe("computeFieldRedaction — abac obligations", () => {
 
   it("does not consult the evaluator when the roles check already failed", () => {
     const spy = recordingEvaluator("satisfied");
-    const r = computeFieldRedaction(principal("technician"), ABAC_PERMS, ROLES, ["mrn"], {
+    const r = readUnclassified(principal("technician"), ABAC_PERMS, ROLES, ["mrn"], {
       entity: "Prescription",
       evaluator: spy.fn,
     });
@@ -716,9 +735,9 @@ describe("the four field functions — unresolved abac attributes", () => {
 
   const FIELD = { name: "mrn", classification: "phi" as const };
 
-  it("computeFieldRedaction redacts an obligated field even with an evaluator", () => {
+  it("the unclassified read path redacts an obligated field even with an evaluator", () => {
     const spy = recordingEvaluator("satisfied");
-    const r = computeFieldRedaction(unresolved("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
+    const r = readUnclassified(unresolved("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
       entity: "Prescription",
       evaluator: spy.fn,
     });
@@ -798,7 +817,7 @@ describe("the four field functions — unresolved abac attributes", () => {
     // The regression that matters most: these fixtures carry no `abac`, so an unwired directory must
     // change nothing about them — the rule is about obligations and not about every field grant.
     const p = unresolved("pharmacist");
-    expect(computeFieldRedaction(p, PERMS, ROLES, ["narcotic_schedule"]).readable).toEqual([
+    expect(readUnclassified(p, PERMS, ROLES, ["narcotic_schedule"]).readable).toEqual([
       "narcotic_schedule",
     ]);
     expect(validateWriteMask(p, PERMS, ROLES, ["narcotic_schedule"])).toEqual({ ok: true });
@@ -848,8 +867,8 @@ describe("the four field functions — the record a policy needs", () => {
   const recordBearing: AbacEvaluator = (input) =>
     input.record === undefined ? "deferred" : "satisfied";
 
-  it("computeFieldRedaction redacts on deferred", () => {
-    const r = computeFieldRedaction(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
+  it("the unclassified read path redacts on deferred", () => {
+    const r = readUnclassified(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
       entity: "Prescription",
       evaluator: recordBearing,
     });
@@ -861,8 +880,8 @@ describe("the four field functions — the record a policy needs", () => {
     expect(r.deferred).toEqual(["mrn"]);
   });
 
-  it("computeFieldRedaction reads the field once the record is supplied", () => {
-    const r = computeFieldRedaction(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
+  it("the unclassified read path reads the field once the record is supplied", () => {
+    const r = readUnclassified(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
       entity: "Prescription",
       evaluator: recordBearing,
       record: RECORD,
@@ -945,7 +964,7 @@ describe("the four field functions — the record a policy needs", () => {
 
   it("passes the record through verbatim on the read side", () => {
     const spy = recordingEvaluator("satisfied");
-    computeFieldRedaction(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
+    readUnclassified(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
       entity: "Prescription",
       evaluator: spy.fn,
       record: RECORD,
@@ -967,7 +986,7 @@ describe("the four field functions — the record a policy needs", () => {
 
   it("omits the record key entirely when the enforcement carried none", () => {
     const spy = recordingEvaluator("satisfied");
-    computeFieldRedaction(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
+    readUnclassified(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
       entity: "Prescription",
       evaluator: spy.fn,
     });
@@ -977,13 +996,13 @@ describe("the four field functions — the record a policy needs", () => {
 
   it("carries an empty record through as a record on all four", () => {
     for (const run of [
-      (e: Parameters<typeof computeFieldRedaction>[4]): void => {
-        computeFieldRedaction(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], e);
+      (e: AbacEnforcement | undefined): void => {
+        readUnclassified(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], e);
       },
-      (e: Parameters<typeof computeFieldRedaction>[4]): void => {
+      (e: AbacEnforcement | undefined): void => {
         validateWriteMask(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], e);
       },
-      (e: Parameters<typeof computeFieldRedaction>[4]): void => {
+      (e: AbacEnforcement | undefined): void => {
         computeClassifiedFieldRedaction(
           principal("clinician"),
           CLASSIFIED_ABAC_PERMS,
@@ -993,7 +1012,7 @@ describe("the four field functions — the record a policy needs", () => {
           e,
         );
       },
-      (e: Parameters<typeof computeFieldRedaction>[4]): void => {
+      (e: AbacEnforcement | undefined): void => {
         validateClassifiedWriteMask(
           principal("clinician"),
           CLASSIFIED_ABAC_PERMS,
@@ -1015,8 +1034,8 @@ describe("the four field functions — the record a policy needs", () => {
   it("still refuses undischargeable when the abac parameter is omitted entirely", () => {
     // Pinned against the no-evaluator result: omitting the parameter is a caller with no evaluator,
     // and a record-bearing policy never gets to answer `deferred` because no evaluator is reached.
-    expect(computeFieldRedaction(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"])).toEqual(
-      computeFieldRedaction(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
+    expect(readUnclassified(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"])).toEqual(
+      readUnclassified(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
         entity: "Prescription",
       }),
     );
@@ -1084,7 +1103,7 @@ describe("the four field functions — the record a policy needs", () => {
 
   it("leaves an unobligated field grant untouched when a record is supplied", () => {
     // A record is an input to a policy, never a trigger for one.
-    const r = computeFieldRedaction(principal("pharmacist"), ABAC_PERMS, ROLES, ["plain"], {
+    const r = readUnclassified(principal("pharmacist"), ABAC_PERMS, ROLES, ["plain"], {
       entity: "Prescription",
       evaluator: () => "deferred",
       record: RECORD,
@@ -1137,7 +1156,7 @@ describe("FieldRedactionResult.deferred", () => {
   const MIXED_CLASSIFIED: readonly ClassifiedField[] = MIXED_NAMES.map((name) => ({ name }));
 
   it("is empty when no field carries an obligation", () => {
-    const r = computeFieldRedaction(
+    const r = readUnclassified(
       principal("technician"),
       PERMS,
       ROLES,
@@ -1151,7 +1170,7 @@ describe("FieldRedactionResult.deferred", () => {
   });
 
   it("is empty for a field list with no rules at all", () => {
-    expect(computeFieldRedaction(principal("technician"), PERMS, ROLES, ["a"]).deferred).toEqual(
+    expect(readUnclassified(principal("technician"), PERMS, ROLES, ["a"]).deferred).toEqual(
       [],
     );
     expect(
@@ -1161,8 +1180,8 @@ describe("FieldRedactionResult.deferred", () => {
     ).toEqual([]);
   });
 
-  it("names a deferred field in both redacted and deferred — computeFieldRedaction", () => {
-    const r = computeFieldRedaction(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
+  it("names a deferred field in both redacted and deferred — an unclassified field", () => {
+    const r = readUnclassified(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
       entity: "Prescription",
       evaluator: () => "deferred",
     });
@@ -1186,7 +1205,7 @@ describe("FieldRedactionResult.deferred", () => {
 
   it("empties on the second pass once the record is supplied, on both functions", () => {
     // The whole point of the signal: the caller re-asks with the record and the field comes back.
-    const read = computeFieldRedaction(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
+    const read = readUnclassified(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
       entity: "Prescription",
       evaluator: mixedByRecord,
       record: RECORD,
@@ -1208,7 +1227,7 @@ describe("FieldRedactionResult.deferred", () => {
 
   it("excludes a denied field, because a record cannot change a statement about the principal", () => {
     for (const r of [
-      computeFieldRedaction(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
+      readUnclassified(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
         entity: "Prescription",
         evaluator: () => "denied",
       }),
@@ -1229,14 +1248,14 @@ describe("FieldRedactionResult.deferred", () => {
   it("excludes an undischargeable field, however the deployment arrived at it", () => {
     // Three routes to one outcome — an evaluator that says so, no evaluator, and no `abac`
     // parameter at all — and none of them is a question a record could answer.
-    const byAnswer = computeFieldRedaction(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
+    const byAnswer = readUnclassified(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
       entity: "Prescription",
       evaluator: () => "undischargeable",
     });
-    const noEvaluator = computeFieldRedaction(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
+    const noEvaluator = readUnclassified(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
       entity: "Prescription",
     });
-    const noParameter = computeFieldRedaction(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"]);
+    const noParameter = readUnclassified(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"]);
     for (const r of [byAnswer, noEvaluator, noParameter]) {
       expect(r.redacted).toEqual(["mrn"]);
       expect(r.deferred).toEqual([]);
@@ -1265,7 +1284,7 @@ describe("FieldRedactionResult.deferred", () => {
     // The ordering ADR-0340 fixed, read through the new field: a roles refusal is not an obligation,
     // so it must neither be re-asked nor shown to the deployment's policy layer.
     const spy = recordingEvaluator("deferred");
-    const r = computeFieldRedaction(principal("technician"), ABAC_PERMS, ROLES, ["mrn"], {
+    const r = readUnclassified(principal("technician"), ABAC_PERMS, ROLES, ["mrn"], {
       entity: "Prescription",
       evaluator: spy.fn,
     });
@@ -1320,7 +1339,7 @@ describe("FieldRedactionResult.deferred", () => {
   it("excludes an unresolved-attribute principal's obligated field", () => {
     // `null` attributes resolve `undischargeable` before any evaluator runs, so the remedy is an
     // attribute directory and not a record — re-asking with one would change nothing.
-    const r = computeFieldRedaction(
+    const r = readUnclassified(
       { ...principal("pharmacist"), abacAttributes: null },
       ABAC_PERMS,
       ROLES,
@@ -1333,7 +1352,7 @@ describe("FieldRedactionResult.deferred", () => {
 
   it("holds deferred ⊆ redacted over a mixed fixture, on both functions", () => {
     const enforcement = { entity: "Patient", evaluator: mixed };
-    const flat = computeFieldRedaction(
+    const flat = readUnclassified(
       principal("clinician"),
       MIXED_PERMS,
       CLINICAL_ROLES,
@@ -1364,7 +1383,7 @@ describe("FieldRedactionResult.deferred", () => {
 
   it("agrees with ABAC_OUTCOMES: exactly one outcome contributes to deferred", () => {
     const contributing = ABAC_OUTCOMES.filter((outcome) => {
-      const r = computeFieldRedaction(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
+      const r = readUnclassified(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
         entity: "Prescription",
         evaluator: () => outcome,
       });
@@ -1374,7 +1393,7 @@ describe("FieldRedactionResult.deferred", () => {
   });
 
   it("is reported in field order, so a caller can zip it against the field list", () => {
-    const r = computeFieldRedaction(
+    const r = readUnclassified(
       principal("clinician"),
       {
         fields: {

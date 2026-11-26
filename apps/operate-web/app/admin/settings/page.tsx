@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { AccountCodePicker } from "@/components/AccountCodePicker";
+import { ACCOUNT_CODE_FIELDS, buildFinance, unmanagedFinance } from "@/lib/finance-settings";
 import { getSettings, putSettings } from "@/lib/api";
 
 interface NumberingRow {
@@ -79,8 +80,8 @@ export default function SettingsPage() {
   const [loading, setLoading] = useState(true);
   // The settings document as loaded. PUT /v1/admin/settings replaces the whole document, and this
   // form edits only part of it, so a save starts from what was loaded: sections and finance keys
-  // the form does not show (inventory, depreciation, COGS/GRNI account codes, notifications, audit
-  // sampling) are carried through unchanged instead of being erased by the save.
+  // the form does not show (notifications, audit sampling, and any finance key outside
+  // `lib/finance-settings.ts`) are carried through unchanged instead of being erased by the save.
   const loadedRef = useRef<Record<string, unknown>>({});
 
   useEffect(() => {
@@ -222,18 +223,9 @@ export default function SettingsPage() {
               <Text label="Payment terms (days)" value={finance.defaultPaymentTermsDays ?? ""} onChange={(v) => setD(setFinance, "defaultPaymentTermsDays", v)} />
               <Toggle label="Multi-currency enabled" checked={finance.multiCurrencyEnabled === "true"} onChange={(b) => setD(setFinance, "multiCurrencyEnabled", b ? "true" : "")} />
               <Toggle label="Prices include tax" checked={finance.pricesIncludeTax === "true"} onChange={(b) => setD(setFinance, "pricesIncludeTax", b ? "true" : "")} />
-              <AccountCodePicker label="AR account code" value={finance.arAccountCode ?? ""} onChange={(v) => setD(setFinance, "arAccountCode", v)} />
-              <AccountCodePicker label="Revenue account code" value={finance.revenueAccountCode ?? ""} onChange={(v) => setD(setFinance, "revenueAccountCode", v)} />
-              <AccountCodePicker label="AP account code" value={finance.apAccountCode ?? ""} onChange={(v) => setD(setFinance, "apAccountCode", v)} />
-              <AccountCodePicker label="Expense account code" value={finance.expenseAccountCode ?? ""} onChange={(v) => setD(setFinance, "expenseAccountCode", v)} />
-              <AccountCodePicker label="Cash / bank account code" value={finance.cashAccountCode ?? ""} onChange={(v) => setD(setFinance, "cashAccountCode", v)} />
-              <AccountCodePicker label="Tax payable (output) code" value={finance.taxPayableAccountCode ?? ""} onChange={(v) => setD(setFinance, "taxPayableAccountCode", v)} />
-              <AccountCodePicker label="Input tax code" value={finance.taxInputAccountCode ?? ""} onChange={(v) => setD(setFinance, "taxInputAccountCode", v)} />
-              <AccountCodePicker label="FX gain/loss code" value={finance.fxGainLossAccountCode ?? ""} onChange={(v) => setD(setFinance, "fxGainLossAccountCode", v)} />
-              <AccountCodePicker label="Unrealized FX code" value={finance.unrealizedFxGainLossAccountCode ?? ""} onChange={(v) => setD(setFinance, "unrealizedFxGainLossAccountCode", v)} />
-              <AccountCodePicker label="WHT receivable code" value={finance.whtReceivableAccountCode ?? ""} onChange={(v) => setD(setFinance, "whtReceivableAccountCode", v)} />
-              <AccountCodePicker label="WHT payable code" value={finance.whtPayableAccountCode ?? ""} onChange={(v) => setD(setFinance, "whtPayableAccountCode", v)} />
-              <AccountCodePicker label="Tax recoverable code" value={finance.taxRecoverableAccountCode ?? ""} onChange={(v) => setD(setFinance, "taxRecoverableAccountCode", v)} />
+              {ACCOUNT_CODE_FIELDS.map((f) => (
+                <AccountCodePicker key={f.key} label={f.label} value={finance[f.key] ?? ""} onChange={(v) => setD(setFinance, f.key, v)} />
+              ))}
               <Select label="Tax return remittance" value={finance.taxRemittancePosting ?? ""} onChange={(v) => setD(setFinance, "taxRemittancePosting", v)}
                 options={TAX_REMITTANCE_POSTING_OPTIONS} />
             </div>
@@ -241,7 +233,7 @@ export default function SettingsPage() {
               Tax return remittance: with &quot;post on mark paid&quot;, marking a tax return paid posts its remittance from the return&apos;s figures — output tax debited to tax payable, input tax credited to input tax, the net to cash (a withholding return clears WHT payable) — and a return the books, the currency or the account codes cannot serve is refused rather than posted. With manual journal (the default) marking a return paid posts nothing, and the remittance is a journal entry you write yourself. Before switching an existing workspace to posting, mark paid every filed or amended return whose remittance you already journalled, or reverse those journals, or the remittance is posted twice.
             </p>
             <p className="mt-3 text-xs text-ink-faint">
-              Account codes map to your chart of accounts (LedgerAccount): invoice issue posts AR / revenue / tax-payable; bill approval posts expense / input-tax / AP, with tax withheld from the supplier credited to WHT-payable; a completed payment settles cash against AR/AP, booking any cash-vs-balance gap to FX gain/loss. Tax a customer withheld from an invoice is debited to WHT-receivable, and confirming its WHT certificate reclasses it to tax-recoverable. A tax code that names its own GL account overrides the withholding codes. Inventory, COGS, GRNI, inventory-variance and the two depreciation codes are not on this form: set them through PUT /v1/admin/settings (a save here keeps them).
+              Account codes map to your chart of accounts (LedgerAccount): invoice issue posts AR / revenue / tax-payable; bill approval posts expense / input-tax / AP, with tax withheld from the supplier credited to WHT-payable; a completed payment settles cash against AR/AP, booking any cash-vs-balance gap to FX gain/loss. Tax a customer withheld from an invoice is debited to WHT-receivable, and confirming its WHT certificate reclasses it to tax-recoverable. A tax code that names its own GL account overrides the withholding codes. The monthly depreciation run debits depreciation expense and credits accumulated depreciation, and refuses until both are set. A goods receipt debits inventory (at standard cost) and credits GRNI, which the matched bill's approval clears; a shipment debits COGS against inventory; purchase price variance, stock adjustments and standard-cost revaluation post to inventory variance. Finance settings this form does not show are kept by a save.
             </p>
 
             <div className="mt-5 border-t border-line pt-4">
@@ -422,67 +414,6 @@ function buildDefaults(d: StrMap): Record<string, unknown> {
 
 /** Sections this form owns outright: what it shows is what is saved, so clearing a field removes it. */
 const FORM_SECTIONS = ["company", "defaults", "finance", "features", "numbering"] as const;
-
-/** The finance keys this form edits; every other finance key is carried through a save unchanged. */
-const FORM_FINANCE_KEYS: ReadonlySet<string> = new Set([
-  "accountingStandard",
-  "rounding",
-  "defaultTaxJurisdiction",
-  "defaultPaymentTermsDays",
-  "multiCurrencyEnabled",
-  "pricesIncludeTax",
-  "arAccountCode",
-  "revenueAccountCode",
-  "apAccountCode",
-  "expenseAccountCode",
-  "cashAccountCode",
-  "taxPayableAccountCode",
-  "taxInputAccountCode",
-  "fxGainLossAccountCode",
-  "unrealizedFxGainLossAccountCode",
-  "whtReceivableAccountCode",
-  "whtPayableAccountCode",
-  "taxRecoverableAccountCode",
-  "taxAccountsByJurisdiction",
-  "taxRemittancePosting",
-]);
-
-function unmanagedFinance(loaded: unknown): Record<string, unknown> {
-  if (loaded === null || typeof loaded !== "object") return {};
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(loaded as Record<string, unknown>)) {
-    if (!FORM_FINANCE_KEYS.has(k)) out[k] = v;
-  }
-  return out;
-}
-
-function buildFinance(f: StrMap): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  if (f.accountingStandard) out.accountingStandard = f.accountingStandard;
-  if (f.rounding) out.rounding = f.rounding;
-  if (f.defaultTaxJurisdiction?.trim()) out.defaultTaxJurisdiction = f.defaultTaxJurisdiction.trim();
-  if (f.defaultPaymentTermsDays?.trim() && Number.isFinite(Number(f.defaultPaymentTermsDays))) {
-    out.defaultPaymentTermsDays = Number(f.defaultPaymentTermsDays);
-  }
-  if (f.multiCurrencyEnabled === "true") out.multiCurrencyEnabled = true;
-  if (f.pricesIncludeTax === "true") out.pricesIncludeTax = true;
-  if (f.arAccountCode?.trim()) out.arAccountCode = f.arAccountCode.trim();
-  if (f.revenueAccountCode?.trim()) out.revenueAccountCode = f.revenueAccountCode.trim();
-  if (f.apAccountCode?.trim()) out.apAccountCode = f.apAccountCode.trim();
-  if (f.expenseAccountCode?.trim()) out.expenseAccountCode = f.expenseAccountCode.trim();
-  if (f.cashAccountCode?.trim()) out.cashAccountCode = f.cashAccountCode.trim();
-  if (f.taxPayableAccountCode?.trim()) out.taxPayableAccountCode = f.taxPayableAccountCode.trim();
-  if (f.taxInputAccountCode?.trim()) out.taxInputAccountCode = f.taxInputAccountCode.trim();
-  if (f.fxGainLossAccountCode?.trim()) out.fxGainLossAccountCode = f.fxGainLossAccountCode.trim();
-  if (f.unrealizedFxGainLossAccountCode?.trim()) out.unrealizedFxGainLossAccountCode = f.unrealizedFxGainLossAccountCode.trim();
-  if (f.whtReceivableAccountCode?.trim()) out.whtReceivableAccountCode = f.whtReceivableAccountCode.trim();
-  if (f.whtPayableAccountCode?.trim()) out.whtPayableAccountCode = f.whtPayableAccountCode.trim();
-  if (f.taxRecoverableAccountCode?.trim()) out.taxRecoverableAccountCode = f.taxRecoverableAccountCode.trim();
-  if (f.taxRemittancePosting === "manual_journal" || f.taxRemittancePosting === "on_mark_paid") {
-    out.taxRemittancePosting = f.taxRemittancePosting;
-  }
-  return out;
-}
 
 /** {jurisdiction, code} rows ⇄ the taxAccountsByJurisdiction record. */
 function jurisdictionRowsToMap(rows: readonly JurisdictionRow[]): Record<string, string> {

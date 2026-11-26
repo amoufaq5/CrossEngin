@@ -48,7 +48,11 @@
  * unsafe direction, from a plausible reading of one line.
  */
 
-import { deriveTenantCursorKey, parseCursorEncryptionSecret } from "@crossengin/crypto";
+import {
+  ColumnSecretRefused,
+  deriveTenantCursorKey,
+  parseCursorEncryptionSecret,
+} from "@crossengin/crypto";
 import { resolvedClassifiedFields, type Manifest } from "@crossengin/kernel";
 import {
   buildCursorSealer,
@@ -131,7 +135,7 @@ export function buildCursorKeySource(
   rawSecret: string,
   opts: { readonly generation?: number } = {},
 ): CursorKeySource {
-  const secret = parseCursorEncryptionSecret(rawSecret);
+  const secret = parseCursorSecretNamingItsConsumers(rawSecret);
   const generation = opts.generation;
   const cache = new Map<string, Uint8Array>();
   return (tenantId: string): Uint8Array => {
@@ -148,6 +152,39 @@ export function buildCursorKeySource(
     cache.set(tenantId, derived);
     return derived;
   };
+}
+
+/**
+ * The flag that decouples the AI tenant pseudonym from this secret (ADR-0461). Spelled here and
+ * not imported from `ai-tenant-pseudonym.ts`, which imports this module, so the import would be a
+ * cycle over a `const`; a test asserts the two spellings agree.
+ */
+const AI_PSEUDONYM_FLAG_FOR_REFUSAL = "--ai-tenant-pseudonym";
+
+/**
+ * `parseCursorEncryptionSecret`, with a refusal that names the **variable** and **both** of its
+ * consumers (ADR-0481). The crypto package's label is "list-cursor encryption secret", which names
+ * one role and no variable — while since ADR-0456 the same value also keys the AI tenant pseudonym,
+ * so an operator reading only "list-cursor" would not know a weak secret also stops the pseudonym,
+ * nor which variable to change. Wrapped at the call site rather than by editing the crypto label,
+ * whose known-answer tests pin that wording. The refusal reason is kept, so a caller keying on it
+ * is unaffected; nothing about the secret's value is added.
+ */
+export function parseCursorSecretNamingItsConsumers(rawSecret: string): Uint8Array {
+  try {
+    return parseCursorEncryptionSecret(rawSecret);
+  } catch (err) {
+    if (!(err instanceof ColumnSecretRefused)) throw err;
+    const marker = `(${err.reason}): `;
+    const at = err.message.indexOf(marker);
+    const detail = at === -1 ? err.message : err.message.slice(at + marker.length);
+    throw new ColumnSecretRefused(
+      err.reason,
+      detail,
+      `${CURSOR_ENCRYPTION_SECRET_VAR} (it keys list-cursor sealing and, unless ` +
+        `${AI_PSEUDONYM_FLAG_FOR_REFUSAL} off, the AI tenant pseudonym)`,
+    );
+  }
 }
 
 export interface CursorSealingResolution {

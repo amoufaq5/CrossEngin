@@ -258,7 +258,11 @@ export interface UnreadableRequestRow {
  * the three methods have three different audiences (a scheduler, an HTTP route, an audit sweep),
  * which one callback on the store would merge.
  */
-export type UnreadableRowReporter = (row: UnreadableRequestRow) => void;
+export type UnreadableRequestRowReporter = (row: UnreadableRequestRow) => void;
+// Renamed from `UnreadableRowReporter` (ADR-0477): `kernel-pg` exports a type of that name over
+// `UnreadableRow {identity, detail}`, both are re-exported with `export *`, and `node.ts` imports
+// from both packages — so one name meant two incompatible types depending on which import a reader
+// followed. The field name `requestId` stays, for the reason the comment on `readRequestRows` gives.
 
 /**
  * A page into requests: every row that can be represented, and a report for every row that cannot.
@@ -291,7 +295,7 @@ export type UnreadableRowReporter = (row: UnreadableRequestRow) => void;
  */
 function readRequestRows(
   rows: readonly Record<string, unknown>[],
-  onUnreadable: UnreadableRowReporter,
+  onUnreadable: UnreadableRequestRowReporter,
 ): readonly GdprDeletionRequest[] {
   return readRows(
     rows,
@@ -626,7 +630,7 @@ export class PostgresDeletionRequestStore {
    * required parameter cannot follow an optional one, and the order is what the requirement costs.
    */
   async dueForExecution(
-    onUnreadable: UnreadableRowReporter,
+    onUnreadable: UnreadableRequestRowReporter,
     limit = 10,
     grace?: DeletionGraceGate,
   ): Promise<readonly GdprDeletionRequest[]> {
@@ -671,7 +675,7 @@ export class PostgresDeletionRequestStore {
    */
   async stranded(
     olderThan: string,
-    onUnreadable: UnreadableRowReporter,
+    onUnreadable: UnreadableRequestRowReporter,
     limit = 50,
   ): Promise<readonly GdprDeletionRequest[]> {
     return this.conn.transaction(async (tx) => {
@@ -763,6 +767,36 @@ export class PostgresDeletionRequestStore {
   }
 
   /**
+   * `completed` requests whose completion was recorded **after** their deadline, newest first
+   * (ADR-0477).
+   *
+   * `rejectedAfterDeadline`'s sibling for the other answer column, and the half the Article 12(3)
+   * sweep was missing. A late completion used to be reported only from inside `auditCompleted`'s
+   * walk, which has two bounds that made it no answer at all on most deployments: it reads the
+   * newest 100 completions and nothing older, and it runs only under
+   * `--deletion-audit-every-ticks`, which is off by default — while the deadline pass runs hourly by
+   * default and asked about every other breach shape. So a late completion on a default deployment
+   * was reported by nothing.
+   *
+   * A comparison between two **stored** columns, like its sibling, so it is a historical audit and
+   * not a queue; `completed_at IS NULL` cannot satisfy `>` and is excluded by the predicate, which is
+   * correct because the contract refuses a completed row without it (the row would be unreadable).
+   */
+  async completedAfterDeadline(limit = 100): Promise<DeadlineRequestPage> {
+    const bounded = Math.max(1, Math.min(500, Math.trunc(limit)));
+    return this.conn.transaction(async (tx) => {
+      await tx.query("SELECT set_config('app.platform_audit', 'on', true)");
+      const result = await tx.query<Record<string, unknown>>(
+        `SELECT ${REQUEST_COLUMNS.join(", ")} FROM ${this.table}
+          WHERE status = 'completed' AND completed_at > deadline_at
+          ORDER BY completed_at DESC, request_id LIMIT $1`,
+        [bounded],
+      );
+      return deadlineRequestPage(result.rows);
+    });
+  }
+
+  /**
    * `completed` requests that name a tombstone, newest first — the audit's input (ADR-0323).
    *
    * Every completed request names one, because the contract requires it and `rowToDeletionRequest`
@@ -775,7 +809,7 @@ export class PostgresDeletionRequestStore {
    * checked, which is a silence indistinguishable from a clean audit.
    */
   async completedWithTombstone(
-    onUnreadable: UnreadableRowReporter,
+    onUnreadable: UnreadableRequestRowReporter,
     limit = 100,
   ): Promise<readonly GdprDeletionRequest[]> {
     return this.conn.transaction(async (tx) => {

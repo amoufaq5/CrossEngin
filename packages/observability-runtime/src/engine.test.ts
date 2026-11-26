@@ -10,7 +10,19 @@ import {
 import { KillSwitchSchema } from "@crossengin/feature-flags";
 import type { AlertPolicy, Slo } from "@crossengin/observability";
 import { FixedClock } from "./clock.js";
+import { DEFAULT_BURN_RATE_THRESHOLDS } from "./burn-rate.js";
+import type { DeclarationErrorSink, DeclarationFailure } from "./enforcement.js";
 import { SloEnforcementEngine, type SloRegistration } from "./engine.js";
+
+/**
+ * A recording sink, so no engine in this file is built with a silent reporter: the option is
+ * required (ADR-0483), and a test that expects no reported failure can read this list.
+ */
+const reportedDeclarationErrors: { error: unknown; failure: DeclarationFailure }[] = [];
+const recordDeclarationError: DeclarationErrorSink = (error, failure) => {
+  reportedDeclarationErrors.push({ error, failure });
+};
+void reportedDeclarationErrors;
 
 const SURFACE = "POST /v1/orders";
 const SYSTEM_ACTOR = "00000000-0000-0000-0000-000000000001";
@@ -37,6 +49,7 @@ const registration: SloRegistration = {
 
 function makeEngine(clock: FixedClock, registrations: readonly SloRegistration[] = [registration]): SloEnforcementEngine {
   return new SloEnforcementEngine({
+    onDeclarationError: recordDeclarationError,
     alertPolicy: policy,
     systemActorUserId: SYSTEM_ACTOR,
     registrations,
@@ -196,7 +209,7 @@ function engineWith(
     registrations: [registration],
     clock,
     declarer,
-    ...(onDeclarationError !== undefined ? { onDeclarationError } : {}),
+    onDeclarationError: onDeclarationError ?? recordDeclarationError,
   });
 }
 
@@ -288,6 +301,7 @@ describe("SloEnforcementEngine — incident ids come from the declarer", () => {
     };
     const clock = new FixedClock(BASE);
     const engine = new SloEnforcementEngine({
+      onDeclarationError: recordDeclarationError,
       alertPolicy: policy,
       systemActorUserId: SYSTEM_ACTOR,
       registrations: [registration, { slo: other, category: "availability" }],
@@ -432,6 +446,7 @@ describe("SloEnforcementEngine — an adopted breach can recover its kill switch
             },
           };
     const restarted = new SloEnforcementEngine({
+      onDeclarationError: recordDeclarationError,
       alertPolicy: policy,
       systemActorUserId: SYSTEM_ACTOR,
       registrations: [registration],
@@ -815,6 +830,7 @@ describe("SloEnforcementEngine — a recovered breach releases its kill switch (
     const clock = new FixedClock(BASE);
     const released: { id: string }[] = [];
     const engine = new SloEnforcementEngine({
+      onDeclarationError: recordDeclarationError,
       alertPolicy: policy,
       systemActorUserId: SYSTEM_ACTOR,
       registrations: [{ slo, category: "availability" }],
@@ -847,6 +863,36 @@ describe("SloEnforcementEngine — a recovered breach releases its kill switch (
 
     expect(() => engineFor(new FixedClock(BASE), [], "absent", { killSwitchTtlMs: 59_999 })).toThrow(
       /killSwitchTtlMs/,
+    );
+  });
+});
+
+describe("SloEnforcementEngine — construction (ADR-0483)", () => {
+  it("refuses at compile time to be built without a declaration-error sink", () => {
+    // `onDeclarationError` is required: an engine built without it failed every reported step
+    // in silence. The directive is the fence — `tsconfig.typecheck.json` evaluates it (ADR-0307).
+    // @ts-expect-error onDeclarationError is required
+    const engine = new SloEnforcementEngine({
+      alertPolicy: policy,
+      systemActorUserId: SYSTEM_ACTOR,
+      registrations: [registration],
+    });
+    expect(engine).toBeInstanceOf(SloEnforcementEngine);
+  });
+
+  it("names the grades of the thresholds it actually runs on, not the package defaults", () => {
+    // Both thresholds re-graded to one severity: the getter de-duplicates.
+    const custom = DEFAULT_BURN_RATE_THRESHOLDS.map((t) => ({ ...t, severity: "sev1" as const }));
+    const engine = new SloEnforcementEngine({
+      onDeclarationError: recordDeclarationError,
+      alertPolicy: policy,
+      systemActorUserId: SYSTEM_ACTOR,
+      registrations: [registration],
+      thresholds: custom,
+    });
+    expect(engine.declaredSeverities).toEqual(["sev1"]);
+    expect(makeEngine(new FixedClock(BASE)).declaredSeverities).toEqual(
+      [...new Set(DEFAULT_BURN_RATE_THRESHOLDS.map((t) => t.severity))],
     );
   });
 });

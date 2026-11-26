@@ -815,12 +815,19 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
     options.foreignTokenScopes !== undefined
       ? withForeignPlatformRolesDropped(wiring.principalResolver, options.foreignTokenScopes)
       : wiring.principalResolver;
-  const withAttributes =
-    options.abac?.attributeDirectory !== undefined
-      ? withAbacAttributes(scopesTrimmed, options.abac.attributeDirectory)
+  // ADR-0479: the revocation check runs **first** (innermost after the scope trim) and the
+  // attribute decoration outside it, so a revoked principal is refused after one directory call and
+  // is never handed attributes, and an active one costs two calls of which the second is a cache hit.
+  const revocationChecked =
+    options.sessionRevocation !== undefined
+      ? withMembershipRevocationCheck(
+          scopesTrimmed,
+          options.sessionRevocation.directory,
+          options.sessionRevocation.onRefused,
+        )
       : scopesTrimmed;
   /*
-   * The revocation check wraps **outside** the attribute decoration.
+   * The revocation check used to wrap **outside** the attribute decoration.
    *
    * **Both clauses of what this comment used to claim for that are false**, measured by running the
    * built modules and counting the directory calls (ADR-0398). It read *"so a refused principal is
@@ -830,11 +837,9 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
    * revocation check look — and call `attributesFor` a second time. Shipped order: two calls, the
    * second a cache hit. Reversed: one. Nothing is "never reached"; it is reached first.
    *
-   * Reversing it would be strictly better — one directory call, and `withAbacAttributes`' refusal
-   * pass-through arm would stop being dead code — and it is deliberately **not** done here, because
-   * the ordering is latent (it needs `--abac-policy` *and* `--credential-login` together) and a
-   * composition change argued from a corrected comment deserves its own increment rather than
-   * riding on one. Recorded as an open question instead.
+   * Reversed in ADR-0479, which is the increment this paragraph asked for: the revocation check is
+   * now inside, so a revoked principal costs one directory call and `withAbacAttributes`' refusal
+   * pass-through arm is the live path for it. The ordering below is the shipped one.
    *
    * Two declarations and not one: the directory arrives under `--abac-policy` and the gate under
    * `--credential-login`, so a deployment can have either, both or neither. `sessionRevocation`
@@ -842,13 +847,9 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
    * a login and no ABAC policy must still get the check, and that is the shipped compose.
    */
   const principalResolver =
-    options.sessionRevocation !== undefined
-      ? withMembershipRevocationCheck(
-          withAttributes,
-          options.sessionRevocation.directory,
-          options.sessionRevocation.onRefused,
-        )
-      : withAttributes;
+    options.abac?.attributeDirectory !== undefined
+      ? withAbacAttributes(revocationChecked, options.abac.attributeDirectory)
+      : revocationChecked;
   const standingChecked =
     options.sessionStanding !== undefined
       ? withSessionStandingCheck(principalResolver, options.sessionStanding)

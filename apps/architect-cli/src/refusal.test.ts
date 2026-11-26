@@ -147,6 +147,50 @@ describe("classifyManifestEditRefusal — encryption weakening", () => {
   });
 });
 
+describe("classifyManifestEditRefusal — a classification contributed by a trait", () => {
+  function withTrait(classification: string | undefined, traitName = "patient_identity"): Manifest {
+    return ManifestSchema.parse({
+      manifestVersion: "1.0",
+      meta: { name: "Fixture", slug: "fixture-pack", version: "1.0.0" },
+      traits: [
+        {
+          name: traitName,
+          fields: [
+            {
+              name: "mrn",
+              type: { kind: "text", maxLength: 64 },
+              ...(classification !== undefined ? { classification } : {}),
+            },
+          ],
+        },
+      ],
+      entities: [
+        { name: "Patient", traits: ["auditable", traitName], fields: [{ name: "label", type: { kind: "text", maxLength: 64 } }] },
+      ],
+    });
+  }
+
+  it("refuses phi → internal on a trait field, which a raw read of entity.fields never saw", () => {
+    expect(classifyManifestEditRefusal(withTrait("phi"), withTrait("internal"))).toBe(
+      "weaken_encryption_below_pack_minimum",
+    );
+    expect(classifyManifestEditRefusal(withTrait("regulated"), withTrait(undefined))).toBe(
+      "weaken_encryption_below_pack_minimum",
+    );
+  });
+
+  it("allows phi → regulated and raising a trait field to phi", () => {
+    expect(classifyManifestEditRefusal(withTrait("phi"), withTrait("regulated"))).toBeNull();
+    expect(classifyManifestEditRefusal(withTrait("internal"), withTrait("phi"))).toBeNull();
+  });
+
+  it("compares each side against its own traits, so a renamed trait carrying the same field is still compared", () => {
+    expect(classifyManifestEditRefusal(withTrait("phi", "identity_a"), withTrait("pii", "identity_b"))).toBe(
+      "weaken_encryption_below_pack_minimum",
+    );
+  });
+});
+
 describe("classifyManifestEditRefusal — new manifests + benign edits", () => {
   it("returns null when there is no current manifest (nothing to remove)", () => {
     const after = manifest({

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { isPostingRefused } from "./posting-period.js";
+import { isPostingRefused, PostingRefused } from "./posting-period.js";
 import { InMemoryEntityStore } from "./store.js";
 import {
   applicableTaxRules,
@@ -82,7 +82,13 @@ describe("applicableTaxRules", () => {
 });
 
 describe("determineLines", () => {
-  const ctx = { side: "sales" as const, jurisdictionCode: "UK", date: "2026-06-15", codeLabel: (id: string) => id };
+  const ctx = {
+    side: "sales" as const,
+    jurisdictionCode: "UK",
+    date: "2026-06-15",
+    codeLabel: (id: string) => id,
+    isWithholding: (id: string) => id === "wht",
+  };
   const refusal = (fn: () => unknown): { status: number; error: string } => {
     try {
       fn();
@@ -138,6 +144,27 @@ describe("determineLines", () => {
     const line = [{ net: 100, taxCodeId: "vat", flatRatePct: 0 }];
     expect(determineLines({ ...ctx, lines: line, applicable: rc }).rates.get("vat")).toEqual({ rate: 0, selfAssessed: false });
     expect(determineLines({ ...ctx, side: "purchase", lines: line, applicable: rc }).rates.get("vat")).toEqual({ rate: 20, selfAssessed: true });
+  });
+
+  it("refuses a reverse-charge rule on a withholding code on both sides, naming the code and jurisdiction", () => {
+    const rc = [rule({ taxCodeId: "wht", appliesTo: "both", reverseCharge: true })];
+    const line = [{ net: 100, taxCodeId: "wht", flatRatePct: 0 }];
+    for (const side of ["sales", "purchase"] as const) {
+      let caught: unknown = null;
+      try {
+        determineLines({ ...ctx, side, lines: line, applicable: rc });
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeInstanceOf(PostingRefused);
+      const r = caught as PostingRefused;
+      expect([r.status, r.error]).toEqual([409, "tax_rule_reverse_charge_withholding"]);
+      expect(r.detail).toContain("'wht'");
+      expect(r.detail).toContain("'UK'");
+    }
+    // The same rule on a non-withholding code is the ordinary reverse charge, unaffected.
+    const ok = determineLines({ ...ctx, side: "purchase", lines: [{ net: 100, taxCodeId: "vat", flatRatePct: 0 }], applicable: [rule({ appliesTo: "both", reverseCharge: true })] });
+    expect(ok.rates.get("vat")).toEqual({ rate: 20, selfAssessed: true });
   });
 });
 
@@ -259,6 +286,26 @@ describe("recognition with a declared jurisdiction", () => {
     const aloneLines = await postedLines(alone.store);
     expect(aloneLines.some((l) => String(l["description"]).startsWith("Withholding"))).toBe(false);
     expect(aloneLines.find((l) => l["description"] === "Revenue")?.["credit"]).toBe(100);
+  });
+
+  it("refuses a reverse-charge rule on a coded withholding line through the effect, writing nothing (ADR-0480)", async () => {
+    // `determineLines`' own test hands it `isWithholding`; this one proves `determineDocumentTax`
+    // derives it from the code row's `kind`, which is the half a stubbed reader cannot fence.
+    const { store, inv } = await seed({ lineCode: "wht", total: 100 });
+    const uk = (await store.list(TENANT, "TaxJurisdiction"))[0]!;
+    await store.create(TENANT, "TaxCode", { id: "wht", code: "WHT5", rate_pct: 5, kind: "withholding", is_active: true });
+    await store.create(TENANT, "TaxRule", { jurisdiction_id: uk["id"], tax_code_id: "wht", applies_to: "sales", rate_pct: 5, reverse_charge: true, effective_from: "2020-01-01" });
+    expect(await refusalOf(send(invoiceEffect("UK"), store, inv))).toEqual({ status: 409, error: "tax_rule_reverse_charge_withholding" });
+    expect(await store.list(TENANT, "JournalEntry")).toHaveLength(0);
+    // The same rule on a non-withholding code is the ordinary reverse charge and is not refused here.
+    await store.update(TENANT, "TaxCode", "wht", { kind: "vat" });
+    let error: string | null = null;
+    try {
+      await send(invoiceEffect("UK"), store, inv);
+    } catch (err) {
+      error = isPostingRefused(err) ? err.error : String(err);
+    }
+    expect(error).not.toBe("tax_rule_reverse_charge_withholding");
   });
 
   it("posts exactly as before when the tenant declares no jurisdiction", async () => {

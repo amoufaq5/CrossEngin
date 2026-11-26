@@ -312,7 +312,7 @@ function RecordDetail({ entity, id }: { entity: UiEntitySchema; id: string }) {
         )}
 
         {record !== null && !editing && reverseReferences(schema, entity.name).map((rel) => (
-          <RelatedRecords key={`${rel.entity.name}.${rel.field.name}`} rel={rel} parentId={id} schema={schema} />
+          <RelatedRecords key={`${rel.entity.name}.${rel.field.name}`} rel={rel} parentId={id} />
         ))}
 
         {record !== null && !editing && (entity.associations ?? []).map((assoc) => (
@@ -340,11 +340,9 @@ function CountBadge({ label }: { label: string }) {
 function RelatedRecords({
   rel,
   parentId,
-  schema,
 }: {
   rel: ReverseReference;
   parentId: string;
-  schema: ReturnType<typeof useSchema>["schema"];
 }) {
   const { entity: child, field } = rel;
   const [rows, setRows] = useState<ReadonlyArray<Record<string, unknown>>>([]);

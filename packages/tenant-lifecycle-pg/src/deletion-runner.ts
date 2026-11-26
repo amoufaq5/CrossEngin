@@ -9,7 +9,7 @@ import { deletionRefusalDisposition, formatRefusalReasons } from "./deletion-ret
 import {
   DeletionRequestCommittedUnreadable,
   type PostgresDeletionRequestStore,
-  type UnreadableRowReporter,
+  type UnreadableRequestRowReporter,
 } from "./deletion-request-store.js";
 
 /**
@@ -46,9 +46,13 @@ import {
  * before anything is destroyed (a confined role, a missing table) releases the request back to
  * `verified` with the refusal recorded, so it is retried without the data subject resubmitting; a
  * cause that is the **request's** or the tenant's (an empty scope, a caller's body), or one raised
- * after the erasure has begun deleting — every `DeletionPipelineAborted` — rejects it, as every
- * refusal did before. Anything *else* thrown — a connection lost at commit time — is genuinely unknown, and only
- * that gets the open-ended `aborted`. Found live twice: a tenant with no schema of its own refused
+ * after the erasure has begun deleting, rejects it, as every refusal did before. That is every
+ * `DeletionPipelineAborted` but one: `preflight/preflight_failed` is thrown (a throw inside the
+ * preflight may leave the transaction aborted, so it cannot be returned for a COMMIT) and raised
+ * before the first `DELETE`, so it releases (ADR-0477). The map decides, not the exception's type.
+ * A transaction that never opened is `connect/owner_connection_unavailable`, returned rather than
+ * thrown, and releases too. Anything *else* thrown — a connection lost at commit time — is
+ * genuinely unknown, and only that gets the open-ended `aborted`. Found live twice: a tenant with no schema of its own refused
  * `assemble/scope_empty` and stranded `in_progress`; and on the confined `crossengin_app` role every
  * attempt refused `rls_would_confine_this_session` and **consumed the verified request** (ADR-0446).
  *
@@ -255,7 +259,7 @@ export interface DeletionRunnerOptions {
    * and a row the contract refused supplies neither — inventing them is the claim-with-no-evidence
    * this whole surface is about.
    */
-  readonly onUnreadableRequest: UnreadableRowReporter;
+  readonly onUnreadableRequest: UnreadableRequestRowReporter;
   /**
    * Called once a proven refusal has committed the request `rejected` — and only then — so the
    * tenant the verify route moved to `pending_deletion` is restored exactly as the synchronous route

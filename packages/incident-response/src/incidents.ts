@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { POSTMORTEM_ID_REGEX } from "./postmortems.js";
 import { SeveritySchema, profileFor } from "./severities.js";
 import {
   RoleAssignmentSetSchema,
@@ -266,7 +267,14 @@ export const IncidentRecordSchema = z
     breachDataClasses: z
       .array(z.enum(["pii", "phi", "regulated", "commercial_sensitive"]))
       .default([]),
-    postmortemId: z.string().min(1).nullable().default(null),
+    // The postmortem's own id shape, not any non-empty string: a citation the postmortem table
+    // could never hold is not a citation (ADR-0483). Shape only — whether the postmortem exists is
+    // a store question this contract cannot answer.
+    postmortemId: z
+      .string()
+      .regex(POSTMORTEM_ID_REGEX, { message: "postmortemId must match PM-YYYY-NNNN" })
+      .nullable()
+      .default(null),
     /**
      * The automated signal this incident was declared for, and the idempotency key for declaring
      * it. An SLO burn loop or an integrity proof holds its open incidents in memory, so a restart

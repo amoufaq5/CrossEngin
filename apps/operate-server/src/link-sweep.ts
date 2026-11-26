@@ -5,6 +5,22 @@ import type { Manifest } from "@crossengin/kernel/manifest";
  * The structural capability the sweep needs: prune one relation's dangling
  * association links. `PostgresEntityStore.pruneDanglingLinks` satisfies it; the
  * column store doesn't (its join-table FKs cascade, so it never dangles).
+ *
+ * **The read order and the writer premise it needs** (ADR-0481; ADR-0407's survey found this
+ * comparison right and its reason written nowhere). The implementation reads the links first and
+ * the two record-id sets second, in one READ COMMITTED transaction — so one transaction and not one
+ * snapshot — and deletes every link whose endpoints the *later* read did not find. That is the safe
+ * order, the containing side read second: a record created in the window is in the set it is
+ * compared against, and a link created in the window is not in the set being pruned. Reversed, the
+ * sweep would delete links whose records were created between the two reads.
+ *
+ * What the order cannot supply is the premise it rests on: that a link is written only for records
+ * that already exist. **No writer establishes that.** `PostgresEntityStore.link` is a bare `INSERT`
+ * and the association route calls it without reading either record, so a client that links a
+ * record id and then creates the record leaves a link that is "dangling" for exactly that interval,
+ * and a sweep landing inside it deletes a link the client meant. Bounded by the sweep's cadence and
+ * by clients writing in that order; stated here rather than fixed, because the fix is on the write
+ * side (`association.ts` and the store), not in this sweep.
  */
 export interface DanglingLinkPruner {
   pruneDanglingLinks(

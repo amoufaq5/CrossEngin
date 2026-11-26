@@ -9,11 +9,13 @@ import {
   formatReplayReport,
   runReplaySections,
   scopeRefusal,
+  selectReplaySubsystems,
   subsystemsServedBy,
   summarizeReplay,
   type ReplayCoverage,
   type ReplaySection,
   type ReplaySubsystem,
+  type ReplaySubsystemRunner,
 } from "./replay.js";
 import type { PgConnection } from "@crossengin/kernel-pg";
 
@@ -205,5 +207,66 @@ describe("the subsystem list", () => {
       "dr", "slo", "access_reviews", "gateway", "incidents", "workflow",
     ];
     expect([...REPLAY_SUBSYSTEMS].sort()).toEqual([...expected].sort());
+  });
+});
+
+describe("selectReplaySubsystems (ADR-0483)", () => {
+  const stub: ReplaySubsystemRunner = {
+    run: async () => ({ complete: true, scanned: 0, refusal: null, findings: [] }),
+  };
+  // `node.ts`'s wiring today: five runners, no `workflow`.
+  const wired: Partial<Record<ReplaySubsystem, ReplaySubsystemRunner>> = {
+    dr: stub,
+    slo: stub,
+    access_reviews: stub,
+    gateway: stub,
+    incidents: stub,
+  };
+
+  it("leaves an unwired subsystem out of the default and names it in one info line", () => {
+    const sel = selectReplaySubsystems([], wired, null);
+    expect(sel.selected).toEqual(["dr", "slo", "access_reviews", "gateway", "incidents"]);
+    expect(sel.omitted).toEqual([{ subsystem: "workflow", reason: "no_runner_wired" }]);
+    expect(sel.info).toBe(
+      "[replay] default selection: dr, slo, access_reviews, gateway, incidents; not selected: workflow (no runner is wired in this build) — name one with --subsystem to see its refusal",
+    );
+  });
+
+  it("leaves out what the chosen scope cannot serve, so `--tenant` alone can exit 0", async () => {
+    const sel = selectReplaySubsystems([], wired, TENANT);
+    expect(sel.selected).toEqual(["dr", "slo", "access_reviews", "gateway"]);
+    expect(sel.omitted.map((o) => `${o.subsystem}:${o.reason}`)).toEqual([
+      "incidents:scope_cannot_serve",
+      "workflow:no_runner_wired",
+    ]);
+    const report = summarizeReplay(await runReplaySections(conn, TENANT, sel.selected, wired, 10));
+    expect(report.ok).toBe(true);
+    // Control: the old default — every subsystem — exits non-zero on the same healthy build.
+    const old = summarizeReplay(await runReplaySections(conn, TENANT, REPLAY_SUBSYSTEMS, wired, 10));
+    expect(old.ok).toBe(false);
+  });
+
+  it("runs an explicit request as asked, so an unwired one still refuses and exits 1", async () => {
+    const sel = selectReplaySubsystems(["workflow", "dr"], wired, TENANT);
+    expect(sel).toEqual({ selected: ["workflow", "dr"], omitted: [], info: null });
+    const report = summarizeReplay(await runReplaySections(conn, TENANT, sel.selected, wired, 10));
+    expect(report.ok).toBe(false);
+    expect(report.sections[0]?.refusal).toMatch(/no runner wired/);
+  });
+
+  it("prints nothing when nothing is omitted", () => {
+    const all = Object.fromEntries(REPLAY_SUBSYSTEMS.map((s) => [s, stub])) as Record<ReplaySubsystem, ReplaySubsystemRunner>;
+    expect(selectReplaySubsystems([], all, null)).toEqual({
+      selected: [...REPLAY_SUBSYSTEMS],
+      omitted: [],
+      info: null,
+    });
+  });
+
+  it("never selects nothing, because an empty report reads as ok having read nothing", async () => {
+    const sel = selectReplaySubsystems([], {}, PLATFORM);
+    expect(sel.selected).toEqual([...REPLAY_SUBSYSTEMS]);
+    expect(summarizeReplay(await runReplaySections(conn, PLATFORM, sel.selected, {}, 10)).ok).toBe(false);
+    expect(summarizeReplay([]).ok).toBe(true); // why the floor exists
   });
 });

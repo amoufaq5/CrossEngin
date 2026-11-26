@@ -176,6 +176,12 @@ export function determineLines(input: {
   readonly date: string;
   readonly codeLabel: (codeId: string) => string;
   readonly mayDefault?: (codeId: string) => boolean;
+  /**
+   * Whether a code is a withholding code (`TaxCode.kind`). **Required**, because the one decision it
+   * drives — refusing a reverse-charge rule over a withholding code — is the kind an optional input
+   * defaulting to "not withholding" would silently skip.
+   */
+  readonly isWithholding: (codeId: string) => boolean;
 }): { readonly lines: readonly DeterminationLine[]; readonly rates: ReadonlyMap<string, DeterminedCodeRate> } {
   const { applicable, side, jurisdictionCode, date } = input;
   const mayDefault = input.mayDefault ?? (() => true);
@@ -221,6 +227,21 @@ export function determineLines(input: {
       );
     }
     const rule = forCode[0]!;
+    // A reverse charge moves who accounts for a *consumption* tax: the seller charges none, the buyer
+    // self-assesses. Withholding is not that — it is the payer keeping back part of the price for the
+    // authority — so reading a withholding code's reverse-charge rule as rate 0 (sales) or
+    // self-assessed (purchase) dropped the withholding with nothing saying so (ADR-0466 Q5). There is
+    // no reading of the pair this module could post honestly, so it refuses before anything is
+    // written: the effect throws inside the document's transaction and the write rolls back.
+    if (rule.reverseCharge && input.isWithholding(code)) {
+      throw refused(
+        409,
+        "tax_rule_reverse_charge_withholding",
+        `tax code '${input.codeLabel(code)}' is a withholding code, and its rule in jurisdiction '${jurisdictionCode}' ` +
+          `in force for ${side} on ${date} is marked reverse_charge; a reverse charge does not apply to withholding, ` +
+          `so clear reverse_charge on that rule or give the line a non-withholding code`,
+      );
+    }
     if (rule.reverseCharge) {
       rates.set(code, side === "sales" ? { rate: 0, selfAssessed: false } : { rate: rule.ratePct, selfAssessed: true });
     } else {
@@ -228,6 +249,30 @@ export function determineLines(input: {
     }
   }
   return { lines, rates };
+}
+
+/**
+ * The one active jurisdiction carrying `code` in this tenant, or `null` when none, several, or only an
+ * inactive one does. The single reading of `finance.defaultTaxJurisdiction`: the determination asks
+ * it at posting time and the settings write asks it at save time (ADR-0480), so a value the save
+ * admitted is one the posting resolves.
+ */
+export async function resolveTaxJurisdiction(
+  store: Pick<EntityStore, "listPage">,
+  tenantId: string,
+  code: string,
+  jurisdictionEntity: string = DETERMINATION_FALLBACKS.jurisdictionEntity,
+): Promise<EntityRecord | null> {
+  const page = await store.listPage(tenantId, jurisdictionEntity, {
+    filters: [{ field: "code", op: "eq", value: code }],
+    sort: [],
+    limit: 2,
+    cursor: null,
+  });
+  const matches = page.records.filter((r) => r["code"] === code);
+  const jurisdiction = matches.length === 1 ? matches[0]! : null;
+  if (jurisdiction === null || jurisdiction["is_active"] === false || typeof jurisdiction["id"] !== "string") return null;
+  return jurisdiction;
 }
 
 /**
@@ -247,15 +292,8 @@ export async function determineDocumentTax(input: {
   const declared = (await c.resolveJurisdictionCode(input.tenantId))?.trim();
   if (declared === undefined || declared.length === 0) return { kind: "off" };
 
-  const page = await input.store.listPage(input.tenantId, c.jurisdictionEntity, {
-    filters: [{ field: "code", op: "eq", value: declared }],
-    sort: [],
-    limit: 2,
-    cursor: null,
-  });
-  const matches = page.records.filter((r) => r["code"] === declared);
-  const jurisdiction = matches.length === 1 ? matches[0]! : null;
-  if (jurisdiction === null || jurisdiction["is_active"] === false || typeof jurisdiction["id"] !== "string") {
+  const jurisdiction = await resolveTaxJurisdiction(input.store, input.tenantId, declared, c.jurisdictionEntity);
+  if (jurisdiction === null) {
     throw refused(
       409,
       "tax_jurisdiction_unresolved",
@@ -312,6 +350,7 @@ export async function determineDocumentTax(input: {
     date,
     codeLabel,
     mayDefault: (id) => codeRows.get(id)?.[c.codeKindField] !== c.withholdingKind,
+    isWithholding: (id) => codeRows.get(id)?.[c.codeKindField] === c.withholdingKind,
   });
   for (const code of determined.rates.keys()) {
     const row = codeRows.get(code);

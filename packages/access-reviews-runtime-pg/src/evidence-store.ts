@@ -10,14 +10,14 @@ import {
   assertScopedWriteLanded,
   readRowsWithUnreadable,
   scopeFilter,
+  textIdentity,
   type PgConnection,
+  type RowRead,
 } from "@crossengin/kernel-pg";
 
 import {
-  rowKey,
   rowToEvidence,
   type EvidenceRow,
-  type TypedRowRead,
 } from "./records.js";
 import { withTenantContext } from "./tenant-context.js";
 
@@ -376,7 +376,7 @@ ${rateChecks}`,
    */
   async listByTenant(
     tenantId: string,
-  ): Promise<TypedRowRead<AccessReviewEvidence>> {
+  ): Promise<RowRead<AccessReviewEvidence>> {
     const scope = scopeFilter(tenantId, 1);
     return withTenantContext(this.conn, tenantId, async (tx) => {
       const result = await tx.query<EvidenceRow>(
@@ -387,7 +387,7 @@ ${rateChecks}`,
         [...scope.params],
       );
       return readRowsWithUnreadable(result.rows, rowToEvidence, (row) =>
-        rowKey(row.evidence_id),
+        textIdentity(row, "evidence_id"),
       );
     });
   }

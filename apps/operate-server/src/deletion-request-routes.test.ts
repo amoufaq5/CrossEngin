@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { matchRoute, type ResolvedPrincipal } from "@crossengin/api-gateway";
 import type { Handler, HandlerInput } from "@crossengin/api-gateway-runtime";
 import type { PgConnection } from "@crossengin/kernel-pg";
-import type { TenantLifecycleState } from "@crossengin/tenant-lifecycle";
+import { VERIFICATION_METHODS, type TenantLifecycleState } from "@crossengin/tenant-lifecycle";
 import { PostgresLifecycleEventStore } from "@crossengin/tenant-lifecycle-pg";
 
 import {
@@ -19,6 +19,8 @@ import {
   TOMBSTONE_SWEEP_AUDITED_OPERATION,
   DELETION_REQUESTS_PENDING_READ_OPERATION,
   DELETION_REQUEST_DEADLINE_EXTENDED_OPERATION,
+  PRINCIPAL_NAMES_NO_PERSON_DETAIL,
+  VerifyDeletionRequestBodySchema,
   type PendingPageLike,
   type DeletionRequestEvent,
   type DeletionRequestLike,
@@ -503,6 +505,43 @@ describe("submit", () => {
     expect(res.status).toBe(401);
   });
 
+  it("refuses a credential that names no person, before any store call (ADR-0477)", async () => {
+    // A bare `key:role:tenant` api-key is a service_account on the shared placeholder id, so two
+    // such keys are one principal to the four-eyes rule: the submitter and the verifier could be
+    // two people and read as the same one, or one key reach both sides.
+    const h = harness();
+    const res = await call(h.ctx, SUBMIT, {
+      principal: principal({ principalKind: "service_account" }),
+      parsedBody: SUBMIT_BODY,
+    });
+    expect(res.status).toBe(403);
+    expect(res.body["error"]).toBe("principal_names_no_person");
+    expect(res.body["detail"]).toBe(PRINCIPAL_NAMES_NO_PERSON_DETAIL);
+    expect(String(res.body["detail"])).toContain("key:role:tenant:<principal-uuid>");
+    expect(h.submits).toEqual([]);
+    expect(h.events).toEqual([]);
+  });
+
+  it("refuses a user principal whose id is not a uuid", async () => {
+    const h = harness();
+    const res = await call(h.ctx, SUBMIT, {
+      principal: principal({ principalId: "not-a-uuid" }),
+      parsedBody: SUBMIT_BODY,
+    });
+    expect(res.status).toBe(403);
+    expect(res.body["error"]).toBe("principal_names_no_person");
+  });
+
+  it("checks the grant before the person, so a caller with no grant learns nothing else", async () => {
+    const h = harness({ submitRoles: new Set(["nobody_has_this"]) });
+    const res = await call(h.ctx, SUBMIT, {
+      principal: principal({ principalKind: "service_account" }),
+      parsedBody: SUBMIT_BODY,
+    });
+    expect(res.status).toBe(403);
+    expect(res.body["error"]).toBe("forbidden");
+  });
+
   it("does not fail the request when the audit line cannot be written", async () => {
     const errors: string[] = [];
     const h = harness({
@@ -644,6 +683,47 @@ describe("verify", () => {
     const h = harness({ verifyRoles: new Set(["compliance_officer"]) });
     const res = await call(h.ctx, VERIFY, { parsedBody: { verificationMethod: "email_link" } });
     expect(res.status).toBe(403);
+  });
+
+  it("refuses an unknown verification method as a 400 naming the allowed values (ADR-0477)", async () => {
+    const h = harness();
+    const res = await call(h.ctx, VERIFY, { parsedBody: { verificationMethod: "carrier_pigeon" } });
+    // Before: the free-string body passed, the contract refused the stored row, and the route
+    // answered a 409 illegal_transition — a statement about state for a caller's typo.
+    expect(res.status).toBe(400);
+    expect(res.body["error"]).toBe("invalid_verification_method");
+    expect(res.body["allowed"]).toEqual([...VERIFICATION_METHODS]);
+    for (const m of VERIFICATION_METHODS) expect(String(res.body["detail"])).toContain(m);
+    expect(h.transitions).toEqual([]);
+  });
+
+  it("accepts every method the contract admits and nothing it does not", () => {
+    for (const m of VERIFICATION_METHODS) {
+      expect(VerifyDeletionRequestBodySchema.safeParse({ verificationMethod: m }).success).toBe(true);
+    }
+    expect(VerifyDeletionRequestBodySchema.safeParse({ verificationMethod: "" }).success).toBe(false);
+    expect(VerifyDeletionRequestBodySchema.safeParse({}).success).toBe(false);
+  });
+
+  it("answers a body with a stray key as invalid_request, not a method refusal", async () => {
+    const h = harness();
+    const res = await call(h.ctx, VERIFY, {
+      parsedBody: { verificationMethod: "email_link", extra: 1 },
+    });
+    expect(res.status).toBe(400);
+    expect(res.body["error"]).toBe("invalid_request");
+  });
+
+  it("refuses a credential that names no person, before reading the request", async () => {
+    const h = harness({}, { readThrows: true });
+    const res = await call(h.ctx, VERIFY, {
+      principal: principal({ principalKind: "service_account" }),
+      parsedBody: { verificationMethod: "email_link" },
+    });
+    // readThrows would answer 503: the 403 shows the refusal came first.
+    expect(res.status).toBe(403);
+    expect(res.body["error"]).toBe("principal_names_no_person");
+    expect(h.transitions).toEqual([]);
   });
 });
 

@@ -4021,33 +4021,39 @@ export const META_GDPR_DELETION_REQUESTS: TableDefinition = {
       check:
         "status IN ('submitted', 'verified', 'in_progress', 'completed', 'rejected', 'deferred')",
     },
-    { name: "submitted_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    {
+      name: "submitted_at",
+      type: "TIMESTAMPTZ",
+      notNull: true,
+      default: "now()",
+      check: instantRangeCheck("submitted_at"),
+    },
     { name: "submitted_by", type: "TEXT", notNull: true },
-    { name: "deadline_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "deadline_at", type: "TIMESTAMPTZ", notNull: true, check: instantRangeCheck("deadline_at") },
     {
       name: "verification_method",
       type: "TEXT",
       check:
         "verification_method IS NULL OR verification_method IN ('email_link', 'phone_otp', 'in_app_re_authentication', 'government_id_check', 'in_person')",
     },
-    { name: "verified_at", type: "TIMESTAMPTZ" },
+    { name: "verified_at", type: "TIMESTAMPTZ", check: instantRangeCheck("verified_at") },
     /**
      * TEXT and unreferenced, for the reason ADR-0318 gave for the tombstone's actors: a deletion
      * erases the tenant's users, and `ON DELETE RESTRICT` would have made the verifier undeletable
      * *because they verified the request to delete them*. The contract has it as free text.
      */
-    { name: "verified_by", type: "TEXT" },
-    { name: "in_progress_at", type: "TIMESTAMPTZ" },
-    { name: "completed_at", type: "TIMESTAMPTZ" },
+    { name: "verified_by", type: "TEXT", check: "char_length(verified_by) >= 1" },
+    { name: "in_progress_at", type: "TIMESTAMPTZ", check: instantRangeCheck("in_progress_at") },
+    { name: "completed_at", type: "TIMESTAMPTZ", check: instantRangeCheck("completed_at") },
     {
       name: "completion_sha256",
       type: "CHAR(64)",
       check: "completion_sha256 IS NULL OR completion_sha256 ~ '^[0-9a-f]{64}$'",
     },
-    { name: "rejected_at", type: "TIMESTAMPTZ" },
-    { name: "rejected_reason", type: "TEXT" },
-    { name: "deferred_until", type: "TIMESTAMPTZ" },
-    { name: "deferral_reason", type: "TEXT" },
+    { name: "rejected_at", type: "TIMESTAMPTZ", check: instantRangeCheck("rejected_at") },
+    { name: "rejected_reason", type: "TEXT", check: "char_length(rejected_reason) >= 1" },
+    { name: "deferred_until", type: "TIMESTAMPTZ", check: instantRangeCheck("deferred_until") },
+    { name: "deferral_reason", type: "TEXT", check: "char_length(deferral_reason) >= 1" },
     /**
      * Article 12(3)'s two-further-months extension, applied to `deadline_at` **in place**, with
      * these two as its trace. Nullable with no default: a deadline still at the commitment made on
@@ -4060,8 +4066,8 @@ export const META_GDPR_DELETION_REQUESTS: TableDefinition = {
      * inform them of the extension and its reasons within one month of receipt, and this platform
      * has no mail channel, so nothing here can carry that fact.
      */
-    { name: "deadline_extended_at", type: "TIMESTAMPTZ" },
-    { name: "deadline_extension_reason", type: "TEXT" },
+    { name: "deadline_extended_at", type: "TIMESTAMPTZ", check: instantRangeCheck("deadline_extended_at") },
+    { name: "deadline_extension_reason", type: "TEXT", check: "char_length(deadline_extension_reason) >= 1" },
     {
       name: "retention_obligations",
       type: "JSONB",
@@ -4097,7 +4103,7 @@ export const META_GDPR_DELETION_REQUESTS: TableDefinition = {
       type: "INTEGER",
       check: "release_count >= 1",
     },
-    { name: "retry_not_before", type: "TIMESTAMPTZ" },
+    { name: "retry_not_before", type: "TIMESTAMPTZ", check: instantRangeCheck("retry_not_before") },
     /**
      * The tombstone that completed this request. Without it a `completed` request names no proof:
      * `completion_sha256` commits to one but a digest is not a lookup key, so the record of the
@@ -4516,7 +4522,9 @@ export const META_INCIDENTS: TableDefinition = {
     { name: "related_deployment_ids", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
     { name: "security_incident", type: "BOOLEAN", notNull: true, default: "false" },
     { name: "breach_data_classes", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
-    { name: "postmortem_id", type: "TEXT" },
+    // ADR-0483: the same pattern the postmortem table's own business key carries, so an incident
+    // cannot cite an id that table could never hold.
+    { name: "postmortem_id", type: "TEXT", check: "postmortem_id ~ '^PM-[0-9]{4}-[0-9]{4,8}$'" },
     {
       // The automated signal this incident was declared for, namespaced `signal:subject`. A
       // declarer whose open-incident state is in memory asks this column, not its own map, so a
@@ -12601,7 +12609,16 @@ export const META_AUDIT_INTEGRITY_VERDICTS: TableDefinition = {
       notNull: true,
       check: "verdict IN ('verified', 'unproven', 'compromised')",
     },
-    { name: "verified_at", type: "TIMESTAMPTZ", notNull: true },
+    {
+      // Fenced because `rowToRecord` parses it against `Iso8601` and a tenant-context session can
+      // `UPDATE` its own row here (the isolation arm is `ALL`-scope, so its `USING` is its `WITH
+      // CHECK`): `'infinity'` was storable and every read of the row then failed (ADR-0481, register
+      // P2.12b's named remainder from ADR-0374).
+      name: "verified_at",
+      type: "TIMESTAMPTZ",
+      notNull: true,
+      check: instantRangeCheck("verified_at"),
+    },
     {
       name: "anchors_checked",
       type: "INTEGER",
@@ -12658,7 +12675,14 @@ export const META_AUDIT_INTEGRITY_VERDICTS: TableDefinition = {
       type: "TEXT",
       check: "payload_sha256 IS NULL OR payload_sha256 ~ '^[0-9a-f]{64}$'",
     },
-    { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    {
+      // Read by the same mapper as `verified_at`, so fenced for the same reason (ADR-0481).
+      name: "created_at",
+      type: "TIMESTAMPTZ",
+      notNull: true,
+      default: "now()",
+      check: instantRangeCheck("created_at"),
+    },
   ],
   primaryKey: ["id"],
   indexes: [

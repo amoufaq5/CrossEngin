@@ -47,9 +47,24 @@ export type PostingPeriod =
  * covering one day is ambiguous, and the refusing reading is the one that cannot post into a closed
  * book. The period is stamped only when exactly one candidate exists; a date no period covers posts
  * with none, which is what a tenant that keeps no fiscal calendar gets.
+ *
+ * **The decision is made from the locked row, not from the list read** (ADR-0480). A period's close
+ * is a transition, and a transition holds its row `exclusive` (`getLocked`, ADR-0433) until it
+ * commits; the list read above takes no lock, so under READ COMMITTED a posting that read `open`
+ * could commit into a period whose close committed a moment later — the posting landing in a book
+ * the close had already summed. So every covering row is re-read under a `share` lock, which
+ * conflicts with the close's `exclusive`: a posting that locks first holds the close off until it
+ * commits (the close then sees the posting), and one that locks second waits for the close and reads
+ * its `closed` status, which refuses. The rows are locked in id order so two postings over the same
+ * periods take their locks in one order. A row gone by the locked read, or whose dates no longer
+ * cover the day, is no longer a candidate.
+ *
+ * The guarantee is a property of the **transaction** the caller runs in: on a store with no
+ * transaction (`getLocked` outside one) the lock ends with the call and nothing is guaranteed —
+ * which is `getLocked`'s own documented contract, inherited rather than restated.
  */
 export async function resolvePostingPeriod(
-  store: Pick<EntityStore, "listPage">,
+  store: Pick<EntityStore, "listPage" | "getLocked">,
   tenantId: string,
   date: string,
   config: PostingPeriodConfig = {},
@@ -70,23 +85,32 @@ export async function resolvePostingPeriod(
     },
     { ceiling: c.ceiling },
     (rows) => {
-      for (const p of rows) {
-        const start = typeof p[c.startField] === "string" ? (p[c.startField] as string).slice(0, 10) : null;
-        const end = typeof p[c.endField] === "string" ? (p[c.endField] as string).slice(0, 10) : null;
-        if (start !== null && end !== null && start <= day && day <= end) covering.push(p);
-      }
+      for (const p of rows) if (coversDay(p, c.startField, c.endField, day)) covering.push(p);
     },
   );
   if (!outcome.complete) {
     throw new PostingRefused(422, "period_unresolvable", "more fiscal periods cover the posting date than could be read");
   }
-  const ordinary = covering.filter((p) => p[c.adjustmentField] !== true);
-  const candidates = ordinary.length > 0 ? ordinary : covering;
+  const lockedRows: EntityRecord[] = [];
+  const ids = [...new Set(covering.map((p) => p["id"]).filter((id): id is string => typeof id === "string"))].sort();
+  for (const id of ids) {
+    const row = await store.getLocked(tenantId, c.periodEntity, id, "share");
+    if (row !== null && coversDay(row, c.startField, c.endField, day)) lockedRows.push(row);
+  }
+  const ordinary = lockedRows.filter((p) => p[c.adjustmentField] !== true);
+  const candidates = ordinary.length > 0 ? ordinary : lockedRows;
   for (const p of candidates) {
     const status = p[c.statusField];
     if (typeof status === "string" && c.lockedStates.includes(status)) return { kind: "locked", status };
   }
   return { kind: "open", periodId: candidates.length === 1 ? String(candidates[0]!["id"]) : null };
+}
+
+/** Whether a period row's `[start, end]` covers the calendar day `day` (`YYYY-MM-DD`). */
+function coversDay(p: EntityRecord, startField: string, endField: string, day: string): boolean {
+  const start = typeof p[startField] === "string" ? (p[startField] as string).slice(0, 10) : null;
+  const end = typeof p[endField] === "string" ? (p[endField] as string).slice(0, 10) : null;
+  return start !== null && end !== null && start <= day && day <= end;
 }
 
 /** Whether `period` is an adjustment period whose `[start, end]` covers `date`. */
@@ -110,9 +134,13 @@ export function isAdjustmentPeriodCovering(
  *
  * An effect runs after the write it rides on, inside its transaction, so the only way it can refuse
  * is to throw — and a bare throw is `writeTxn`'s fixed 500, which names nothing. This carries the
- * same `{status, error, detail}` a guard block does, and the detail is built only from literals and
- * server-chosen values (a state name, a date the server picked), never a value read from a record
- * the caller may not see.
+ * same `{status, error, detail}` a guard block does. The detail is built from literals,
+ * server-chosen values (a period's state) and values from the caller's own document — a posting
+ * date, a jurisdiction or tax-code label, an amount — which is what a guard block over that document
+ * carries. It used to say "only literals and server-chosen values", which the tax refusals
+ * (`tax-determination.ts`) are not (ADR-0432 Q6, ADR-0480); the rule that
+ * holds is that a refusal must never interpolate a classified field, because the detail reaches the
+ * caller verbatim.
  */
 export class PostingRefused extends Error {
   readonly status: number;
@@ -143,7 +171,7 @@ export function periodLockedDetail(status: string, date: string): string {
  * `undefined` config means the manifest keeps no fiscal calendar, and nothing is resolved.
  */
 export async function postingPeriodFor(
-  store: Pick<EntityStore, "listPage">,
+  store: Pick<EntityStore, "listPage" | "getLocked">,
   tenantId: string,
   date: string,
   config: PostingPeriodConfig | undefined,

@@ -974,3 +974,20 @@ describe("logGatewayInternalError's tag", () => {
     expect(lines[1]).toContain("answered 409 until the reservation lease lapses, then may run again");
   });
 });
+
+describe("the principal decoration order (ADR-0479)", () => {
+  // As text, because the order is a composition in one function and the behaviour it buys is
+  // asserted over the real decorations in `abac-attributes.test.ts`: a revoked principal costs one
+  // directory call and is never handed attributes. This pins that `server.ts` composes that order.
+  const src = readFileSync(new URL("./server.ts", import.meta.url), "utf8");
+
+  it("checks revocation inside the attribute decoration, and the standing check outermost", () => {
+    const revocation = src.indexOf("withMembershipRevocationCheck(\n          scopesTrimmed,");
+    const attributes = src.indexOf("withAbacAttributes(revocationChecked, options.abac.attributeDirectory)");
+    const standing = src.indexOf("withSessionStandingCheck(principalResolver, options.sessionStanding)");
+    expect(revocation).toBeGreaterThan(-1);
+    expect(attributes).toBeGreaterThan(revocation);
+    expect(standing).toBeGreaterThan(attributes);
+    expect(src).not.toContain("withMembershipRevocationCheck(\n          withAttributes,");
+  });
+});

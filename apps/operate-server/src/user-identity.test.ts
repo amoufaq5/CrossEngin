@@ -208,4 +208,144 @@ describe("userIdentityFromStore", () => {
     await resolve(ADA);
     expect(reads).toHaveLength(2);
   });
+  describe("evict", () => {
+    it("drops a cached identity so the next call reads the row again", async () => {
+      let name = "Ada";
+      const resolve = userIdentityFromStore(
+        readerOf(async () => ({ displayName: name, email: "ada@example.test" })),
+        { onError: record },
+      );
+      expect((await resolve(ADA))?.displayName).toBe("Ada");
+      name = "Ada Lovelace";
+      // Without the eviction the old name is served for the whole TTL.
+      expect((await resolve(ADA))?.displayName).toBe("Ada");
+      resolve.evict(ADA);
+      expect((await resolve(ADA))?.displayName).toBe("Ada Lovelace");
+      expect(reads).toEqual([ADA, ADA]);
+    });
+
+    it("drops a cached absence, which is the provisioning case", async () => {
+      let provisioned = false;
+      const resolve = userIdentityFromStore(
+        readerOf(async () => (provisioned ? { displayName: null, email: "bob@example.test" } : null)),
+        { onError: record },
+      );
+      expect(await resolve(BOB)).toBeNull();
+      provisioned = true;
+      resolve.evict(BOB);
+      expect(await resolve(BOB)).toEqual({ displayName: null, email: "bob@example.test" });
+    });
+
+    it("touches only the person evicted", async () => {
+      const resolve = userIdentityFromStore(
+        readerOf(async (id) => ({ displayName: id, email: `${id}@example.test` })),
+        { onError: record },
+      );
+      await resolve(ADA);
+      await resolve(BOB);
+      resolve.evict(ADA);
+      await resolve(ADA);
+      await resolve(BOB);
+      expect(reads).toEqual([ADA, BOB, ADA]);
+    });
+
+    it("does not let a read that began before the eviction repopulate the entry", async () => {
+      let release: (() => void) | undefined;
+      let name = "before";
+      const resolve = userIdentityFromStore(
+        {
+          getById: async (id) => {
+            reads.push(id);
+            const seen = name;
+            if (reads.length === 1) await new Promise<void>((r) => (release = r));
+            return { displayName: seen, email: "ada@example.test" };
+          },
+        },
+        { onError: record },
+      );
+      const racing = resolve(ADA);
+      // The write lands and evicts while the first read is still in flight.
+      name = "after";
+      resolve.evict(ADA);
+      const fresh = await resolve(ADA);
+      expect(fresh?.displayName).toBe("after");
+      release?.();
+      expect((await racing)?.displayName).toBe("before");
+      // The racing read's pre-write answer was not stored over the fresh one.
+      expect((await resolve(ADA))?.displayName).toBe("after");
+      expect(reads).toEqual([ADA, ADA]);
+    });
+
+    it("keeps the post-eviction read's in-flight slot when the pre-eviction read settles", async () => {
+      // The pre-eviction read settling must not delete the slot a newer read holds, or a third
+      // caller starts a second concurrent read instead of joining the one already in flight.
+      const gates: (() => void)[] = [];
+      const resolve = userIdentityFromStore(
+        {
+          getById: async (id) => {
+            reads.push(id);
+            await new Promise<void>((r) => gates.push(r));
+            return { displayName: "Ada", email: "ada@example.test" };
+          },
+        },
+        { onError: record },
+      );
+      const first = resolve(ADA);
+      await Promise.resolve();
+      resolve.evict(ADA);
+      const second = resolve(ADA);
+      await Promise.resolve();
+      gates[0]?.();
+      await first;
+      const third = resolve(ADA);
+      await Promise.resolve();
+      // Every gate opened, so a regression reads a third time rather than hanging.
+      for (const open of gates) open();
+      await Promise.all([second, third]);
+      expect(reads).toEqual([ADA, ADA]);
+    });
+
+    it("does not serve the pre-eviction entry stale when a read in flight at the eviction fails", async () => {
+      let fail = false;
+      let release: (() => void) | undefined;
+      const clock = fakeClock();
+      const resolve = userIdentityFromStore(
+        {
+          getById: async (id) => {
+            reads.push(id);
+            if (!fail) return { displayName: "Ada", email: "ada@example.test" };
+            await new Promise<void>((r) => (release = r));
+            throw new Error("down");
+          },
+        },
+        { onError: record, now: clock.now, ttlMs: 1_000 },
+      );
+      await resolve(ADA);
+      // The entry has lapsed, so the next read carries it as the stale fallback.
+      clock.advance(1_001);
+      fail = true;
+      const racing = resolve(ADA);
+      await Promise.resolve();
+      resolve.evict(ADA);
+      release?.();
+      expect(await racing).toBeNull();
+      expect(errors).toEqual([{ userId: ADA, servedStale: false }]);
+    });
+
+    it("does not serve the pre-eviction answer stale when the next read fails", async () => {
+      let fail = false;
+      const resolve = userIdentityFromStore(
+        readerOf(async () => {
+          if (fail) throw new Error("down");
+          return { displayName: "Ada", email: "ada@example.test" };
+        }),
+        { onError: record },
+      );
+      await resolve(ADA);
+      fail = true;
+      resolve.evict(ADA);
+      expect(await resolve(ADA)).toBeNull();
+      expect(errors).toEqual([{ userId: ADA, servedStale: false }]);
+    });
+  });
 });

@@ -10,7 +10,19 @@ import {
 import { KillSwitchSchema } from "@crossengin/feature-flags";
 import type { AlertPolicy, Slo } from "@crossengin/observability";
 import { FixedClock } from "./clock.js";
+import { DEFAULT_LATENCY_THRESHOLDS } from "./latency.js";
+import type { DeclarationErrorSink, DeclarationFailure } from "./enforcement.js";
 import { LatencySloEngine, type LatencyRegistration } from "./latency-engine.js";
+
+/**
+ * A recording sink, so no engine in this file is built with a silent reporter: the option is
+ * required (ADR-0483), and a test that expects no reported failure can read this list.
+ */
+const reportedDeclarationErrors: { error: unknown; failure: DeclarationFailure }[] = [];
+const recordDeclarationError: DeclarationErrorSink = (error, failure) => {
+  reportedDeclarationErrors.push({ error, failure });
+};
+void reportedDeclarationErrors;
 
 const SURFACE = "GET /v1/catalog";
 const SYSTEM_ACTOR = "00000000-0000-0000-0000-000000000001";
@@ -40,6 +52,7 @@ function makeEngine(
   registrations: readonly LatencyRegistration[] = [registration],
 ): LatencySloEngine {
   return new LatencySloEngine({
+    onDeclarationError: recordDeclarationError,
     alertPolicy: policy,
     systemActorUserId: SYSTEM_ACTOR,
     registrations,
@@ -166,6 +179,7 @@ class StubDeclarer implements IncidentDeclarer {
 
 function engineWith(clock: FixedClock, declarer: IncidentDeclarer): LatencySloEngine {
   return new LatencySloEngine({
+    onDeclarationError: recordDeclarationError,
     alertPolicy: policy,
     systemActorUserId: SYSTEM_ACTOR,
     registrations: [registration],
@@ -330,6 +344,7 @@ describe("LatencySloEngine — escalation and kill-switch release (M-23, ADR-041
     const clock = new FixedClock(BASE);
     const regraded: string[] = [];
     const engine = new LatencySloEngine({
+      onDeclarationError: recordDeclarationError,
       alertPolicy: policy,
       systemActorUserId: SYSTEM_ACTOR,
       registrations: [{ ...registration, escalation: { afterMs: 30 * 60_000, severity: "sev2" } }],
@@ -357,6 +372,7 @@ describe("LatencySloEngine — escalation and kill-switch release (M-23, ADR-041
   it("does not escalate a breach already opened at or above the escalation grade", async () => {
     const clock = new FixedClock(BASE);
     const engine = new LatencySloEngine({
+      onDeclarationError: recordDeclarationError,
       alertPolicy: policy,
       systemActorUserId: SYSTEM_ACTOR,
       registrations: [{ ...registration, escalation: { afterMs: 30 * 60_000, severity: "sev2" } }],
@@ -374,6 +390,7 @@ describe("LatencySloEngine — escalation and kill-switch release (M-23, ADR-041
     const released: string[] = [];
     const expiries: (string | null)[] = [];
     const engine = new LatencySloEngine({
+      onDeclarationError: recordDeclarationError,
       alertPolicy: policy,
       systemActorUserId: SYSTEM_ACTOR,
       registrations: [registration],
@@ -399,5 +416,35 @@ describe("LatencySloEngine — escalation and kill-switch release (M-23, ADR-041
     const recovered = (await engine.evaluate(clock.now()))[0];
     expect(recovered).toMatchObject({ kind: "recovered", killSwitchRelease: "released" });
     expect(released).toEqual([opened.plan.killSwitch?.id]);
+  });
+});
+
+describe("LatencySloEngine — construction (ADR-0483)", () => {
+  it("refuses at compile time to be built without a declaration-error sink", () => {
+    // @ts-expect-error onDeclarationError is required
+    const engine = new LatencySloEngine({
+      alertPolicy: policy,
+      systemActorUserId: SYSTEM_ACTOR,
+      registrations: [registration],
+    });
+    expect(engine).toBeInstanceOf(LatencySloEngine);
+  });
+
+  it("names the grades of the thresholds it actually runs on", () => {
+    const engine = new LatencySloEngine({
+      onDeclarationError: recordDeclarationError,
+      alertPolicy: policy,
+      systemActorUserId: SYSTEM_ACTOR,
+      registrations: [registration],
+      thresholds: DEFAULT_LATENCY_THRESHOLDS.map((t) => ({ ...t, severity: "sev4" as const })),
+    });
+    expect(engine.declaredSeverities).toEqual(["sev4"]);
+    const defaults = new LatencySloEngine({
+      onDeclarationError: recordDeclarationError,
+      alertPolicy: policy,
+      systemActorUserId: SYSTEM_ACTOR,
+      registrations: [registration],
+    });
+    expect(defaults.declaredSeverities).toEqual(["sev2", "sev3"]);
   });
 });

@@ -558,11 +558,12 @@ export function hasRetainedData(request: GdprDeletionRequest): boolean {
 /**
  * Where one request stands against its Article 12(3) deadline.
  *
- * Six standings over two branches, and the branch is `article12Answer`'s: while the subject is
+ * Seven standings — six over two branches, and the branch is `article12Answer`'s: while the subject is
  * waiting the **wall clock** decides, and once they have been answered a **stored instant** does. The
  * two that are not findings (`within_deadline`, `answered_in_time`) are named rather than left as an
  * absence, because a sweep's answer is the *absence* of findings and that claim can only be made
- * alongside how many requests were looked at (ADR-0323).
+ * alongside how many requests were looked at (ADR-0323). The seventh, `deadline_unstated`, sits ahead
+ * of both branches: a deadline that cannot be read decides nothing on either.
  */
 export const DEADLINE_STANDINGS = [
   /** Still waiting, and the deadline has passed. */
@@ -583,6 +584,17 @@ export const DEADLINE_STANDINGS = [
    * `answered_late` would assert a breach from a record that gives no instant.
    */
   "answer_time_unstated",
+  /**
+   * The record's `deadlineAt` is not an instant this runtime can read (ADR-0477).
+   *
+   * Reachable from a record the contract admits: `z.string().datetime({offset: true})` accepts an
+   * offset such as `+99:00` that `new Date()` answers `NaN` for, and every comparison against `NaN`
+   * is false — so before this standing existed such a request read `within_deadline` while waiting
+   * and `answered_in_time` once answered, both unreported. It is **reported** and neither breached
+   * nor meetable, for `answer_time_unstated`'s reason one field across: the record cannot say, and a
+   * sweep that cannot say must not answer as though it had looked and found compliance.
+   */
+  "deadline_unstated",
 ] as const;
 export type DeadlineStanding = (typeof DEADLINE_STANDINGS)[number];
 
@@ -625,6 +637,7 @@ export const DEADLINE_STANDING_FACTS: Readonly<Record<DeadlineStanding, Deadline
     answered_late: { breached: true, deadlineCanStillBeMet: false, reported: true },
     answered_in_time: { breached: false, deadlineCanStillBeMet: false, reported: false },
     answer_time_unstated: { breached: false, deadlineCanStillBeMet: false, reported: true },
+    deadline_unstated: { breached: false, deadlineCanStillBeMet: false, reported: true },
   });
 
 /** Whether a sweep reports this standing. One reader of the map, so no caller re-derives it. */
@@ -657,7 +670,8 @@ export interface DeadlineAssessment {
    * `lateByMs` of its own (`auditCompleted` used to subtract the same two instants inline beside a
    * late-completion predicate of its own).
    *
-   * `null` for `answer_time_unstated` alone, where there is no instant to subtract: `0` would read
+   * `null` for `answer_time_unstated` and `deadline_unstated`, where there is no instant to subtract
+   * (an unreadable answer instant reads `answer_time_unstated` too, not a `NaN`): `0` would read
    * as "answered exactly at the deadline" and `NaN` would propagate into every figure a reader
    * renders.
    */
@@ -708,6 +722,17 @@ export function assessDeadline(
   };
   const deadlineMs = new Date(request.deadlineAt).getTime();
   const answer = article12Answer(request);
+  // First, and before either branch: every comparison below is against `deadlineMs`, and a `NaN`
+  // there makes `isOverdue` false and `daysUntilDeadline` NaN, so the request fell through to
+  // `within_deadline` (or `answered_in_time`) and no sweep reported it — failing open (ADR-0477).
+  if (!Number.isFinite(deadlineMs)) {
+    return {
+      ...base,
+      standing: "deadline_unstated",
+      answeredAt: answer.kind === "answered" ? answer.at : null,
+      msPastDeadline: null,
+    };
+  }
   if (answer.kind === "unanswered") {
     const msPastDeadline = opts.now.getTime() - deadlineMs;
     if (isOverdue(request, opts.now)) {
@@ -725,12 +750,19 @@ export function assessDeadline(
       msPastDeadline: null,
     };
   }
+  const answeredMs = new Date(answer.at).getTime();
+  // The same fail-open one field across: an answer instant `new Date()` cannot read made
+  // `answeredAfterDeadline` false, which read as `answered_in_time`. The record does not state a
+  // usable answer instant, which is what `answer_time_unstated` means.
+  if (!Number.isFinite(answeredMs)) {
+    return { ...base, standing: "answer_time_unstated", answeredAt: null, msPastDeadline: null };
+  }
   const late = answeredAfterDeadline(request);
   return {
     ...base,
     standing: late === true ? "answered_late" : "answered_in_time",
     answeredAt: answer.at,
-    msPastDeadline: new Date(answer.at).getTime() - deadlineMs,
+    msPastDeadline: answeredMs - deadlineMs,
   };
 }
 

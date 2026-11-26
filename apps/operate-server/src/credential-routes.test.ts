@@ -239,6 +239,11 @@ function ctxFor(
     readonly admission?: LoginAdmission;
     readonly pepper?: string;
     readonly minPasswordLength?: number;
+    /** The subject's memberships, as `membershipsOfUser` would answer; `"throw"` is a failed read. */
+    readonly subjectMemberships?:
+      | readonly { readonly primaryRole: string; readonly secondaryRoles: readonly string[] }[]
+      | "throw";
+    readonly authorityRoles?: readonly string[];
   } = {},
 ): { ctx: CredentialRoutesContext; recorded: Recorded } {
   const recorded: Recorded = { events: [], failures: [], calls: [], ended: [] };
@@ -257,6 +262,11 @@ function ctxFor(
         secondaryRoles: roles.slice(1),
       }),
       adminRoles: new Set(opts.adminRoles ?? ["platform_admin"]),
+      subjectMemberships: async () => {
+        if (opts.subjectMemberships === "throw") throw new Error("membership read failed");
+        return opts.subjectMemberships ?? [];
+      },
+      platformAuthorityRoles: new Set(opts.authorityRoles ?? ["platform_admin", "credential_admin"]),
       audit: async (e) => {
         if (opts.auditThrows === true) throw new Error("audit down");
         recorded.events.push(e);
@@ -735,6 +745,78 @@ describe("the operator route", () => {
     // Six emoji are twelve UTF-16 code units; a floor of 12 must not admit them.
     expect(passwordLength("\u{1F600}".repeat(6))).toBe(6);
     expect(DEFAULT_MIN_PASSWORD_LENGTH).toBeGreaterThanOrEqual(MIN_MIN_PASSWORD_LENGTH);
+  });
+
+  describe("the takeover check (ADR-0479)", () => {
+    it("403s role_escalation, records the refusal and writes nothing, when the subject holds a platform role the caller lacks", async () => {
+      const db = fakeDb({ reads: [credentialRow()] });
+      const { ctx, recorded } = ctxFor(new PostgresCredentialStore(db.conn), {
+        roles: ["credential_admin"],
+        adminRoles: ["credential_admin"],
+        subjectMemberships: [
+          { primaryRole: "erp_admin", secondaryRoles: [] },
+          { primaryRole: "erp_viewer", secondaryRoles: ["platform_admin"] },
+        ],
+      });
+      const out = await invoke(handlerFor(ctx, SET), {
+        principal: principal(),
+        params: { id: TARGET },
+        parsedBody: setBody(),
+      });
+      expect(out.status).toBe(403);
+      expect(body(out)["error"]).toBe("role_escalation");
+      expect(body(out)["roles"]).toEqual(["platform_admin"]);
+      expect(db.updates()).toHaveLength(0);
+      // Recorded as a refusal, never as the act: no `credential_set` row claims a write.
+      expect(recorded.events.map((e) => e.operation)).toEqual(["platform.user_credential_refused"]);
+      expect(recorded.events[0]?.detail["refusal"]).toBe("role_escalation");
+    });
+
+    it("admits the reset when the caller holds every platform role the subject does — onboarding's shape", async () => {
+      const db = fakeDb({ reads: [credentialRow()], writes: [1] });
+      const { ctx } = ctxFor(new PostgresCredentialStore(db.conn), {
+        roles: ["platform_admin"],
+        subjectMemberships: [{ primaryRole: "erp_admin", secondaryRoles: ["platform_admin"] }],
+      });
+      const out = await invoke(handlerFor(ctx, SET), {
+        principal: principal(),
+        params: { id: TARGET },
+        parsedBody: setBody(),
+      });
+      expect(out.status).toBe(200);
+      expect(db.updates()).toHaveLength(1);
+    });
+
+    it("admits a reset for a subject whose only roles are tenant roles, which grant no platform authority", async () => {
+      const db = fakeDb({ reads: [credentialRow()], writes: [1] });
+      const { ctx } = ctxFor(new PostgresCredentialStore(db.conn), {
+        roles: ["credential_admin"],
+        adminRoles: ["credential_admin"],
+        subjectMemberships: [{ primaryRole: "erp_admin", secondaryRoles: ["hr_manager"] }],
+      });
+      const out = await invoke(handlerFor(ctx, SET), {
+        principal: principal(),
+        params: { id: TARGET },
+        parsedBody: setBody(),
+      });
+      expect(out.status).toBe(200);
+    });
+
+    it("503s subject_roles_unresolved and writes nothing when the subject's memberships cannot be read", async () => {
+      const db = fakeDb({ reads: [credentialRow()] });
+      const { ctx, recorded } = ctxFor(new PostgresCredentialStore(db.conn), {
+        subjectMemberships: "throw",
+      });
+      const out = await invoke(handlerFor(ctx, SET), {
+        principal: principal(),
+        params: { id: TARGET },
+        parsedBody: setBody(),
+      });
+      expect(out.status).toBe(503);
+      expect(body(out)["error"]).toBe("subject_roles_unresolved");
+      expect(db.updates()).toHaveLength(0);
+      expect(recorded.events[0]?.detail["refusal"]).toBe("subject_roles_unresolved");
+    });
   });
 
   it("503s and writes nothing when the act cannot be recorded", async () => {

@@ -11,30 +11,6 @@ import type { RowRead, UnreadableRow } from "@crossengin/kernel-pg";
 type Timestampish = string | Date | null | undefined;
 
 /**
- * Every row a read could represent, with a report for every row it could not — `kernel-pg`'s own
- * shape, re-exported so this package's stores name one type.
- *
- * This file used to hold a second copy of the loop as well, because the primitive typed its mapper
- * `(row: Record<string, unknown>) => T` and an `interface Row` with no index signature reaches
- * neither that parameter nor `Record<string, unknown>` itself — a function parameter is
- * contravariant, so no widening gets there. The primitive is generic in its row type now, which is
- * what that copy's own comment said would retire it.
- */
-export type TypedRowRead<T> = RowRead<T>;
-
-/**
- * A refused row's business key, which is the one handle a remedy can name.
- *
- * Declared as `unknown` rather than taking the row interface's own field type, because the column
- * may itself be what is wrong — and `null` then says *this row does not name one* rather than
- * inventing a handle (ADR-0331). Every *other* column of a refused row is of unestablished
- * trustworthiness, so a finding carries none of them.
- */
-export function rowKey(value: unknown): string | null {
-  return typeof value === "string" && value.length > 0 ? value : null;
-}
-
-/**
  * The refusal a read takes when its consumer cannot be handed a short list.
  *
  * It carries the `UnreadableRow`s rather than only a message, so a future caller can act on the
@@ -72,7 +48,7 @@ export class UnreadableRowsError extends Error {
  * that cannot be trusted must not answer (ADR-0333's `IdempotencyStore.get` rule — not knowing
  * whether something is there must not admit that it is not).
  */
-export function recordsOrRefuse<T>(subject: string, read: TypedRowRead<T>): readonly T[] {
+export function recordsOrRefuse<T>(subject: string, read: RowRead<T>): readonly T[] {
   if (read.unreadable.length > 0) throw new UnreadableRowsError(subject, read.unreadable);
   return read.records;
 }

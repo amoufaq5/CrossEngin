@@ -37,6 +37,38 @@ export const APPLY_FLAG_KINDS = {
   "lock-retries": "count",
 } as const;
 
+/**
+ * One sentence per flag, as a total map over `APPLY_FLAG_KINDS`: adding a flag there is a compile
+ * error here until it says what it does, so `apply --help` cannot fall behind the flags `apply`
+ * reads (the top-level help lists only some of them, and lists them beside every other command's).
+ */
+export const APPLY_FLAG_HELP: Readonly<Record<keyof typeof APPLY_FLAG_KINDS, string>> = {
+  format: "human|json — the output format (default: human)",
+  "dry-run": "print the full bootstrap SQL; connects to nothing",
+  plan: "introspect the live schema and print the reconciliation plan, including what it will not close; applies nothing (its probe statements are rolled back), so it needs no --confirm",
+  confirm: "required to execute against a database whose name looks like production",
+  "allow-loosening": "also DROP foreign keys the catalog no longer declares (said on stderr before anything runs)",
+  "lock-timeout-ms": "per-statement lock_timeout for the applier, and the probe's lock bound under --plan",
+  "statement-timeout-ms": "per-statement statement_timeout for the applier",
+  "lock-retries": "how many times a statement that timed out on its lock is retried",
+};
+
+export function applyHelpText(): string {
+  const names = Object.keys(APPLY_FLAG_HELP) as (keyof typeof APPLY_FLAG_HELP)[];
+  const width = Math.max(...names.map((n) => n.length)) + 4;
+  return [
+    "Usage: crossengin apply [flags]",
+    "",
+    "Reconcile the meta-schema with the Postgres named by PGHOST / PGPORT / PGUSER / PGPASSWORD /",
+    "PGDATABASE / PGSSLMODE. A flag not listed here is refused, and so is a flag given twice.",
+    "",
+    "Flags:",
+    ...names.map((n) => `  ${`--${n}`.padEnd(width)}${APPLY_FLAG_HELP[n]}`),
+    `  ${"--help".padEnd(width)}print this text and run nothing`,
+    "",
+  ].join("\n");
+}
+
 export interface ApplyFlags {
   readonly dryRun: boolean;
   readonly planOnly: boolean;
@@ -59,6 +91,12 @@ export function readApplyFlags(
 ): { readonly ok: true; readonly flags: ApplyFlags } | { readonly ok: false; readonly error: string } {
   if (command.positional.length > 0) {
     return { ok: false, error: `unexpected argument '${command.positional[0]!}'` };
+  }
+  // A repeat is refused rather than resolved, because the shared parser keeps the later value and
+  // `--plan --plan=false` would otherwise be an apply decided by argv order.
+  const repeated = [...command.repeatedFlags].sort();
+  if (repeated.length > 0) {
+    return { ok: false, error: `--${repeated[0]!} is given more than once; give each flag once` };
   }
   const booleans = new Set<string>();
   const bounds: { lockTimeoutMs?: number; statementTimeoutMs?: number; lockRetries?: number } = {};
@@ -101,6 +139,12 @@ export async function runApply(
   command: ParsedCommand,
   ctx: RunContext,
 ): Promise<number> {
+  if (command.flags.get("help") === true && !command.repeatedFlags.has("help")) {
+    // Before anything is read or validated: asking for help must never run, or refuse to run, the
+    // command it is asking about.
+    printSuccess(ctx.io, applyHelpText());
+    return 0;
+  }
   const read = readApplyFlags(command);
   if (!read.ok) {
     printError(ctx.io, `apply: ${read.error}`);
@@ -125,7 +169,10 @@ export async function runApply(
     printError(ctx.io, `apply: ${err instanceof Error ? err.message : String(err)}`);
     return 2;
   }
-  if (looksLikeProductionDatabase(config.database) && !confirm) {
+  // `--plan` is exempt: it introspects and proves through probe statements that are rolled back
+  // (`planLiveReconciliation`), so it writes nothing, and refusing it is refusing the one read an
+  // operator wants before deciding whether to pass `--confirm` at all.
+  if (looksLikeProductionDatabase(config.database) && !confirm && !planOnly) {
     printError(
       ctx.io,
       `apply: refusing to apply against production-looking database '${config.database}' without --confirm`,

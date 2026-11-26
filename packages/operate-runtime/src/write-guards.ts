@@ -491,10 +491,13 @@ export function journalPostingGuard(config: JournalPostingGuardConfig = {}): Wri
     // period shares its dates with the last ordinary one, and posting year-end adjustments into it
     // after the ordinary period is closed is what an adjustment period is for — so there the named
     // period's own status decides, read just below.
+    // Read under a `share` lock for `resolvePostingPeriod`'s reason: a close is a transition holding
+    // the period `exclusive`, so a plain read could decide on `open` and commit after the close had
+    // committed `closed` (ADR-0480).
     const periodId = input.after[c.periodRefField];
     const named =
       typeof periodId === "string" && periodId.length > 0
-        ? await input.store.get(input.tenantId, c.periodEntity, periodId)
+        ? await input.store.getLocked(input.tenantId, c.periodEntity, periodId, "share")
         : null;
     if (config.postingPeriods !== undefined) {
       const date = input.after[c.entryDateField];
@@ -1412,6 +1415,48 @@ export function taxRemittanceJournalReverseGuard(config: { readonly wiring: TaxR
       };
     }
     return null;
+  };
+}
+
+/**
+ * Whether `entryNumber` is in the namespace the tax remittance posting numbers its entries by:
+ * `<return>-REMIT-<n>`, or that followed by any number of `-REV` (a reversal of one, and of that).
+ * The server generates every number of this shape (`taxRemittanceEntryNumber`, and the reversal
+ * effect's `-REV`); a caller-supplied one can only collide with a later `mark_paid`.
+ */
+export function isReservedRemittanceEntryNumber(entryNumber: string): boolean {
+  let base = entryNumber;
+  while (base.endsWith(TAX_REMITTANCE_REVERSAL_SUFFIX)) base = base.slice(0, -TAX_REMITTANCE_REVERSAL_SUFFIX.length);
+  const at = base.lastIndexOf(TAX_REMITTANCE_ENTRY_INFIX);
+  return at > 0 && /^[1-9]\d*$/.test(base.slice(at + TAX_REMITTANCE_ENTRY_INFIX.length));
+}
+
+export const ENTRY_NUMBER_RESERVED_DETAIL =
+  "entry numbers of the form '<return number>-REMIT-<n>' (and their '-REV' reversals) are reserved for the " +
+  "tax remittance a return's mark_paid posts; choose another number";
+
+/**
+ * Refuses a journal entry a **caller** numbers inside the remittance namespace (ADR-0480, ADR-0467's
+ * open question). Before this, `POST /v1/journal-entrys {entry_number: "TAX-1-REMIT-1"}` succeeded,
+ * and the return's own `mark_paid` then refused `tax_remittance_number_taken` — a refusal at the
+ * wrong act, naming a number the caller never meant to take from the return.
+ *
+ * On create, and on an update that **changes** the number to a reserved one. An update that leaves
+ * the number alone is not refused, which is what keeps every write to the server's own remittance
+ * entries — a transition to `reversed`, a stamp — out of this guard's reach. The remittance effect
+ * and the reversal effect write through the store and never through `runWriteGuards` (an HTTP-path
+ * caller), so they are unaffected by construction; a test asserts it.
+ */
+export function reservedRemittanceEntryNumberGuard(config: { readonly entryEntity?: string; readonly numberField?: string } = {}): WriteGuard {
+  const entity = config.entryEntity ?? "JournalEntry";
+  const field = config.numberField ?? "entry_number";
+  return async (input) => {
+    if (input.entity !== entity) return null;
+    if (input.operation !== "create" && input.operation !== "update") return null;
+    const number = input.after[field];
+    if (typeof number !== "string" || !isReservedRemittanceEntryNumber(number)) return null;
+    if (input.operation === "update" && input.before?.[field] === number) return null;
+    return { status: 422, error: "entry_number_reserved", detail: ENTRY_NUMBER_RESERVED_DETAIL };
   };
 }
 

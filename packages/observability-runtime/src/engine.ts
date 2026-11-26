@@ -87,7 +87,14 @@ export interface SloEnforcementEngineOptions {
   readonly killSwitchTtlMs?: number;
   /** Re-grades a stored incident when a registration's escalation is due. */
   readonly regrader?: IncidentRegrader;
-  readonly onDeclarationError?: DeclarationErrorSink;
+  /**
+   * Where every enforcement step that is reported rather than thrown goes — a failed lookup,
+   * declaration, close-out, kill-switch plan/record/release or regrade. **Required** (ADR-0483):
+   * it was optional, so an engine built without it failed every one of those steps in silence, and
+   * an optional reporter defaulting to *say nothing* is the defect restated as a default
+   * (ADR-0364). A caller that genuinely wants nothing reported must say so with a no-op.
+   */
+  readonly onDeclarationError: DeclarationErrorSink;
 }
 
 interface ActiveBreach {
@@ -160,7 +167,7 @@ export class SloEnforcementEngine {
   private readonly killSwitchReleaser: KillSwitchReleaser | undefined;
   private readonly killSwitchTtlMs: number;
   private readonly regrader: IncidentRegrader | undefined;
-  private readonly onDeclarationError: DeclarationErrorSink | undefined;
+  private readonly onDeclarationError: DeclarationErrorSink;
   private readonly active: Map<string, ActiveBreach> = new Map();
   /**
    * Surfaces with a declaration in flight. A breach is only recorded as active once its id comes
@@ -190,6 +197,16 @@ export class SloEnforcementEngine {
 
   recordOutcome(outcome: RequestOutcome): void {
     this.window.record(outcome);
+  }
+
+  /**
+   * The grades this engine can declare an incident at — one per threshold it actually runs on, in
+   * threshold order and de-duplicated. Read by the `[incident]` boot line rather than the package
+   * defaults, so a caller that supplied its own `thresholds` is described as it runs (ADR-0483).
+   * The escalation regrade is not a declaration and is not included.
+   */
+  get declaredSeverities(): readonly Severity[] {
+    return [...new Set(this.thresholds.map((t) => t.severity))];
   }
 
   activeBreaches(): readonly { surface: string; breach: ActiveBreach }[] {

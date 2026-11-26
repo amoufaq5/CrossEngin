@@ -17,6 +17,7 @@ import {
   LOGIN_ADMISSION_REFUSAL_STATUS,
   type LoginAdmission,
 } from "./login-admission.js";
+import { escalatingRoles } from "./platform-authority.js";
 import { USER_STATUSES, type UserStatus } from "./platform-users.js";
 
 /**
@@ -113,6 +114,11 @@ export const CREDENTIAL_REFUSALS = [
   "user_not_active",
   "unrecordable",
   "password_too_short",
+  // ADR-0479: the operator route skips the possession proof, so setting a password is taking the
+  // account — and every grant it holds. Refused when the subject holds a platform authority the
+  // caller does not, and refused (as not established) when the subject's grants cannot be read.
+  "role_escalation",
+  "subject_roles_unresolved",
   // Shed before any password work, by the admission the login shares.
   ...LOGIN_ADMISSION_REFUSALS,
 ] as const;
@@ -148,6 +154,8 @@ export const CREDENTIAL_REFUSAL_STATUS: Readonly<Record<CredentialRefusal, numbe
     user_not_active: 403,
     unrecordable: 503,
     password_too_short: 400,
+    role_escalation: 403,
+    subject_roles_unresolved: 503,
     ...LOGIN_ADMISSION_REFUSAL_STATUS,
   },
 );
@@ -290,6 +298,22 @@ export interface CredentialRoutesContext {
    * reads as broken rather than as ungranted.
    */
   readonly adminRoles: ReadonlySet<string>;
+  /**
+   * Every membership the **subject** of an operator reset holds, in every tenant and every status —
+   * `PostgresUserStore.membershipsOfUser` in production (ADR-0479).
+   *
+   * Setting another person's password without their current one is taking their account, and with
+   * it every role their memberships grant in every tenant. So the operator route refuses
+   * `role_escalation` when the subject holds a platform authority the caller does not — the same
+   * rule `platform-users.ts` applies to a membership *grant* (H-04), because a reset is a grant by
+   * another route. Required: an optional reader defaulting to "no memberships" is the escalation
+   * kept as a default. A reader that throws is `subject_roles_unresolved` (503), never a pass.
+   */
+  readonly subjectMemberships: (
+    userId: string,
+  ) => Promise<readonly { readonly primaryRole: string; readonly secondaryRoles: readonly string[] }[]>;
+  /** The deployment's platform-authority roles (`platformAuthorityRoles`), read by the check above. */
+  readonly platformAuthorityRoles: ReadonlySet<string>;
   /**
    * Required, not optional. Both acts replace the one credential a person authenticates with, so
    * this is ADR-0313's privileged-write class without exception and the record goes **before** the
@@ -532,6 +556,47 @@ export function buildSetUserCredentialHandler(ctx: CredentialRoutesContext): Han
       // one set for an active user, and the trail is where that distinction has to survive.
       detail: { hadCredential: existing.credentialHash !== null, subjectStatus: existing.status },
     };
+    // ADR-0479: after the subject is known to exist and before anything is admitted or recorded as
+    // a credential write. Every membership status counts — a revoked one can be restored, and a
+    // reset that preceded the restore would have taken the authority it brings back.
+    let subjectRoles: string[];
+    try {
+      subjectRoles = (await ctx.subjectMemberships(userId)).flatMap((m) => [
+        m.primaryRole,
+        ...m.secondaryRoles,
+      ]);
+    } catch {
+      return recordRefusal(
+        ctx,
+        event,
+        "subject_roles_unresolved",
+        refuse(
+          "subject_roles_unresolved",
+          "the subject's memberships could not be read, so whether this reset would hand the caller" +
+            " a platform authority they do not hold is not established; retry",
+        ),
+      );
+    }
+    const escalating = escalatingRoles({
+      granterRoles: roles,
+      grantedRoles: subjectRoles,
+      authorityRoles: ctx.platformAuthorityRoles,
+    });
+    if (escalating.length > 0) {
+      return recordRefusal(
+        ctx,
+        { ...event, detail: { ...event.detail, escalatingRoles: escalating } },
+        "role_escalation",
+        json(403, {
+          error: "role_escalation",
+          detail:
+            `user ${userId} holds platform role(s) ${escalating.join(", ")} the caller does not;` +
+            " setting their password without their current one would take that authority, so only a" +
+            " principal already holding it may",
+          roles: escalating,
+        }),
+      );
+    }
     // Admitted before the record, so a request shed for want of capacity leaves no row claiming a
     // credential was set.
     const admission = await ctx.admission.enter(userId);

@@ -13,7 +13,12 @@ import {
 } from "@crossengin/incident-response-runtime";
 import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 import type { AlertPolicy, Slo } from "@crossengin/observability";
-import { FixedClock, type PageDirective } from "@crossengin/observability-runtime";
+import {
+  FixedClock,
+  type DeclarationErrorSink,
+  type DeclarationFailure,
+  type PageDirective,
+} from "@crossengin/observability-runtime";
 import {
   buildSloEnforcement,
   defaultRecoverPages,
@@ -24,6 +29,13 @@ import {
 import type { ObservedEnforcementDecision } from "./slo.js";
 
 const SYSTEM_ACTOR = "00000000-0000-0000-0000-000000000001";
+
+/** `onDeclarationError` is required (ADR-0483); every enforcement here reports into this list. */
+const reportedDeclarationErrors: { error: unknown; failure: DeclarationFailure }[] = [];
+const recordDeclarationError: DeclarationErrorSink = (error, failure) => {
+  reportedDeclarationErrors.push({ error, failure });
+};
+void reportedDeclarationErrors;
 const SURFACE = "product.list";
 const END = "2026-06-02T12:00:00.040Z";
 const DURATION_MS = 40;
@@ -122,6 +134,20 @@ function makeExecution(status: number, outcome: "pass" | "error", at: string): P
   });
 }
 
+describe("buildSloEnforcement — construction (ADR-0483)", () => {
+  it("refuses at compile time to be built without a declaration-error sink", () => {
+    // It took `opts = {}` and spread `onDeclarationError` in only when present.
+    // Typed only, never called: with no options object at all the call cannot even read `clock`.
+    const bare = (): unknown =>
+      // @ts-expect-error the options argument, and its onDeclarationError, are required
+      buildSloEnforcement(parseSloConfig(validConfig()));
+    void bare;
+    // @ts-expect-error onDeclarationError is required
+    const noSink = buildSloEnforcement(parseSloConfig(validConfig()), {});
+    expect(noSink.engines.availability).not.toBeNull();
+  });
+});
+
 describe("parseSloConfig", () => {
   it("accepts an availability-only config", () => {
     const cfg = parseSloConfig(validConfig());
@@ -170,6 +196,36 @@ describe("parseSloConfig", () => {
     expect(() => parseSloConfig(validConfig({ systemActorUserId: "not-a-uuid" } as Partial<SloConfig>))).toThrow();
     expect(() => parseSloConfig({ ...(validConfig() as object), bogus: true })).toThrow();
   });
+
+  it("refuses a registration tenantId that is not a uuid, naming the field (ADR-0483)", () => {
+    // `"acme"` parsed under `min(1)` and was refused only at the database, after the incident was
+    // declared — every record a breach writes types its tenant as a uuid.
+    const withTenant = (tenantId: unknown): unknown =>
+      validConfig({
+        availability: [{ slo: availabilitySlo(SURFACE), category: "availability", tenantId }],
+      } as Partial<SloConfig>);
+    expect(() => parseSloConfig(withTenant("acme"))).toThrow(/tenantId must be a tenant uuid/);
+    expect(() =>
+      parseSloConfig(
+        validConfig({ availability: undefined, latency: [{ slo: latencySlo(SURFACE), tenantId: "acme" }] } as Partial<SloConfig>),
+      ),
+    ).toThrow(/tenantId must be a tenant uuid/);
+    const parsed = (() => {
+      try {
+        parseSloConfig(withTenant("acme"));
+        return null;
+      } catch (err) {
+        return err as { issues?: { path: (string | number)[] }[] };
+      }
+    })();
+    expect(parsed?.issues?.[0]?.path).toEqual(["availability", 0, "tenantId"]);
+    // Accept paths: a uuid, the platform's null, and absent.
+    expect(parseSloConfig(withTenant("11111111-1111-4111-8111-111111111111")).availability?.[0]?.tenantId).toBe(
+      "11111111-1111-4111-8111-111111111111",
+    );
+    expect(parseSloConfig(withTenant(null)).availability?.[0]?.tenantId).toBeNull();
+    expect(parseSloConfig(validConfig()).availability?.[0]?.tenantId).toBeUndefined();
+  });
 });
 
 describe("loadSloConfig", () => {
@@ -206,13 +262,13 @@ describe("loadSloConfig", () => {
 describe("buildSloEnforcement", () => {
   it("builds only the engines whose registrations are present", () => {
     const clock = new FixedClock(new Date(END));
-    const availOnly = buildSloEnforcement(parseSloConfig(validConfig()), { clock });
+    const availOnly = buildSloEnforcement(parseSloConfig(validConfig()), { onDeclarationError: recordDeclarationError, clock });
     expect(availOnly.engines.availability).not.toBeNull();
     expect(availOnly.engines.latency).toBeNull();
 
     const latOnly = buildSloEnforcement(
       parseSloConfig(validConfig({ availability: undefined, latency: [{ slo: latencySlo(SURFACE) }] })),
-      { clock },
+      { onDeclarationError: recordDeclarationError, clock },
     );
     expect(latOnly.engines.availability).toBeNull();
     expect(latOnly.engines.latency).not.toBeNull();
@@ -220,7 +276,7 @@ describe("buildSloEnforcement", () => {
 
   it("drives a breach_opened decision from a failure burst fed through the observer sink", async () => {
     const clock = new FixedClock(new Date(END));
-    const enforcement = buildSloEnforcement(parseSloConfig(validConfig()), { clock });
+    const enforcement = buildSloEnforcement(parseSloConfig(validConfig()), { onDeclarationError: recordDeclarationError, clock });
     const sink = enforcement.observer.asExecutionSink();
     for (let i = 0; i < 25; i += 1) {
       sink(makeExecution(503, "error", new Date(Date.parse(END) - i * 1_000).toISOString()));
@@ -237,6 +293,7 @@ describe("buildSloEnforcement", () => {
     const clock = new FixedClock(new Date(END));
     const seen: string[] = [];
     const enforcement = buildSloEnforcement(parseSloConfig(validConfig()), {
+      onDeclarationError: recordDeclarationError,
       clock,
       onDecision: (d) => seen.push(`${d.signal}:${d.kind}`),
     });
@@ -249,13 +306,14 @@ describe("buildSloEnforcement", () => {
   });
 
   it("reports itself unpersisted without a connection", () => {
-    expect(buildSloEnforcement(parseSloConfig(validConfig())).persisted).toBe(false);
+    expect(buildSloEnforcement(parseSloConfig(validConfig()), { onDeclarationError: recordDeclarationError }).persisted).toBe(false);
   });
 
   it("persists evaluations, actions and the incident itself over a connection", async () => {
     const capture: { sql: string }[] = [];
     const clock = new FixedClock(new Date(END));
     const enforcement = buildSloEnforcement(parseSloConfig(validConfig()), {
+      onDeclarationError: recordDeclarationError,
       clock,
       conn: allocatingConnection(capture, 88),
     });
@@ -283,7 +341,7 @@ describe("buildSloEnforcement", () => {
           latency: [{ slo: latencySlo("GET /v1/items") }],
         }),
       ),
-      { clock, conn: allocatingConnection(capture, 88) },
+      { onDeclarationError: recordDeclarationError, clock, conn: allocatingConnection(capture, 88) },
     );
     expect(enforcement.engines.availability).not.toBeNull();
     expect(enforcement.engines.latency).not.toBeNull();
@@ -513,6 +571,7 @@ describe("buildSloEnforcement — recoverPages", () => {
     } as unknown as PageDirective;
     let asked = 0;
     const enforcement = buildSloEnforcement(parseSloConfig(validConfig()), {
+      onDeclarationError: recordDeclarationError,
       clock,
       recoverPages: async () => {
         asked += 1;
@@ -536,6 +595,7 @@ describe("buildSloEnforcement — recoverPages", () => {
     // from here, which is why a deployment with no store recovers nothing.
     const declarer = new CountingIncidentDeclarer({ clock });
     const enforcement = buildSloEnforcement(parseSloConfig(validConfig()), {
+      onDeclarationError: recordDeclarationError,
       clock,
       declarer,
       onResolvePage: async (_d, pages) => {
@@ -589,7 +649,7 @@ describe("buildSloEnforcement — escalation and delivered pages (M-23, ADR-0415
           ],
         } as Partial<SloConfig>),
       ),
-      { clock },
+      { onDeclarationError: recordDeclarationError, clock },
     );
     expect(enforcement.escalationGrades).toEqual({ availability: ["sev1"], latency: [] });
     burst(enforcement, clock.nowMs());
@@ -606,6 +666,7 @@ describe("buildSloEnforcement — escalation and delivered pages (M-23, ADR-0415
     const delivered: number[] = [];
     let onPage = 0;
     const enforcement = buildSloEnforcement(parseSloConfig(validConfig()), {
+      onDeclarationError: recordDeclarationError,
       clock,
       conn: allocatingConnection(capture, 91),
       onPage: async () => {
@@ -628,6 +689,7 @@ describe("buildSloEnforcement — escalation and delivered pages (M-23, ADR-0415
     let delivered = 0;
     let onPage = 0;
     const enforcement = buildSloEnforcement(parseSloConfig(validConfig()), {
+      onDeclarationError: recordDeclarationError,
       clock,
       onPage: async () => {
         onPage += 1;

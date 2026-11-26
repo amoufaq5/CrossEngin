@@ -1,8 +1,14 @@
-import type { PathSegment, ResolvedPrincipal, RouteDefinition } from "@crossengin/api-gateway";
+import {
+  principalUserId,
+  type PathSegment,
+  type ResolvedPrincipal,
+  type RouteDefinition,
+} from "@crossengin/api-gateway";
 import type { Handler, HandlerOutput, PrincipalRoles } from "@crossengin/api-gateway-runtime";
 import type { ExtraGatewayRoute } from "@crossengin/operate-runtime";
 import {
   DEADLINE_STANDINGS,
+  VERIFICATION_METHODS,
   deletionExecuteNotBefore,
   type LifecycleAction,
   type TenantLifecycleState,
@@ -415,9 +421,45 @@ export const SubmitDeletionRequestBodySchema = z
   })
   .strict();
 
+/*
+ * `verificationMethod` is the contract's own enum (ADR-0477). It was a free string here while
+ * `GdprDeletionRequestSchema` holds it to `VERIFICATION_METHODS`, so an unknown method passed this
+ * parse, reached the store, was refused by the contract on the way back, and was answered as a 409
+ * `illegal_transition` — a claim about the request's *state* for what was a caller's typo.
+ */
 export const VerifyDeletionRequestBodySchema = z
-  .object({ verificationMethod: z.string().min(1).max(100) })
+  .object({ verificationMethod: z.enum(VERIFICATION_METHODS) })
   .strict();
+
+/**
+ * The refusal a credential naming no person gets on the two routes that record a person (ADR-0477).
+ * `submittedBy` and `verifiedBy` are the two sides of this flow's four-eyes rule, and a bare
+ * `key:role:tenant` api-key resolves as a `service_account` on the one shared `DEFAULT_PRINCIPAL_ID`
+ * (ADR-0331) — so two such keys were the *same* principal to the rule, and a key whose holder
+ * submitted could not be told from one whose holder verified. The remedy is a credential that names
+ * somebody, which is why the detail names both forms and no flag.
+ */
+export const PRINCIPAL_NAMES_NO_PERSON_DETAIL =
+  "this route records who acted, and this credential names no person; sign in, or use an api-key spec of the form key:role:tenant:<principal-uuid> naming a provisioned meta.users id";
+
+function principalNamesNoPerson(): HandlerOutput {
+  return json(403, { error: "principal_names_no_person", detail: PRINCIPAL_NAMES_NO_PERSON_DETAIL });
+}
+
+function invalidBody(issues: readonly z.ZodIssue[]): HandlerOutput {
+  const method = issues.find((i) => i.path[0] === "verificationMethod");
+  if (method !== undefined) {
+    return json(400, {
+      error: "invalid_verification_method",
+      detail: `verificationMethod must be one of: ${VERIFICATION_METHODS.join(", ")}`,
+      allowed: VERIFICATION_METHODS,
+    });
+  }
+  return json(400, {
+    error: "invalid_request",
+    detail: issues.map((i) => `${i.path.join(".")}: ${i.message}`),
+  });
+}
 
 export const RejectDeletionRequestBodySchema = z
   .object({ reason: z.string().min(1).max(500) })
@@ -546,6 +588,10 @@ function buildSubmitHandler(ctx: DeletionRequestRoutesContext): Handler {
         detail: "submitting a deletion request is not granted to this role",
       });
     }
+    // After the grant check, so a caller with no grant learns nothing about how their credential
+    // resolves; before the body, so nothing about the request is read for an act nobody can sign.
+    const submitter = principalUserId(principal);
+    if (submitter === null) return principalNamesNoPerson();
     const body = input.parsedBody;
     if (typeof body === "object" && body !== null && "submittedBy" in body) {
       // Refused rather than ignored (ADR-0331's rule): a client sending it believes it chose the
@@ -576,7 +622,7 @@ function buildSubmitHandler(ctx: DeletionRequestRoutesContext): Handler {
         tenantId: parsed.data.tenantId,
         subjectIdentifier: parsed.data.subjectIdentifier,
         legalBasis: parsed.data.legalBasis,
-        submittedBy: principal.principalId,
+        submittedBy: submitter,
         submittedAt: at,
         deadlineAt,
         retentionObligations: parsed.data.retentionObligations,
@@ -612,17 +658,14 @@ function buildVerifyHandler(ctx: DeletionRequestRoutesContext): Handler {
         detail: "verifying a deletion request is not granted to this role",
       });
     }
+    const verifier = principalUserId(principal);
+    if (verifier === null) return principalNamesNoPerson();
     const requestId = input.params["id"] ?? "";
     if (!REQUEST_ID_RE.test(requestId)) {
       return json(400, { error: "invalid_request", detail: "request id must be a dreq_… id" });
     }
     const parsed = VerifyDeletionRequestBodySchema.safeParse(input.parsedBody ?? {});
-    if (!parsed.success) {
-      return json(400, {
-        error: "invalid_request",
-        detail: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`),
-      });
-    }
+    if (!parsed.success) return invalidBody(parsed.error.issues);
     const existing = await ctx.store.read(requestId).catch(() => undefined);
     if (existing === undefined) {
       return json(503, {
@@ -631,7 +674,7 @@ function buildVerifyHandler(ctx: DeletionRequestRoutesContext): Handler {
       });
     }
     if (existing === null) return json(404, { error: "not_found" });
-    if (existing.submittedBy === principal.principalId) {
+    if (existing.submittedBy === verifier) {
       // Verification is the platform attesting that the subject's identity was checked. The person who
       // typed the request in cannot also be the one who attests the check passed.
       return json(403, {
@@ -645,7 +688,7 @@ function buildVerifyHandler(ctx: DeletionRequestRoutesContext): Handler {
     try {
       moved = await ctx.store.transition(requestId, "verified", {
         at,
-        verifiedBy: principal.principalId,
+        verifiedBy: verifier,
         verificationMethod: parsed.data.verificationMethod,
       });
     } catch (err) {

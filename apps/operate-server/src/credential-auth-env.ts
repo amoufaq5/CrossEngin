@@ -1,6 +1,9 @@
 import {
   type ColumnSecretRefused,
   ed25519PublicKeyFromSeed,
+  encodePasswordHash,
+  PASSWORD_KDF,
+  PASSWORD_SCRYPT_DEFAULTS,
   isEd25519PrivateSeedBase64,
   parseCredentialPepper,
   type PepperRing,
@@ -247,4 +250,25 @@ export function resolvePepperRing(
     retired.set(retiredVersion, value);
   }
   return { ok: true, ring: { version, pepper, retired } };
+}
+
+/**
+ * A stored-hash string in exactly the shape a hash written under pepper `version` takes — the
+ * `k<version>$` segment included for every version but the legacy one — and carrying **no**
+ * password-derived bytes: the salt and the digest are all zeros (ADR-0479).
+ *
+ * It exists so a boot check can ask a *live* database whether the `meta.users.credential_hash`
+ * CHECK admits the hashes this deployment is about to write. A deployment rotated to version 2 on a
+ * database whose CHECK predates the `(k…$)?` group would otherwise answer every password set and
+ * every login re-hash with a `23514` — the catalog survey cannot catch it, because a pattern CHECK
+ * is `not_probeable` there (it has no declared candidate to ask about), so this is that candidate.
+ */
+export function sampleKeyedPasswordHash(version: number): string {
+  return encodePasswordHash({
+    kdf: PASSWORD_KDF,
+    params: PASSWORD_SCRYPT_DEFAULTS,
+    pepperVersion: version,
+    saltHex: "0".repeat(32),
+    hashHex: "0".repeat(128),
+  });
 }

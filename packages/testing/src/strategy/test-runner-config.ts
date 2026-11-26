@@ -6,7 +6,7 @@ import { z } from "zod";
  * ADR-0382 closed the half of register P1.3 that was about *running* the rules — there is a CI
  * workflow and a pre-commit hook now, so the twelve strategy rules and the whole suite run without a
  * human typing anything. What that increment deliberately did not take is the other half: whether
- * every member has a runner at all. One member does not, and the absence is invisible by
+ * every member has a runner at all. One member did not until ADR-0478, and the absence is invisible by
  * construction, because a member that never runs a test never fails one — the same shape
  * `typecheck-config.ts` exists to prevent one tool over.
  *
@@ -49,22 +49,11 @@ export const TEST_SCRIPT = "vitest run";
 export const TEST_RUNNER_EXEMPT_MEMBERS: Readonly<
   Record<string, { readonly reason: string; readonly consequence: string }>
 > = {
-  "apps/operate-web": {
-    reason:
-      "a Next.js app with no vitest config and no `test` script, so `pnpm -r test` has nothing to run for it",
-    consequence:
-      "62 .ts/.tsx files, 14,969 lines, 19 pages and 41 `fetch(` call sites have no runner of their own. " +
-      "Only the import-free helpers are run, from outside (`packages/testing/src/operate-web.test.ts`: " +
-      "`safeNextPath`, the CSV cell, the proxy's cross-site/body/timeout rules and the page security " +
-      "headers), and the three `/api` route handlers are checked as text to call them; no page, " +
-      "component or route handler is executed by any test. " +
-      "It also sets no `noUnusedLocals`, so a change that orphans a binding leaves `tsc` and `next build` " +
-      "both green — measured in ADR-0385, where commenting out that increment's one publish line was " +
-      "invisible to both. The cost has been paid three times: ADR-0335 shipped a console button that was a " +
-      "guaranteed 400 because the request body crosses as a `string`; ADR-0385's fix is fenced by nothing; " +
-      "and ADR-0398's `forwardedResponseHeaders` is a pure function with an argued deny-list for which no " +
-      "unit test is possible, because there is no runner to add one to.",
-  },
+  // Empty since ADR-0478. `apps/operate-web` was the one member, declared with the bill: 62 files,
+  // 19 pages and 41 `fetch(` sites run by no test, its pure helpers fenced only from outside by
+  // `packages/testing/src/operate-web.test.ts`, and no `noUnusedLocals`. It has a vitest config, a
+  // `test` script and its own tests now, and those cases moved into it, so the line was deleted in
+  // the same change — which is the direction `exempt_but_wired` exists to enforce.
 };
 
 export const TEST_RUNNER_VIOLATION_KINDS = [

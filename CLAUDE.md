@@ -15927,7 +15927,7 @@ runs found that no review had is the useful part:
   stores; geo kinds are refused at plan time; encrypted JSON round-trips its type; `Patient`'s six
   demographics are `phi`. **Upgrade hazard**: an existing `erp-healthcare` deployment on
   `pg-columns` holds those six as TEXT/DATE, which the additive migrator cannot convert — the boot
-  now refuses naming the column, and the remedy is `crossengin-pg encrypt --plan` then `--apply`.
+  now refuses naming the column, and no shipped tool converts a populated column per tenant: `crossengin-pg encrypt` uses one key and no tenant filter, so it would write ciphertext other tenants cannot read (ADR-0482).
 - **ADR-0444, database operations**: `PGSSLMODE` is negotiated as libpq does, with
   `PGSSLROOTCERT`, so `verify-full` against a private CA and `verify-ca` both work; boot DDL changes
   only what differs (it no longer takes table locks on an unchanged schema); declared indexes are
@@ -16145,6 +16145,101 @@ role where the slice touched SQL or the request path:
 
 A tracked file named `--tenant-status-gate` (a `--help` dump from an argv slip in `be8d55b`) was
 deleted from the repository root.
+
+**The remaining-open-items run, batch B (ADR-0477 – ADR-0484).** The other eight slices. Each was
+implemented, adversarially reviewed and fixed. The shared-file edits the slices could not make
+(`node.ts`, `cli.ts`, `server.ts`, `meta-schema.ts`, a rule declaration and the lint suppressions)
+were made by the orchestrator, and the addenda in ADR-0477, ADR-0479 and ADR-0483 say which.
+Applying them was not free: the twelfth workspace rule immediately caught three new undeclared
+multi-row reads from the credentials slice.
+
+- **ADR-0477, Article 12(3)/17 hygiene.**
+  - A deadline the runtime cannot read is `deadline_unstated`: reported, never a breach, never paged.
+  - A late completion is found by a third read in `auditDeadlines`, which is now the only producer of
+    deadline findings.
+  - A bad `verificationMethod` is 400 rather than 409.
+  - Submit and verify refuse a credential naming no person (`principal_names_no_person`, which
+    includes the shipped three-field bootstrap key).
+  - Three refusals raised before anything is destroyed are released for retry rather than stranded:
+    the transaction never opening, a declared subsystem with no attestation, and a preflight that
+    finds the eraser cannot drop the tenant's schema. The preflight is wired at both deletion call
+    sites, and that wiring is a unit-tested shared edit that was not verified live.
+  - `meta.gdpr_deletion_requests` gains nine instant-range CHECKs and four `char_length` CHECKs.
+- **ADR-0478, operate-web tests.**
+  - `apps/operate-web` runs its own tests: 192 in 11 files through the shared preset. So
+    `test-runner-config.ts` has **no exemptions left**, and `noUnusedLocals` is on there, which
+    closes register P1.3's operate-web half.
+  - The proxy refuses a cross-site GET; a read with neither Fetch Metadata nor `Origin` is still
+    admitted, which covers Safari before 16.4 and a plain-HTTP console.
+  - Aging names the API's `asOf` refusals.
+  - The notifications partition pages with the cursor, and the "floor" banner is gone.
+  - Sign-out reports a failed revocation.
+- **ADR-0479, identity.**
+  - An operator credential reset is 403 `role_escalation` when the subject holds a platform
+    authority the caller lacks. Resetting a tenant's `erp_admin` still works. The subject's roles
+    are read across every tenant, every status, and an unreadable read is 503.
+  - A rotated pepper is checked against the live `credential_hash` CHECK at boot.
+  - An access-request approval locks its row and decides expiry on the database clock.
+  - The revocation check runs inside the attribute decoration.
+  - The identity cache evicts on writes.
+  - `onboard-tenant.sh --existing` adds a person to a workspace.
+  - `computeFieldRedaction` is deleted.
+- **ADR-0480, finance.**
+  - A post locks every covering `FiscalPeriod` (`share`, in id order) and decides from the locked
+    rows, so a post cannot commit into a period a concurrent close has closed. Measured live:
+    without the lock the post answered 200; with it, 422 `period_locked` once the close commits.
+  - `LOCKED_DOCUMENT_SPECS` is the single lock list, with `STATE_LOCKED_ENTITIES` derived from it.
+  - `FiscalPeriod.closed_at` is an effect stamp.
+  - Remittance entry numbers are reserved.
+  - A reverse-charge rule on a withholding code is refused.
+  - `finance.defaultTaxJurisdiction` is resolved on save.
+  - Array elements are type-checked.
+- **ADR-0481, the chain.**
+  - `verify-chain` reads the deployment's own memory before folding: the latest verified baseline
+    plus a *count* of stored verdicts. An empty chain beside a non-zero count is HISTORY
+    CONTRADICTED, exit 1, where it used to be NO HISTORY, exit 0.
+  - `audit_integrity_verdicts.verified_at`/`created_at` gain instant-range CHECKs, and
+    `requireIsoInstant` replaces `isoOf`.
+  - `GatewayReplayer` parses through `PipelineExecutionSchema`.
+  - `rowKey` is deleted.
+- **ADR-0482, deploy and CI.**
+  - All three secret rotations have a documented deploy route.
+  - The compose forwards their variables and gives the API `stop_grace_period: 20s`, because 8 s of
+    grace plus a 2 s drain equalled Docker's 10 s default.
+  - The `[entitlement]` line says that `STRIPE_WEBHOOK_SECRET` alone arms the subscription gate
+    (402 on reads as well as writes).
+  - `ci.yml` declares `permissions: contents: read`, a per-ref `concurrency` and
+    `timeout-minutes: 45`.
+  - VERCEL-SUPABASE gains a Backups section.
+- **ADR-0483, SLO, incidents, replay and metering.**
+  - `onDeclarationError` is required on both SLO engines and on `buildSloEnforcement`.
+  - An SLO `tenantId` must be a uuid.
+  - The `[incident]` line reads each engine's own declared severities.
+  - `operate-server replay`'s default is the wired subsystems the scope can serve, so it no longer
+    exits 1 on `workflow`.
+  - `meta.incidents.postmortem_id` carries the postmortem pattern.
+  - Each usage record gets its own savepoint, so one unprovisioned tenant's refusal no longer rolls
+    back every tenant's window.
+  - A usage key includes its writer, so two replicas no longer collide.
+- **ADR-0484, the Architect CLI and the secret rule.**
+  - The file tools refuse a hard-linked file; the write no longer opens with `O_TRUNC`, which
+    emptied a linked file before any check ran.
+  - A diff over 400 lines is refused rather than shown truncated.
+  - The weakening refusal reads trait fields, so that `entity-field-aperture` declaration went
+    `overtaken` and was deleted.
+  - The secret rule recognises `whsec_`, AWS secrets beside their name (including a prefixed
+    variable name), and Dockerfile `ENV`/`ARG`.
+  - `crossengin diff` prints the section census.
+  - `crossengin pack verify` runs the server's release verifier.
+
+Still open from batch B, each recorded in its ADR:
+- the hourly integrity proof's empty-scope discard has the flip-then-destroy hole that
+  `verify-chain` now closes;
+- `classifyManifestEditRefusal` still has no caller;
+- `STRIPE_WEBHOOK_SECRET` couples mounting the webhook and arming the gate, so no order avoids a
+  402 window — an owner decision;
+- a released `preflight/schema_not_droppable` needs the schema owner's role granted to the eraser;
+- the takeover check's two refusals are undeclared in the OpenAPI document.
 
 ### Demoted, with the measurement that demoted them
 

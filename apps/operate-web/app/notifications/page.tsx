@@ -9,16 +9,19 @@ import {
   decidedAtOf,
   decisionOf,
   describeReadStateFailure,
-  fetchUnreadPartition,
+  extendPartitionOnto,
+  fetchUnreadPartitionCovering,
   isDigest,
   listNotifications,
   markNoticeRead,
   markReadThrough,
   noticeReadState,
   noticeReadStateTitle,
+  partitionPagesAfter,
   readStateFailureHeading,
   readStateWriteFailure,
   reportUnreadBadgeCount,
+  unreadCountLabel,
   READ_STATE_MAY_MARK,
   type NoticeReadState,
   type ReadStateFailure,
@@ -42,11 +45,11 @@ import {
  */
 
 /**
- * The store clamps a list to 200 (`MAX_LIMIT`, notification-store.ts) and the unread answer examines
- * `DEFAULT_UNREAD_SCAN_LIMIT` = 200 of the same ordering (`ORDER BY queued_at DESC, dispatch_id`,
- * a total order since `dispatch_id` is unique). So a page of 50 is a prefix of the examined window
- * and every row on the first four pages has an answer; past that `noticeReadState` says
- * `unexamined` rather than guessing.
+ * One page of the list, and the size of the partition window read beside it. The unread count is
+ * exact and depends on no window (ADR-0476); the per-row read state comes from the partition, which
+ * pages over the same listing ordering (`ORDER BY queued_at DESC, dispatch_id`) with the same cursor,
+ * so this page extends the partition every time it loads more of the list and every loaded row has
+ * an answer (ADR-0478). It used to read one 200-notice window and mark everything past it Unknown.
  */
 const PAGE_LIMIT = 50;
 
@@ -107,18 +110,50 @@ export default function NotificationsPage(): ReactElement {
    * cursor with a position in a set this caller was never shown.
    */
   const generation = useRef(0);
+  /**
+   * The partition's own guard: a re-read after "Mark all read" and an extension after "Load more"
+   * can be in flight together, and the extension, built on the older partition, must not land last.
+   */
+  const partitionGeneration = useRef(0);
+  /**
+   * The partition as last committed, read synchronously. An extension starts from it and lands onto
+   * it, and React state cannot serve either: a closure holds the partition of the render that made
+   * it, so an extension built from that copy and landing after "Mark all read" or a per-row mark
+   * would lay a pre-mark answer over the post-mark one (ADR-0478 review). Every write goes through
+   * `commitPartition`, so the ref and the state cannot disagree.
+   */
+  const partitionRef = useRef<UnreadPartition | null>(null);
+  /** Whether a full re-read is in flight; an extension then defers to a re-read of its own. */
+  const fullReadInFlight = useRef(false);
+  /** Extensions run one after another, so each starts from where the previous one ended. */
+  const extensionChain = useRef<Promise<void>>(Promise.resolve());
 
-  const loadPartition = useCallback(() => {
-    fetchUnreadPartition(CHANNEL)
-      .then((p) => {
-        setPartition(p);
-        setReadStateFailure(null);
-      })
-      .catch((e: unknown) => {
-        setPartition(null);
-        setReadStateFailure(describeReadStateFailure(e));
-      });
+  const commitPartition = useCallback((next: UnreadPartition | null) => {
+    partitionRef.current = next;
+    setPartition(next);
   }, []);
+
+  /** Reads the partition afresh, covering at least `atLeast` notices of the listing. */
+  const loadPartition = useCallback(
+    (atLeast: number) => {
+      const mine = ++partitionGeneration.current;
+      fullReadInFlight.current = true;
+      fetchUnreadPartitionCovering(CHANNEL, atLeast)
+        .then((p) => {
+          if (partitionGeneration.current !== mine) return;
+          fullReadInFlight.current = false;
+          commitPartition(p);
+          setReadStateFailure(null);
+        })
+        .catch((e: unknown) => {
+          if (partitionGeneration.current !== mine) return;
+          fullReadInFlight.current = false;
+          commitPartition(null);
+          setReadStateFailure(describeReadStateFailure(e));
+        });
+    },
+    [commitPartition],
+  );
 
   const load = useCallback(() => {
     const mine = ++generation.current;
@@ -145,7 +180,7 @@ export default function NotificationsPage(): ReactElement {
   // no read-state route, so a deployment that mounts none still gets its notifications. Only the
   // affordances degrade, and the banner below names what is missing.
   useEffect(() => load(), [load]);
-  useEffect(() => loadPartition(), [loadPartition]);
+  useEffect(() => loadPartition(PAGE_LIMIT), [loadPartition]);
 
   // The nav badge reads one number and this is where it is written: whenever this page holds the
   // server's unread figure, the badge is told. One rule and one call site rather than a report
@@ -177,12 +212,39 @@ export default function NotificationsPage(): ReactElement {
         if (generation.current !== mine) return;
         setNotices((prev) => [...prev, ...page.data]);
         setNextCursor(page.nextCursor);
+        extendPartition(notices.length + page.data.length);
       })
       .catch((e: unknown) => {
         if (generation.current !== mine) return;
         setError(e instanceof Error ? e.message : String(e));
       })
       .finally(() => setLoadingMore(false));
+  }
+
+  /**
+   * Extends the partition to cover the rows just loaded. A failure here keeps the partition the page
+   * already has rather than discarding it: the rows it covered still have their answer, and the new
+   * ones say Unknown, which is true of them.
+   */
+  function extendPartition(atLeast: number): void {
+    extensionChain.current = extensionChain.current.then(async () => {
+      const from = partitionRef.current;
+      // No partition yet (the first read has not landed, or failed) or a re-read in flight: read the
+      // whole covering range afresh instead, which supersedes the narrower read in flight.
+      if (from === null || fullReadInFlight.current) {
+        loadPartition(atLeast);
+        return;
+      }
+      if (from.examined >= atLeast || from.nextCursor === null) return;
+      const mine = partitionGeneration.current;
+      try {
+        const added = await fetchUnreadPartitionCovering(CHANNEL, atLeast - from.examined, partitionPagesAfter(from));
+        if (partitionGeneration.current !== mine) return;
+        commitPartition(extendPartitionOnto(partitionRef.current, from, added));
+      } catch {
+        // kept: see above
+      }
+    });
   }
 
   async function markOne(n: TenantNotification): Promise<void> {
@@ -201,7 +263,8 @@ export default function NotificationsPage(): ReactElement {
       // are honest and neither is the other's bug — this one is the server's reply about this
       // notice, and that one is the server's partition, which can only speak about ids inside the
       // examined window. The row is written either way; only what the page can be told differs.
-      setPartition((p) =>
+      const p = partitionRef.current;
+      commitPartition(
         p === null
           ? p
           : {
@@ -233,7 +296,7 @@ export default function NotificationsPage(): ReactElement {
       // consults the per-notice rows and fails OPEN on an unparseable `queuedAt` — so computing the
       // new partition here would disagree with the server exactly on the notices it is most
       // important not to hide.
-      loadPartition();
+      loadPartition(Math.max(PAGE_LIMIT, notices.length));
       setNotice(
         result.clamped
           ? "Marked everything up to the server's clock read — the position sent was in the future and was clamped."
@@ -246,10 +309,7 @@ export default function NotificationsPage(): ReactElement {
     }
   }
 
-  const unreadLabel =
-    partition === null
-      ? null
-      : `${partition.unread.toString()}${partition.truncated ? "+" : ""} unread of ${partition.examined.toString()} examined`;
+  const unreadLabel = partition === null ? null : unreadCountLabel(partition);
 
   return (
     <>
@@ -278,7 +338,7 @@ export default function NotificationsPage(): ReactElement {
             <button
               onClick={() => {
                 load();
-                loadPartition();
+                loadPartition(PAGE_LIMIT);
               }}
               className="rounded-lg border border-line px-3 py-1.5 text-sm text-ink-muted hover:bg-surface-soft"
             >
@@ -312,19 +372,6 @@ export default function NotificationsPage(): ReactElement {
             {readStateFailure.detail} Your notices are listed below and nothing is hidden; what is
             missing is the record that you have seen one, so the sidebar badge falls back to counting
             notices from the last seven days instead of counting unread ones.
-          </div>
-        )}
-
-        {/* Named as a fact and NOT with a flag to raise. `--read-state-unread-scan` accepts up to
-            1000 while the notification store clamps a page to 200, so raising it past 200 changes
-            nothing — and a remedy that cannot work is worse than naming none (ADR-0334). */}
-        {partition !== null && partition.truncated && (
-          <div className="mb-4 rounded-lg border border-line bg-surface-soft px-4 py-3 text-sm text-ink-muted">
-            Read state was answered over the newest {partition.examined.toString()} notices, which is
-            as far as the server looks for one answer. Older notices are listed with their read state
-            marked <span className="font-semibold">Unknown</span> rather than assumed, and the unread
-            figure above is a floor. Marking one read still works: that request names the notice
-            directly and does not depend on the window.
           </div>
         )}
 

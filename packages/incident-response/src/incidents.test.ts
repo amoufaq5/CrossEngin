@@ -17,6 +17,7 @@ import {
   type IncidentRecord,
   type PagedTimelineFacts,
 } from "./incidents.js";
+import { POSTMORTEM_ID_REGEX } from "./postmortems.js";
 
 const requiredRoles = [
   {
@@ -199,6 +200,25 @@ describe("IncidentRecordSchema", () => {
         rootCause: "DB connection pool exhaustion",
       }),
     ).toThrow(/postmortemId/);
+  });
+
+  it("accepts a postmortemId in the postmortem table's own shape and refuses any other (ADR-0483)", () => {
+    expect(IncidentRecordSchema.parse({ ...base, postmortemId: "PM-2026-0001" }).postmortemId).toBe(
+      "PM-2026-0001",
+    );
+    expect(IncidentRecordSchema.parse({ ...base, postmortemId: null }).postmortemId).toBeNull();
+    for (const bad of ["anything", "PM-26-0001", "PM-2026-001", "pm-2026-0001", "PM-2026-0001x", ""]) {
+      expect(() => IncidentRecordSchema.parse({ ...base, postmortemId: bad })).toThrow(/postmortemId|PM-YYYY/);
+    }
+  });
+
+  it("uses the regex the postmortem record itself is validated by, not a second spelling", () => {
+    expect(POSTMORTEM_ID_REGEX.source).toBe("^PM-\\d{4}-\\d{4,8}$");
+    // The incident and the postmortem agree on one id: what one accepts the other does.
+    for (const id of ["PM-2026-0001", "PM-2026-12345678", "PM-2026-123456789"]) {
+      const incidentOk = IncidentRecordSchema.safeParse({ ...base, postmortemId: id }).success;
+      expect(incidentOk).toBe(POSTMORTEM_ID_REGEX.test(id));
+    }
   });
 
   it("rejects malformed incident id", () => {

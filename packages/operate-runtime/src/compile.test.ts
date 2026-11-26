@@ -1931,6 +1931,24 @@ describe("compileOperateServer — a tax return's remittance (ADR-0467)", () => 
     expect(Number(after?.["remittance_count"])).toBe(1);
   });
 
+  it("refuses a reserved remittance number on a request, while the effect still posts one (ADR-0480)", async () => {
+    const { store, compiled } = await remittanceServer({ mode: "on_mark_paid" });
+    const id = await seedReturn(store);
+    expect((await callOperation(compiled, "taxReturn.mark_paid", { id }, null)).status).toBe(200);
+    expect((await remittanceEntries(store)).map((e) => e["entry_number"])).toEqual(["TR-1-REMIT-1"]);
+    for (const n of ["TR-1-REMIT-2", "TR-1-REMIT-1-REV"]) {
+      const r = await callOperation(compiled, "journalEntry.create", {}, { entry_number: n, entry_date: "2026-04-01" });
+      expect([r.status, r.body["error"]]).toEqual([422, "entry_number_reserved"]);
+    }
+    const manual = await callOperation(compiled, "journalEntry.create", {}, { entry_number: "JE-1", entry_date: "2026-04-01" });
+    expect(manual.status).toBe(201);
+    const renamed = await callOperation(compiled, "journalEntry.update", { id: String(manual.body["id"]) }, { entry_number: "TR-1-REMIT-9" });
+    // On erp-core the number is sequence-allocated, so renumbering is already refused by the write
+    // surface; the guard's update arm is for a manifest whose entry number a caller may write.
+    expect([renamed.status, renamed.body["error"]]).toEqual([422, "field_server_owned"]);
+    expect((await remittanceEntries(store)).map((e) => e["entry_number"]).sort()).toEqual(["JE-1", "TR-1-REMIT-1"]);
+  });
+
   it.each([
     [
       "a refund received",
@@ -2191,5 +2209,33 @@ describe("compileOperateServer — a tax return's remittance (ADR-0467)", () => 
     const id = await seedReturn(store, { net_payable: 650 });
     expect((await callOperation(compiled, "taxReturn.mark_paid", { id }, null)).status).toBe(200);
     expect(await remittanceEntries(store)).toEqual([]);
+  });
+});
+
+describe("compileOperateServer — a fiscal period's close time (ADR-0480, ADR-0433 Q8)", () => {
+  it("stamps closed_at on close, keeps it on lock, clears it on reopen, and refuses it from a caller", async () => {
+    const { store, compiled } = coverageServer();
+    const p = await store.create(COVERAGE_TENANT, "FiscalPeriod", {
+      fiscal_year_id: "fy",
+      period_number: 1,
+      name: "Jan",
+      start_date: "2026-01-01",
+      end_date: "2026-01-31",
+      status: "open",
+      is_adjustment: false,
+    });
+    const id = String(p["id"]);
+    const closedAt = async () => (await store.get(COVERAGE_TENANT, "FiscalPeriod", id))?.["closed_at"] ?? null;
+    expect((await callOperation(compiled, "fiscalPeriod.close", { id }, null)).status).toBe(200);
+    const stamped = await closedAt();
+    expect(typeof stamped).toBe("string");
+    expect((await callOperation(compiled, "fiscalPeriod.reopen", { id }, null)).status).toBe(200);
+    expect(await closedAt()).toBeNull();
+    expect((await callOperation(compiled, "fiscalPeriod.close", { id }, null)).status).toBe(200);
+    const again = await closedAt();
+    expect((await callOperation(compiled, "fiscalPeriod.lock", { id }, null)).status).toBe(200);
+    expect(await closedAt()).toBe(again);
+    const forged = await callOperation(compiled, "fiscalPeriod.update", { id }, { closed_at: "2020-01-01T00:00:00.000Z" });
+    expect([forged.status, forged.body["error"]]).toEqual([422, "field_server_owned"]);
   });
 });

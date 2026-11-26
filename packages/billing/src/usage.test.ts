@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildIdempotencyKey,
+  USAGE_WRITER_REGEX,
   isUsageAnomalous,
   rollupUsage,
   UsageRecordSchema,
@@ -18,7 +19,7 @@ describe("UsagePeriodSchema", () => {
 });
 
 describe("buildIdempotencyKey", () => {
-  const base = { tenantId: "t_1", subscriptionId: "sub_1", meter: "ai_call" as const };
+  const base = { tenantId: "t_1", subscriptionId: "sub_1", meter: "ai_call" as const, writer: null };
 
   it("is stable for one window and names tenant, subscription, meter and start", () => {
     const a = buildIdempotencyKey({ ...base, periodStart: "2026-05-13T10:00:00.000Z" });
@@ -40,6 +41,33 @@ describe("buildIdempotencyKey", () => {
     const a = buildIdempotencyKey({ ...base, periodStart: "2026-05-13T00:00:00.000Z" });
     const b = buildIdempotencyKey({ ...base, subscriptionId: "sub_2", periodStart: "2026-05-13T00:00:00.000Z" });
     expect(a).not.toBe(b);
+  });
+
+  it("separates two writers' windows that start in the same millisecond (ADR-0483)", () => {
+    // Two replicas metering one subscription cut windows from their own clocks; one key for both
+    // made `ON CONFLICT DO NOTHING` drop the second replica's usage.
+    const start = "2026-05-13T10:00:00.000Z";
+    const a = buildIdempotencyKey({ ...base, periodStart: start, writer: "replica-a" });
+    const b = buildIdempotencyKey({ ...base, periodStart: start, writer: "replica-b" });
+    expect(a).not.toBe(b);
+    expect(a).toBe(`${buildIdempotencyKey({ ...base, periodStart: start })}:writer=replica-a`);
+    // Stable within a writer, so a retried window is still a no-op.
+    expect(buildIdempotencyKey({ ...base, periodStart: start, writer: "replica-a" })).toBe(a);
+  });
+
+  it("keeps the writer-less form for a period's own record, and refuses a writer that could break the key", () => {
+    expect(buildIdempotencyKey({ ...base, periodStart: "2026-05-13T10:00:00.000Z" })).not.toContain("writer=");
+    expect(() => buildIdempotencyKey({ ...base, periodStart: "2026-05-13T10:00:00.000Z", writer: "a:b" })).toThrow(
+      /writer id/,
+    );
+    expect(() => buildIdempotencyKey({ ...base, periodStart: "2026-05-13T10:00:00.000Z", writer: "" })).toThrow();
+    expect(USAGE_WRITER_REGEX.test("0c7f4c2e-8a41-4a8e-9b2d-2c8d6b1b9a10")).toBe(true);
+  });
+
+  it("requires the writer to be stated, so no caller inherits the colliding form by omission", () => {
+    // @ts-expect-error writer is required: null is a claim, absence is not
+    const key = buildIdempotencyKey({ tenantId: "t", subscriptionId: "s", meter: "ai_call", periodStart: "2026-05-13T10:00:00.000Z" });
+    expect(typeof key).toBe("string");
   });
 });
 

@@ -165,6 +165,69 @@ export function subsystemsServedBy(coverage: ReplayCoverage): readonly ReplaySub
   return REPLAY_SUBSYSTEMS.filter((s) => scopeRefusal(s, coverage) === null);
 }
 
+/** Why the default selection left a subsystem out. */
+export type ReplayOmission = "no_runner_wired" | "scope_cannot_serve";
+
+const OMISSION_REASON: Readonly<Record<ReplayOmission, string>> = Object.freeze({
+  no_runner_wired: "no runner is wired in this build",
+  scope_cannot_serve: "the chosen scope cannot serve it",
+});
+
+export interface ReplaySelection {
+  readonly selected: readonly ReplaySubsystem[];
+  /** What the default selection left out and why; always empty for an explicit selection. */
+  readonly omitted: readonly { readonly subsystem: ReplaySubsystem; readonly reason: ReplayOmission }[];
+  /** One info line naming the omissions, or null when nothing was omitted. */
+  readonly info: string | null;
+}
+
+/**
+ * Decides which subsystems a replay runs — pure, so `runReplay` is one call (ADR-0483).
+ *
+ * **An explicit `--subsystem` is run as asked**, wired or not and servable or not: naming one is a
+ * question about it, and its refused section with exit 1 is the answer (ADR-0337 — an unread
+ * subsystem must not exit 0).
+ *
+ * **The default selection is what this build can actually read under this scope.** It was every
+ * subsystem, so it always held `workflow`, which no runner serves, and under `--tenant` also
+ * `incidents`, which a tenant scope cannot serve — and so every default invocation exited 1 on a
+ * healthy deployment, which teaches an operator to ignore the exit code (ADR-0416 Q9). The
+ * omissions are named in one info line rather than dropped silently.
+ *
+ * `coverage` is null for `--all-tenants`, whose sweep visits several coverages and already reports
+ * a subsystem no coverage could serve; only the runner filter applies there.
+ *
+ * The default never selects nothing: an empty selection would summarise as `ok` having read
+ * nothing, which is the falsely-true output this surface exists to prevent. If every candidate is
+ * omitted, all of them run and their refusals carry the exit code.
+ */
+export function selectReplaySubsystems(
+  requested: readonly ReplaySubsystem[],
+  runners: Readonly<Partial<Record<ReplaySubsystem, ReplaySubsystemRunner>>>,
+  coverage: ReplayCoverage | null,
+): ReplaySelection {
+  if (requested.length > 0) return { selected: [...requested], omitted: [], info: null };
+  const selected: ReplaySubsystem[] = [];
+  const omitted: { subsystem: ReplaySubsystem; reason: ReplayOmission }[] = [];
+  for (const subsystem of REPLAY_SUBSYSTEMS) {
+    if (runners[subsystem] === undefined) {
+      omitted.push({ subsystem, reason: "no_runner_wired" });
+    } else if (coverage !== null && scopeRefusal(subsystem, coverage) !== null) {
+      omitted.push({ subsystem, reason: "scope_cannot_serve" });
+    } else {
+      selected.push(subsystem);
+    }
+  }
+  if (selected.length === 0) return { selected: [...REPLAY_SUBSYSTEMS], omitted: [], info: null };
+  const info =
+    omitted.length === 0
+      ? null
+      : `[replay] default selection: ${selected.join(", ")}; not selected: ${omitted
+          .map((o) => `${o.subsystem} (${OMISSION_REASON[o.reason]})`)
+          .join(", ")} — name one with --subsystem to see its refusal`;
+  return { selected, omitted, info };
+}
+
 export interface ReplaySubsystemRunner {
   /** Read one subsystem under one scope. Must not write. */
   readonly run: (

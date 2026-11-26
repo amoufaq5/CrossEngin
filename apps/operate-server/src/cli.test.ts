@@ -2734,9 +2734,17 @@ describe("--allow-weak-api-keys and --idp-platform-roles", () => {
   });
 
   it("are booleans that take no value", () => {
-    const opts = parseServeArgs([...base, "--allow-weak-api-keys", "--idp-platform-roles"]);
+    const jwks = ["--jwks-key", `k:${JWKS_PUB}`, "--jwt-issuer", "https://idp.test", "--jwt-audience", "api"];
+    const opts = parseServeArgs([...base, ...jwks, "--allow-weak-api-keys", "--idp-platform-roles"]);
     expect(opts.allowWeakApiKeys).toBe(true);
     expect(opts.idpPlatformRoles).toBe(true);
+  });
+
+  it("refuses --idp-platform-roles with no JWKS, naming the three flags that would give it one (ADR-0479)", () => {
+    expect(() => parseServeArgs([...base, "--idp-platform-roles"])).toThrow(
+      "--idp-platform-roles requires a JWKS (--jwks-key, --jwks-file or --jwks-url): with none, no" +
+        " foreign token is verified, so there is no IdP scope for it to let through",
+    );
   });
 
   it("are documented in --help", () => {

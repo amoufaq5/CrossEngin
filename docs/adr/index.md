@@ -1,10 +1,10 @@
 # ADR index
 
-470 records. Generated from the ADR files themselves — regenerate rather than
+478 records. Generated from the ADR files themselves — regenerate rather than
 hand-edit, so a title or status change in an ADR cannot silently drift from this table:
 `python3 docs/adr/generate-index.py`.
 
-- **Accepted:** 391  **Proposed:** 79
+- **Accepted:** 399  **Proposed:** 79
 - ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never written;
   those milestones landed under other numbers. The gap is permanent and intentional.
 - ADR-0046 is the Phase 2 plan; **ADR-0077 is the Phase 3 plan (P1–P8)**. Phase 4 has no
@@ -482,3 +482,11 @@ hand-edit, so a title or status change in an ADR cannot silently drift from this
 | [0474](0474-a-fixed-500-body-has-its-cause-in-the-log-and-a-race-or-an-unreadable-row-has-its-own-code.md) | A fixed 500 body has its cause in the log, and a create race or an unreadable row has its own code | — | Accepted | 2026-11-25 |
 | [0475](0475-a-money-effect-locks-what-it-decides-from-converts-what-it-posts-and-a-report-refuses-a-question-it-cannot-answer.md) | A money effect locks what it decides from, converts what it posts, and a report refuses a question it cannot answer | — | Accepted | 2026-11-25 |
 | [0476](0476-the-unread-badge-is-an-exact-count-the-inbox-list-has-its-own-grant-and-a-claim-lease-starts-when-it-is-seen.md) | The unread badge is an exact count, the inbox list has its own grant, and a claim lease starts when it is seen | — | Accepted | 2026-11-25 |
+| [0477](0477-article-12-17-hygiene-deadlines-late-completions-verify-body-person-credentials-retryable-pre-destruction-refusals.md) | Article 12(3)/17 hygiene — an unreadable deadline is said, a late completion is found, the verify body is the contract's, a person signs both halves, and a deployment-fixable refusal before destruction is released | — | Accepted | 2026-11-25 |
+| [0478](0478-operate-web-runs-its-own-tests-and-the-console-stops-answering-small-questions-wrongly.md) | operate-web runs its own tests, and the console stops answering small questions wrongly | — | Accepted | 2026-11-25 |
+| [0479](0479-an-operator-cannot-take-an-authority-by-setting-its-holders-password.md) | An operator cannot take an authority by setting its holder's password, and seven identity seams say what they do | — | Accepted | 2026-11-25 |
+| [0480](0480-a-posting-decides-from-the-period-it-locked-and-six-finance-declarations-become-checked.md) | A posting decides from the period it locked, and six finance declarations become checked | — | Accepted | 2026-11-25 |
+| [0481](0481-verify-chain-reads-the-deployments-own-memory-and-five-durable-records-say-what-they-cannot.md) | `verify-chain` reads the deployment's own memory, and five durable records say what they cannot | — | Accepted | 2026-11-25 |
+| [0482](0482-rotation-the-subscription-gate-and-backups-are-documented-where-an-operator-looks.md) | Rotation, the subscription gate and backups are documented where an operator looks, and the CI workflow declares its token, its concurrency and its timeouts | — | Accepted | 2026-11-25 |
+| [0483](0483-an-slo-declaration-cannot-be-silent-a-replay-default-can-pass-and-one-refused-usage-record-no-longer-stops-billing.md) | An SLO declaration cannot fail silently, a replay default can pass, and one refused usage record no longer stops billing | — | Accepted | 2026-11-25 |
+| [0484](0484-the-architect-cli-refuses-what-it-cannot-show-and-the-secret-rule-reads-what-it-names.md) | The Architect CLI refuses what it cannot show, and the secret rule reads the part of a value it names | — | Accepted | 2026-11-25 |

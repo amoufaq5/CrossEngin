@@ -701,9 +701,8 @@ function buildUnreadHandler(ctx: ReadStateRoutesContext): Handler {
       body["examined"] = probes.length;
       body["nextCursor"] = nextCursor;
       // Kept on the partition, where it is still true: the window is a page, so notices past it have
-      // no answer here, and `apps/operate-web` renders its "read state Unknown" explanation off this
-      // flag. Dropping it with the count's would have silenced that explanation while the rows it
-      // explains still read Unknown (ADR-0476 review).
+      // no answer here. `apps/operate-web` pages the partition with `nextCursor` since ADR-0478 and
+      // no longer reads this flag; it stays as the one-word form of that fact for other clients.
       body["truncated"] = nextCursor !== null;
     }
     return json(200, body);

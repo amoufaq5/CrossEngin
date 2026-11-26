@@ -44,6 +44,8 @@ export * from "./maker-checker.js";
 export * from "./entity-audit.js";
 export * from "./system-writer.js";
 export * from "./starter-chart.js";
+export * from "./locked-documents.js";
+export * from "./period-stamps.js";
 export * from "./tax-remittance.js";
 export * from "./payment-allocation.js";
 

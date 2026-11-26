@@ -80,8 +80,6 @@ export interface AbacBatchAnswer {
  * - `rbacCheckForRecords` — **batches.** One grant decided for every row of a page, so the question
  *   set is known before any answer is needed. It shares `rbacCheck`'s input type precisely so the
  *   two evaluator arms cannot be handed to the wrong form.
- * - `computeFieldRedaction` — callerless and superseded by the classified pair, so an arm here would
- *   equip dead code and leave the two read paths with different costs.
  * - `computeClassifiedFieldRedaction` / `…ForRecords` — **batches.** Every obligated field is
  *   decided, so the whole question set is known before any answer is needed, and a page of records
  *   multiplies it by the record count.

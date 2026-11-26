@@ -1,11 +1,24 @@
 // The decisions the `/api/[...path]` proxy and the two `/api/auth/*` handlers make before they
 // spend a credential: whether a state-changing request came from this app's own pages, how much
-// body it may carry, and how long the API may take. Pure and import-free, so it is testable from
-// outside this app (packages/testing/src/operate-web.test.ts) — operate-web has no test runner of its own —
-// and so the edge and node runtimes can both load it.
+// body it may carry, and how long the API may take. Pure and import-free, so the edge and node
+// runtimes can both load it; its tests are `proxy-guard.test.ts` beside it.
 
-/** Methods that must not change state, and so carry no cross-site risk worth refusing. */
-const SAFE_METHODS: ReadonlySet<string> = new Set(["GET", "HEAD", "OPTIONS"]);
+/**
+ * Methods that must not change state. They are **not** exempt from the provenance check
+ * (ADR-0478, closing ADR-0447 Q5): a read through this proxy is not side-effect-free on the API —
+ * an audit-trail read writes `meta.audit_log` rows recording the reader (ADR-0313) — and a sibling
+ * subdomain is same-site, so `SameSite=Strict` lets its `<img src>` or credentialed `fetch` carry
+ * the session cookie here. The response is unreadable to that page; the request still happens, as
+ * the viewer. So a read is held to "same-origin or a user navigation" instead of "same-origin".
+ */
+const READ_METHODS: ReadonlySet<string> = new Set(["GET", "HEAD"]);
+
+/**
+ * `OPTIONS` alone stays unchecked, because a browser never attaches a cookie to one it sends on a
+ * page's behalf (a CORS preflight is credential-free by specification), so there is no session to
+ * ride, and none of this app's handlers exports one.
+ */
+const CREDENTIAL_FREE_METHODS: ReadonlySet<string> = new Set(["OPTIONS"]);
 
 export const CROSS_SITE_REFUSALS = [
   "cross_site_request",
@@ -22,7 +35,9 @@ export interface RequestProvenance {
 }
 
 /**
- * Why a state-changing request is refused as not having come from this app, or `null`.
+ * Why a request is refused as not having come from this app, or `null`. A write and a read are held
+ * to the same question with two differences, both stated where they apply below: a read also admits
+ * a user navigation (`Sec-Fetch-Site: none`), and a read stating neither header is admitted.
  *
  * The session cookie is `SameSite=Strict`, which stops a *cross-site* page from riding it but not a
  * *same-site* one: `api.{DOMAIN}` and any sibling subdomain are same-site with the console, so a
@@ -30,23 +45,40 @@ export interface RequestProvenance {
  * is "same origin", and the browser states it:
  *
  * - **`Sec-Fetch-Site`** first, because a page cannot set or forge it (a forbidden header name) and
- *   every current engine sends it. Only `same-origin` is admitted — `same-site` is the hole above,
- *   and `none` is a user-initiated navigation, which no form or fetch on this app's pages produces
- *   for a non-GET.
+ *   every current engine sends it. For a write only `same-origin` is admitted — `same-site` is the
+ *   hole above, and `none` is a user-initiated navigation, which no form or fetch on this app's pages
+ *   produces for a non-GET. A read also admits `none`.
  * - **`Origin`** when that is absent (an engine that predates it), compared on **host** against the
  *   request's own `Host`. The host and not the full origin, because TLS terminates at the edge
  *   (Caddy) and this process sees plain HTTP: comparing schemes would refuse every request on the
  *   shipped stack. Caddy passes `Host` through unchanged, and `Host` is forbidden to a page too.
- * - **Neither**: refused. Every engine that sends neither on a state-changing fetch is one that
+ * - **Neither**, on a write: refused. Every engine that sends neither on a state-changing fetch is one that
  *   also predates `SameSite`, and a non-browser client has no business replaying a browser's cookie
  *   here — it has the API, which takes its own credentials.
  */
 export function crossSiteRefusal(req: RequestProvenance): CrossSiteRefusal | null {
-  if (SAFE_METHODS.has(req.method.toUpperCase())) return null;
+  const method = req.method.toUpperCase();
+  if (CREDENTIAL_FREE_METHODS.has(method)) return null;
+  const read = READ_METHODS.has(method);
   if (req.secFetchSite !== null && req.secFetchSite.trim() !== "") {
-    return req.secFetchSite.trim().toLowerCase() === "same-origin" ? null : "cross_site_request";
+    const site = req.secFetchSite.trim().toLowerCase();
+    // `none` is a navigation the user started (the address bar, a bookmark): admitted for a read,
+    // because that is how a person opens `/api/...` by hand, and refused for a write, because no
+    // page here produces a non-GET navigation.
+    if (site === "same-origin" || (read && site === "none")) return null;
+    return "cross_site_request";
   }
-  if (req.origin === null || req.origin.trim() === "") return "origin_absent";
+  if (req.origin === null || req.origin.trim() === "") {
+    // A read with neither header is admitted, and that is the one residual: Chromium and Firefox do
+    // not send `Origin` on a same-origin GET, so refusing here would refuse every page load in a
+    // browser that sends no `Sec-Fetch-Site`. Two populations reach this arm: an engine that
+    // predates the header (Safari before 16.4, March 2023), and **every** engine on a console served
+    // over plain HTTP from a host that is not `localhost`, because Fetch Metadata is sent only to a
+    // potentially trustworthy origin. The shipped stack terminates TLS at Caddy, so it is held by the
+    // arm above; a plain-HTTP deployment gets no read protection from this function. A write keeps
+    // its refusal, below.
+    return read ? null : "origin_absent";
+  }
   if (req.host === null || req.host.trim() === "") return "origin_mismatch";
   let originHost: string;
   try {

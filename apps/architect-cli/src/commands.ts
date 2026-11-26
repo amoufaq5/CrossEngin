@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { homedir } from "node:os";
 
 import type {
   LlmProvider,
@@ -19,6 +20,7 @@ import { LocalLlmProvider } from "@crossengin/ai-providers-local";
 import { DefaultLlmRouter, type RouterResolution } from "@crossengin/ai-router";
 import {
   computeManifestDiff,
+  diffManifestSections,
   manifestHash,
   tryValidateManifest,
   validateManifest,
@@ -50,17 +52,16 @@ import {
   type ChatToolDefinition,
   type WriteApprover,
 } from "./tools.js";
-import { resolveFileRoot } from "./file-confinement.js";
+import { isHomeDirectory, resolveFileRoot } from "./file-confinement.js";
 import type { ParsedCommand } from "./cli.js";
 import { getBooleanFlag, getStringFlag } from "./cli.js";
 import {
-  formatDiff,
+  formatManifestSectionDiff,
   formatManifestSummary,
   formatValidationErrors,
   printError,
   printJson,
   printSuccess,
-  type DiffCounts,
   type IoStreams,
 } from "./format.js";
 import {
@@ -180,24 +181,13 @@ export async function runDiff(
     return 1;
   }
   const diff = computeManifestDiff(oldManifest, newManifest);
+  const sections = diffManifestSections(oldManifest, newManifest);
   if (command.format === "json") {
-    printJson(ctx.io, { diff });
+    printJson(ctx.io, { diff, sections });
     return 0;
   }
-  const counts = countDiff(diff);
-  printSuccess(ctx.io, formatDiff(counts));
+  printSuccess(ctx.io, formatManifestSectionDiff(sections));
   return 0;
-}
-
-function countDiff(diff: ReturnType<typeof computeManifestDiff>): DiffCounts {
-  return {
-    entitiesAdded: diff.addedEntities.length,
-    entitiesRemoved: diff.removedEntities.length,
-    entitiesModified: diff.modifiedEntities.length,
-    workflowsAdded: 0,
-    workflowsRemoved: 0,
-    workflowsModified: 0,
-  };
 }
 
 export async function runHash(
@@ -465,7 +455,7 @@ export async function runChat(
       return 2;
     }
     try {
-      fileRootDir = await resolveFileRoot(fileRootFlag ?? process.cwd());
+      fileRootDir = await resolveFileRoot(fileRootFlag ?? process.cwd(), { implicit: fileRootFlag === null });
     } catch (err) {
       printError(ctx.io, `chat: ${err instanceof Error ? err.message : String(err)}`);
       return 2;
@@ -473,7 +463,7 @@ export async function runChat(
     // Said either way: this directory is what the file tools can hand to the model's vendor or overwrite.
     printError(
       ctx.io,
-      `[tools] file root: ${fileRootDir} (${[
+      `[tools] file root: ${fileRootDir}${(await isHomeDirectory(fileRootDir, homedir())) ? " — your home directory, as --file-root asked" : ""} (${[
         allowFileRead ? "read_file" : null,
         allowFileWrite ? `propose_manifest_edit, ${autoApprove ? "writes auto-approved with no review" : "each write shown as a diff for y/N"}` : null,
       ]

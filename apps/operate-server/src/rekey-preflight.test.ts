@@ -125,7 +125,11 @@ describe("operate-server rekey's column-key pre-flight", () => {
       // The survey's own message and remedy, scoped to this tenant; no secret in it.
       const text = formatRekeyColumnKeys(report.keyConsistency);
       expect(text).toContain(`error: column keys (tenant ${TENANT}): KEK_SECRET_MISMATCH`);
-      expect(text).toContain("Remedy:");
+      // One tenant has one key row, so the survey read a single sample and cannot tell a corrupt
+      // row from a wrong secret (ADR-0481): it names both remedies rather than asserting one.
+      expect(text).toContain("cannot tell a corrupt row from a wrong secret");
+      expect(text).toContain("Remedy, if the secret is wrong:");
+      expect(text).toContain("if the row is corrupt:");
       expect(text).toContain("REFUSED");
       expect(text).not.toContain("booting");
       for (const secret of [RIGHT, WRONG]) expect(text).not.toContain(secret);

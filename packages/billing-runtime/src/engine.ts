@@ -106,6 +106,9 @@ export class BillingMeteringEngine {
         period: input.period,
         id: this.ids.next(),
         recordedAt,
+        // A period close is the period's own record: closing the same period again is meant to
+        // collide with it and refresh it (ADR-0483), so no writer segment.
+        writer: null,
       }),
     );
     const usage: MeterUsage[] = buckets.map((b) => ({ meter: b.meter, usedUnits: b.quantity }));

@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   ed25519PublicKeyFingerprint,
   generateEd25519Keypair,
+  isEd25519PrivateSeedBase64,
 } from "@crossengin/crypto";
 
 import {
@@ -137,25 +138,50 @@ describe("resolveAuditChain", () => {
   });
 
   it("refuses a malformed variable, naming the width and not the value", () => {
-    const r = refused(resolveAuditChain({ env: env("REPLACE_WITH_32_BYTES_OF_BASE64"), file: null }));
+    const r = refused(resolveAuditChain({ env: env("not-a-seed"), file: null }));
     expect(r.refusal).toBe("signing_key_malformed");
     expect(r.detail).toContain("32 bytes");
-    expect(r.detail).not.toContain("REPLACE_WITH_32_BYTES_OF_BASE64");
+    expect(r.detail).not.toContain("not-a-seed");
   });
 
-  it("refuses the placeholder by SHAPE, so no published-placeholder check is owed", () => {
-    // ADR-0377 needed `SECRET_PLACEHOLDER_PREFIX` because an entropy floor cannot see that a
-    // placeholder is *published*. A seed's width is exact, so every placeholder shape is refused
-    // here without one — asserted rather than reasoned, including a 32-character one that would
-    // clear a length floor.
+  it("refuses the published placeholder by its literal, before the width check (ADR-0481)", () => {
+    // This test used to be titled "refuses the placeholder by SHAPE, so no published-placeholder
+    // check is owed" and pinned the absence of the check as the design. A width is an argument from
+    // shape, and a placeholder's weakness is that it is published (ADR-0377), so the literal is
+    // checked first and the refusal names the remedy rather than the width.
+    const r = refused(
+      resolveAuditChain({ env: env("REPLACE_WITH_32_BYTES_OF_BASE64"), file: null }),
+    );
+    expect(r.refusal).toBe("unreplaced_placeholder");
+    expect(r.detail).toContain(AUDIT_CHAIN_SIGNING_KEY_VAR);
+    expect(r.detail).not.toContain("32_BYTES_OF_BASE64");
+  });
+
+  it("refuses any prefixed value by the literal, whatever its width, and admits the control", () => {
+    // Measured, and stated rather than overclaimed: `_` is outside the strict standard alphabet the
+    // seed parser accepts, so no value beginning with the prefix can pass the width check either.
+    // The literal check therefore changes *which refusal* an operator reads — the one naming the
+    // remedy — and it stops depending on the alphabet the day the seed parser admits base64url.
+    const withPrefix = `REPLACE_WITH_${"A".repeat(30)}=`;
+    expect(withPrefix.length).toBe(44);
+    expect(isEd25519PrivateSeedBase64(withPrefix)).toBe(false);
+    expect(refused(resolveAuditChain({ env: env(withPrefix), file: null })).refusal).toBe(
+      "unreplaced_placeholder",
+    );
+    // The control: a well-formed seed carrying the same letters without the prefix resolves.
+    const control = "REPLACEWITH".padEnd(43, "A") + "=";
+    expect(isEd25519PrivateSeedBase64(control)).toBe(true);
+    expect(resolveAuditChain({ env: env(control), file: null }).kind).toBe("resolved");
+  });
+
+  it("refuses every shipped placeholder shape one way or the other", () => {
     for (const placeholder of [
       "REPLACE_WITH_32_BYTES_OF_BASE64",
       "REPLACE_WITH_32_PLUS_RANDOM_CHARS",
       "CHANGEME",
       "x".repeat(32),
-      "",
     ]) {
-      expect(resolveAuditChain({ env: env(placeholder), file: null }).kind).not.toBe("resolved");
+      expect(resolveAuditChain({ env: env(placeholder), file: null }).kind).toBe("refused");
     }
   });
 
@@ -204,6 +230,7 @@ describe("resolveAuditChain", () => {
     const seen = new Set<string>();
     const sources = new Set<string>();
     const cases: { env?: string; file?: unknown }[] = [
+      { env: "REPLACE_WITH_32_BYTES_OF_BASE64" },
       { env: "nope" },
       { file: { sampleRate: 1 } },
       { file: { privateKeyBase64: A.privateKeyBase64, publicKeyBase64: B.publicKeyBase64 } },

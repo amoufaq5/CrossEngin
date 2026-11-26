@@ -11,6 +11,7 @@ import {
   auditSecretValues,
   DECLARED_PLACEHOLDERS,
   formatSecretViolations,
+  isDockerfile,
   isEnvFile,
   isSecretName,
   parseIndexListing,
@@ -47,6 +48,8 @@ const SAMPLES: Readonly<Record<SecretPatternKind, string>> = {
   slack_token: "xo" + "xb-" + "123456789012-" + body(24),
   github_token: "gh" + "p_" + body(36),
   stripe_live_key: "sk" + "_live_" + body(24),
+  stripe_webhook_secret: "wh" + "sec_" + body(32),
+  aws_secret_access_key: "aws_secret" + "_access_key = " + body(40),
 };
 
 /** One near miss per kind: the prefix without a real length, or a name rather than a key. */
@@ -58,6 +61,9 @@ const NEAR_MISSES: Readonly<Record<SecretPatternKind, string>> = {
   slack_token: "xo" + "xb-placeholder",
   github_token: "gh" + "p_" + "short",
   stripe_live_key: "sk" + "_test_" + body(24),
+  stripe_webhook_secret: "wh" + "sec_" + "short",
+  // The shape operate-server's sender test carries: forty characters, no upper case.
+  aws_secret_access_key: "AWS_SECRET" + "_ACCESS_KEY: '0123456789abcdefghij0123456789abcdefghij'",
 };
 
 function scanText(path: string, text: string): ReturnType<typeof scanForSecretValues> {
@@ -79,6 +85,39 @@ describe("the patterns", () => {
   it("reports an Anthropic key as one finding and not also as an OpenAI one", () => {
     const scan = scanText("src/a.ts", SAMPLES.anthropic_api_key);
     expect(scan.findings.map((f) => f.kind)).toEqual(["anthropic_api_key"]);
+  });
+
+  it("tests an OpenAI key's body, not the sk- prefix, for its lower-case requirement", () => {
+    // `requires` used to test the whole match, which always begins `sk-`, so its lower-case test was
+    // satisfied by the prefix and an all-upper-case body passed it.
+    const upper = "QWERTYUIOP0123456789ASDFGHJKLZ0123456789";
+    expect(upper).toHaveLength(40);
+    expect(scanText("src/a.ts", `"sk-${upper}"`).findings).toEqual([]);
+    expect(scanText("src/a.ts", `"sk-proj-${upper}"`).findings).toEqual([]);
+    expect(scanText("src/a.ts", `"sk-${upper.slice(0, 20)}q${upper.slice(20)}"`).findings.map((f) => f.kind)).toEqual([
+      "openai_api_key",
+    ]);
+  });
+
+  it("reads an AWS secret only beside its own name, in each assignment spelling", () => {
+    const secret = body(40);
+    for (const text of [
+      `AWS_SECRET_ACCESS_KEY=${secret}`,
+      `aws_secret_access_key = "${secret}"`,
+      `{"aws_secret_access_key": "${secret}"}`,
+      `awsSecretAccessKey: '${secret}'`,
+      // A prefixed name: `_` is a word character, so a `\b` anchor missed every one of these.
+      `TF_VAR_aws_secret_access_key=${secret}`,
+      `S3_AWS_SECRET_ACCESS_KEY: "${secret}"`,
+    ]) {
+      expect(scanText("src/a.ts", text).findings.map((f) => f.kind), text).toEqual(["aws_secret_access_key"]);
+    }
+    // No name, a 41-character run, and AWS's own published example under another name are not findings.
+    expect(scanText("src/a.ts", `const s = "${secret}";`).findings).toEqual([]);
+    // A name that merely ends in the AWS one, inside a longer word, is not it.
+    expect(scanText("src/a.ts", `notaws_secret_access_key = "${secret}"`).findings).toEqual([]);
+    expect(scanText("src/a.ts", `AWS_SECRET_ACCESS_KEY=${secret}Z`).findings).toEqual([]);
+    expect(scanText("src/a.ts", 'secretAccessKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"').findings).toEqual([]);
   });
 
   it("reads a PEM body across a real newline as well as across the escape", () => {
@@ -198,6 +237,61 @@ describe("assignments in env and YAML files", () => {
     for (const n of ["keyv", "monkey_count", "apiKeyId", "tokenUrl", "js_tokenizer"]) {
       expect(isSecretName(n), n).toBe(false);
     }
+  });
+
+  it("accepts a prefixed placeholder only when the whole value is in the placeholder shape", () => {
+    // `startsWith` admitted a real secret pasted after the prefix.
+    const real = randomBytes(16).toString("hex");
+    const scan = scanText(
+      "x/.env",
+      [
+        `SIGNING_KEY=${PREFIX}32_BYTES_OF_BASE64`,
+        `API_TOKEN=${PREFIX}${real}`,
+        `DB_PASSWORD=${PREFIX}X:${real}`,
+        `ROUTE_SECRET=${PREFIX}`,
+      ].join("\n"),
+    );
+    expect(scan.findings.map((f) => f.variable)).toEqual(["API_TOKEN", "DB_PASSWORD", "ROUTE_SECRET"]);
+    expect(scan.placeholdersAccepted).toBe(1);
+  });
+
+  it("reads ENV and ARG in a Dockerfile with the env file's grammar", () => {
+    const hex = randomBytes(16).toString("hex");
+    for (const p of ["Dockerfile", "deploy/Dockerfile", "deploy/postgres/Dockerfile", "api.Dockerfile", "Dockerfile.prod"]) {
+      expect(isDockerfile(p), p).toBe(true);
+    }
+    for (const p of ["docs/dockerfile-notes.md", "src/Dockerfile.ts.bak/x.ts", "Dockerfiles/README"]) {
+      expect(isDockerfile(p), p).toBe(false);
+    }
+    const text = [
+      "FROM node:22",
+      "ARG NODE_IMAGE=node:22",
+      `ENV DB_PASSWORD=${hex}`,
+      `ARG API_TOKEN="${hex}"`,
+      `ENV PATH=$PNPM_HOME:$PATH SIGNING_KEY=${hex}`,
+      `ENV SESSION_SECRET ${hex}`,
+      "ENV ROUTE_SECRET=${ROUTE_SECRET}",
+      "ENV OTHER_SECRET=$OTHER_SECRET",
+      "ARG BUILD_TOKEN",
+      `ENV A=1 \\`,
+      `    CACHE_PASSWORD=${hex}`,
+      `# ENV OLD_PASSWORD=${hex}`,
+      "# ENV PASSWORD is set by the orchestrator, never here",
+      `RUN echo DB_PASSWORD=${hex}`,
+    ].join("\n");
+    const scan = scanText("deploy/Dockerfile", text);
+    expect(scan.findings.map((f) => [f.line, f.kind, f.variable, f.length])).toEqual([
+      [3, "secret_dockerfile_assignment", "DB_PASSWORD", 32],
+      [4, "secret_dockerfile_assignment", "API_TOKEN", 32],
+      [5, "secret_dockerfile_assignment", "SIGNING_KEY", 32],
+      [6, "secret_dockerfile_assignment", "SESSION_SECRET", 32],
+      [10, "secret_dockerfile_assignment", "CACHE_PASSWORD", 32],
+      [12, "secret_dockerfile_assignment", "OLD_PASSWORD", 32],
+    ]);
+    expect(scan.placeholdersAccepted).toBe(2);
+    // JSON and TypeScript stay out: a secret-named key there is a schema or a fixture.
+    expect(scanText("src/a.ts", `const DB_PASSWORD = "${hex}";`).findings).toEqual([]);
+    expect(scanText("a.json", `{"DB_PASSWORD": "${hex}"}`).findings).toEqual([]);
   });
 
   it("matches a declared placeholder on its exact value only", () => {

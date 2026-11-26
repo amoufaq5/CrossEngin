@@ -397,9 +397,6 @@
   "apps/operate-web/app/e/[slug]/[id]/page.tsx": {
     "@typescript-eslint/no-base-to-string": {
       "count": 13
-    },
-    "@typescript-eslint/no-unused-vars": {
-      "count": 1
     }
   },
   "apps/operate-web/app/e/[slug]/page.tsx": {
@@ -439,9 +436,6 @@
   },
   "apps/operate-web/lib/schema.ts": {
     "@typescript-eslint/no-base-to-string": {
-      "count": 1
-    },
-    "@typescript-eslint/no-unused-vars": {
       "count": 1
     }
   },

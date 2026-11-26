@@ -51,18 +51,35 @@ import { REPO_ROOT } from "./workspace-sql-scan.js";
  * a judgement with no case left (ADR-0375). `CI_JOB_YAML_KEYS` is read by the parse and by the
  * audit, so the set the reader skips and the set the audit reports cannot come to differ.
  *
- * The shipped file therefore has exactly three top-level keys: a `concurrency:` or `permissions:`
- * block would be configuration this fence has no comparison for, and a half-fenced one is worse
- * than a named follow-up (ADR-0382's first open end).
+ * The shipped file has five top-level keys. `permissions:` and `concurrency:` were held out for one
+ * stated reason — configuration this fence had no comparison for, and a half-fenced one is worse
+ * than a named follow-up (ADR-0382's first open end) — and ADR-0482 gave each a declaration on
+ * `CiPipeline` and a comparison here, so they are fenced in both directions like every other key.
  */
 
 export const CI_WORKFLOW_PATH = join(".github", "workflows", "ci.yml");
 
-/** The only top-level keys the shipped workflow may hold; see the module comment for why three. */
-export const CI_WORKFLOW_TOP_LEVEL_KEYS: readonly string[] = Object.freeze(["name", "on", "jobs"]);
+/** The only top-level keys the shipped workflow may hold; see the module comment. */
+export const CI_WORKFLOW_TOP_LEVEL_KEYS: readonly string[] = Object.freeze([
+  "name",
+  "on",
+  "permissions",
+  "concurrency",
+  "jobs",
+]);
+
+/**
+ * The top-level keys every workflow must hold. `permissions:` and `concurrency:` are absent from it
+ * because their presence is compared against the declaration instead (`permissions_differ`,
+ * `concurrency_differ`), so a declared-`null` pipeline may omit them and a declared one may not.
+ */
+export const CI_WORKFLOW_REQUIRED_KEYS: readonly string[] = Object.freeze(["name", "on", "jobs"]);
 
 /** The only per-job keys. `services:` and `strategy:` are caught by this rather than by name. */
-export const CI_JOB_YAML_KEYS: readonly string[] = Object.freeze(["runs-on", "steps"]);
+export const CI_JOB_YAML_KEYS: readonly string[] = Object.freeze(["runs-on", "timeout-minutes", "steps"]);
+
+/** The per-job keys every job must hold; `timeout-minutes:` is compared rather than required. */
+export const CI_REQUIRED_JOB_YAML_KEYS: readonly string[] = Object.freeze(["runs-on", "steps"]);
 
 /**
  * How a trigger in `ci.ts`'s provider-neutral vocabulary is spelled in a GitHub `on:` block.
@@ -110,6 +127,9 @@ export const CI_WORKFLOW_FINDING_KINDS = [
   "step_order_differs",
   "action_input_differs",
   "budget_exceeded",
+  "permissions_differ",
+  "concurrency_differ",
+  "job_timeout_differs",
 ] as const;
 export type CiWorkflowFindingKind = (typeof CI_WORKFLOW_FINDING_KINDS)[number];
 
@@ -137,6 +157,9 @@ export const CI_WORKFLOW_FINDING_MEANINGS: Readonly<Record<CiWorkflowFindingKind
     step_order_differs: "the declared steps, in an order the declaration does not have",
     action_input_differs: "an action input whose value is not the declared one",
     budget_exceeded: "the declared critical path is longer than the trigger's budget",
+    permissions_differ: "the workflow token's scopes are not the declared ones",
+    concurrency_differ: "the workflow's concurrency group or cancellation is not the declared one",
+    job_timeout_differs: "a job's timeout-minutes is not the declared one",
   });
 
 export interface CiWorkflowFinding {
@@ -157,6 +180,8 @@ export interface ParsedCiJob {
   readonly id: string;
   readonly keys: readonly string[];
   readonly runsOn: string | null;
+  /** `timeout-minutes:` as written, or `null` when the job has none. */
+  readonly timeoutMinutes: string | null;
   readonly steps: readonly ParsedCiStep[];
 }
 
@@ -165,6 +190,10 @@ export interface ParsedCiWorkflow {
   readonly triggers: readonly string[];
   /** The branches the `push` trigger names, or `null` when it names none. */
   readonly pushBranches: readonly string[] | null;
+  /** The `permissions:` block's entries, or `null` when the workflow has none. */
+  readonly permissions: ReadonlyMap<string, string> | null;
+  /** The `concurrency:` block's entries as written, or `null` when the workflow has none. */
+  readonly concurrency: ReadonlyMap<string, string> | null;
   readonly jobs: readonly ParsedCiJob[];
 }
 
@@ -201,6 +230,7 @@ interface MutableJob {
   readonly id: string;
   readonly keys: string[];
   runsOn: string | null;
+  timeoutMinutes: string | null;
   readonly steps: MutableStep[];
 }
 
@@ -222,8 +252,10 @@ export function parseCiWorkflow(text: string): ParsedCiWorkflow {
   const triggers: string[] = [];
   let pushBranches: string[] | null = null;
   const jobs: MutableJob[] = [];
+  let permissions: Map<string, string> | null = null;
+  let concurrency: Map<string, string> | null = null;
 
-  let region: "none" | "name" | "on" | "jobs" = "none";
+  let region: "none" | "name" | "on" | "jobs" | "permissions" | "concurrency" = "none";
   /** Inside `on:`, which trigger's sub-block we are in — only `push` has one. */
   let onTrigger: string | null = null;
   let inPushBranches = false;
@@ -265,7 +297,37 @@ export function parseCiWorkflow(text: string): ParsedCiWorkflow {
       step = null;
       inWith = false;
       skippingJobKey = false;
-      region = key === "on" ? "on" : key === "jobs" ? "jobs" : key === "name" ? "name" : "none";
+      region =
+        key === "on"
+          ? "on"
+          : key === "jobs"
+            ? "jobs"
+            : key === "name"
+              ? "name"
+              : key === "permissions"
+                ? "permissions"
+                : key === "concurrency"
+                  ? "concurrency"
+                  : "none";
+      // A block-form map only. GitHub also accepts `permissions: read-all` as a scalar, and that is
+      // refused rather than read: the comparison below is over entries, and a scalar would compare
+      // as an empty map — the vacuous direction.
+      if (region === "permissions") {
+        if ((top[2] ?? "").trim() !== "") return refuse(i, "a permissions: scalar; write it as a block of scopes");
+        permissions = new Map();
+      }
+      if (region === "concurrency") {
+        if ((top[2] ?? "").trim() !== "") return refuse(i, "a concurrency: scalar; write it as a block with group: and cancel-in-progress:");
+        concurrency = new Map();
+      }
+      continue;
+    }
+
+    if (region === "permissions" || region === "concurrency") {
+      const entry = /^ {2}([a-z][a-z0-9-]*):(.+)$/.exec(line);
+      if (entry === null) return refuse(i, `unreadable inside the ${region}: block`);
+      const target = region === "permissions" ? permissions : concurrency;
+      target?.set(entry[1] ?? "", scalar(entry[2] ?? ""));
       continue;
     }
 
@@ -309,7 +371,7 @@ export function parseCiWorkflow(text: string): ParsedCiWorkflow {
     if (region === "jobs") {
       const jobId = /^ {2}([a-z][a-z0-9-]*):\s*$/.exec(line);
       if (jobId !== null) {
-        job = { id: jobId[1] ?? "", keys: [], runsOn: null, steps: [] };
+        job = { id: jobId[1] ?? "", keys: [], runsOn: null, timeoutMinutes: null, steps: [] };
         jobs.push(job);
         inSteps = false;
         step = null;
@@ -328,6 +390,7 @@ export function parseCiWorkflow(text: string): ParsedCiWorkflow {
         inWith = false;
         skippingJobKey = !CI_JOB_YAML_KEYS.includes(key);
         if (key === "runs-on") job.runsOn = scalar(jobKey[2] ?? "");
+        if (key === "timeout-minutes") job.timeoutMinutes = scalar(jobKey[2] ?? "");
         continue;
       }
 
@@ -392,10 +455,13 @@ export function parseCiWorkflow(text: string): ParsedCiWorkflow {
     topLevelKeys,
     triggers,
     pushBranches,
+    permissions,
+    concurrency,
     jobs: jobs.map((j) => ({
       id: j.id,
       keys: j.keys,
       runsOn: j.runsOn,
+      timeoutMinutes: j.timeoutMinutes,
       steps: j.steps.map((s) => ({
         // Narrowed by the loop above rather than asserted: `rendered === null` is refused there, so
         // the `?? ""` is unreachable and exists only because the mutable shape cannot say so.
@@ -467,7 +533,7 @@ export function auditCiWorkflow(
       });
     }
   }
-  for (const key of CI_WORKFLOW_TOP_LEVEL_KEYS) {
+  for (const key of CI_WORKFLOW_REQUIRED_KEYS) {
     if (!parsed.topLevelKeys.includes(key)) {
       findings.push({
         kind: "workflow_key_absent",
@@ -553,7 +619,7 @@ export function auditCiWorkflow(
         });
       }
     }
-    for (const key of CI_JOB_YAML_KEYS) {
+    for (const key of CI_REQUIRED_JOB_YAML_KEYS) {
       if (!actual.keys.includes(key)) {
         findings.push({
           kind: "job_key_absent",
@@ -561,6 +627,17 @@ export function auditCiWorkflow(
           detail: `job '${id}' has no '${key}:' key`,
         });
       }
+    }
+
+    const wantTimeout = declared.timeoutMinutes === null ? null : declared.timeoutMinutes.toString();
+    if (actual.timeoutMinutes !== wantTimeout) {
+      findings.push({
+        kind: "job_timeout_differs",
+        subject: id,
+        detail:
+          `job '${id}' has timeout-minutes ${actual.timeoutMinutes ?? "(none)"}; CI_PIPELINE declares ` +
+          `${wantTimeout ?? "none"}`,
+      });
     }
 
     if (actual.runsOn !== null && actual.runsOn !== declared.runsOn) {
@@ -633,6 +710,33 @@ export function auditCiWorkflow(
     }
   }
 
+  // Both directions over the token's scopes: a scope the workflow grants and the declaration does
+  // not is a widening nobody reviewed here, and one the declaration names and the workflow drops is
+  // a narrowing the jobs may not survive. Absent on one side and present on the other is a finding
+  // too, since an absent block is the repository's default rather than "no permissions".
+  const declaredPerms = pipeline.permissions === null ? null : new Map(Object.entries(pipeline.permissions));
+  if (!sameEntries(declaredPerms, parsed.permissions)) {
+    findings.push({
+      kind: "permissions_differ",
+      subject: "permissions",
+      detail: `declared ${renderEntries(declaredPerms)}, workflow has ${renderEntries(parsed.permissions)}`,
+    });
+  }
+  const declaredConcurrency =
+    pipeline.concurrency === null
+      ? null
+      : new Map([
+          ["group", pipeline.concurrency.group],
+          ["cancel-in-progress", pipeline.concurrency.cancelInProgress ? "true" : "false"],
+        ]);
+  if (!sameEntries(declaredConcurrency, parsed.concurrency)) {
+    findings.push({
+      kind: "concurrency_differ",
+      subject: "concurrency",
+      detail: `declared ${renderEntries(declaredConcurrency)}, workflow has ${renderEntries(parsed.concurrency)}`,
+    });
+  }
+
   for (const trigger of CI_JOB_TRIGGERS) {
     if (!declaredTriggers.has(trigger)) continue;
     if (fitsBudget(pipeline, trigger)) continue;
@@ -647,6 +751,18 @@ export function auditCiWorkflow(
   }
 
   return findings;
+}
+
+function sameEntries(a: ReadonlyMap<string, string> | null, b: ReadonlyMap<string, string> | null): boolean {
+  if (a === null || b === null) return a === b;
+  if (a.size !== b.size) return false;
+  for (const [k, v] of a) if (b.get(k) !== v) return false;
+  return true;
+}
+
+function renderEntries(m: ReadonlyMap<string, string> | null): string {
+  if (m === null) return "no block";
+  return JSON.stringify(Object.fromEntries([...m].sort(([x], [y]) => x.localeCompare(y))));
 }
 
 /**
@@ -728,6 +844,15 @@ export function auditExceptionDisagreements(
       for (const m of inputs.members) {
         if (m.dependencies.includes(e.via)) {
           out.push(`${e.advisory} is dev_tooling_not_shipped through ${e.via}, which ${m.name} lists in its dependencies`);
+        }
+        // The premise has a second door the `via` check cannot see (ADR-0482): a member listing the
+        // vulnerable package *itself* as a runtime dependency puts it in that member's closure
+        // whatever `via` it was first found through, so "reached only through dev tooling" is false
+        // the moment one does. `via` is the one member allowed to, since that is the declaration.
+        if (m.name !== e.via && m.dependencies.includes(e.package)) {
+          out.push(
+            `${e.advisory} is dev_tooling_not_shipped, but ${m.name} lists ${e.package} in its own dependencies`,
+          );
         }
       }
     } else if (e.via !== null) {

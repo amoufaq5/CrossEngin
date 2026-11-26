@@ -9,7 +9,10 @@
  */
 
 export const DEFAULT_DIFF_CONTEXT = 3;
-/** Past this many rendered lines the rest is counted, never silently dropped. */
+/**
+ * Past this many rendered lines a diff is too long to approve: the rest is counted, never silently
+ * dropped, and a write whose diff is longer is refused rather than offered for approval.
+ */
 export const MAX_DIFF_LINES = 400;
 
 export type DiffOp = { readonly kind: " " | "-" | "+"; readonly text: string };
@@ -134,13 +137,16 @@ export interface UnifiedDiffOptions {
   readonly maxLines?: number;
 }
 
-export function unifiedDiff(
+/**
+ * The diff with no cap, so a caller can tell how long it is before deciding whether a person can be
+ * asked to approve it. `unifiedDiff` is this, cut at `maxLines`.
+ */
+export function fullUnifiedDiff(
   oldText: string,
   newText: string,
-  opts: UnifiedDiffOptions,
+  opts: Omit<UnifiedDiffOptions, "maxLines">,
 ): readonly string[] {
   const context = opts.context ?? DEFAULT_DIFF_CONTEXT;
-  const maxLines = opts.maxLines ?? MAX_DIFF_LINES;
   const ops = diffLines(oldText, newText);
   const changed: number[] = [];
   ops.forEach((op, i) => {
@@ -189,6 +195,29 @@ export function unifiedDiff(
       if (op.kind !== "-") newLine++;
     }
   }
+  return out;
+}
+
+/**
+ * Whether a diff is too long to be shown in full. A write-approval prompt must not offer `y` over a
+ * diff it cut: the person would be approving bytes they were not shown (ADR-0484).
+ */
+export function diffExceedsCap(lines: readonly string[], maxLines: number = MAX_DIFF_LINES): boolean {
+  return lines.length > maxLines;
+}
+
+/**
+ * The diff cut at `maxLines`, with the remainder counted rather than dropped. For a reader that is not
+ * an approval — a person approving a write is never shown a cut diff; `propose_manifest_edit` refuses
+ * the write instead.
+ */
+export function unifiedDiff(
+  oldText: string,
+  newText: string,
+  opts: UnifiedDiffOptions,
+): readonly string[] {
+  const maxLines = opts.maxLines ?? MAX_DIFF_LINES;
+  const out = fullUnifiedDiff(oldText, newText, opts);
   if (out.length <= maxLines) return out;
   const shown = out.slice(0, maxLines - 1);
   shown.push(

@@ -147,11 +147,12 @@ describe("the write surface over resolved erp-core", () => {
   });
 
   it("derives the effect-stamped fields from the effects compile wires, and nothing else", () => {
-    // Measured, not chosen: ten stamps. Six are three fields on each of the two documents, each
+    // Measured, not chosen: eleven stamps. Six are three fields on each of the two documents, each
     // one an `input.store.update` an effect issues against the document that triggered it; the
     // seventh is the one a goods receipt advances on the order line it receives, which both the
     // receipt and the three-way match read back; and three are the tax remittance's on the return
-    // it posts for (ADR-0467). `credit_disposition` is the caller's and is not among them.
+    // it posts for (ADR-0467), and the eleventh is the close time a period's own close stamps
+    // (ADR-0480). `credit_disposition` is the caller's and is not among them.
     const stamps = defaultEffectStamps(CORE)
       .map((s) => `${s.entity}.${s.field}`)
       .sort();
@@ -159,6 +160,7 @@ describe("the write surface over resolved erp-core", () => {
       "Bill.booking_rate",
       "Bill.paid_at",
       "Bill.withholding_total",
+      "FiscalPeriod.closed_at",
       "Invoice.booking_rate",
       "Invoice.paid_at",
       "Invoice.withholding_total",

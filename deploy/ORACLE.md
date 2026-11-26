@@ -259,10 +259,10 @@ What each secret does, so you know what rotating one costs:
 | `POSTGRES_PASSWORD` | the database | must match the volume; change before first boot |
 | `POSTGRES_APP_PASSWORD` | the role the API connects as (`POSTGRES_APP_USER`, `NOSUPERUSER NOBYPASSRLS`, owning nothing), which is what makes the row-level-security policies apply | none: `app-role` re-sets it on every `up`, so change it and run `docker compose up -d` |
 | `OPERATE_ADMIN_API_KEY` | the platform-admin credential — it can provision and delete tenants | invalidates that key |
-| `CREDENTIAL_PEPPER` | password hashes, which `meta.users` holds with no RLS | **every password stops verifying.** Do not change it after users exist |
+| `CREDENTIAL_PEPPER` | password hashes, which `meta.users` holds with no RLS | **replacing it outright stops every password verifying.** Rotate it instead: keep the old value as `CREDENTIAL_PEPPER_RETIRED_<version>` and raise `CREDENTIAL_PEPPER_VERSION`, and each sign-in re-keys that user's hash — [README → Rotating the login pepper](./README.md#rotating-the-login-pepper) |
 | `OPERATE_TOKEN_SIGNING_KEY` | session tokens; the public half is derived from it | every session gets one 401 and a re-login |
 | `CURSOR_ENCRYPTION_SECRET` | the keyset cursor, which otherwise carries a classified field's plaintext | cursors in flight get one 400 and a restarted page walk |
-| `AUDIT_CHAIN_SIGNING_KEY` | the Ed25519 key every audit-chain entry is signed with; the public half is derived from it | entries already written stay verifiable under the old key's registered fingerprint; do not rotate casually |
+| `AUDIT_CHAIN_SIGNING_KEY` | the Ed25519 key every audit-chain entry is signed with; the public half is derived from it | entries already written stay verifiable only if the old key's public half is listed in `AUDIT_CHAIN_TRUSTED_PUBLIC_KEYS` — the verifier trusts that set and not the key registry (ADR-0437), so a rotation that omits it reads every old entry `untrusted_key` and the integrity proof answers compromised; see [README → Rotating the audit-chain key](./README.md#rotating-the-audit-chain-key) |
 
 Generate these four as **base64**, as above, and not as hex: hex draws from only 16 characters,
 and the boot's floor is 16 distinct byte values, so a hex string is refused as `too_uniform`
@@ -566,7 +566,15 @@ set -euo pipefail
 # and nothing below installs one or sets MAILTO. So a failure is RECORDED here rather than
 # announced — strictly better than the void it used to go to, and still a file you have to
 # read. If you want it pushed, set MAILTO and install an MTA, or point a monitor at this log.
-exec >> /home/ubuntu/backups/dump.log 2>&1
+# Bounded to its last 1000 lines first, because a nightly append with no rotation grows for as
+# long as the VM lives. Through a temporary file and one rename, so a trim that fails leaves the
+# old log whole rather than empty — and `|| true`, because a log that cannot be trimmed is no
+# reason to skip tonight's backup.
+log=/home/ubuntu/backups/dump.log
+if [ -f "$log" ]; then
+  { tail -n 1000 "$log" > "$log.trim" && mv -- "$log.trim" "$log"; } || rm -f -- "$log.trim" || true
+fi
+exec >> "$log" 2>&1
 echo "=== $(date -Is)"
 cd /home/ubuntu/crossengin/deploy
 out="/home/ubuntu/backups/crossengin-$(date +%F-%H%M).sql.gz"
@@ -850,9 +858,14 @@ They are also not peers, and it is a three-way split rather than the two this se
   anyone who can pull and is not deletable from a tag that has been pulled.
 
   Back it up with the database, not separately. Rotating the key does not invalidate the chain, but
-  verification resolves each entry's own `signingKeyFingerprint` against the key registry, so a
-  rotated-away key must stay registered or every entry it signed reads as unverifiable — and a chain
-  whose key is lost cannot be proven intact, which is the one thing it exists for.
+  verification checks each entry against a **pinned trust set** — the current seed's public half and
+  every key in `AUDIT_CHAIN_TRUSTED_PUBLIC_KEYS` — and not against the key registry (ADR-0437), so a
+  rotated-away key's public half must be **listed there** or every entry it signed reads
+  `untrusted_key` and the integrity proof answers compromised. Record it before you change the seed;
+  [README → Rotating the audit-chain key](./README.md#rotating-the-audit-chain-key) has the command
+  and the order. A chain whose key is lost cannot be proven intact, which is the one thing it exists
+  for. `--integrity-proof-full-every <n>` (default 24 passes; 0 never) is how often the hourly proof
+  re-reads the whole chain rather than the suffix after a signed checkpoint.
 
   **The chain key gates one of the three deletion *surfaces* and not all three, and the capability
   declaration gates a different two of the four flags** — so the two columns below do not agree, and

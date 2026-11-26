@@ -60,6 +60,8 @@ import {
   type FinanceAccountCodeFiller,
   OPENAPI_PATH,
   ensureStarterChart,
+  formatStarterChartActorCapability,
+  starterChartActorCapability,
 } from "@crossengin/operate-runtime";
 import { type PgConnection } from "@crossengin/kernel-pg";
 import {
@@ -128,8 +130,8 @@ import {
 import { GatewayReplayer } from "@crossengin/api-gateway-pg";
 import { replayIncidents } from "@crossengin/incident-response-runtime-pg";
 import {
-  REPLAY_SUBSYSTEMS,
   runReplaySections,
+  selectReplaySubsystems,
   subsystemsServedBy,
   summarizeReplay,
   type ReplayCoverage,
@@ -241,6 +243,12 @@ import { formatTenantManifestSurvey, servedFromOf, surveyTenantManifest } from "
 import { readFlagJsonFile } from "./flag-json-file.js";
 import { formatServingRoleSurvey, surveyServingRole } from "./serving-role-survey.js";
 import { userIdentityFromStore } from "./user-identity.js";
+import {
+  CREDENTIAL_HASH_ADMISSION_MAY_SERVE,
+  credentialHashAdmissionRemedy,
+  formatCredentialHashAdmission,
+  probeCredentialHashAdmission,
+} from "./credential-hash-admission.js";
 import {
   AbacObligationsUnevaluable,
   checkAbacObligations,
@@ -403,7 +411,7 @@ import {
   resolveAiSetting,
 } from "./ai-model-source.js";
 import { buildCredentialRoutes, DEFAULT_MIN_PASSWORD_LENGTH } from "./credential-routes.js";
-import { deriveAccessRequestContactKey, hashPassword } from "@crossengin/crypto";
+import { deriveAccessRequestContactKey, hashPassword, pepperRingOf } from "@crossengin/crypto";
 import {
   AccessRequestSweeper,
   ACCESS_REQUEST_INTAKE_PATH,
@@ -464,6 +472,7 @@ import {
 } from "@crossengin/tenant-lifecycle-pg";
 import {
   formatDeletionConnectionLine,
+  buildDeletionPreflight,
   probeDeletionConnection,
   resolveDeletionOwnerConfig,
   tenantSchemaDroppable,
@@ -610,7 +619,12 @@ import {
 import { PostgresAuditReadStore } from "./audit-read-store.js";
 import { buildNotificationTemplateRoutes } from "./notification-template-routes.js";
 import { PostgresNotificationTemplateStore } from "./notification-template-store.js";
-import { PostgresIntegrityVerdictStore } from "./integrity-verdict-store.js";
+import {
+  PostgresIntegrityVerdictStore,
+  attestedWitnessFrom,
+  storedVerdictCensusFrom,
+  type StoredVerdictCensus,
+} from "./integrity-verdict-store.js";
 import { assessManifestRisk } from "./design-review.js";
 import { projectManifestView } from "./manifest-view.js";
 import { buildDiffLineage, diffManifests } from "./manifest-diff.js";
@@ -740,6 +754,7 @@ import {
   requirePinnedChainKeys,
   resolverFor,
   verifyChainForAudit,
+  verifyChainWitnessMemory,
   type ChainVerificationReport,
 } from "./chain-verify.js";
 import {
@@ -749,6 +764,7 @@ import {
   type AnchorAuditReport,
   type ChainTruncationCheck,
 } from "./anchor-audit.js";
+import type { WitnessMemoryCheck } from "./witness-memory.js";
 import { buildRequestMetering, loadMeteringConfig, type RequestMetering } from "./metering.js";
 import {
   buildStripeUsageSync,
@@ -758,6 +774,7 @@ import {
 import { PostgresJobInvoker, buildActionRoleMap, mergeActionRoleMaps } from "./job-invoke.js";
 import { buildErpJobProviders, erpJobCoverage, type JobAccessResolver } from "./erp-job-handlers.js";
 import { tenantStandingFromDirectory } from "./job-tenant-standing.js";
+import { entitlementGateSourceOf, formatEntitlementSurvey } from "./entitlement-survey.js";
 import { invokeRolesByAction, isUnservableJobVerdict, type JobProducer } from "@crossengin/jobs";
 
 function firstHeader(v: string | readonly string[] | undefined): string | undefined {
@@ -2155,6 +2172,15 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       },
     };
   }
+  // Said here, after the webhook block that may have built the Stripe resolver, and read off the live
+  // resolver: the gate refuses reads as well as writes for a tenant with no entitlement, and nothing
+  // printed that it was armed (ADR-0418 Q6, ADR-0482).
+  console.info(
+    `[entitlement] ${formatEntitlementSurvey({
+      source: entitlementGateSourceOf(entitlementResolver),
+      stripeWebhookMounted: webhookRoute !== undefined,
+    })}`,
+  );
   // Stripe Billing Portal: POST /v1/meta/billing-portal mints a hosted session so a tenant can
   // manage/fix their subscription. The subscription store resolves the tenant's Stripe customer
   // id; the Stripe client (with the secret key) creates the session. Both structural.
@@ -2416,6 +2442,12 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // archive/reactivate + stats) across all tenants, gated to the configured platform-admin role(s). Enabled
   // by --platform-admin over a pg store.
   if (options.platformAdmin && conn !== undefined) {
+    // Whether the starter chart can be written at all, said before the first approval asks
+    // (ADR-0480): a `--job-actor-role` this manifest does not grant LedgerAccount create refuses
+    // every chart, and before this the operator learned it from the first approval's report.
+    const starterChartActor = formatStarterChartActorCapability(starterChartActorCapability(manifest, options.jobActorRoles));
+    if (starterChartActor.level === "warn") console.warn(starterChartActor.line);
+    else console.log(starterChartActor.line);
     extraRouteList.push(
       ...buildPlatformAdminRoutes({
         store: new PostgresTenantStore(conn),
@@ -3013,6 +3045,9 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
                   tenantId: req.tenantId,
                   tombstoneId: req.tombstoneId,
                   bootSchema: deletionBootSchema,
+                  // ADR-0477: a schema the eraser cannot drop is refused before the first DELETE,
+                  // so the request is released for retry rather than stranded mid-erasure.
+                  preflight: buildDeletionPreflight(),
                   kind: req.kind,
                   executedBy: req.executedBy,
                   approvedBy: req.approvedBy,
@@ -3787,6 +3822,11 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           onUserStatusChanged: (userId: string): void => {
             sessionStandingDirectory?.forget(userId);
           },
+          // ADR-0479: a provision may name an id the identity cache holds as absent, and a status
+          // move is a write to the row it reads, so the cached label goes on this replica at once.
+          onUserIdentityChanged: (userId: string): void => {
+            userIdentity?.evict(userId);
+          },
           // Which roles the tenant being granted into actually declares. The grant boundary is the
           // only place that question has both halves in hand, and a boot census over existing
           // memberships could not stand in for it: `meta.user_tenant_membership` carries one
@@ -3881,6 +3921,30 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     credentialAuth?.ok === true && conn !== undefined
       ? new PostgresCredentialStore(conn, schemaOpt)
       : null;
+  // ADR-0479: a rotated pepper writes `k<N>$` hashes, which a database applied before that segment
+  // existed refuses 23514 on every password set and every login re-hash — and the reconciler does
+  // not plan that widening (a pattern CHECK), so the live predicate is asked here, once, at boot.
+  if (credentialAuth?.ok === true && conn !== undefined) {
+    const hashSchema = options.schema ?? "meta";
+    const hashAdmission = await probeCredentialHashAdmission(conn, {
+      schema: hashSchema,
+      pepperVersion: pepperRingOf(credentialAuth.material.pepper).version,
+    });
+    const hashLine = formatCredentialHashAdmission(hashAdmission);
+    if (!CREDENTIAL_HASH_ADMISSION_MAY_SERVE[hashAdmission.verdict]) {
+      console.error(hashLine);
+      console.error(credentialHashAdmissionRemedy(hashSchema, hashAdmission));
+      throw new Error(
+        `--credential-login cannot be served: ${hashAdmission.detail}; run the ALTER pair above as the` +
+          " schema owner, or set CREDENTIAL_PEPPER_VERSION back to the version the stored hashes use",
+      );
+    }
+    if (hashAdmission.verdict === "admits" || hashAdmission.verdict === "not_applicable") {
+      console.info(hashLine);
+    } else {
+      console.warn(hashLine);
+    }
+  }
   // Resolved once, here, although the login that also enforces it is wired much further down.
   // Parsing it twice would be two results for one policy, and the lockout is the one input where
   // the two surfaces disagreeing is the whole defect: the credential route verifies a password
@@ -3907,6 +3971,15 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         },
         principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
         adminRoles: new Set(options.credentialAdminRoles),
+        // ADR-0479: a reset without the current password is a takeover of every grant the subject
+        // holds, so it is refused when the subject holds a platform authority the caller does not.
+        // `credentialStore` is non-null only with a connection, so the reject is unreachable; it is
+        // there so the reader fails closed (a 503) rather than answering "no memberships".
+        subjectMemberships: (userId: string) =>
+          conn === undefined
+            ? Promise.reject(new Error("no Postgres connection"))
+            : new PostgresUserStore(conn, schemaOpt).membershipsOfUser(userId),
+        platformAuthorityRoles: platformAuthorityRoles(options),
         // Required for the same reason the registry's is: both acts replace the one credential a
         // person authenticates with, so the record goes before the write and an unrecordable one
         // is refused (ADR-0313).
@@ -5900,10 +5973,10 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       // principal who authenticated to make that act, and the runner refuses one equal to itself.
       //
       // The runner supplies no attestations, so a subsystem the capabilities require to attest and
-      // the pipeline does not perform refuses every scheduled deletion `assemble/subsystem_unattested`
-      // — after both erasures, so it rejects the request rather than releasing it (ADR-0453). That is
-      // a fact about this boot's declaration, so it is said here, once, rather than discovered per
-      // request.
+      // the pipeline does not perform refuses every scheduled deletion
+      // `input/declared_subsystem_unattested` before the transaction opens, so the request is
+      // released with backoff and the tenant stays `pending_deletion` (ADR-0477). That is a fact
+      // about this boot's declaration, so it is said here, once, rather than discovered per request.
       const unattestable = requiredSubsystemsFor(runnerCapabilities).filter(
         (s) => !(PIPELINE_PERFORMED_SUBSYSTEMS as readonly string[]).includes(s),
       );
@@ -5911,7 +5984,8 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         console.warn(
           `[deletion] runner: --deletion-capabilities requires an attestation for ` +
             `${unattestable.join(", ")}, which the runner cannot supply, so every scheduled deletion ` +
-            "will be refused assemble/subsystem_unattested and its request rejected; declare each " +
+            "will be refused input/declared_subsystem_unattested and released for retry, with the " +
+            "tenant left pending_deletion until the declaration is fixed; declare each " +
             "absent or present_not_erased as is true of this deployment, or delete through " +
             "--tenant-deletion-routes with the attestation in the body",
         );
@@ -5955,6 +6029,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
               tenantId: input.tenantId,
               tombstoneId: input.tombstoneId,
               bootSchema: deletionBootSchema,
+              preflight: buildDeletionPreflight(),
               /*
                * `tenant_deletion`, from the deployment's `--deletion-subject-scope` declaration —
                * **not** `data_subject_erasure`, which is what stood here.
@@ -7362,9 +7437,20 @@ export async function runPruneLinks(options: PruneOptions): Promise<MultiTenantS
 export async function runReplay(options: ReplayOptions): Promise<ReplayReport> {
   const conn = createNodePgConnection(parsePgEnvConfig());
   try {
-    const selected: readonly ReplaySubsystem[] =
-      options.subsystems.length > 0 ? options.subsystems : REPLAY_SUBSYSTEMS;
     const runners = buildReplayRunners(options.schema);
+    const scopedCoverage: ReplayCoverage | null = options.allTenants
+      ? null
+      : options.tenantId !== null
+        ? { kind: "tenant", tenantId: options.tenantId }
+        : options.platform
+          ? { kind: "platform" }
+          : { kind: "unscoped" };
+    // ADR-0483: the default is the wired subsystems this scope can serve; an explicit
+    // --subsystem runs as asked. Before this, the default named every subsystem and exited 1 on
+    // the one with no runner.
+    const selection = selectReplaySubsystems(options.subsystems, runners, scopedCoverage);
+    if (selection.info !== null) console.info(selection.info);
+    const selected: readonly ReplaySubsystem[] = selection.selected;
     const sections: ReplaySection[] = [];
 
     if (options.allTenants) {
@@ -7407,12 +7493,7 @@ export async function runReplay(options: ReplayOptions): Promise<ReplayReport> {
       return summarizeReplay(sections);
     }
 
-    const coverage: ReplayCoverage =
-      options.tenantId !== null
-        ? { kind: "tenant", tenantId: options.tenantId }
-        : options.platform
-          ? { kind: "platform" }
-          : { kind: "unscoped" };
+    const coverage: ReplayCoverage = scopedCoverage ?? { kind: "unscoped" };
     return summarizeReplay(
       await runReplaySections(conn, coverage, selected, runners, options.limit),
     );
@@ -7579,6 +7660,19 @@ export interface VerifyChainReport {
    * `signatures: valid (0 checked)` and concluded **OK** with exit 0.
    */
   readonly truncation: ChainTruncationCheck;
+  /**
+   * The fourth report: this deployment's newest **baseline** verdict compared against what this run
+   * read (ADR-0481). Without it a scope whose entries *and* checkpoints were destroyed was
+   * byte-identical to a new one and exited 0 as `NO HISTORY`, while the hourly pass — which has read
+   * the prior verdict since ADR-0399 — answered `compromised`.
+   */
+  readonly witnessMemory: WitnessMemoryCheck;
+  /**
+   * How many verdict rows of any verdict this deployment stored for the scope (ADR-0481's review):
+   * the baseline above is a filtered read over columns the tenant can write, and a row's existence
+   * is what survives such an edit. See `storedVerdictCensusFrom`.
+   */
+  readonly storedVerdicts: StoredVerdictCensus;
 }
 
 export async function runVerifyChain(options: VerifyChainOptions): Promise<VerifyChainReport> {
@@ -7601,6 +7695,15 @@ export async function runVerifyChain(options: VerifyChainOptions): Promise<Verif
     // Built in **both** modes now. It used to be built only for `--from-checkpoint`, because only a
     // bounded fold needed an anchor; the audit needs the table whichever fold ran.
     const checkpoints = new PostgresChainCheckpointStore(conn, schemaOpt);
+    // The claim side, read **first** (ADR-0407): a prior verdict names a chain entry the chain must
+    // contain, so read after the chain it could name an entry appended in between and forge a
+    // contradiction. Same connection, same scope; `attestedWitnessFrom` owns the catch, so an
+    // unreadable baseline is an `unreadable` read rather than a thrown command (ADR-0481).
+    const verdictStore = new PostgresIntegrityVerdictStore(conn, schemaOpt);
+    const priorVerdict = await attestedWitnessFrom(verdictStore, tenantId);
+    // The census is a claim side too (every row implies a chain entry), so it is read before the
+    // chain for the same reason.
+    const storedVerdicts = await storedVerdictCensusFrom(verdictStore, tenantId);
     // The verification **and** the entries it examined. `verifyChainForAudit` hands back what
     // `foldFromGenesis` already loaded, which is five of the six reachable paths — the full mode
     // plus all four bounded fallbacks — so the correspondence costs this command nothing on any of
@@ -7633,7 +7736,20 @@ export async function runVerifyChain(options: VerifyChainOptions): Promise<Verif
     // happened (`proveScopeIntegrity`'s own ordering argument, one caller across).
     const tail = await reader.tail(tenantId);
     const truncation = chainTruncation(anchors.witnessSequence, tail?.sequenceNumber ?? null);
-    return { trust: formatChainTrust(trust), chain, anchors, truncation };
+    const witnessMemory = verifyChainWitnessMemory({
+      prior: priorVerdict,
+      anchors,
+      truncation,
+      correspondenceChain: verification.correspondenceChain,
+    });
+    return {
+      trust: formatChainTrust(trust),
+      chain,
+      anchors,
+      truncation,
+      witnessMemory,
+      storedVerdicts,
+    };
   } finally {
     await conn.close();
   }

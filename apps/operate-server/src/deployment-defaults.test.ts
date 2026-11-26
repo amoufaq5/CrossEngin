@@ -4,7 +4,19 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
+import { REQUIRED_JWT_CLAIMS } from "@crossengin/api-gateway-runtime";
+
+import { AUDIT_CHAIN_TRUSTED_PUBLIC_KEYS_VAR } from "./audit-chain-env.js";
+import { helpText } from "./cli.js";
+import {
+  COLUMN_ENCRYPTION_SECRET_GENERATION_VAR,
+  COLUMN_ENCRYPTION_SECRET_PREVIOUS_VAR,
+} from "./column-secret-ring.js";
+import { CREDENTIAL_PEPPER_RETIRED_PREFIX, CREDENTIAL_PEPPER_VERSION_VAR } from "./credential-auth-env.js";
+import { DEFAULT_HTTP_LISTENER_SETTINGS } from "./http-listener.js";
 import { IntegrityProofConfigSchema } from "./integrity-proof.js";
+import { notificationListGrant } from "./notification-routes.js";
+import { STRIPE_API_KEY_VAR, STRIPE_WEBHOOK_SECRET_VAR } from "./stripe-secret-source.js";
 
 /**
  * The first fence over `deploy/`, and it exists because this increment's own class is **a default
@@ -49,8 +61,9 @@ function deployDoc(path: string): string {
  *
  * The set was a hardcoded pair and that was ADR-0288's shape one level out: a maximally defective
  * `pg_dump` added to `deploy/VERCEL-SUPABASE.md` passed every assertion below, and that is the
- * document a backup section would be added to, because it is the managed-cloud path and the only
- * one of the three with no occurrence of *backup*, *dump*, *restore*, *PITR* or *snapshot*. The
+ * document a backup section would be added to, because it is the managed-cloud path — it was the
+ * only one of the three with no occurrence of *backup*, *dump*, *restore*, *PITR* or *snapshot*,
+ * and ADR-0482 gave it a backup section whose dump is now one of this fence's population. The
  * floor is what makes the read a fence rather than a convenience: a `readdirSync` that stopped
  * matching would hand every assertion an empty population, which is the silent direction.
  */
@@ -277,8 +290,9 @@ describe("the api command's shape", () => {
   });
 
   it("serves the JSONB store, which is what the other assertions here are measured against", () => {
-    // Several reasons below are store-specific — the drain needs Postgres, the unique-index figure
-    // is `0 of 32` on this store — so a change here invalidates them rather than merely differing.
+    // Several reasons below are store-specific — the drain needs Postgres, and on this store the
+    // unique indexes are built by the `document-indexes` owner step rather than by the API (ADR-0423)
+    // — so a change here invalidates them rather than merely differing.
     expect(valueAfter(args, "--store")).toBe("pg");
   });
 });
@@ -774,7 +788,9 @@ describe("the documented backup commands", () => {
     // ORACLE comes first. An exact count rather than a floor: three is the whole population, so a
     // fourth is a new command somebody added without reading this block, and a second is one of
     // these three having been deleted or reworded past the matcher.
-    expect(commands.map((c) => c.doc)).toEqual(["ORACLE.md", "README.md", "README.md"]);
+    // VERCEL-SUPABASE.md joined it in ADR-0482 with the one dump that does not go through
+    // `docker compose exec`, because on that path the database is not in a compose project.
+    expect(commands.map((c) => c.doc)).toEqual(["ORACLE.md", "README.md", "README.md", "VERCEL-SUPABASE.md"]);
     // And the mentions really are excluded by content: four of them across the three documents,
     // each the bare token. A count rather than a list, because the prose will be reworded.
     const mentions = deployMarkdown().reduce(
@@ -788,7 +804,11 @@ describe("the documented backup commands", () => {
     // `docker compose exec` without `-T` allocates a TTY, which injects CR into the stream, so a
     // dump that completes may still not restore. README's day-2 bullet was the one that lacked it
     // while both siblings had it — the asymmetry is what identified it.
-    for (const { doc, cmd } of commands) {
+    // Scoped to commands that run through a container (ADR-0482): the Supabase dump connects to a
+    // managed database directly and has no TTY to suppress. A floor keeps the scope from emptying.
+    const throughContainer = commands.filter(({ cmd }) => /\bdocker\b/.test(cmd));
+    expect(throughContainer.length).toBeGreaterThanOrEqual(3);
+    for (const { doc, cmd } of throughContainer) {
       expect(cmd, `${doc}: pg_dump without -T`).toMatch(/\bexec\s+-T\b/);
     }
   });
@@ -825,9 +845,10 @@ describe("the documented backup commands", () => {
       // Non-vacuity, and the floor rather than the form: the role has to be named *somehow* — the
       // literal, or a lookup of the variable `.env` holds. A command naming neither would satisfy
       // the refusal above by saying nothing at all.
-      expect(argsOf(cmd), `${doc}: pg_dump names neither the crossengin role nor POSTGRES_USER`).toMatch(
-        /crossengin|POSTGRES_USER=/,
-      );
+      // A direct connection to a managed database (VERCEL-SUPABASE.md, ADR-0482) names the
+      // provider's owner role as a literal; the bare-variable refusal above still applies to it.
+      const roleNamed = /\bdocker\b/.test(cmd) ? /crossengin|POSTGRES_USER=/ : /-U\s+[A-Za-z_][A-Za-z0-9_]*\b/;
+      expect(argsOf(cmd), `${doc}: pg_dump names neither the crossengin role nor POSTGRES_USER`).toMatch(roleNamed);
     }
   });
 
@@ -1465,10 +1486,13 @@ describe("there is no import route, and the README says so (register P1.13)", ()
     // A biconditional and not `importFlags.length === 0` alone, which would pin the absence as a
     // specification (ADR-0412): an import flag landing makes this fail and points at the README
     // sentence that must change with it.
+    //
+    // It used to carry two more assertions that did exactly that, and ADR-0417 Q10 named them:
+    // `expect(claimsAbsent).toBe(true)` and `@crossengin/migration` having no dependents. Both made
+    // the absence the specification, so the natural fix for an import route landing was to delete
+    // them (ADR-0372's class). Removed in ADR-0482; the biconditional alone reds on either side.
     const claimsAbsent = flat(readme).includes("**No import, backfill or bulk route.**");
     expect(claimsAbsent).toBe(importFlags.length === 0);
-    expect(claimsAbsent, "the README's non-capabilities list lost the import row").toBe(true);
-    expect(workspaceDependents("@crossengin/migration")).toEqual([]);
   });
 
   it("ties the loading hazards to the code and the compose they describe", () => {
@@ -1485,16 +1509,41 @@ describe("there is no import route, and the README says so (register P1.13)", ()
     expect(section).toContain("86,400 seconds");
     const operatorSources = appSources().filter(({ src }) => src.includes("idempotencyTtlSeconds"));
     expect(operatorSources.map((s) => s.name), "something now sets the idempotency TTL").toEqual([]);
-    // The duplicate hazard is stated for the store the compose ships.
+    // The duplicate hazard is stated for the store the compose ships, and since ADR-0423 that store
+    // enforces a declared unique field once the `document-indexes` owner step has built its index.
+    // The bullet said "not enforced on `--store pg`" until ADR-0482, which was true before that
+    // increment and false after it — so the fence asserted a defect as the specification and kept
+    // asserting it after the defect was fixed. It reads the mechanism off the code now: the compose
+    // runs the step before the API, the handler answers the code the bullet names, and the two
+    // reasons the bullet tells an operator to read are the survey's own keys.
     expect(valueAfter(apiCommandArgs(), "--store")).toBe("pg");
-    expect(section).toContain("not enforced on `--store pg`");
+    expect(section).not.toContain("not enforced on `--store pg`");
+    const apiBlock = liveLines(composeService(COMPOSE, "api"));
+    expect(apiBlock, "api no longer waits for the document-indexes step").toMatch(
+      /document-indexes:\s*\n\s*condition: service_completed_successfully/,
+    );
+    expect(section).toContain("`document-indexes`");
+    expect(section).toContain("**409** `unique_violation`");
+    const uniqueSurvey = readFileSync(resolve(here, "./unique-enforcement.ts"), "utf8");
+    for (const reason of ["index_not_owner", "existing_duplicates"]) {
+      expect(uniqueSurvey, `the unique survey no longer has the reason ${reason}`).toMatch(
+        new RegExp(`\\n {2}${reason}: \\{`),
+      );
+      expect(section, `the loading hazards no longer name ${reason}`).toContain(`\`${reason}\``);
+    }
     // The bootstrap key's role is the one the hazard names.
     const env = readFileSync(resolve(here, "../../../deploy/.env.example"), "utf8");
     expect(env).toMatch(/^OPERATE_ADMIN_API_KEY=[^:\n]+:platform_admin:/m);
     expect(section).toContain("It carries `platform_admin`, which grants no operation on any entity");
     // The id and write-surface refusals are the create handler's codes, not prose of their own.
     const handlers = readFileSync(resolve(here, "../../../packages/operate-runtime/src/handlers.ts"), "utf8");
-    for (const code of ["id_conflict", "record_id_malformed", "field_not_declared", "field_server_owned"]) {
+    for (const code of [
+      "id_conflict",
+      "record_id_malformed",
+      "field_not_declared",
+      "field_server_owned",
+      "unique_violation",
+    ]) {
       expect(handlers, `the create handler no longer answers ${code}`).toContain(`"${code}"`);
       expect(section, `the loading hazards no longer name ${code}`).toContain(`\`${code}\``);
     }
@@ -2214,5 +2263,188 @@ describe("self-service sign-up requests (ADR-0464)", () => {
       expect(env).toMatch(new RegExp(`^# ${v}=`, "m"));
       expect(env).not.toMatch(new RegExp(`^${v}=`, "m"));
     }
+  });
+});
+
+describe("rotation, the subscription gate and backups are documented where an operator looks (ADR-0482)", () => {
+  const compose = readFileSync(COMPOSE, "utf8");
+  const api = liveLines(composeService(COMPOSE, "api"));
+  const env = readFileSync(resolve(here, "../../../deploy/.env.example"), "utf8");
+  const readme = flat(deployDoc(README));
+  const oracle = flat(deployDoc(ORACLE));
+  const vercel = flat(deployDoc(resolve(here, "../../../deploy/VERCEL-SUPABASE.md")));
+  const section = (src: string, heading: string): string => {
+    const start = src.indexOf(heading);
+    expect(start, `README has no "${heading}" section`).toBeGreaterThanOrEqual(0);
+    const next = src.indexOf(" ### ", start + heading.length);
+    return src.slice(start, next < 0 ? undefined : next);
+  };
+
+  it("forwards every rotation and Stripe variable into the api, defaulted empty", () => {
+    // A variable the binary reads and the compose does not forward is unset inside the container
+    // whatever `.env` says, so the README's rotation steps would be steps an operator takes and
+    // nothing reads. Each name is the module's own constant, so a rename reds here.
+    const forwarded = [
+      AUDIT_CHAIN_TRUSTED_PUBLIC_KEYS_VAR,
+      COLUMN_ENCRYPTION_SECRET_PREVIOUS_VAR,
+      COLUMN_ENCRYPTION_SECRET_GENERATION_VAR,
+      CREDENTIAL_PEPPER_VERSION_VAR,
+      `${CREDENTIAL_PEPPER_RETIRED_PREFIX}1`,
+      `${CREDENTIAL_PEPPER_RETIRED_PREFIX}2`,
+      `${CREDENTIAL_PEPPER_RETIRED_PREFIX}3`,
+      STRIPE_API_KEY_VAR,
+      STRIPE_WEBHOOK_SECRET_VAR,
+    ];
+    expect(forwarded.length).toBe(9);
+    for (const v of forwarded) {
+      expect(api, `the api service does not forward ${v}`).toContain(`${v}: \${${v}:-}`);
+      expect(apiCommandArgs().join(" "), `${v} is on argv`).not.toContain(v);
+    }
+    // Not forwarded anywhere else: one service reads them.
+    expect(compose.split(`${STRIPE_WEBHOOK_SECRET_VAR}: `).length - 1).toBe(1);
+  });
+
+  it("documents each of them in .env.example only as a commented placeholder", () => {
+    // Commented, so copying the file changes nothing; a REPLACE_WITH_ value, so the secret-values
+    // rule admits it (an uncommented one would be a live assignment the scanner reads).
+    for (const v of [
+      AUDIT_CHAIN_TRUSTED_PUBLIC_KEYS_VAR,
+      COLUMN_ENCRYPTION_SECRET_PREVIOUS_VAR,
+      `${CREDENTIAL_PEPPER_RETIRED_PREFIX}1`,
+      STRIPE_API_KEY_VAR,
+      STRIPE_WEBHOOK_SECRET_VAR,
+    ]) {
+      expect(env, `.env.example does not show ${v}`).toMatch(new RegExp(`^#${v}=REPLACE_WITH_`, "m"));
+      expect(env, `.env.example sets ${v}`).not.toMatch(new RegExp(`^${v}=`, "m"));
+    }
+  });
+
+  it("tells an operator how to rotate the chain key without paging on honest history", () => {
+    const rotate = section(readme, "### Rotating the audit-chain key");
+    expect(rotate).toContain(AUDIT_CHAIN_TRUSTED_PUBLIC_KEYS_VAR);
+    expect(rotate).toContain("untrusted_key");
+    expect(rotate).toContain("--integrity-proof-full-every");
+    expect(rotate).toContain("Keep the old key listed for good");
+    // The derivation reads the seed on stdin, never argv, and through `-T` so no TTY mangles it.
+    expect(rotate).toMatch(/grep '\^AUDIT_CHAIN_SIGNING_KEY=' \.env \| cut -d= -f2- \| docker compose exec -T api node -e/);
+    // The flag the section documents is the one the CLI parses, with the default it states.
+    const cli = readFileSync(resolve(here, "./cli.ts"), "utf8");
+    expect(cli).toContain('arg === "--integrity-proof-full-every"');
+    expect(rotate).toContain("default 24");
+    // `0` disables the first-pass fold as well as the periodic one (periodicFullFoldSchedule answers
+    // false for every pass), so the section may not call the first pass "always" a full fold.
+    expect(rotate).not.toMatch(/first pass after boot is\s+always a full fold/);
+    expect(rotate).toContain("`0` turns both off");
+    expect(cli).toMatch(/--integrity-proof-full-every <n>[\s\S]{0,200}default 24/);
+  });
+
+  it("documents the column-secret and pepper rotations against the commands that perform them", () => {
+    const column = section(readme, "### Rotating the column secret");
+    for (const v of [COLUMN_ENCRYPTION_SECRET_PREVIOUS_VAR, COLUMN_ENCRYPTION_SECRET_GENERATION_VAR]) {
+      expect(column).toContain(v);
+    }
+    expect(column).toContain("--rewrap-kek");
+    expect(column).toContain("envelope");
+    expect(readFileSync(resolve(here, "./cli.ts"), "utf8")).toContain('arg === "--rewrap-kek"');
+    const pepper = section(readme, "### Rotating the login pepper");
+    expect(pepper).toContain(CREDENTIAL_PEPPER_VERSION_VAR);
+    expect(pepper).toContain(`${CREDENTIAL_PEPPER_RETIRED_PREFIX}<its version>`);
+    expect(pepper).toContain("crossengin apply --plan");
+  });
+
+  it("says the subscription gate refuses reads, as the policy does", () => {
+    const gate = section(readme, "### Turning on the subscription gate");
+    expect(gate).toContain(STRIPE_WEBHOOK_SECRET_VAR);
+    expect(gate).toContain("reads included");
+    expect(gate).toContain("402** `no_subscription`");
+    expect(gate).toContain("meta.billing_subscriptions");
+    // The route that writes a row is mounted by the same variable that arms the gate, so "make a row
+    // exist before you set the secret" is a remedy that cannot be followed (ADR-0334); the section
+    // has to say there is no such order rather than prescribe one.
+    expect(gate).toContain("There is no order that avoids the window");
+    expect(gate).not.toMatch(/before\*\* you set the secret/);
+    // The compose comment beside the variable says the same and does not call it inert.
+    const composeComment = composeService(COMPOSE, "api");
+    expect(flat(composeComment)).toContain("STRIPE_WEBHOOK_SECRET alone ARMS the subscription gate");
+  });
+
+  it("no longer tells anyone there is no rotation path, or to keep a key registered", () => {
+    // Three stale sentences, each true before the increment that made it false (ADR-0437 pinned the
+    // trust set; ADR-0444 read PGSSLROOTCERT and served verify-ca).
+    for (const { doc, src } of deployMarkdown()) {
+      const text = flat(src);
+      expect(text, `${doc} still says there is no rotation path`).not.toMatch(/no rotation path/);
+      expect(text, `${doc} still says a rotated key must stay registered`).not.toMatch(/must stay registered/);
+      expect(text, `${doc} still says PGSSLROOTCERT is never read`).not.toMatch(
+        /nothing reads `?PGSSLROOTCERT`?|accepts no CA material|`verify-ca` is \*\*refused\*\*/,
+      );
+    }
+  });
+
+  it("gives every deployment path a backup section with a restore test", () => {
+    // ADR-0390 found VERCEL-SUPABASE.md the one document with no occurrence of backup, dump,
+    // restore, PITR or snapshot. It has a section now, and it is the one path where the compose
+    // backup service does not run, so the section has to say so.
+    expect(readme).toContain("### Backups");
+    expect(oracle).toMatch(/## \d+\. Back up/);
+    expect(vercel).toContain("## Backups");
+    const vBackups = vercel.slice(vercel.indexOf("## Backups"), vercel.indexOf("## Troubleshooting"));
+    expect(vBackups).toContain("point-in-time recovery");
+    expect(vBackups).toContain("backup` service is not on this path");
+    expect(vBackups).toContain("To prove the restore");
+    expect(vBackups).toContain("pg_restore --no-owner");
+    // pg_dump turns row security off and, as a confined role, errors on the first tenant table
+    // (measured on PG 16: "query would be affected by row-level security policy") — it does not
+    // dump a silently short copy, which is what this section first said.
+    expect(vBackups).toContain("query would be affected by row-level security policy");
+    expect(vBackups).not.toContain("silently leaves out");
+  });
+
+  it("bounds the scheduled script's log before appending to it", () => {
+    const src = readFileSync(ORACLE, "utf8");
+    const body = /cat > ~\/backups\/dump\.sh <<'SH'\n([\s\S]*?)\nSH\n/.exec(src)?.[1] ?? "";
+    expect(body.length).toBeGreaterThan(100);
+    const live = body
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("#"))
+      .join("\n");
+    const trim = live.indexOf("tail -n 1000");
+    const append = live.indexOf('exec >> "$log"');
+    expect(trim, "the dump log is no longer bounded").toBeGreaterThan(0);
+    expect(append, "the dump log is no longer appended through $log").toBeGreaterThan(0);
+    expect(trim, "the log is trimmed after the append starts").toBeLessThan(append);
+    // Through a temporary file and a rename, so a failed trim leaves the old log whole.
+    expect(live.slice(trim, append)).toMatch(/> "\$log\.trim" && mv -- "\$log\.trim" "\$log"/);
+  });
+
+  it("gives Docker longer to stop the api than the drain deadline", () => {
+    // `shutdownGraceMs` plus the fixed drain allowance is the deadline the process waits for; the
+    // default sums to exactly Docker's own 10 s, so the drain raced SIGKILL until stop_grace_period.
+    const bin = readFileSync(resolve(here, "../bin/operate-server.ts"), "utf8");
+    const allowance = Number(/const SHUTDOWN_DRAIN_ALLOWANCE_MS = ([\d_]+);/.exec(bin)?.[1]?.replace(/_/g, ""));
+    expect(allowance).toBeGreaterThan(0);
+    const passed = valueAfter(apiCommandArgs(), "--shutdown-grace-ms");
+    const grace = passed === null ? DEFAULT_HTTP_LISTENER_SETTINGS.shutdownGraceMs : Number(passed);
+    const declared = /\n {4}stop_grace_period: (\d+)s\n/.exec(api)?.[1];
+    expect(declared, "the api service declares no stop_grace_period").toBeDefined();
+    expect(Number(declared) * 1000).toBeGreaterThan(grace + allowance);
+  });
+
+  it("keeps the notification list and its read state on one grant", () => {
+    // ADR-0476 made the own-inbox list follow the read-state roles; with none granted it falls back
+    // to --ai-design-role and the inbox and its badge answer to different grants. The compose grants
+    // the read-state roles, so the fallback must not be what this deployment gets.
+    const args = apiCommandArgs();
+    const readState = valuesAfter(args, "--read-state-role");
+    expect(readState.length).toBeGreaterThan(0);
+    const grant = notificationListGrant(readState, valuesAfter(args, "--ai-design-role"));
+    expect(grant.source).toBe("read_state");
+    expect([...grant.roles].sort()).toEqual([...readState].sort());
+  });
+
+  it("documents --jwt-optional-claim in --help with every claim it can relax", () => {
+    const entry = helpText.slice(helpText.indexOf("  --jwt-optional-claim <claim>"));
+    expect(helpText).toContain("  --jwt-optional-claim <claim>");
+    for (const claim of REQUIRED_JWT_CLAIMS) expect(entry.slice(0, 400)).toContain(claim);
   });
 });

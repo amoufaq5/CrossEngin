@@ -965,22 +965,6 @@ export const ENTITY_FIELD_APERTURE: readonly ApertureDeclaration[] = Object.free
       "pulling trait fields into the plans would make a create demand a field the server fills. That " +
       "is a subsystem decision about required-but-defaulted fields, not a reader fix.",
   },
-  {
-    pkg: "apps/architect-cli",
-    file: "apps/architect-cli/src/refusal.ts",
-    symbol: "detectEncryptionWeakening",
-    direction: "fails_open",
-    consequence:
-      "The `weaken_encryption_below_pack_minimum` hard refusal does not fire for a trait-contributed " +
-      "`phi`/`regulated` field, so the one edit the Architect is forbidden to make is permitted on " +
-      "exactly the fields a compliance trait contributes.",
-    note:
-      "Latent, and the reason is worth knowing before anyone fixes it: `classifyManifestEditRefusal` " +
-      "has no caller outside its own test, so no manifest edit is refused by this module at all " +
-      "today. Wiring the gate without widening the read would ship the hole. Reads `before.fields` " +
-      "over `current.entities ?? []` where `current: Manifest`, and `now.fields` through a " +
-      "`Map<string, ManifestEntity>`.",
-  },
   /* ----------------------------------------------------------- fails_closed */
   {
     pkg: "apps/operate-server",

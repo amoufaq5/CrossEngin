@@ -1,16 +1,16 @@
 import type { AccessReviewDecision } from "@crossengin/access-reviews";
 import {
   readRowsWithUnreadable,
+  textIdentity,
   type PgConnection,
+  type RowRead,
 } from "@crossengin/kernel-pg";
 
 import { CampaignUuidResolver, ItemUuidResolver } from "./id-mapping.js";
 import {
   recordsOrRefuse,
-  rowKey,
   rowToDecision,
   type DecisionRow,
-  type TypedRowRead,
 } from "./records.js";
 import { tenantScopePredicate, withTenantContext } from "./tenant-context.js";
 
@@ -110,7 +110,7 @@ export class PostgresAccessReviewDecisionStore {
         `${SELECT_JOINED} WHERE i.item_id = $1 ORDER BY d.decided_at ASC, d.decision_id ASC`,
         [itemId],
       );
-      return readRowsWithUnreadable(result.rows, rowToDecision, (row) => rowKey(row.decision_id));
+      return readRowsWithUnreadable(result.rows, rowToDecision, (row) => textIdentity(row, "decision_id"));
     });
     return recordsOrRefuse(`decisions of item ${itemId}`, read);
   }
@@ -144,7 +144,7 @@ export class PostgresAccessReviewDecisionStore {
   async listByCampaignWithUnreadable(
     tenantId: string,
     campaignId: string,
-  ): Promise<TypedRowRead<AccessReviewDecision>> {
+  ): Promise<RowRead<AccessReviewDecision>> {
     return withTenantContext(this.conn, tenantId, async (tx) => {
       const result = await tx.query<DecisionRow>(
         `${SELECT_JOINED}
@@ -155,7 +155,7 @@ export class PostgresAccessReviewDecisionStore {
           ORDER BY d.decided_at ASC, d.decision_id ASC`,
         [campaignId, tenantId],
       );
-      return readRowsWithUnreadable(result.rows, rowToDecision, (row) => rowKey(row.decision_id));
+      return readRowsWithUnreadable(result.rows, rowToDecision, (row) => textIdentity(row, "decision_id"));
     });
   }
 

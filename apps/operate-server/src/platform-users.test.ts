@@ -437,6 +437,78 @@ describe("PostgresUserStore — users", () => {
   });
 });
 
+describe("PostgresUserStore.membershipsOfUser (ADR-0479)", () => {
+  /**
+   * A fake that models the one fact the read exists to survive: `user_tenant_membership`'s only arm
+   * is tenant isolation, so a SELECT answers only the rows of the tenant the session's context names
+   * — what a non-owner sees. An unscoped read here answers `[]`, which is exactly the owner-dependent
+   * empty set the module's own comment refuses to build a route on.
+   */
+  function confinedDb(memberships: readonly Row[]): { conn: PgConnection; captured: Captured[] } {
+    const captured: Captured[] = [];
+    let tenant: string | null = null;
+    const tenants = [...new Set(memberships.map((m) => String(m["tenant_id"])))].sort();
+    const run = async (sql: string, params?: readonly unknown[]): Promise<{ rows: Row[]; rowCount: number }> => {
+      const p = params ?? [];
+      captured.push({ sql, params: p });
+      if (sql.includes("set_config")) {
+        tenant = String(p[0]);
+        return { rows: [], rowCount: 0 };
+      }
+      if (/FROM meta\.tenants/.test(sql)) {
+        const rows = tenants.map((id) => ({ id }));
+        return { rows, rowCount: rows.length };
+      }
+      if (/FROM meta\.user_tenant_membership/.test(sql)) {
+        const rows = memberships.filter(
+          (m) => m["tenant_id"] === tenant && m["tenant_id"] === p[0] && m["user_id"] === p[1],
+        );
+        return { rows: [...rows], rowCount: rows.length };
+      }
+      throw new Error(`confinedDb: unexpected statement ${sql.slice(0, 80)}`);
+    };
+    const conn: PgConnection = {
+      query: run as PgConnection["query"],
+      transaction: async <T>(fn: (tx: PgConnection) => Promise<T>): Promise<T> => fn(conn),
+      withAdvisoryLock: async <T>(_k: bigint, fn: () => Promise<T>): Promise<T> => fn(),
+      close: async (): Promise<void> => undefined,
+    };
+    return { conn, captured };
+  }
+
+  it("reads every tenant's memberships under that tenant's own context, every status", async () => {
+    const db = confinedDb([
+      membershipRow(),
+      membershipRow({
+        id: "44444444-4444-4444-8444-444444444444",
+        tenant_id: OTHER_TENANT,
+        primary_role: "platform_admin",
+        secondary_roles: [],
+        status: "revoked",
+      }),
+      membershipRow({ id: "55555555-5555-4555-8555-555555555555", user_id: OTHER_USER }),
+    ]);
+    const out = await new PostgresUserStore(db.conn).membershipsOfUser(USER);
+    expect(out.map((m) => [m.tenantId, m.primaryRole, m.status])).toEqual([
+      [TENANT, "erp_admin", "active"],
+      [OTHER_TENANT, "platform_admin", "revoked"],
+    ]);
+    // Each membership SELECT carries its strict scope predicate beside the context it ran under.
+    const selects = db.captured.filter((c) => /user_tenant_membership/.test(c.sql));
+    expect(selects).toHaveLength(2);
+    for (const c of selects) expect(c.sql).toMatch(/tenant_id = \$1/);
+  });
+
+  it("answers [] for a user with no membership, and throws rather than answering on a failed read", async () => {
+    expect(await new PostgresUserStore(confinedDb([membershipRow()]).conn).membershipsOfUser(OTHER_USER)).toEqual([]);
+    const broken: PgConnection = {
+      ...confinedDb([]).conn,
+      transaction: async () => Promise.reject(new Error("connection reset")),
+    };
+    await expect(new PostgresUserStore(broken).membershipsOfUser(USER)).rejects.toThrow(/connection reset/);
+  });
+});
+
 describe("PostgresUserStore — memberships", () => {
   it("carries the strict scope predicate beside the tenant context on a read", async () => {
     const db = fakeDb([[membershipRow()]]);
@@ -574,9 +646,12 @@ function ctxFor(
   directoryAsked: () => readonly string[];
   /** The users whose status a transition moved, in order (the standing cache's invalidation). */
   statusChanged: readonly string[];
+  /** The users whose displayed identity a write may have changed (the identity cache's eviction). */
+  identityChanged: readonly string[];
 } {
   const recorded: Recorded = { events: [] };
   const statusChanged: string[] = [];
+  const identityChanged: string[] = [];
   let directoryCalls = 0;
   const asked: string[] = [];
   return {
@@ -584,6 +659,7 @@ function ctxFor(
     directoryCalls: () => directoryCalls,
     directoryAsked: () => asked,
     statusChanged,
+    identityChanged,
     ctx: {
       store,
       principalRoles: () => ({
@@ -594,6 +670,9 @@ function ctxFor(
       platformAuthorityRoles: new Set(opts.authorityRoles ?? ["platform_admin", "deletion_verifier"]),
       onUserStatusChanged: (userId) => {
         statusChanged.push(userId);
+      },
+      onUserIdentityChanged: (userId) => {
+        identityChanged.push(userId);
       },
       roleDirectory: async (tenantId) => {
         directoryCalls += 1;
@@ -685,6 +764,7 @@ describe("buildPlatformUserRoutes", () => {
         adminRoles: new Set(["platform_admin"]),
         platformAuthorityRoles: new Set(["platform_admin"]),
         onUserStatusChanged: () => undefined,
+        onUserIdentityChanged: () => undefined,
         roleDirectory: async () => null,
         audit: undefined as unknown as (e: UserRegistryAuditEvent) => Promise<void>,
       }),
@@ -721,6 +801,29 @@ describe("buildPlatformUserRoutes", () => {
     expect(recorded.events[0]?.operation).toBe("platform.user_provisioned");
     expect(recorded.events[0]?.detail["email"]).toBe("ada@example.com");
     expect(recorded.events[0]?.subjectUserId).toBe(USER);
+  });
+
+  it("evicts the provisioned id from the identity cache, and only after the write landed (ADR-0479)", async () => {
+    const ok = ctxFor(new PostgresUserStore(fakeDb([[userRow()]]).conn));
+    const out = await handlerFor(buildPlatformUserRoutes(ok.ctx), "platform.users.provision")({
+      principal: principal(),
+      params: {},
+      request: {},
+      parsedBody: { user: { id: USER, email: "ada@example.com" } },
+    });
+    expect(out.status).toBe(201);
+    expect(ok.identityChanged).toEqual([USER]);
+
+    const failing = { ...fakeDb([]).conn, transaction: async () => Promise.reject(pgError("23505")) };
+    const lost = ctxFor(new PostgresUserStore(failing as unknown as PgConnection));
+    const refused = await handlerFor(buildPlatformUserRoutes(lost.ctx), "platform.users.provision")({
+      principal: principal(),
+      params: {},
+      request: {},
+      parsedBody: { user: { id: USER, email: "ada@example.com" } },
+    });
+    expect(refused.status).not.toBe(201);
+    expect(lost.identityChanged).toEqual([]);
   });
 
   it("reports no subject when the body named no id, rather than a placeholder", async () => {
@@ -943,6 +1046,7 @@ describe("buildPlatformUserRoutes", () => {
     });
     expect(out.status).toBe(200);
     expect(ok.statusChanged).toEqual([USER]);
+    expect(ok.identityChanged).toEqual([USER]);
 
     const lost = fakeDb([[userRow({ status: "active" })], []]);
     const raced = ctxFor(new PostgresUserStore(lost.conn));
@@ -953,6 +1057,7 @@ describe("buildPlatformUserRoutes", () => {
     });
     expect(refused.status).toBe(409);
     expect(raced.statusChanged).toEqual([]);
+    expect(raced.identityChanged).toEqual([]);
   });
 
   it("refuses a provision whose membership names a platform role the caller does not hold", async () => {
@@ -1086,6 +1191,7 @@ describe("buildPlatformUserRoutes", () => {
         adminRoles: new Set(["platform_admin"]),
         platformAuthorityRoles: new Set(["platform_admin"]),
         onUserStatusChanged: () => undefined,
+        onUserIdentityChanged: () => undefined,
         roleDirectory: async () => new Set(DECLARED_ROLES),
         audit: async () => {
           calls += 1;

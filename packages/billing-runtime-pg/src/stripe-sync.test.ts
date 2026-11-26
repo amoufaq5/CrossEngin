@@ -25,6 +25,7 @@ function record(id: string, meter: "ai_call" | "integration_call" = "ai_call") {
     period,
     id,
     recordedAt: "2026-07-01T00:00:00.000Z",
+    writer: null,
   });
 }
 

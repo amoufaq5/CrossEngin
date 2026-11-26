@@ -17,7 +17,7 @@ import {
   writeConfinedText,
   type ConfinedPath,
 } from "./file-confinement.js";
-import { unifiedDiff } from "./unified-diff.js";
+import { diffExceedsCap, fullUnifiedDiff, MAX_DIFF_LINES, unifiedDiff } from "./unified-diff.js";
 import { buildManifestSummary } from "./manifest-io.js";
 import { classifyManifestEditRefusal, manifestEditRefusalResult } from "./refusal.js";
 
@@ -89,19 +89,34 @@ const CONFINEMENT_RULES =
   "Hidden files and directories (.env, .git, .ssh, …), credential-named files and symlinks leading outside the root are refused";
 
 /** Resolves the root once per catalog, on first use, so a refusal surfaces as the tool's error. */
-function memoRoot(dir: string): () => Promise<string> {
+function memoRoot(dir: string, implicit: boolean): () => Promise<string> {
   let pending: Promise<string> | null = null;
   return () => {
-    pending ??= resolveFileRoot(dir);
+    pending ??= resolveFileRoot(dir, { implicit });
     return pending;
   };
 }
 
-function refusalError(tool: string, err: unknown): unknown {
+/**
+ * A refusal becomes the tool's error with its message; any other filesystem failure becomes its
+ * errno **code** and the path **as the model gave it**, never the error's own message — node's
+ * `EACCES: permission denied, open '/home/<user>/…'` carries the absolute real path, and with it the
+ * account name and the layout above the root, to whichever vendor serves the session (ADR-0484).
+ * An error with no code is not a filesystem error, so it keeps its message.
+ */
+export function fileToolError(tool: string, err: unknown, requested: string): unknown {
   if (err instanceof FileToolRefusal) {
     return new ToolExecutionError(`${tool}: refused (${err.reason}): ${err.message}`);
   }
+  const code = errnoCode(err);
+  if (code !== null) return new ToolExecutionError(`${tool}: ${code} on ${requested}`);
   return err;
+}
+
+function errnoCode(err: unknown): string | null {
+  if (typeof err !== "object" || err === null) return null;
+  const code = (err as { code?: unknown }).code;
+  return typeof code === "string" && /^E[A-Z0-9]+$/.test(code) ? code : null;
 }
 
 export function buildToolCatalog(opts: ChatToolOptions = {}): readonly ChatToolDefinition[] {
@@ -193,7 +208,7 @@ export function buildToolCatalog(opts: ChatToolOptions = {}): readonly ChatToolD
     },
   ];
   const rootDir = opts.fileRootDir ?? process.cwd();
-  const root = memoRoot(rootDir);
+  const root = memoRoot(rootDir, opts.fileRootDir === undefined);
   if (opts.allowFileRead === true) {
     const maxBytes = opts.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES;
     tools.push({
@@ -216,7 +231,7 @@ export function buildToolCatalog(opts: ChatToolOptions = {}): readonly ChatToolD
     const approver = opts.approver;
     const review =
       approver.showsDiffToPerson === true
-        ? "A person is shown a unified diff of the file's current text against exactly what will be written, and nothing is written unless they approve."
+        ? `A person is shown a unified diff of the file's current text against exactly what will be written, and nothing is written unless they approve. A diff longer than ${MAX_DIFF_LINES.toString()} lines is refused rather than shown in part, so build a large manifest in smaller edits.`
         : "This session approves writes without showing them to a person: the file is written as soon as the manifest validates.";
     tools.push({
       name: "propose_manifest_edit",
@@ -278,7 +293,7 @@ async function readFileTool(
     }
     return { path: confined.relative, contents };
   } catch (err) {
-    throw refusalError("read_file", err);
+    throw fileToolError("read_file", err, path);
   }
 }
 
@@ -333,7 +348,7 @@ async function proposeManifestEditTool(
     target = await confinePath(await root(), pathRaw, WRITABLE_FILE_EXTENSIONS, "write");
     existingText = target.exists ? await readConfinedText(target, MAX_EXISTING_MANIFEST_BYTES) : null;
   } catch (err) {
-    throw refusalError("propose_manifest_edit", err);
+    throw fileToolError("propose_manifest_edit", err, pathRaw);
   }
   const relativePath = target.relative;
   const existing = existingText === null ? null : parseExistingManifest(existingText);
@@ -370,16 +385,30 @@ async function proposeManifestEditTool(
     entitiesModified: diff.modifiedEntities.length,
   };
   const newText = JSON.stringify(proposed, null, 2) + "\n";
+  const labels = { oldLabel: isNew ? "/dev/null" : `a/${relativePath}`, newLabel: `b/${relativePath}` };
+  const fullDiff = fullUnifiedDiff(existingText ?? "", newText, labels);
+  // A write is approved over its bytes, so a diff too long to show in full is not offered for
+  // approval at all (ADR-0484): `y` over a cut diff approves lines nobody saw. Only an approver that
+  // declares it shows nothing to a person is exempt, because there is no review for the cut to
+  // undermine — and an undeclared approver is treated as a person, the fail-closed reading.
+  if (diffExceedsCap(fullDiff) && approver.showsDiffToPerson !== false) {
+    return {
+      applied: false,
+      reason: "diff_too_large_to_review",
+      path: relativePath,
+      diff_lines: fullDiff.length,
+      max_diff_lines: MAX_DIFF_LINES,
+      diff_summary: diffSummary,
+      message: `the diff of ${relativePath} is ${fullDiff.length.toString()} lines, over the ${MAX_DIFF_LINES.toString()}-line limit a person can be asked to approve; nothing was written. Propose a smaller edit — fewer entities or fields at a time — and build the change in steps.`,
+    };
+  }
   const approved = await approver.approve({
     path: target.real,
     isNew,
     newHash,
     diffSummary,
     details: approvalDetailLines(existing, proposed, kernelDiff),
-    unifiedDiff: unifiedDiff(existingText ?? "", newText, {
-      oldLabel: isNew ? "/dev/null" : `a/${relativePath}`,
-      newLabel: `b/${relativePath}`,
-    }),
+    unifiedDiff: diffExceedsCap(fullDiff) ? unifiedDiff(existingText ?? "", newText, labels) : fullDiff,
   });
   if (!approved) {
     return {
@@ -404,11 +433,10 @@ async function proposeManifestEditTool(
     }
     await writeConfinedText(recheck, newText);
   } catch (err) {
-    const refused = refusalError("propose_manifest_edit", err);
+    const refused = fileToolError("propose_manifest_edit", err, relativePath);
     if (refused instanceof ToolExecutionError) throw refused;
-    throw new ToolExecutionError(
-      `propose_manifest_edit: failed to write ${relativePath}: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    // Not the error's message: it can name the absolute path the code-only form above withholds.
+    throw new ToolExecutionError(`propose_manifest_edit: failed to write ${relativePath}`);
   }
   return {
     applied: true,

@@ -7,7 +7,10 @@ import {
   APPLIED_PAYMENT_EPSILON,
   childParentRefs,
   declaredSettlementSpec,
+  ENTRY_NUMBER_RESERVED_DETAIL,
+  isReservedRemittanceEntryNumber,
   journalPostingGuard,
+  reservedRemittanceEntryNumberGuard,
   LIFECYCLE_STATE_ERRORS,
   lifecycleStateGuard,
   PAYMENT_DIRECTION,
@@ -1370,5 +1373,76 @@ describe("taxRemittanceJournalReverseGuard", () => {
     await store.create(TENANT, "TaxReturn", { return_number: "TR-1", state: "paid", remittance_entry_number: "TR-1-REMIT-1" });
     expect(await guard({ ...reverse(store), after: { ...entry, memo: "x" } })).toBeNull();
     expect(await guard({ ...reverse(store), entity: "TaxReturn" })).toBeNull();
+  });
+});
+
+describe("journalPostingGuard reads its named period under a share lock (ADR-0480)", () => {
+  it("locks the period the entry names, so a concurrent close is serialised against the post", async () => {
+    class Recording extends InMemoryEntityStore {
+      readonly locked: string[] = [];
+      override async getLocked(t: string, e: string, id: string, l: "share" | "exclusive") {
+        this.locked.push(`${e}:${id}:${l}`);
+        return super.getLocked(t, e, id, l);
+      }
+    }
+    const store = new Recording();
+    const entryId = await seedWith(store, [
+      [100, 0],
+      [0, 100],
+    ]);
+    expect(await journalPostingGuard()(postInput(store, entryId, { fiscal_period_id: "p_open" }))).toBeNull();
+    expect(store.locked).toContain("FiscalPeriod:p_open:share");
+  });
+});
+
+describe("reservedRemittanceEntryNumberGuard (ADR-0480)", () => {
+  const guard = reservedRemittanceEntryNumberGuard();
+  const store = new InMemoryEntityStore();
+  const create = (n: unknown): WriteGuardInput => ({
+    operation: "create",
+    entity: "JournalEntry",
+    tenantId: TENANT,
+    id: null,
+    before: null,
+    after: { entry_number: n, state: "draft" },
+    store,
+  });
+
+  it("recognises the remittance form and its reversals, and nothing near it", () => {
+    for (const n of ["TR-2026-Q2-REMIT-1", "TR-2026-Q2-REMIT-12", "TR-2026-Q2-REMIT-1-REV", "TR-REMIT-3-REV-REV"]) {
+      expect(isReservedRemittanceEntryNumber(n)).toBe(true);
+    }
+    for (const n of ["-REMIT-1", "TR-REMIT-0", "TR-REMIT-01", "TR-REMIT-", "TR-REMIT-x", "JE-100", "TR-REMIT-1-REVX", "REMIT-1"]) {
+      expect(isReservedRemittanceEntryNumber(n)).toBe(false);
+    }
+  });
+
+  it("refuses a create naming a reserved number, with a detail that names no value", async () => {
+    for (const n of ["TR-1-REMIT-1", "TR-1-REMIT-1-REV"]) {
+      expect(await guard(create(n))).toEqual({ status: 422, error: "entry_number_reserved", detail: ENTRY_NUMBER_RESERVED_DETAIL });
+    }
+    expect(ENTRY_NUMBER_RESERVED_DETAIL).not.toContain("TR-1");
+    expect(await guard(create("JE-7"))).toBeNull();
+    expect(await guard(create(undefined))).toBeNull();
+  });
+
+  it("refuses an update that changes the number to a reserved one, and admits one that keeps it", async () => {
+    const update = (before: unknown, after: unknown): WriteGuardInput => ({
+      operation: "update",
+      entity: "JournalEntry",
+      tenantId: TENANT,
+      id: "je_1",
+      before: { entry_number: before },
+      after: { entry_number: after },
+      store,
+    });
+    expect((await guard(update("JE-7", "TR-1-REMIT-1")))?.error).toBe("entry_number_reserved");
+    expect(await guard(update("TR-1-REMIT-1", "TR-1-REMIT-1"))).toBeNull();
+    expect(await guard(update("JE-7", "JE-8"))).toBeNull();
+  });
+
+  it("ignores other entities and non-write operations", async () => {
+    expect(await guard({ ...create("TR-1-REMIT-1"), entity: "Invoice" })).toBeNull();
+    expect(await guard({ ...create("TR-1-REMIT-1"), operation: "delete" })).toBeNull();
   });
 });

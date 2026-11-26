@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  formatDiff,
+  formatManifestSectionDiff,
   formatManifestSummary,
   formatValidationErrors,
   printError,
@@ -119,29 +119,58 @@ describe("formatManifestSummary", () => {
   });
 });
 
-describe("formatDiff", () => {
-  it("reports (no changes) for empty counts", () => {
-    const text = formatDiff({
-      entitiesAdded: 0,
-      entitiesRemoved: 0,
-      entitiesModified: 0,
-      workflowsAdded: 0,
-      workflowsRemoved: 0,
-      workflowsModified: 0,
-    });
-    expect(text).toContain("(no changes)");
+describe("formatManifestSectionDiff", () => {
+  it("reports (no changes) for no changed section", () => {
+    expect(formatManifestSectionDiff([])).toContain("(no changes)");
   });
 
-  it("renders +added -removed ~modified per section", () => {
-    const text = formatDiff({
-      entitiesAdded: 2,
-      entitiesRemoved: 1,
-      entitiesModified: 3,
-      workflowsAdded: 0,
-      workflowsRemoved: 0,
-      workflowsModified: 0,
-    });
-    expect(text).toContain("entities: +2 -1 ~3");
-    expect(text).not.toContain("workflows:");
+  it("names each changed section with its reach, its members and the reach note", () => {
+    const text = formatManifestSectionDiff([
+      {
+        section: "workflows",
+        reach: "served",
+        reachNote: "NOTE-SERVED",
+        keying: "record",
+        presence: "present",
+        membersKeyed: true,
+        added: ["a"],
+        removed: [],
+        changed: ["b", "c"],
+        countBefore: 2,
+        countAfter: 3,
+      },
+      {
+        section: "relations",
+        reach: "served",
+        reachNote: "NOTE-REL",
+        keying: "unkeyed_array",
+        presence: "present",
+        membersKeyed: false,
+        added: [],
+        removed: [],
+        changed: [],
+        countBefore: 4,
+        countAfter: 4,
+      },
+      {
+        section: "theme",
+        reach: "unread",
+        reachNote: "NOTE-UNREAD",
+        keying: "object_keys",
+        presence: "added",
+        membersKeyed: false,
+        added: [],
+        removed: [],
+        changed: [],
+        countBefore: 0,
+        countAfter: 1,
+      },
+    ]);
+    expect(text).toContain("workflows [served]: +1 -0 ~2");
+    expect(text).toContain("added a; changed b, c");
+    expect(text).toContain("relations [served]: changed (members unkeyed; 4 -> 4)");
+    expect(text).toContain("theme [unread]: section added");
+    for (const note of ["NOTE-SERVED", "NOTE-REL", "NOTE-UNREAD"]) expect(text).toContain(note);
+    expect(text).not.toContain("(no changes)");
   });
 });

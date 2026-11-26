@@ -119,13 +119,23 @@ describe("the sentence the line ends on", () => {
   async function pagesFor(registration: Record<string, unknown>): Promise<number> {
     const clock = new FixedClock(new Date(END));
     let pages = 0;
+    // `"acme"` is refused by `parseSloConfig` now (ADR-0483), so the config is built past the parse:
+    // this arm measures the engine's own resilience to a tenant the kill switch cannot carry, which
+    // must hold whatever produced the registration.
+    const { tenantId, ...rest } = registration;
+    const parsed = parseSloConfig({
+      alertPolicy: policy,
+      systemActorUserId: SYSTEM_ACTOR,
+      availability: [{ slo: slo("orders.create", "orders-create", "availability"), ...rest }],
+    });
+    const config = {
+      ...parsed,
+      availability: (parsed.availability ?? []).map((r) => ({ ...r, tenantId: tenantId as string })),
+    };
     const enforcement = buildSloEnforcement(
-      parseSloConfig({
-        alertPolicy: policy,
-        systemActorUserId: SYSTEM_ACTOR,
-        availability: [{ slo: slo("orders.create", "orders-create", "availability"), ...registration }],
-      }),
+      config,
       {
+        onDeclarationError: () => undefined,
         clock,
         onPage: async (): Promise<void> => {
           pages += 1;
@@ -145,6 +155,16 @@ describe("the sentence the line ends on", () => {
     for (let tick = 0; tick < 3; tick += 1) await enforcement.scheduler.evaluateOnce();
     return pages;
   }
+
+  it("refuses that tenant id at parse, so the arms below are reachable only past the config", () => {
+    expect(() =>
+      parseSloConfig({
+        alertPolicy: policy,
+        systemActorUserId: SYSTEM_ACTOR,
+        availability: [{ slo: slo("orders.create", "orders-create", "availability"), tenantId: "acme" }],
+      }),
+    ).toThrow(/tenantId must be a tenant uuid/);
+  });
 
   it("pages once for a registration with no rollback (the control)", async () => {
     expect(await pagesFor({ tenantId: "acme" })).toBe(1);

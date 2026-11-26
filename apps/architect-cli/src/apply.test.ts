@@ -8,7 +8,15 @@ import {
 } from "@crossengin/kernel-pg";
 
 import { helpText, parseArgs, type ParsedCommand } from "./cli.js";
-import { applyJsonPayload, readApplyFlags, runApply, standingDifferences } from "./apply.js";
+import {
+  APPLY_FLAG_HELP,
+  APPLY_FLAG_KINDS,
+  applyHelpText,
+  applyJsonPayload,
+  readApplyFlags,
+  runApply,
+  standingDifferences,
+} from "./apply.js";
 import { printJson } from "./format.js";
 import type { RunContext } from "./commands.js";
 
@@ -92,15 +100,24 @@ describe("runApply --plan", () => {
     expect(err()).toContain("apply:");
   });
 
-  it("refuses a production-looking database without --confirm, like apply does", async () => {
-    const { ctx, err } = buffers({
-      PGHOST: "db.internal",
+  // This test used to require the refusal, which pinned the defect: a plan applies nothing (its
+  // probe statements are rolled back), so refusing it refused the one read an operator wants before
+  // deciding whether to pass --confirm. An apply against the same name is still refused.
+  it("does not ask a production-looking database for --confirm, while an apply still does", async () => {
+    const env = {
+      PGHOST: "127.0.0.1",
+      PGPORT: "1",
       PGUSER: "postgres",
       PGDATABASE: "crossengin_production",
-    });
-    const code = await runApply(parsed("apply", "--plan"), ctx);
-    expect(code).toBe(2);
-    expect(err()).toContain("--confirm");
+      PGCONNECT_TIMEOUT: "1",
+    };
+    const applyRun = buffers(env);
+    expect(await runApply(parsed("apply"), applyRun.ctx)).toBe(2);
+    expect(applyRun.err()).toContain("without --confirm");
+    const planRun = buffers(env);
+    // Port 1 has no listener, so the plan fails at the connection — past the guard, which is the point.
+    await runApply(parsed("apply", "--plan"), planRun.ctx).catch(() => 1);
+    expect(planRun.err()).not.toContain("without --confirm");
   });
 });
 
@@ -381,3 +398,47 @@ describe("apply flags are read strictly (H-23)", () => {
     expect(readApplyFlags(parsed("apply", "--plan", "--format", "json")).ok).toBe(true);
   });
 });
+
+describe("apply refuses a flag given twice", () => {
+  it.each([
+    [["apply", "--plan", "--plan=false"], "--plan"],
+    [["apply", "--confirm", "--confirm"], "--confirm"],
+    [["apply", "--lock-retries=1", "--lock-retries", "5"], "--lock-retries"],
+    [["apply", "--format", "json", "--format=human"], "--format"],
+  ])("refuses %j before touching the environment", async (argv, flag) => {
+    const { ctx, err } = buffers({ PGHOST: "127.0.0.1", PGDATABASE: "dev_db", PGUSER: "u" });
+    expect(await runApply(parsed(...argv), ctx)).toBe(2);
+    expect(err()).toContain(`apply: ${flag} is given more than once`);
+  });
+
+  it("records the repeat in the parsed command and keeps the later value in flags", () => {
+    const c = parsed("apply", "--plan", "--plan=false");
+    expect([...c.repeatedFlags]).toEqual(["plan"]);
+    expect(c.flags.get("plan")).toBe("false");
+    expect([...parsed("apply", "--plan").repeatedFlags]).toEqual([]);
+  });
+});
+
+describe("apply --help", () => {
+  it("names every flag apply reads, and only those", () => {
+    const text = applyHelpText();
+    for (const name of Object.keys(APPLY_FLAG_KINDS)) expect(text).toContain(`--${name} `);
+    expect(Object.keys(APPLY_FLAG_HELP).sort()).toEqual(Object.keys(APPLY_FLAG_KINDS).sort());
+    const named = [...text.matchAll(/^ {2}--([a-z-]+)/gm)].map((m) => m[1]);
+    expect(named.sort()).toEqual([...Object.keys(APPLY_FLAG_KINDS), "help"].sort());
+  });
+
+  it("prints and exits 0 without reading the environment, even beside a flag that would apply", async () => {
+    const { ctx, out, err } = buffers({});
+    expect(await runApply(parsed("apply", "--confirm", "--help"), ctx)).toBe(0);
+    expect(out()).toContain("Usage: crossengin apply");
+    expect(err()).toBe("");
+  });
+
+  it("refuses --help=x as an unknown flag rather than reading it as help", async () => {
+    const { ctx, err } = buffers({});
+    expect(await runApply(parsed("apply", "--help=x"), ctx)).toBe(2);
+    expect(err()).toContain("apply: unknown flag --help");
+  });
+});
+

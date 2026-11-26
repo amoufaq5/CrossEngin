@@ -20,6 +20,14 @@ export interface ParsedCommand {
   readonly subcommand: Subcommand;
   readonly positional: readonly string[];
   readonly flags: ReadonlyMap<string, string | true>;
+  /**
+   * Every flag name that appeared more than once. `flags` keeps the last value, which is the
+   * parser's long-standing behaviour and what most commands want, so a repeat is recorded rather
+   * than refused here: a command for which "which of two values applies" is consequential — `apply`,
+   * whose effect is DDL against a live database — refuses on it, where silently taking the later
+   * value would make the outcome depend on argv order nobody reads.
+   */
+  readonly repeatedFlags: ReadonlySet<string>;
   readonly format: OutputFormat;
 }
 
@@ -36,6 +44,11 @@ export function parseArgs(argv: readonly string[]): ParseResult {
   const args = argv.slice(2);
   const positional: string[] = [];
   const flags = new Map<string, string | true>();
+  const repeatedFlags = new Set<string>();
+  const setFlag = (name: string, value: string | true): void => {
+    if (flags.has(name)) repeatedFlags.add(name);
+    flags.set(name, value);
+  };
 
   let subcommandRaw: string | null = null;
 
@@ -44,14 +57,14 @@ export function parseArgs(argv: readonly string[]): ParseResult {
     if (arg.startsWith("--")) {
       const eq = arg.indexOf("=");
       if (eq >= 0) {
-        flags.set(arg.slice(2, eq), arg.slice(eq + 1));
+        setFlag(arg.slice(2, eq), arg.slice(eq + 1));
       } else {
         const next = args[i + 1];
         if (next !== undefined && !next.startsWith("--")) {
-          flags.set(arg.slice(2), next);
+          setFlag(arg.slice(2), next);
           i += 1;
         } else {
-          flags.set(arg.slice(2), true);
+          setFlag(arg.slice(2), true);
         }
       }
       continue;
@@ -64,7 +77,7 @@ export function parseArgs(argv: readonly string[]): ParseResult {
   }
 
   if (subcommandRaw === null) {
-    return { ok: true, command: { subcommand: "help", positional, flags, format: "human" } };
+    return { ok: true, command: { subcommand: "help", positional, flags, repeatedFlags, format: "human" } };
   }
   if (!isSubcommand(subcommandRaw)) {
     return {
@@ -85,7 +98,7 @@ export function parseArgs(argv: readonly string[]): ParseResult {
   }
   return {
     ok: true,
-    command: { subcommand: subcommandRaw, positional, flags, format },
+    command: { subcommand: subcommandRaw, positional, flags, repeatedFlags, format },
   };
 }
 
@@ -114,13 +127,13 @@ export function helpText(): string {
     "Commands:",
     "  init <output>           Scaffold a new manifest file",
     "  validate <path>         Validate a manifest against the kernel schema",
-    "  diff <old> <new>        Compare two manifests",
+    "  diff <old> <new>        Compare two manifests, one line per changed section",
     "  patch <base> <patch>    Apply a manifest patch (writes new manifest)",
     "  hash <path>             Print the deterministic manifest hash",
-    "  apply [--dry-run|--plan] Reconcile the meta-schema with the configured Postgres",
+    "  apply [--dry-run|--plan] Reconcile the meta-schema with the configured Postgres (apply --help)",
     "  chat                    Interactive AI Architect session (Claude-backed)",
     "  license <action>        Offline license tooling: keygen | mint | inspect",
-    "  pack <action>           Pack publisher tooling: keygen | sign (signs a release envelope)",
+    "  pack <action>           Pack publisher tooling: keygen | sign (signs a release envelope) | verify",
     "  version                 Print the CLI version + workspace info",
     "  help                    Show this help text",
     "",
@@ -139,6 +152,9 @@ export function helpText(): string {
     "  pack sign:               crossengin pack sign <manifest.json> --version <semver>",
     "                          (--bundle <file> | --bundle-sha256 <hex>) [--signed-at <iso>]",
     "                          the seed comes from PACK_SIGNING_KEY only; a key flag is refused",
+    "  pack verify:             crossengin pack verify <manifest.json> --release <sign-output.json>",
+    "                          --publisher-key <namespace>:<authorKind>:<public key> [--bundle <file>]",
+    "                          exit 0 verified, 1 naming the refusal, 2 usage",
     "  --prompt <text>         With chat, run a one-shot turn and exit",
     "  --model <id>            With chat, pick a Claude model (default: claude-sonnet-4-6)",
     "  --provider <name>       With chat: auto (default) | anthropic | openai | local. auto routes Anthropic->OpenAI when both keys are set",

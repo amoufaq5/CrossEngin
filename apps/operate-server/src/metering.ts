@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
 import { z } from "zod";
@@ -13,6 +14,7 @@ import {
 import {
   buildPersistentBillingEngine,
   type PersistentBillingMeteringEngine,
+  type RefusedUsageRecord,
 } from "@crossengin/billing-runtime-pg";
 import type { PgConnection } from "@crossengin/kernel-pg";
 
@@ -146,6 +148,12 @@ export interface UsageWindowOptions {
   readonly source: MeteredUsageEvent["source"];
   readonly recordedAt: string;
   readonly ids: UuidGenerator;
+  /**
+   * The writer cutting the window, folded into each record's idempotency key (ADR-0483). Two
+   * replicas cut windows over overlapping instants, and a key built from the window start alone made
+   * the second replica's insert a silent `ON CONFLICT DO NOTHING` — its usage was never billed.
+   */
+  readonly writer: string;
 }
 
 /**
@@ -173,6 +181,7 @@ export function takeUsageWindow(
           period: opts.period,
           id: opts.ids.next(),
           recordedAt: opts.recordedAt,
+          writer: opts.writer,
         }),
       );
     }
@@ -201,6 +210,20 @@ export interface MeteringFlushSchedulerOptions {
   readonly scheduler?: IntervalScheduler;
   readonly onFlush?: (written: number) => void;
   readonly onError?: (err: unknown) => void;
+  /**
+   * Records the database refused on their own account (a constraint or a data exception). They are
+   * **dropped** from pending, because re-sending cannot make them succeed until somebody changes the
+   * database, and keeping them would hold every later window behind them meanwhile — so this
+   * callback is the only record that the usage was not billed. Required for that reason (ADR-0364:
+   * an optional reporter defaulting to silence is the defect restated as a default).
+   */
+  readonly onRefused: (refused: readonly RefusedUsageRecord[]) => void;
+  /**
+   * This instance's writer id; defaults to one random id per scheduler, which is one per process.
+   * It must be stable for the life of the process, because a pending window is retried under the
+   * keys it was cut with.
+   */
+  readonly writer?: string;
 }
 
 /**
@@ -225,12 +248,14 @@ export class MeteringFlushScheduler {
   private lastFlushAt: Date;
   private readonly ids: UuidGenerator;
   private readonly clock: () => Date;
+  private readonly writer: string;
   private readonly pending: UsageRecord[][] = [];
   private chain: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly opts: MeteringFlushSchedulerOptions) {
     this.ids = opts.ids ?? new RandomUuidGenerator();
     this.clock = opts.clock ?? (() => new Date());
+    this.writer = opts.writer ?? randomUUID();
     this.lastFlushAt = this.clock();
   }
 
@@ -276,6 +301,7 @@ export class MeteringFlushScheduler {
           source: this.opts.source,
           recordedAt: now.toISOString(),
           ids: this.ids,
+          writer: this.writer,
         });
         this.lastFlushAt = now;
         if (records.length > 0) this.pending.push(records);
@@ -290,12 +316,25 @@ export class MeteringFlushScheduler {
     }
   }
 
+  /** This instance's writer id, as folded into every record key it cuts. */
+  writerId(): string {
+    return this.writer;
+  }
+
+  /**
+   * A window either writes (with any records the database refused reported and dropped) or throws
+   * and stays pending unchanged. Before ADR-0483 one refused record failed the whole window, so a
+   * refusal that stands until an operator acts — one unprovisioned tenant — kept every tenant's
+   * usage pending behind it.
+   */
   private async drainPending(): Promise<number> {
     let written = 0;
     while (this.pending.length > 0) {
       const window = this.pending[0] as UsageRecord[];
-      written += await this.opts.engine.usageStore.recordWindow(window);
+      const result = await this.opts.engine.usageStore.recordWindow(window);
       this.pending.shift();
+      written += result.inserted;
+      if (result.refused.length > 0) this.opts.onRefused(result.refused);
     }
     return written;
   }
@@ -314,7 +353,17 @@ export interface RequestMetering {
 export function buildRequestMetering(
   conn: PgConnection,
   config: MeteringConfig,
-  opts: { readonly onFlush?: (written: number) => void; readonly onError?: (err: unknown) => void } = {},
+  opts: {
+    readonly onFlush?: (written: number) => void;
+    readonly onError?: (err: unknown) => void;
+    /**
+     * Defaults to one `console.error` line carrying `UsageRecordsRefused`'s message. Deliberately
+     * **not** routed to `onError`: that sink means *a window did not write and is retried*, and
+     * `node.ts` labels it "flush error" — while a refusal is a window that did write, minus records
+     * that were dropped, so the two need different sentences (ADR-0483).
+     */
+    readonly onRefused?: (refused: readonly RefusedUsageRecord[]) => void;
+  } = {},
 ): RequestMetering {
   const engine = buildPersistentBillingEngine(conn, {
     meter: new UsageMeter({
@@ -330,8 +379,35 @@ export function buildRequestMetering(
     intervalMs: config.flushIntervalMs,
     ...(opts.onFlush !== undefined ? { onFlush: opts.onFlush } : {}),
     ...(opts.onError !== undefined ? { onError: opts.onError } : {}),
+    onRefused:
+      opts.onRefused ??
+      ((refused) => {
+        console.error(`[metering] ${new UsageRecordsRefused(refused).message}`);
+      }),
   });
   return { engine, observer, flushScheduler };
+}
+
+/**
+ * Usage the database refused and that was therefore not billed. The message names the count, the
+ * SQLSTATE and constraint of each, and the meter — never a tenant id or a quantity (ADR-0373).
+ */
+export class UsageRecordsRefused extends Error {
+  /**
+   * The refused records, which carry tenant ids and quantities. **Non-enumerable**, so logging the
+   * error object prints its message and stack and not the rows: `util.inspect` prints an error's own
+   * enumerable properties, and a constructor parameter property is one (ADR-0373).
+   */
+  declare readonly refused: readonly RefusedUsageRecord[];
+
+  constructor(refused: readonly RefusedUsageRecord[]) {
+    const causes = [...new Set(refused.map((r) => `${r.record.meter}: ${r.detail}`))].sort();
+    super(
+      `${refused.length.toString()} usage record(s) refused by the database and dropped (not billed): ${causes.join("; ")}`,
+    );
+    this.name = "UsageRecordsRefused";
+    Object.defineProperty(this, "refused", { value: refused, enumerable: false, writable: false });
+  }
 }
 
 function errMessage(err: unknown): string {

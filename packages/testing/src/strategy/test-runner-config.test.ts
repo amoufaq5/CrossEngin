@@ -26,6 +26,8 @@ function facts(over: Partial<TestRunnerFacts> = {}): TestRunnerFacts {
   });
 }
 
+const LEGACY_EXEMPTION = { "apps/legacy": { reason: "r".repeat(30), consequence: "c".repeat(100) } };
+
 describe("the declared shape", () => {
   it("names the filenames vitest reads", () => {
     expect([...TEST_RUNNER_CONFIG_FILENAMES]).toEqual([
@@ -35,15 +37,12 @@ describe("the declared shape", () => {
     ]);
   });
 
-  it("exempts exactly one member, and that member carries its consequence", () => {
-    // One and not two: `packages/config` tracks zero TypeScript files, so the precondition excludes
-    // it mechanically and a declaration for it would excuse nothing — ADR-0386's dead-exemption
-    // finding. The consequence is required because a waiver with no bill is not a declaration.
-    expect(Object.keys(TEST_RUNNER_EXEMPT_MEMBERS)).toEqual(["apps/operate-web"]);
-    for (const [dir, entry] of Object.entries(TEST_RUNNER_EXEMPT_MEMBERS)) {
-      expect(entry.reason.length, `${dir} states no reason`).toBeGreaterThan(20);
-      expect(entry.consequence.length, `${dir} states no consequence`).toBeGreaterThan(80);
-    }
+  it("exempts no member since apps/operate-web gained its runner (ADR-0478)", () => {
+    // Not `packages/config` either: it tracks zero TypeScript files, so the precondition excludes it
+    // mechanically and a declaration for it would excuse nothing — ADR-0386's dead-exemption
+    // finding. A future exemption must carry its consequence; the shape test is below, over a map
+    // passed in, so it does not depend on the real map being non-empty.
+    expect(Object.keys(TEST_RUNNER_EXEMPT_MEMBERS)).toEqual([]);
   });
 
   it("gives every violation kind a producer", () => {
@@ -55,9 +54,9 @@ describe("the declared shape", () => {
       facts({ dir: "packages/c", testScript: null }),
       facts({ dir: "packages/d", testRunnerConfig: null }),
       facts({ dir: "packages/e", testScript: "jest" }),
-      facts({ dir: "apps/operate-web", typeScriptFileCount: 58 }),
+      facts({ dir: "apps/legacy", typeScriptFileCount: 58 }),
     ];
-    for (const v of auditTestRunnerConfig(inputs)) reached.add(v.kind);
+    for (const v of auditTestRunnerConfig(inputs, LEGACY_EXEMPTION)) reached.add(v.kind);
     expect([...reached].sort()).toEqual([...TEST_RUNNER_VIOLATION_KINDS].sort());
   });
 });
@@ -119,23 +118,35 @@ describe("auditTestRunnerConfig", () => {
     // The direction that makes the first real test in an exempt member land green: the fix for this
     // red is to delete the exemption line, not to weaken an assertion. Asserting `testFileCount === 0`
     // for the exempt member instead would pin the defect as the specification (ADR-0372).
-    const v = auditTestRunnerConfig([facts({ dir: "apps/operate-web" })]);
+    const v = auditTestRunnerConfig([facts({ dir: "apps/legacy" })], LEGACY_EXEMPTION);
     expect(v.map((x) => x.kind)).toEqual(["exempt_but_wired"]);
     expect(v[0]?.detail).toContain("remove its TEST_RUNNER_EXEMPT_MEMBERS entry");
   });
 
   it("reports a half-wired exempt member too", () => {
-    const v = auditTestRunnerConfig([facts({ dir: "apps/operate-web", testScript: null })]);
+    const v = auditTestRunnerConfig([facts({ dir: "apps/legacy", testScript: null })], LEGACY_EXEMPTION);
     expect(v.map((x) => x.kind)).toEqual(["exempt_but_wired"]);
     expect(v[0]?.detail).toContain('no "test" script');
   });
 
   it("stays silent for an exempt member that is genuinely unwired", () => {
     expect(
-      auditTestRunnerConfig([
-        facts({ dir: "apps/operate-web", testRunnerConfig: null, testScript: null, testFileCount: 0 }),
-      ]),
+      auditTestRunnerConfig(
+        [facts({ dir: "apps/legacy", testRunnerConfig: null, testScript: null, testFileCount: 0 })],
+        LEGACY_EXEMPTION,
+      ),
     ).toEqual([]);
+  });
+
+  it("holds apps/operate-web to the rule like any other member now that it is not exempt", () => {
+    // The default map, so this is the real rule: had the exemption survived the runner's arrival,
+    // this would read `exempt_but_wired`; with neither config nor script it reads `no_runner`.
+    expect(auditTestRunnerConfig([facts({ dir: "apps/operate-web" })])).toEqual([]);
+    expect(
+      auditTestRunnerConfig([facts({ dir: "apps/operate-web", testRunnerConfig: null, testScript: null })]).map(
+        (x) => x.kind,
+      ),
+    ).toEqual(["no_runner", "tests_without_runner"]);
   });
 
   it("takes the exemption map as an argument, so the rule is testable without the real one", () => {
@@ -230,7 +241,11 @@ describe("the real workspace", () => {
     // 58 tracked files to 81, and a figure read off build output is this register's standing trap.
     const web = members.find((m) => m.dir === "apps/operate-web");
     expect(web?.typeScriptFileCount).toBeGreaterThan(40);
-    expect(web?.typeScriptFileCount).toBeLessThan(70);
+    // ~76 with ADR-0478's tests and config; ~100 more would mean `.next/types/**` is being counted.
+    expect(web?.typeScriptFileCount).toBeLessThan(110);
+    // ADR-0478: the app runs its own tests now. A member whose test files all vanished would still
+    // pass the biconditional (a config and a script with nothing to run), so this is the floor.
+    expect(web?.testFileCount).toBeGreaterThanOrEqual(7);
   });
 
   it("every exempt member still exists and still tracks TypeScript", () => {

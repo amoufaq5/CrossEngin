@@ -32,6 +32,7 @@ describe("usageRecordFrom", () => {
       period,
       id: "33333333-3333-3333-3333-333333333333",
       recordedAt: "2026-07-01T00:00:00.000Z",
+      writer: null,
     });
     expect(record.quantity).toBe(700);
     expect(record.meter).toBe("ai_call");

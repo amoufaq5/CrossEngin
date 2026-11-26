@@ -15,8 +15,8 @@ import { UPSTREAM_BASE_URL } from "@/lib/upstream";
 // The upstream call is best-effort with a short bound and the cookie is cleared whatever it
 // answers: a sign-out the browser cannot complete because the API is down would leave the user
 // signed in on the one device they are trying to leave, which is the worse of the two failures.
-// `ended` in the body says which happened; the shell's sign-out button navigates away and does not
-// read it yet, so a failed upstream call is silent to the user today.
+// `ended` in the body says which happened, and the shell's sign-out button reads it, so a failed
+// upstream call tells the user their other sessions may still be live (ADR-0478).
 
 export const dynamic = "force-dynamic";
 
@@ -40,7 +40,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 }
 
 // Declared after the handler so the cross-site refusal is the first thing in this file that can
-// act, which `packages/testing`'s M-07 fence reads by position.
+// act, which `app/api/guards.test.ts`' M-07 fence reads by position.
 async function endUpstreamSessions(token: string): Promise<boolean> {
   try {
     const res = await fetch(`${UPSTREAM_BASE_URL}/v1/account/logout`, {

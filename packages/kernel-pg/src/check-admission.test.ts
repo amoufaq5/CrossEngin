@@ -256,8 +256,9 @@ describe("declaredAdmissionChecks over the real catalog", () => {
     // original bound. So a parser that quietly gave up is still caught at 25.
     const unclassified = all.filter((d) => d.shape === "unclassified");
     const instantRanges = unclassified.filter((d) => d.expression === instantRangeCheck(d.column));
-    // 37 from ADR-0402, plus ADR-0464's four on `meta.access_requests`.
-    expect(instantRanges.length).toBe(41);
+    // 37 from ADR-0402, plus ADR-0464's four on `meta.access_requests`, plus ADR-0481's two on
+    // `meta.audit_integrity_verdicts` (`verified_at`, `created_at`).
+    expect(instantRanges.length).toBe(52);
     // ADR-0464's six text-length bounds use the catalog's `char_length(x) BETWEEN …` idiom, which
     // this taxonomy leaves unclassified like the nine siblings already in the tail. Named rather
     // than absorbed into the ceiling, so the fence still holds at 25 for everything else.

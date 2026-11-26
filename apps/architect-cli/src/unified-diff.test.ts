@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 
-import { containsTerminalUnsafe, diffLines, MAX_DIFF_LINES, unifiedDiff, visibleLine } from "./unified-diff.js";
+import {
+  containsTerminalUnsafe,
+  diffExceedsCap,
+  diffLines,
+  fullUnifiedDiff,
+  MAX_DIFF_LINES,
+  unifiedDiff,
+  visibleLine,
+} from "./unified-diff.js";
 
 const L = { oldLabel: "a/m.json", newLabel: "b/m.json" };
 
@@ -71,6 +79,18 @@ describe("unifiedDiff", () => {
     const out = unifiedDiff("", after, L);
     expect(out).toHaveLength(MAX_DIFF_LINES);
     expect(out[out.length - 1]).toMatch(/^… \d+ more diff lines not shown; the file is written in full$/);
+  });
+
+  it("gives the uncut diff to a caller deciding whether a person may approve it", () => {
+    const after = Array.from({ length: MAX_DIFF_LINES * 2 }, (_, i) => i.toString()).join("\n") + "\n";
+    const full = fullUnifiedDiff("", after, L);
+    expect(full).toHaveLength(MAX_DIFF_LINES * 2 + 3);
+    expect(diffExceedsCap(full)).toBe(true);
+    expect(unifiedDiff("", after, L)).toEqual([...full.slice(0, MAX_DIFF_LINES - 1), expect.stringMatching(/more diff lines/)]);
+    // At the cap exactly, nothing is cut, so nothing is refused.
+    const exact = fullUnifiedDiff("", Array.from({ length: MAX_DIFF_LINES - 3 }, (_, i) => i.toString()).join("\n") + "\n", L);
+    expect(exact).toHaveLength(MAX_DIFF_LINES);
+    expect(diffExceedsCap(exact)).toBe(false);
   });
 });
 

@@ -8,9 +8,10 @@
 # before changing anything below: it carries the measurement behind the step
 # order, the Node pin and the nine-minute budget.
 #
-# Deliberately three top-level keys and nothing else. A `concurrency:` or
-# `permissions:` block would be config the fence does not cover, and the fence's
-# claim is that every line in this file that executes anything is declared.
+# Five top-level keys and nothing else. `permissions:` and `concurrency:` are
+# declared on CI_PIPELINE like every step (ADR-0482), so the fence's claim still
+# holds: every line in this file that executes or grants anything is declared.
+# `timeout-minutes:` on each job bounds a hang and is not the budget.
 name: ci
 
 on:
@@ -19,9 +20,17 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   verify:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Check out
         uses: actions/checkout@v4
@@ -48,6 +57,7 @@ jobs:
         run: pnpm -r test
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Check out
         uses: actions/checkout@v4
@@ -68,6 +78,7 @@ jobs:
         run: pnpm lint
   deploy-smoke:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Check out
         uses: actions/checkout@v4

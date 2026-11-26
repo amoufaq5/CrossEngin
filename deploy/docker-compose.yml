@@ -276,6 +276,12 @@ services:
       # on --store pg-columns; see the OPERATE_PACK note below. In the environment and never in
       # `command:` below, because argv is readable via ps.
       COLUMN_ENCRYPTION_SECRET: ${COLUMN_ENCRYPTION_SECRET:-}
+      # Rotating that secret, in `--column-key-mode envelope` only (derived mode refuses both): the
+      # old secret moves to _PREVIOUS, the new one becomes COLUMN_ENCRYPTION_SECRET, and _GENERATION
+      # goes up by one. Empty means no rotation in progress and generation 1. README "Rotating the
+      # column secret" has the steps; the `column secret:` boot line says which state this process is in.
+      COLUMN_ENCRYPTION_SECRET_PREVIOUS: ${COLUMN_ENCRYPTION_SECRET_PREVIOUS:-}
+      COLUMN_ENCRYPTION_SECRET_GENERATION: ${COLUMN_ENCRYPTION_SECRET_GENERATION:-}
       # Seals the entity-list keyset cursor (AES-256-GCM under a per-tenant HKDF key). Set this on
       # ANY deployment whose manifest classifies a sortable field: the cursor carries the plaintext
       # of every declared sort key, so `?sort=<classified field>` hands back in `nextCursor` what
@@ -302,7 +308,25 @@ services:
       # (`node -e 'console.log(require("node:crypto").randomBytes(32).toString("base64"))'`).
       # Changing it invalidates every session in flight -- one 401 and a re-login.
       CREDENTIAL_PEPPER: ${CREDENTIAL_PEPPER:-}
+      # Rotating the pepper (ADR-0448): move the current value to CREDENTIAL_PEPPER_RETIRED_<its
+      # version>, set a new CREDENTIAL_PEPPER and raise CREDENTIAL_PEPPER_VERSION. Each sign-in under
+      # a retired pepper re-keys that user's hash. Only the retired slots named here reach the
+      # process -- compose forwards a variable by name, not by prefix -- so a deployment rotating a
+      # fourth time adds a line. Empty values are ignored.
+      CREDENTIAL_PEPPER_VERSION: ${CREDENTIAL_PEPPER_VERSION:-}
+      CREDENTIAL_PEPPER_RETIRED_1: ${CREDENTIAL_PEPPER_RETIRED_1:-}
+      CREDENTIAL_PEPPER_RETIRED_2: ${CREDENTIAL_PEPPER_RETIRED_2:-}
+      CREDENTIAL_PEPPER_RETIRED_3: ${CREDENTIAL_PEPPER_RETIRED_3:-}
       OPERATE_TOKEN_SIGNING_KEY: ${OPERATE_TOKEN_SIGNING_KEY:-}
+      # Stripe, for the subscription gate and usage sync (ADR-0418, ADR-0448). Here and never as
+      # `--stripe-api-key` / `--stripe-webhook-secret` on `command:` (argv is readable via ps).
+      # CAREFUL: STRIPE_WEBHOOK_SECRET alone ARMS the subscription gate on this store -- from then on
+      # every entity request (reads too) for a tenant with no billing_subscriptions row answers 402
+      # `no_subscription`, which on a fresh deployment is every tenant. The boot line `[entitlement]`
+      # says which source gates; README "Turning on the subscription gate" has the order to do it in.
+      # STRIPE_API_KEY alone gates nothing (it feeds the billing portal and usage sync).
+      STRIPE_API_KEY: ${STRIPE_API_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
       # The Ed25519 seed the audit chain signs entries with -- the thing that makes an edited or
       # deleted audit row detectable at all (ADR-0286). Here and never in `command:` for the reason
       # above, and never in a file under `deploy/` either: `Dockerfile`'s `COPY . .` runs under a
@@ -317,6 +341,12 @@ services:
       # the chain's policy with no key in it; both sources may carry a key only if they state the
       # same one, compared by fingerprint.
       AUDIT_CHAIN_SIGNING_KEY: ${AUDIT_CHAIN_SIGNING_KEY:-}
+      # The public halves of chain keys this deployment rotated AWAY from (comma- or space-separated
+      # base64). The verifier trusts only the current key's derived half plus these (ADR-0437), so
+      # after a rotation every entry and checkpoint the old key signed reads `untrusted_key` -- a
+      # paging finding -- until its public half is listed here. Public material, so not a secret;
+      # empty means "no rotation has happened". README "Rotating the audit-chain key" has the steps.
+      AUDIT_CHAIN_TRUSTED_PUBLIC_KEYS: ${AUDIT_CHAIN_TRUSTED_PUBLIC_KEYS:-}
       # The public "request access" form (ADR-0464) opens only when ALL THREE are set: the terms a
       # requester accepts, the privacy notice they are shown before submitting, and the version
       # string recorded with every acceptance. Not secrets; here rather than in `command:` only so
@@ -664,6 +694,13 @@ services:
       timeout: 5s
       retries: 6
       start_period: 40s
+    # Longer than the API's own shutdown deadline, which is the drain grace (8 s, `--shutdown-grace-ms`)
+    # plus a 2 s allowance for the scheduler drains, the final usage flush and the pool close — 10 s,
+    # which is exactly Docker's default stop timeout. Left at the default the two raced: SIGKILL
+    # could land while the final flush was writing, so the requests that finished inside the grace
+    # went unbilled and the claimed job runs stayed leased until their lease expired (ADR-0449).
+    # If you raise `--shutdown-grace-ms`, raise this to at least that plus 2 s and some headroom.
+    stop_grace_period: 20s
     mem_limit: ${API_MEMORY_LIMIT:-1g}
     logging: *logging
     restart: unless-stopped

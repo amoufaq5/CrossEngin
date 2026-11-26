@@ -1,9 +1,20 @@
 import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
-import { FixedClock } from "@crossengin/observability-runtime";
+import {
+  FixedClock,
+  type DeclarationErrorSink,
+  type DeclarationFailure,
+} from "@crossengin/observability-runtime";
 import { describe, expect, it, vi } from "vitest";
 import { CountingIncidentDeclarer } from "@crossengin/incident-response-runtime";
 import { buildPersistentLatencySloEngine } from "./latency-persisting-engine.js";
 import { SLO_ENFORCEMENT_ACTION_COLUMNS } from "./enforcement-action-store.js";
+
+/** Required on the builder (ADR-0483); recorded so no engine in this file reports into silence. */
+const reportedDeclarationErrors: { error: unknown; failure: DeclarationFailure }[] = [];
+const recordDeclarationError: DeclarationErrorSink = (error, failure) => {
+  reportedDeclarationErrors.push({ error, failure });
+};
+void reportedDeclarationErrors;
 
 /** Derived from the stored column order so a new column cannot shift a literal index out from under. */
 function bound(
@@ -70,6 +81,7 @@ function build(
 ) {
   const clock = new FixedClock(BASE);
   const persistent = buildPersistentLatencySloEngine(mockConnection(capture), {
+    onDeclarationError: recordDeclarationError,
     alertPolicy: policy,
     systemActorUserId: SYSTEM_ACTOR,
     registrations: [{ slo, tenantId: TENANT, rollback: { flagId: "ff_catalogv2", safeValueJson: "false" } }],

@@ -1,11 +1,12 @@
 import {
   PIPELINE_STAGES,
+  PipelineExecutionSchema,
   type PipelineExecution,
   type PipelineStage,
   type StageOutcome,
   type StageResult,
 } from "@crossengin/api-gateway";
-import { requireIsoInstant, type PgConnection } from "@crossengin/kernel-pg";
+import { requireIsoInstant, unreadableDetail, type PgConnection } from "@crossengin/kernel-pg";
 
 import {
   optionalScopeFilter,
@@ -53,6 +54,8 @@ export const GATEWAY_DRIFT_CODES = [
   "stages_unreadable",
   "unknown_stage",
   "terminating_not_last",
+  "stage_missing",
+  "execution_unparseable",
 ] as const;
 export type GatewayDriftCode = (typeof GATEWAY_DRIFT_CODES)[number];
 
@@ -235,6 +238,29 @@ export function verifyPipelineExecutionShape(
     }
   }
 
+  // `stage_missing` (ADR-0481): the gateway runs its stages in order and every stage method records
+  // before it returns — measured over all 17, each `return` preceded by a `rec.record` on its path,
+  // and a throw is recorded by the loop's own catch — so a request that reached stage *k* recorded
+  // every stage before it. A gap below the highest stage present is therefore a row edited after the
+  // fact, and nothing above checked for one: order and repetition are both satisfied by a log with
+  // `authenticate` deleted out of the middle. Only indices *below* the last recorded stage are owed,
+  // because a denial ends the walk and the stages after it never ran.
+  const present = new Set<number>();
+  for (const stage of stages) {
+    const idx = PIPELINE_STAGES.indexOf(stage.stage);
+    if (idx !== -1) present.add(idx);
+  }
+  if (present.size > 0) {
+    const highest = Math.max(...present);
+    const missing = PIPELINE_STAGES.slice(0, highest).filter((_, idx) => !present.has(idx));
+    if (missing.length > 0) {
+      issues.push({
+        code: "stage_missing",
+        detail: `stage log skips ${missing.join(", ")} before ${PIPELINE_STAGES[highest]!}, which every request reaching that stage records`,
+      });
+    }
+  }
+
   if (firstTerminatingIdx !== -1 && firstTerminatingIdx !== stages.length - 1) {
     issues.push({
       code: "terminating_not_last",
@@ -388,11 +414,39 @@ export class GatewayReplayer {
     }
     const { execution, stagesUnreadable } = loaded;
     const issues = [...verifyPipelineExecutionShape(execution, { stagesUnreadable })];
+    // The record against its own contract (ADR-0481). The writer ends in
+    // `PipelineExecutionSchema.parse`, so a row this table holds that the schema refuses was not
+    // written that way — and the walk above re-implements a hand-picked subset of that contract (a
+    // `requestId` shape, a uuid tenant, the duration identity, the enums the casts in
+    // `loadExecution` assert, a stage's own fields) and checked none of the rest. The detail is the
+    // field path and the issue code only, sorted, never the stored value (`unreadableDetail`'s rule:
+    // a ZodError's message carries what it received). Skipped when the stage log is unreadable,
+    // because `stages` is then a synthetic `[]` and the parse would report that instead of the row.
+    if (!stagesUnreadable) {
+      const parsed = PipelineExecutionSchema.safeParse(execution);
+      if (!parsed.success) {
+        issues.push({
+          code: "execution_unparseable",
+          detail: `the stored row is not a PipelineExecution (${unreadableDetail(parsed.error)})`,
+        });
+      }
+    }
     if (execution.rateLimitDecisionId !== null) {
       // The decision's scope comes from the execution that names it, not from the caller: a
       // gateway writes both rows in one request, so the execution's own `tenant_id` is a recorded
       // fact about where its decision is. Unscoped, the owner found a *tenant's* decision for a
       // platform execution and reported no drift, and a non-owner found none at all.
+      //
+      // The comparison rests on a **writer's** ordering in another package, so it is stated here
+      // (ADR-0481, the premise ADR-0407's survey found recorded nowhere): `PostgresRateLimitChecker`
+      // *awaits* the decision row inside stage 10, `check_rate_limit`, before the request goes on,
+      // while the execution is captured by `onExecution` after the response is built. So every
+      // captured execution naming a decision was preceded by that decision's commit, and reading the
+      // execution first cannot race it — a missing row is a decision that was never persisted (a
+      // swallowed `onPersistFailure`, or the in-memory checker, which persists none and still stamps
+      // an `rld_` id: ADR-0337's six findings), never one in flight. A writer that persisted the
+      // decision asynchronously would turn this check into a race, and it is the ordering, not the
+      // query, that would need to change.
       const found = await this.rateLimitDecisionExists(
         execution.rateLimitDecisionId,
         execution.tenantId,

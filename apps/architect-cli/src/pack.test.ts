@@ -255,3 +255,143 @@ describe("crossengin pack keygen", () => {
     expect(await runPack(parsed("pack", "publish"), r.ctx)).toBe(2);
   });
 });
+
+describe("crossengin pack verify", () => {
+  async function signed() {
+    const kp = generateEd25519Keypair();
+    const { manifestPath, bundlePath } = await fixture();
+    const r = run({ [PACK_SIGNING_KEY_VAR]: kp.privateKeyBase64 });
+    const code = await runPack(
+      parsed("pack", "sign", manifestPath, "--version", "1.0.0", "--bundle", bundlePath, "--signed-at", SIGNED_AT, "--format", "json"),
+      r.ctx,
+    );
+    expect(code).toBe(0);
+    const out = JSON.parse(r.out()) as PackSignOutput;
+    const dir = await mkdtemp(join(tmpdir(), "pack-verify-"));
+    const releasePath = join(dir, "release.json");
+    await writeFile(releasePath, JSON.stringify(out));
+    return { kp, manifestPath, bundlePath, releasePath, out, dir, spec: `com.acme:community:${kp.publicKeyBase64}` };
+  }
+
+  async function verify(...argv: string[]) {
+    const r = run({});
+    const code = await runPack(parsed("pack", "verify", ...argv), r.ctx);
+    return { code, out: r.out(), err: r.err() };
+  }
+
+  it("exits 0 over the release it signed, naming the publisher and whether the bundle was hashed", async () => {
+    const s = await signed();
+    const withBundle = await verify(s.manifestPath, "--release", s.releasePath, "--publisher-key", s.spec, "--bundle", s.bundlePath);
+    expect(withBundle.code).toBe(0);
+    expect(withBundle.out).toContain("verified com.acme.loyalty@1.0.0");
+    expect(withBundle.out).toContain("bundle bytes match");
+    const withoutBundle = await verify(s.manifestPath, "--release", s.releasePath, "--publisher-key", s.spec);
+    expect(withoutBundle.code).toBe(0);
+    expect(withoutBundle.out).toContain("bundle bytes not checked");
+  });
+
+  it("reads a bare submission body as well as the whole sign output", async () => {
+    const s = await signed();
+    const bare = join(s.dir, "bare.json");
+    await writeFile(bare, JSON.stringify(s.out.submission));
+    expect((await verify(s.manifestPath, "--release", bare, "--publisher-key", s.spec)).code).toBe(0);
+  });
+
+  async function tampered(edit: (sub: Record<string, unknown>) => void) {
+    const s = await signed();
+    const sub = JSON.parse(JSON.stringify(s.out.submission)) as Record<string, unknown>;
+    edit(sub);
+    const path = join(s.dir, "tampered.json");
+    await writeFile(path, JSON.stringify({ submission: sub }));
+    return { ...s, path };
+  }
+
+  it.each([
+    ["version", (sub: Record<string, unknown>): void => {
+      sub.version = "1.0.1";
+    }, "release_version_mismatch"],
+    ["bundle digest", (sub: Record<string, unknown>): void => {
+      sub.bundleSha256 = "c".repeat(64);
+    }, "release_bundle_mismatch"],
+    ["manifest digest", (sub: Record<string, unknown>): void => {
+      sub.manifestSha256 = "d".repeat(64);
+    }, "release_manifest_mismatch"],
+    ["pack id", (sub: Record<string, unknown>): void => {
+      sub.packId = "com.acme.other";
+    }, "release_pack_mismatch"],
+    [
+      "the signed claim itself",
+      (sub: Record<string, unknown>) => {
+        const sig = sub.signature as { release: { version: string } };
+        sig.release.version = "1.0.1";
+        sub.version = "1.0.1";
+      },
+      "signature_invalid",
+    ],
+  ] as const)("refuses a release file whose %s was edited, exit 1 naming the refusal", async (_label, edit, refusal) => {
+    const t = await tampered(edit);
+    const r = await verify(t.manifestPath, "--release", t.path, "--publisher-key", t.spec);
+    expect(r.code).toBe(1);
+    expect(r.err).toContain(`refused ${refusal}`);
+  });
+
+  it("refuses a bundle file that is not the bundle signed", async () => {
+    const s = await signed();
+    const other = join(s.dir, "other.tgz");
+    await writeFile(other, "different bytes");
+    const r = await verify(s.manifestPath, "--release", s.releasePath, "--publisher-key", s.spec, "--bundle", other);
+    expect(r.code).toBe(1);
+    expect(r.err).toContain("refused release_bundle_mismatch");
+  });
+
+  it("refuses an edited manifest file", async () => {
+    const s = await signed();
+    await writeFile(s.manifestPath, JSON.stringify({ ...manifest(), description: "A different pack" }));
+    const r = await verify(s.manifestPath, "--release", s.releasePath, "--publisher-key", s.spec);
+    expect(r.code).toBe(1);
+    expect(r.err).toContain("refused release_manifest_mismatch");
+  });
+
+  it("refuses the wrong public key, and a namespace or author kind the key is not registered for", async () => {
+    const s = await signed();
+    const other = generateEd25519Keypair();
+    const wrongKey = await verify(s.manifestPath, "--release", s.releasePath, "--publisher-key", `com.acme:community:${other.publicKeyBase64}`);
+    expect(wrongKey.code).toBe(1);
+    expect(wrongKey.err).toContain("refused publisher_unregistered");
+    const wrongNs = await verify(s.manifestPath, "--release", s.releasePath, "--publisher-key", `org.other:community:${s.kp.publicKeyBase64}`);
+    expect(wrongNs.err).toContain("refused pack_outside_publisher_namespace");
+    const wrongKind = await verify(s.manifestPath, "--release", s.releasePath, "--publisher-key", `com.acme:certified_partner:${s.kp.publicKeyBase64}`);
+    expect(wrongKind.err).toContain("refused author_kind_not_registered");
+  });
+
+  it("answers --format json with the refusal code", async () => {
+    const t = await tampered((sub) => {
+      sub.version = "2.0.0";
+    });
+    const r = await verify(t.manifestPath, "--release", t.path, "--publisher-key", t.spec, "--format", "json");
+    expect(r.code).toBe(1);
+    expect(JSON.parse(r.out)).toMatchObject({ ok: false, refusal: "release_version_mismatch" });
+  });
+
+  it.each([
+    [[]],
+    [["m.json"]],
+    [["m.json", "--release", "r.json"]],
+    [["m.json", "--publisher-key", "com.acme:community:AAAA"]],
+    [["m.json", "extra", "--release", "r.json", "--publisher-key", "x"]],
+    [["m.json", "--release", "r.json", "--publisher-key", "not-a-spec"]],
+    [["m.json", "--release", "r.json", "--publisher-key", "com.acme:community:AAAA", "--seed", "x"]],
+    [["m.json", "--release", "a", "--release", "b", "--publisher-key", "x"]],
+  ])("exits 2 for an unusable command %j", async (argv) => {
+    expect((await verify(...argv)).code).toBe(2);
+  });
+
+  it("exits 1 for a release file that is not a release", async () => {
+    const s = await signed();
+    const junk = join(s.dir, "junk.json");
+    await writeFile(junk, JSON.stringify({ hello: "world" }));
+    const r = await verify(s.manifestPath, "--release", junk, "--publisher-key", s.spec);
+    expect(r.code).toBe(1);
+    expect(r.err).toContain("refused release_unreadable");
+  });
+});

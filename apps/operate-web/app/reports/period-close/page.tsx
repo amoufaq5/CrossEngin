@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 
 import { Topbar } from "@/components/Topbar";
 import { formatCell, functionalCurrency } from "@/lib/format";
+import { classifyRequestFailure, requestFailureSentence } from "@/lib/request-failure";
 import {
   closePeriod,
   fetchPeriods,
@@ -37,9 +38,10 @@ export default function PeriodClosePage() {
         setLoading(false);
       })
       .catch((e: unknown) => {
-        const msg = e instanceof Error ? e.message : String(e);
-        if (msg.startsWith("403")) setForbidden(true);
-        else setError(msg);
+        // The role panel only for a role refusal: a tenant-status-gate 403 ("Workspace unavailable")
+        // used to read as one, because this matched `message.startsWith("403")` (ADR-0478).
+        if (classifyRequestFailure(e).kind === "role_refused") setForbidden(true);
+        else setError(`Could not load the fiscal periods: ${requestFailureSentence(e)}`);
         setLoading(false);
       });
   }
@@ -76,7 +78,7 @@ export default function PeriodClosePage() {
       load();
       view({ ...period, status: "closed" });
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(`Could not close ${period.name}: ${requestFailureSentence(e)}`);
     } finally {
       setBusy(false);
     }

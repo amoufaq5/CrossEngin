@@ -543,7 +543,8 @@ describe("the real workspace", () => {
     // it arrives as an `undeclared` storm.
     expect(scan.unhandledGlobs).toEqual([]);
     expect(scan.files).toBeGreaterThanOrEqual(900);
-    expect(scan.readers.length).toBeGreaterThanOrEqual(14);
+    // 13 and not 14: ADR-0484 moved refusal.ts::detectEncryptionWeakening onto the resolver.
+    expect(scan.readers.length).toBeGreaterThanOrEqual(13);
     expect(scan.readers.length).toBeLessThanOrEqual(40);
     // 8 and not 10: ADR-0470 moved two raw readers onto the resolver (`manifest-diff.ts`'
     // `fieldIndex` and `fieldNameByColumn`); `design-review.ts` also moved, but out of the separate
@@ -639,19 +640,21 @@ describe("the real workspace", () => {
     }
   });
 
-  it("ranks the two open failures, and each says whether it is live", () => {
+  it("ranks the open failures, and each says whether it is live", () => {
     const open = openFailures(ENTITY_FIELD_APERTURE);
     // Three until H-28, which took the design review's classification layer onto the kernel's
     // trait-resolving reader — the rule reported that declaration `overtaken`, which is the fence
     // working, and it was deleted rather than weakened.
-    expect(open.length).toBe(2);
+    // 1 and not 2: ADR-0484 resolved `detectEncryptionWeakening`'s read, so its fails_open
+    // declaration went `overtaken` and was deleted.
+    expect(open.length).toBe(1);
     for (const member of open) {
       expect(member.consequence, readerSubjectOf(member)).toBeDefined();
       // Every `fails_open` member states its liveness — neither harms a shipped deployment, for two
       // different reasons — and a reader deciding what to fix first needs that in the note.
       expect(member.note, readerSubjectOf(member)).toMatch(/\b(?:[Ll]ive|[Ll]atent)\b/);
     }
-    expect(open.map(readerSubjectOf)).toContain(
+    expect(open.map(readerSubjectOf)).not.toContain(
       "apps/architect-cli/src/refusal.ts::detectEncryptionWeakening",
     );
   });

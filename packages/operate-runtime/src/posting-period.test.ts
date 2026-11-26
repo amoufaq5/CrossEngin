@@ -89,3 +89,81 @@ describe("postingPeriodFor", () => {
     ]);
   });
 });
+
+/** Records each `getLocked` so a test can see which rows the decision was taken under. */
+class RecordingStore extends InMemoryEntityStore {
+  readonly locked: { entity: string; id: string; lock: string }[] = [];
+  override async getLocked(
+    tenantId: string,
+    entity: string,
+    id: string,
+    lock: "share" | "exclusive",
+  ): Promise<Record<string, unknown> | null> {
+    this.locked.push({ entity, id, lock });
+    return super.getLocked(tenantId, entity, id, lock);
+  }
+}
+
+describe("resolvePostingPeriod under a concurrent close (ADR-0480, ADR-0432 Q6)", () => {
+  it("takes a share lock on every covering period, in id order, and on nothing else", async () => {
+    const store = new RecordingStore();
+    const a = await store.create(TENANT, "FiscalPeriod", { start_date: "2026-06-01", end_date: "2026-06-30", status: "open" });
+    const b = await store.create(TENANT, "FiscalPeriod", {
+      start_date: "2026-06-30",
+      end_date: "2026-06-30",
+      status: "open",
+      is_adjustment: true,
+    });
+    await store.create(TENANT, "FiscalPeriod", { start_date: "2026-07-01", end_date: "2026-07-31", status: "open" });
+    await resolvePostingPeriod(store, TENANT, "2026-06-30");
+    const expected = [String(a["id"]), String(b["id"])].sort();
+    expect(store.locked).toEqual(expected.map((id) => ({ entity: "FiscalPeriod", id, lock: "share" })));
+  });
+
+  it("decides from the period as the close commits it, not from the row the scan read before", async () => {
+    const store = new InMemoryEntityStore();
+    const period = await store.create(TENANT, "FiscalPeriod", { start_date: "2026-06-01", end_date: "2026-06-30", status: "open" });
+    const id = String(period["id"]);
+    let releaseClose!: () => void;
+    const closeMayCommit = new Promise<void>((r) => (releaseClose = r));
+    let closeHolds!: () => void;
+    const closeHoldsLock = new Promise<void>((r) => (closeHolds = r));
+
+    // The close: a transition holding the period exclusively until it commits.
+    const close = store.withTransaction(TENANT, async (tx) => {
+      await tx.getLocked(TENANT, "FiscalPeriod", id, "exclusive");
+      closeHolds();
+      await closeMayCommit;
+      await tx.update(TENANT, "FiscalPeriod", id, { status: "closed" });
+    });
+    await closeHoldsLock;
+    // The post: resolves its period inside its own transaction while the close is in flight.
+    const post = store.withTransaction(TENANT, (tx) => resolvePostingPeriod(tx, TENANT, "2026-06-15"));
+    await new Promise((r) => setTimeout(r, 10));
+    releaseClose();
+    await close;
+    expect(await post).toEqual({ kind: "locked", status: "closed" });
+  });
+
+  it("drops a covering row that a concurrent write moved off the date", async () => {
+    const store = new InMemoryEntityStore();
+    const period = await store.create(TENANT, "FiscalPeriod", { start_date: "2026-06-01", end_date: "2026-06-30", status: "closed" });
+    const id = String(period["id"]);
+    let released!: () => void;
+    const mayCommit = new Promise<void>((r) => (released = r));
+    let holds!: () => void;
+    const holding = new Promise<void>((r) => (holds = r));
+    const move = store.withTransaction(TENANT, async (tx) => {
+      await tx.getLocked(TENANT, "FiscalPeriod", id, "exclusive");
+      holds();
+      await mayCommit;
+      await tx.update(TENANT, "FiscalPeriod", id, { start_date: "2026-07-01", end_date: "2026-07-31" });
+    });
+    await holding;
+    const post = store.withTransaction(TENANT, (tx) => resolvePostingPeriod(tx, TENANT, "2026-06-15"));
+    await new Promise((r) => setTimeout(r, 10));
+    released();
+    await move;
+    expect(await post).toEqual({ kind: "open", periodId: null });
+  });
+});

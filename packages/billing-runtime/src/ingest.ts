@@ -49,6 +49,11 @@ export interface UsageRecordInput {
   readonly period: UsagePeriod;
   readonly id: string;
   readonly recordedAt: string;
+  /**
+   * The writer that cut the window, or `null` for a record that is its period's own (see
+   * `buildIdempotencyKey`). Required, so a new caller has to say which it is.
+   */
+  readonly writer: string | null;
 }
 
 /**
@@ -71,6 +76,7 @@ export function usageRecordFrom(input: UsageRecordInput): UsageRecord {
       subscriptionId: input.subscriptionId,
       meter: input.meter,
       periodStart: input.period.start,
+      writer: input.writer,
     }),
   });
 }

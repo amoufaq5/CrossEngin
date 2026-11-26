@@ -1,9 +1,13 @@
 import { ASSEMBLY_REFUSAL_REASONS, type AssemblyRefusalReason } from "@crossengin/tenant-lifecycle";
 
 import {
+  PIPELINE_CONNECT_REFUSAL_REASONS,
   PIPELINE_INPUT_REFUSAL_REASONS,
+  PIPELINE_PREFLIGHT_REFUSAL_REASONS,
   SCHEMA_ERASER_REFUSAL_REASONS,
+  type PipelineConnectRefusalReason,
   type PipelineInputRefusalReason,
+  type PipelinePreflightRefusalReason,
   type SchemaEraserRefusalReason,
 } from "./deletion-pipeline.js";
 import {
@@ -26,6 +30,10 @@ import {
  * - `final`: either the cause is a property of **the request, its caller's body or the tenant's
  *   data**, so no change to the deployment would make a retry succeed; or the refusal is raised
  *   **after** destruction has begun inside the transaction. The request is `rejected`, as before.
+ *
+ * Two stages are wholly pre-destruction and so may be `retry` (ADR-0477): `connect`, where the
+ * transaction never opened, and `preflight`, which asks the schema erasure's refusals before the
+ * shared erasure's first `DELETE`.
  *
  * The second half of `final` is what bounds the cost of a retry, and it is a **type**, not a
  * convention: every reason the pipeline can only raise after the shared-table erasure has issued its
@@ -55,6 +63,8 @@ export type DeletionRefusalDisposition = (typeof DELETION_REFUSAL_DISPOSITIONS)[
  */
 export const DELETION_REFUSAL_RETRYABILITY: {
   readonly input: Readonly<Record<PipelineInputRefusalReason, DeletionRefusalDisposition>>;
+  readonly connect: Readonly<Record<PipelineConnectRefusalReason, DeletionRefusalDisposition>>;
+  readonly preflight: Readonly<Record<PipelinePreflightRefusalReason, DeletionRefusalDisposition>>;
   readonly erase: Readonly<
     Record<SharedTableErasureRefusalReason, DeletionRefusalDisposition> &
       Record<SchemaEraserRefusalReason, "final">
@@ -72,6 +82,24 @@ export const DELETION_REFUSAL_RETRYABILITY: {
     subject_named_on_a_tenant_wide_erasure: "final",
     // `meta.tenants` holds no row for the tenant: a fact about the tenant, which no setting fixes.
     tenant_state_unresolvable: "final",
+    // A subsystem the deployment declares as holding the tenant's data has no attestation
+    // (ADR-0477). The assembler refused the same fact after both erasures and it was rejected; asked
+    // here it is the deployment's declaration — or the synchronous route's body — and the request is
+    // still owed, so it is released rather than lost to a configuration mistake.
+    declared_subsystem_unattested: "retry",
+  }),
+  // The transaction never opened, so nothing in it ran (ADR-0477): the deletion connection's
+  // credential, role or reachability, every one the deployment's to restore.
+  connect: Object.freeze({
+    owner_connection_unavailable: "retry",
+  }),
+  // The schema erasure's refusals asked before the shared erasure's first `DELETE` (ADR-0477) —
+  // the same causes the eraser's own four answer `final` for, because there they arrive after it.
+  preflight: Object.freeze({
+    schema_name_refused: "retry",
+    schema_not_droppable: "retry",
+    external_dependents: "retry",
+    preflight_failed: "retry",
   }),
   erase: Object.freeze({
     // The shared-table erasure's own — every one established before it writes anything.
@@ -126,17 +154,25 @@ export const DELETION_REFUSAL_RETRYABILITY: {
 /** Every reason the map answers for, per stage — the vocabularies the compiler holds it to. */
 export const DELETION_REFUSAL_VOCABULARY: {
   readonly input: readonly string[];
+  readonly connect: readonly string[];
+  readonly preflight: readonly string[];
   readonly erase: readonly string[];
   readonly assemble: readonly string[];
 } = Object.freeze({
   input: PIPELINE_INPUT_REFUSAL_REASONS,
+  connect: PIPELINE_CONNECT_REFUSAL_REASONS,
+  preflight: PIPELINE_PREFLIGHT_REFUSAL_REASONS,
   erase: [...new Set<string>([...SHARED_TABLE_ERASURE_REFUSAL_REASONS, ...SCHEMA_ERASER_REFUSAL_REASONS])],
   assemble: ASSEMBLY_REFUSAL_REASONS,
 });
 
 function dispositionOf(stage: string, reason: string): DeletionRefusalDisposition {
   const byStage: Readonly<Record<string, DeletionRefusalDisposition>> | undefined =
-    stage === "input" || stage === "erase" || stage === "assemble"
+    stage === "input" ||
+    stage === "connect" ||
+    stage === "preflight" ||
+    stage === "erase" ||
+    stage === "assemble"
       ? DELETION_REFUSAL_RETRYABILITY[stage]
       : undefined;
   // An own-property test, so a reason named `constructor` is unknown rather than a prototype member.

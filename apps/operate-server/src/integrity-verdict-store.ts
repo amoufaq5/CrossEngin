@@ -1,5 +1,10 @@
 import { sha256 } from "@crossengin/crypto";
-import { type PgConnection, setPlatformWriteSql } from "@crossengin/kernel-pg";
+import {
+  requireIsoInstant,
+  setPlatformWriteSql,
+  unreadableDetail,
+  type PgConnection,
+} from "@crossengin/kernel-pg";
 import { withTenantContext } from "@crossengin/operate-runtime-pg";
 import { z } from "zod";
 
@@ -414,9 +419,29 @@ export function decodeIntegrityVerdictCursor(
   return { verifiedAt, verdictId };
 }
 
-function isoOf(value: unknown): string {
-  if (value instanceof Date) return value.toISOString();
-  return new Date(String(value)).toISOString();
+// `isoOf` stood here — `new Date(String(value)).toISOString()` — and it was the one read in this
+// store that could fail with no name. node-postgres hands back a `TIMESTAMPTZ` of `'infinity'` as the
+// **number** `Infinity`, so `String()` gave `"Infinity"`, `new Date("Infinity")` is an invalid date
+// and `toISOString()` threw a bare `RangeError: Invalid time value` naming neither the verdict nor the
+// column, out of every read of the row (ADR-0374 named it the sharpest remainder of the temporal
+// class). `requireIsoInstant` renders such a value as text, so it reaches `IntegrityVerdictRecordSchema`
+// and is refused there **by field**, and `StoredVerdictUnreadable` below names the verdict.
+
+/**
+ * A stored verdict this binary's contract refuses, named by its verdict id and by the field path and
+ * issue code of each refusal — never by a value (`unreadableDetail`, ADR-0373), because the message
+ * reaches an HTTP body through `--audit-verdict-routes` and an operator log through the witness-memory
+ * axis. A throw and not a dropped row: a verdict that disappears from a page is the shape a tamper
+ * would take (`integrity-verdict-routes.ts`' `guardStoreRead`).
+ */
+export class StoredVerdictUnreadable extends Error {
+  constructor(
+    readonly verdictId: string | null,
+    readonly detail: string,
+  ) {
+    super(`stored integrity verdict ${verdictId ?? "<unidentified>"} is unreadable (${detail})`);
+    this.name = "StoredVerdictUnreadable";
+  }
 }
 
 function intOf(value: unknown, fallback: number): number {
@@ -531,12 +556,29 @@ export class PostgresIntegrityVerdictStore {
    * constraints see one column at a time. A mismatch throws, so the row is not served.
    */
   private rowToRecord(row: Record<string, unknown>): IntegrityVerdictRecord {
-    const record = IntegrityVerdictRecordSchema.parse({
+    const verdictId = typeof row["verdict_id"] === "string" ? row["verdict_id"] : null;
+    let record: IntegrityVerdictRecord;
+    try {
+      record = this.parseRow(row);
+    } catch (err) {
+      throw new StoredVerdictUnreadable(verdictId, unreadableDetail(err));
+    }
+    const mismatches = storedReportMismatches(record);
+    if (mismatches.length > 0) {
+      throw new Error(
+        `stored integrity verdict ${record.verdictId} disagrees with its report: ${mismatches.join(", ")}`,
+      );
+    }
+    return record;
+  }
+
+  private parseRow(row: Record<string, unknown>): IntegrityVerdictRecord {
+    return IntegrityVerdictRecordSchema.parse({
       id: String(row["id"]),
       verdictId: String(row["verdict_id"]),
       scope: row["tenant_id"] == null ? null : String(row["tenant_id"]),
       verdict: String(row["verdict"]),
-      verifiedAt: isoOf(row["verified_at"]),
+      verifiedAt: requireIsoInstant(row["verified_at"], "verified_at"),
       anchorsChecked: intOf(row["anchors_checked"], -1),
       anchorsVerified: intOf(row["anchors_verified"], -1),
       anchorsTampered: intOf(row["anchors_tampered"], -1),
@@ -548,15 +590,8 @@ export class PostgresIntegrityVerdictStore {
       chainSequenceNumber:
         row["chain_sequence_number"] == null ? null : intOf(row["chain_sequence_number"], -1),
       payloadSha256: row["payload_sha256"] == null ? null : String(row["payload_sha256"]),
-      createdAt: isoOf(row["created_at"]),
+      createdAt: requireIsoInstant(row["created_at"], "created_at"),
     });
-    const mismatches = storedReportMismatches(record);
-    if (mismatches.length > 0) {
-      throw new Error(
-        `stored integrity verdict ${record.verdictId} disagrees with its report: ${mismatches.join(", ")}`,
-      );
-    }
-    return record;
   }
 
   /**
@@ -934,5 +969,42 @@ export async function attestedWitnessFrom(
       kind: "unreadable",
       detail: err instanceof Error ? err.message : String(err),
     };
+  }
+}
+
+/**
+ * How many verdict rows of **any** verdict this deployment has stored for a scope — the census
+ * `verify-chain` reads beside the baseline (ADR-0481's review).
+ *
+ * Needed because the baseline is a *filtered* read and the filter is on columns the scope's own
+ * tenant can write: `latestBaseline` asks for `verdict = 'verified' AND chain_sequence_number IS NOT
+ * NULL`, and the isolation arm on this table is `ALL`-scope, so a tenant-context `UPDATE … SET
+ * verdict = 'unproven'` (one column, measured `UPDATE 1` as the confined `crossengin_app` role)
+ * takes every row out of it. With the chain and its checkpoints then destroyed, `verify-chain`
+ * read `NO HISTORY` and exited 0 again — the state ADR-0481 exists to close, reopened by one write.
+ *
+ * The **existence** of a row is the fact that survives such an edit, and it is sufficient on its
+ * own: `record()` appends the verdict's chain entry to the **same scope's** chain before it stores
+ * the row, so every row a deployment wrote implies that scope's chain held at least one entry. A
+ * tenant cannot remove its rows (the restrictive `FOR DELETE` fence, ADR-0400) nor move them out of
+ * scope (the isolation arm's `USING` is its `WITH CHECK`). A forged row can only make a scope fail,
+ * which is the safe direction. `unreadable` is its own answer rather than zero, for
+ * `attestedWitnessFrom`'s reason: a census that did not happen is not a census of nothing.
+ */
+export type StoredVerdictCensus =
+  | { readonly kind: "counted"; readonly rows: number }
+  | { readonly kind: "unreadable"; readonly detail: string };
+
+export async function storedVerdictCensusFrom(
+  store: Pick<PostgresIntegrityVerdictStore, "counts">,
+  scope: string | null,
+): Promise<StoredVerdictCensus> {
+  try {
+    const counts = await store.counts({
+      scope: scope === null ? { kind: "platform" } : { kind: "tenant", tenantId: scope },
+    });
+    return { kind: "counted", rows: counts.total };
+  } catch (err) {
+    return { kind: "unreadable", detail: err instanceof Error ? err.message : String(err) };
   }
 }

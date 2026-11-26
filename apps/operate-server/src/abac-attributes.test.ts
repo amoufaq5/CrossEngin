@@ -622,6 +622,39 @@ describe("principalAbacAttributes", () => {
  * `attributesFor`'s `null` meaning exactly *no membership, or one that is not active* — never *active
  * with no attributes* — which the first test pins against the contract.
  */
+describe("the composition order server.ts ships (ADR-0479)", () => {
+  /** Revocation inside, attributes outside — the order `server.ts` composes since ADR-0479. */
+  const shipped = (directory: AbacAttributeDirectory): PrincipalResolver =>
+    withAbacAttributes(withMembershipRevocationCheck(resolverFor(principal()), directory), directory);
+
+  it("refuses a revoked principal after ONE directory call, and never attaches attributes", async () => {
+    const directory = directoryOf({});
+    const resolved = await shipped(directory).resolve(RESOLVER_INPUT);
+    expect(resolved).toEqual({ refusedAs: "principal_disabled" });
+    expect(directory.calls).toHaveLength(1);
+    expect(resolved !== null && "abacAttributes" in resolved).toBe(false);
+  });
+
+  it("decorates an active principal, asking twice (the second is the cache's hit in production)", async () => {
+    const directory = directoryOf({ [`${TENANT_A}|${USER}`]: { dept: "fin" } });
+    const resolved = (await shipped(directory).resolve(RESOLVER_INPUT)) as PrincipalWithAbacAttributes;
+    expect(resolved.abacAttributes).toEqual({ dept: "fin" });
+    expect(directory.calls).toHaveLength(2);
+  });
+
+  it("and the order it replaced asked the directory twice and attached before refusing", async () => {
+    // The control: the pre-ADR-0479 order, measured by ADR-0398, so the two tests above are about
+    // the order and not about either decoration alone.
+    const directory = directoryOf({});
+    const old = withMembershipRevocationCheck(
+      withAbacAttributes(resolverFor(principal()), directory),
+      directory,
+    );
+    expect(await old.resolve(RESOLVER_INPUT)).toEqual({ refusedAs: "principal_disabled" });
+    expect(directory.calls).toHaveLength(2);
+  });
+});
+
 describe("withMembershipRevocationCheck", () => {
   it("rests on an active membership never resolving null, which the contract guarantees", () => {
     // `MembershipRecord.abacAttributes` is `z.record(z.unknown())` — not optional, not nullable —

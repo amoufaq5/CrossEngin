@@ -71,6 +71,13 @@ export const CiJobSchema = z
     /** The runner image. Declared so a change to it is a change to this file. */
     runsOn: z.string().min(1).default("ubuntu-latest"),
     /**
+     * The runner's own `timeout-minutes:`, or `null` for none. A **does-not-hang bound and not the
+     * budget**: `targetMinutes` is a measured figure excluding install, and a timeout near it would
+     * red the first green run on install latency (the refutation recorded on `CI_PIPELINE`). So the
+     * schema refuses one at or below the target, and the value shipped is generous on purpose.
+     */
+    timeoutMinutes: z.number().int().positive().max(360).nullable().default(null),
+    /**
      * The job's steps in order. Defaulted to `[]` so a pipeline that declares only budgets and a
      * dependency graph — which is every use of this schema before `CI_PIPELINE` existed — still
      * parses; a pipeline a workflow file is compared against declares them.
@@ -85,8 +92,30 @@ export const CiJobSchema = z
         message: "a job cannot depend on itself",
       });
     }
+    if (v.timeoutMinutes !== null && v.timeoutMinutes <= v.targetMinutes) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["timeoutMinutes"],
+        message:
+          `a ${v.timeoutMinutes.toString()}-minute timeout is at or below the job's measured ` +
+          `${v.targetMinutes.toString()}-minute target, which excludes install, so it would fail a ` +
+          "healthy run; the timeout bounds a hang, not the budget",
+      });
+    }
   });
 export type CiJob = z.infer<typeof CiJobSchema>;
+
+/** The workflow's `permissions:` values, which are GitHub's three. */
+export const CI_PERMISSION_LEVELS = ["read", "write", "none"] as const;
+
+/**
+ * The workflow's `concurrency:` block. `group` is compared as the literal the YAML holds, including
+ * a `${{ … }}` expression, because the fence compares text and the expression is the meaning.
+ */
+export const CiConcurrencySchema = z
+  .object({ group: z.string().min(1), cancelInProgress: z.boolean() })
+  .strict();
+export type CiConcurrency = z.infer<typeof CiConcurrencySchema>;
 
 export const CI_PIPELINE_BUDGET_MINUTES = 20;
 export const FAST_CI_BUDGET_MINUTES = 10;
@@ -97,6 +126,12 @@ export const CiPipelineSchema = z
     jobs: z.array(CiJobSchema).min(1),
     pullRequestTargetMinutes: z.number().int().positive().default(FAST_CI_BUDGET_MINUTES),
     pushMainTargetMinutes: z.number().int().positive().default(CI_PIPELINE_BUDGET_MINUTES),
+    /**
+     * The workflow token's scopes, or `null` for no `permissions:` block (GitHub's default, which is
+     * the repository's setting and may be `write-all`). Declared so a widening is a diff here.
+     */
+    permissions: z.record(z.enum(CI_PERMISSION_LEVELS)).nullable().default(null),
+    concurrency: CiConcurrencySchema.nullable().default(null),
   })
   .superRefine((v, ctx) => {
     const ids = new Set<string>();
@@ -366,15 +401,14 @@ const DEPLOY_SMOKE_STEPS: readonly CiStep[] = [
  *
  * **What it cannot see: an existing step getting slower.** Nothing here times a run, so a `pnpm -r
  * test` that drifts from 200 s to 500 s leaves `fitsBudget` true for ever. The mechanism that would
- * catch it is the runner's, `timeout-minutes:` on the job, and it is a **named follow-up with its
- * refutation** rather than an omission: the job's wall clock is install + the suite, install is the
- * `null` above, and `timeout-minutes: 10` against an 8.78-minute suite would red the *first green*
- * pull request on install latency alone — ADR-0382's own argument against the lint job, that
- * shipping a CI which fails on arrival teaches people to ignore it. A *generous* ceiling is honest
- * and enforceable and enforces a different claim (this job does not hang), and landing it needs a
- * `CiJob` field, a fifth member of `CI_JOB_YAML_KEYS` and a sixteenth finding kind — today the fence
- * **reports** such a key as `job_key_undeclared` rather than forbidding it, which is the demand for
- * a declaration surface working as designed.
+ * catch it is the runner's, `timeout-minutes:` on the job, and the tight form of it is refused on
+ * measurement: the job's wall clock is install + the suite, install is the `null` above, and
+ * `timeout-minutes: 10` against an 8.78-minute suite would red the *first green* pull request on
+ * install latency alone — ADR-0382's own argument against the lint job, that shipping a CI which
+ * fails on arrival teaches people to ignore it. **The generous form landed in ADR-0482**:
+ * `CI_JOB_TIMEOUT_MINUTES` on every job, a `CiJob.timeoutMinutes` field the schema refuses at or
+ * below `targetMinutes`, and a comparison in the audit. It enforces a different claim — this job
+ * does not hang — and still does not see a step getting slower inside the bound.
  *
  * When the check does fire the remedy is one of two, and naming them is the point: split `build`
  * into its own job and fan `typecheck`/`test` out behind it — refused today on the measurement in
@@ -382,8 +416,22 @@ const DEPLOY_SMOKE_STEPS: readonly CiStep[] = [
  * cache whose stale hit is ADR-0307's conditional green — or raise `FAST_CI_BUDGET_MINUTES`, which
  * is a decision about the budget and not about the pipeline.
  */
+/**
+ * Every job's `timeout-minutes:`. Forty-five against a largest measured target of nine: a run that
+ * reaches it has hung, not slowed, and that is the only claim it makes (ADR-0482).
+ */
+export const CI_JOB_TIMEOUT_MINUTES = 45;
+
 export const CI_PIPELINE: CiPipeline = CiPipelineSchema.parse({
   name: "ci",
+  /**
+   * The token's scopes, narrowed to what the jobs use: they read the repository and write nothing
+   * back to it. Without the block a job's token takes the repository's default, which a fork's
+   * pull request does not control and an owner may have set to `write-all`.
+   */
+  permissions: { contents: "read" },
+  /** One run per ref, and a newer push cancels the older one rather than queueing behind it. */
+  concurrency: { group: "ci-${{ github.ref }}", cancelInProgress: true },
   jobs: [
     {
       id: "verify",
@@ -409,6 +457,7 @@ export const CI_PIPELINE: CiPipeline = CiPipelineSchema.parse({
       requiresServices: [],
       /** Derived, never supplied — see `CI_MEASURED_STEP_SECONDS`. `ceil(530.5 / 60) = 9`. */
       targetMinutes: Math.ceil(measuredJobSeconds(VERIFY_STEPS) / 60),
+      timeoutMinutes: CI_JOB_TIMEOUT_MINUTES,
       steps: VERIFY_STEPS,
     },
     {
@@ -419,6 +468,7 @@ export const CI_PIPELINE: CiPipeline = CiPipelineSchema.parse({
       requiresServices: [],
       /** `ceil(245.3 / 60) = 5`. */
       targetMinutes: Math.ceil(measuredJobSeconds(LINT_STEPS) / 60),
+      timeoutMinutes: CI_JOB_TIMEOUT_MINUTES,
       steps: LINT_STEPS,
     },
     {
@@ -435,6 +485,7 @@ export const CI_PIPELINE: CiPipeline = CiPipelineSchema.parse({
        */
       requiresServices: [],
       targetMinutes: Math.ceil(measuredJobSeconds(DEPLOY_SMOKE_STEPS) / 60),
+      timeoutMinutes: CI_JOB_TIMEOUT_MINUTES,
       steps: DEPLOY_SMOKE_STEPS,
     },
   ],

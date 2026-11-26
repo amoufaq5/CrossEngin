@@ -15,10 +15,6 @@ import {
   type IncidentDeclarer,
 } from "@crossengin/incident-response-runtime";
 import { PostgresIncidentDeclarer } from "@crossengin/incident-response-runtime-pg";
-import {
-  DEFAULT_BURN_RATE_THRESHOLDS,
-  DEFAULT_LATENCY_THRESHOLDS,
-} from "@crossengin/observability-runtime";
 
 import type { DeletionEscalationConfig } from "./deletion-escalation-config.js";
 import type { DeletionEvidenceEscalator } from "./deletion-evidence-escalation.js";
@@ -80,12 +76,28 @@ export interface IncidentLifecycleSurveyInput {
   readonly routes: readonly Pick<RouteDefinition, "operationId" | "pathSegments">[];
 }
 
+/**
+ * Where an escalator's declared record ends up. Three values, not a boolean (ADR-0483): the
+ * integrity escalator wraps its store-backed declarer in a `FallbackIncidentDeclarer`, so its
+ * record is stored when the store accepts the declaration and **held in process memory when the
+ * store refuses it** — reading that as "stored" (the old `instanceof PostgresIncidentDeclarer`)
+ * claimed durability for the one escalator whose design is to page anyway when the store fails.
+ */
+export type EscalatorStorage = "stored" | "stored_unless_refused" | "memory";
+
+/** The clause each storage adds to the boot line; empty for the plain stored case. */
+const STORAGE_CLAUSE: Readonly<Record<EscalatorStorage, string>> = Object.freeze({
+  stored: "",
+  stored_unless_refused: " (stored when the store accepts it, held in process memory on refusal)",
+  memory: " (held in process memory, never stored)",
+});
+
 export interface SurveyedEscalator {
   readonly name: string;
   /** The grades it can declare at, in severity order. */
   readonly grades: readonly Severity[];
-  /** Whether its declarer writes `meta.incidents`, rather than holding the record in memory. */
-  readonly stored: boolean;
+  /** Whether its declarer writes `meta.incidents`, and under what condition. */
+  readonly storage: EscalatorStorage;
 }
 
 export interface IncidentEdge {
@@ -130,27 +142,29 @@ function sortedGrades(grades: Iterable<Severity>): readonly Severity[] {
 
 function surveyEscalators(input: IncidentLifecycleSurveyInput): readonly SurveyedEscalator[] {
   const out: SurveyedEscalator[] = [];
-  // `buildSloEnforcement` passes no `thresholds`, so each engine runs on the package defaults —
-  // pinned by a text fence over slo-config.ts in this module's test, because the engines keep their
-  // thresholds private.
+  // The grades come off the engines' own `declaredSeverities` — the thresholds each engine actually
+  // runs on — and not the package defaults, which were right only while no caller passed
+  // `thresholds` and were pinned by a text fence rather than read (ADR-0483). The SLO declarer has
+  // no fallback (slo-config.ts says why), so a persisted engine's record is stored or not declared.
+  const sloStorage: EscalatorStorage = input.slo?.persisted === true ? "stored" : "memory";
   if (input.slo !== null && input.slo.engines.availability !== null) {
     out.push({
       name: "slo-availability",
       grades: sortedGrades([
-        ...DEFAULT_BURN_RATE_THRESHOLDS.map((t) => t.severity),
+        ...input.slo.engines.availability.declaredSeverities,
         ...input.slo.escalationGrades.availability,
       ]),
-      stored: input.slo.persisted,
+      storage: sloStorage,
     });
   }
   if (input.slo !== null && input.slo.engines.latency !== null) {
     out.push({
       name: "slo-latency",
       grades: sortedGrades([
-        ...DEFAULT_LATENCY_THRESHOLDS.map((t) => t.severity),
+        ...input.slo.engines.latency.declaredSeverities,
         ...input.slo.escalationGrades.latency,
       ]),
-      stored: input.slo.persisted,
+      storage: sloStorage,
     });
   }
   const integrity = input.integrity?.escalation ?? null;
@@ -158,7 +172,10 @@ function surveyEscalators(input: IncidentLifecycleSurveyInput): readonly Surveye
     out.push({
       name: "integrity-proof",
       grades: [integrity.config.severity],
-      stored: integrity.declarer instanceof PostgresIncidentDeclarer,
+      // `IntegrityEscalator` always wraps its declarer in a `FallbackIncidentDeclarer`, so a
+      // store-backed primary is durable only while the store accepts the declaration.
+      storage:
+        integrity.declarer instanceof PostgresIncidentDeclarer ? "stored_unless_refused" : "memory",
     });
   }
   if (input.deletion !== null) {
@@ -168,7 +185,8 @@ function surveyEscalators(input: IncidentLifecycleSurveyInput): readonly Surveye
       // `config.severity` stays reachable even when every defect is overridden: a finding reported
       // with no defects grades at it (`severityForDefects`).
       grades: sortedGrades([c.severity, ...Object.values(c.severityByDefect ?? {}), c.sweepStallSeverity]),
-      stored: input.deletion.declarer instanceof PostgresIncidentDeclarer,
+      // Store-backed with no fallback declarer (node.ts), so a store-backed declarer is stored.
+      storage: input.deletion.declarer instanceof PostgresIncidentDeclarer ? "stored" : "memory",
     });
   }
   return out;
@@ -278,7 +296,7 @@ function deriveEdges(
 
 export function surveyIncidentLifecycle(input: IncidentLifecycleSurveyInput): IncidentLifecycleSurvey {
   const escalators = surveyEscalators(input);
-  const stored = escalators.filter((e) => e.stored);
+  const stored = escalators.filter((e) => e.storage !== "memory");
   // The paged note writes only through the store `node.ts` builds beside a connection, which every
   // stored escalator implies; the stall note only through the deletion escalator.
   const writers: AutomatedIncidentWriter[] = [];
@@ -326,7 +344,7 @@ export function formatIncidentLifecycle(s: IncidentLifecycleSurvey): string {
     clauses.push("no incident escalator is built, so nothing in this process declares an incident");
   } else {
     const list = s.escalators
-      .map((e) => `${e.name} at ${e.grades.join("/")}${e.stored ? "" : " (held in process memory, never stored)"}`)
+      .map((e) => `${e.name} at ${e.grades.join("/")}${STORAGE_CLAUSE[e.storage]}`)
       .join(", ");
     clauses.push(`incidents are declared by ${list}`);
   }

@@ -32,7 +32,7 @@ cp .env.example .env
 # the audit trail tamper-evident: without it every audited row is written
 # UNANCHORED and the two hourly chain passes print one warn line each and skip.
 # Back it up -- it is the only thing that can verify the entries written under
-# it, and there is no rotation path. The UI has a login now, so
+# it; to rotate it see "Rotating the audit-chain key". The UI has a login now, so
 # you create the first tenant and user yourself -- five curl calls, no shell in
 # the container; see "The UI has a login" below.
 
@@ -586,7 +586,8 @@ another. The boot line is
 `[audit-chain] audit chain: enabled (key <fingerprint>, …, from env_only)`; without the
 variable the two hourly chain passes print one warn line each and skip, and every audited row
 is written **unanchored**. **Back it up.** It is the only thing that can verify the entries
-written under it and there is no rotation path, so losing it leaves a trail nothing can check.
+written under it, so losing it leaves a trail nothing can check; rotating it is possible and has
+one step that cannot be skipped — see [Rotating the audit-chain key](#rotating-the-audit-chain-key).
 
 **One boot line on a fresh stack is an error and is correct.** `--tenant-status-gate` is a
 default now, and it surveys the tenants your api-key specs name before the first request:
@@ -739,11 +740,16 @@ There is no importer, so moving data in from another system is a script that `PO
 a time. What such a script meets, each measured against a running server
 (`--store pg`, the shipped default, unless it says otherwise):
 
-- **A re-run duplicates, because a declared `unique` field is not enforced on `--store pg`.** Two
-  `POST /v1/warehouses` with the same `code` both answer **201**; the boot line
-  `[unique] declared unique fields: 0 of 32 enforced` says so. A duplicated invoice that is then
-  sent posts to the general ledger **twice** — two journal entries carrying one entry number. On
-  `--store pg-columns` the second `POST` answers **409** `unique_violation` naming the field.
+- **A re-run of a declared `unique` value is refused — once the `document-indexes` step has run.**
+  On `--store pg` the indexes are built by that one-shot owner step before the API starts (the API
+  owns no table, so it cannot build them itself), and from then on a second
+  `POST /v1/warehouses` with the same `code` answers **409** `unique_violation` naming the field,
+  exactly as `--store pg-columns` does (ADR-0423). Read the `[unique]` boot line before loading: it
+  says `N of N enforced` when every index is in place, and when one is not it lists each field as
+  `withheld (<reason>)` with its remedy — `index_not_owner` means the step has not run, and
+  `existing_duplicates` means rows already in the table share a value. **A withheld field still
+  duplicates**: both `POST`s answer **201**, and a duplicated invoice that is then sent posts to the
+  general ledger **twice** — two journal entries carrying one entry number.
 - **An `Idempotency-Key` protects a re-run for 24 hours and no longer.** Within that window a
   repeated key answers the original status and body with `x-idempotent-replay: true` — except a
   body over 256 KiB, which is not retained and is answered empty with
@@ -766,9 +772,12 @@ a time. What such a script meets, each measured against a running server
   cannot be preserved in those columns; carry them in a field the entity declares.
 - **A caller-supplied sequence number is kept and the allocator does not move.** Importing
   `quote_number: QUO-2026-00010` while the allocator stands at `…00009` means the next quote created
-  without a number is handed `…00010` again: a silent duplicate on `--store pg`, a **500** on
-  `--store pg-columns`. Import numbered history first and expect the clash, or leave the number
-  unset and let the allocator assign it.
+  without a number is handed `…00010` again. Where the field's unique index is in place — on
+  `--store pg-columns`, and on `--store pg` once `document-indexes` has run — that create answers
+  **500** with the fixed body rather than **409**, because the clashing value was the allocator's and not the
+  caller's (`write_failed` in the body, the cause in `docker compose logs api`); where the index is
+  withheld it is a **silent duplicate**. No route moves an allocator, so import numbered history
+  first and expect the clash, or leave the number unset and let the allocator assign it.
 - **The bootstrap api-key cannot write a single record.** It carries `platform_admin`, which grants
   no operation on any entity — `GET` and `POST /v1/warehouses` with it are both **403**. Load as a
   signed-in user holding an ERP role (a session lasts one hour), or add a spec naming one —
@@ -819,8 +828,11 @@ it, locks the account, and caps concurrent password checks.
 The API closes a request whose head takes longer than 60 s or whose whole exchange takes longer
 than 300 s, keeps idle connections 125 s (longer than Caddy's 2-minute upstream idle, so Caddy
 never reuses a socket the API is closing), and accepts at most 4,096 connections at once. On
-`docker compose stop` it stops accepting, gives running requests 8 s to finish (inside Docker's
-10 s stop timeout), closes the rest, drains its background work and closes its database pool. The
+`docker compose stop` it stops accepting, gives running requests 8 s to finish, closes the rest,
+drains its background work and closes its database pool. Those 8 s plus a fixed 2 s drain allowance
+are a 10 s deadline, which is exactly Docker's default stop timeout — so the `api` service sets
+`stop_grace_period: 20s`, and the drain finishes before Docker sends `SIGKILL`. If you raise
+`--shutdown-grace-ms`, raise `stop_grace_period` past it plus 2 s, or the drain is cut off. The
 `--http-headers-timeout-ms`, `--http-request-timeout-ms`, `--http-keep-alive-timeout-ms`,
 `--http-max-connections` and `--shutdown-grace-ms` flags change them; the `[http]` boot line prints
 all five. A 5xx from a route carries only an `x-request-id`; the cause is the `[5xx]` line in
@@ -843,6 +855,15 @@ tenant and the cause.
   database roles keeps the API on the owner until `.env` gains `POSTGRES_APP_USER` and
   `POSTGRES_APP_PASSWORD` — the boot line says `BYPASSES` until it does, and
   [The database roles](#the-database-roles) says what to add.
+- **If `migrate` fails during an upgrade, the old API keeps serving a partly migrated schema.**
+  `api` waits for `migrate` to complete successfully, so `up -d` stops before replacing it and the
+  previous container stays up on the previous image. But the applier does not stop at the first
+  failed statement — it runs the rest and reports each one — so the database now holds whatever the
+  new plan applied. An addition (a table, a column with a default or a nullable one, an index) is
+  inert to the old binary, which names none of it; a replaced CHECK or a tightened constraint is not,
+  and may refuse a write the old binary makes. Read `docker compose logs migrate` for the failed
+  statements, fix their cause, and run `docker compose up -d` again — the plan is recomputed against
+  what is there, so the second run applies only what is still missing.
 - **Backups:** the data lives in the `db-data` volume. For an ad-hoc dump:
 
   ```sh
@@ -1275,6 +1296,115 @@ mounted. `--allow-uncovered-settlement` does not waive it.
   in the pre-commit hook and in CI and refuses a key-shaped value in any tracked file, or a literal
   value for a secret-named variable in an env or YAML file. It reads files the index holds — a staged
   `.env` included — and never an untracked one, and it cannot see what is already in history.
+
+### Rotating the audit-chain key
+
+`AUDIT_CHAIN_SIGNING_KEY` can be replaced, and one step cannot be skipped: **the old key's public
+half has to stay trusted**. Verification checks every chain entry and every checkpoint against a
+pinned trust set — the public half derived from the current seed plus every key listed in
+`AUDIT_CHAIN_TRUSTED_PUBLIC_KEYS` (ADR-0437). The key registry is no longer consulted, so a key you
+rotated away from is trusted only if you list it. Leave it out and every entry the old key signed
+reads `untrusted_key`, the integrity proof answers **compromised**, and with an escalation policy
+that pages somebody — about a chain nothing tampered with.
+
+1. **Record the current public half before you change anything.** It is derived from the seed, so
+   it is not in `.env`; this prints it, reading the seed on stdin rather than argv:
+
+   ```sh
+   grep '^AUDIT_CHAIN_SIGNING_KEY=' .env | cut -d= -f2- | docker compose exec -T api node -e '
+     const c = require("node:crypto"); let s = "";
+     process.stdin.on("data", (d) => (s += d)).on("end", () => {
+       const k = c.createPrivateKey({ key: Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"),
+         Buffer.from(s.trim(), "base64")]), format: "der", type: "pkcs8" });
+       console.log(c.createPublicKey(k).export({ format: "der", type: "spki" }).subarray(12).toString("base64"));
+     });'
+   ```
+
+2. Generate a new seed exactly as `.env.example` says, and set `AUDIT_CHAIN_SIGNING_KEY` to it.
+3. Set `AUDIT_CHAIN_TRUSTED_PUBLIC_KEYS` to the public half from step 1 (comma- or space-separated
+   if you are carrying several), and `docker compose up -d api`.
+4. Read the boot line: `chain trust: pinned to 2 key(s) […] (1 from AUDIT_CHAIN_TRUSTED_PUBLIC_KEYS)`.
+   **Keep the old key listed for good** — the entries it signed are permanent, so its public half is
+   needed for as long as they are verified. It is public material, so listing it discloses nothing.
+
+The hourly proof folds only the suffix after a signed checkpoint, so an old entry is re-read only on
+a full fold. `--integrity-proof-full-every <n>` sets how often that happens (every *n*th pass per
+scope, default 24 — a day at the hourly interval), and the first pass after boot is a full fold
+too, which is why a rotation that forgot step 3 is reported within one pass of the restart and not
+at the next scheduled full fold. `0` turns both off — no first-pass fold and no periodic one. A
+forgotten step 3 is still reported on the first pass for any scope holding a checkpoint the old
+key signed, because every pass checks every checkpoint's signature (ADR-0437); what `0` gives up is
+re-reading the old entries themselves. `verify-chain` folds in full by default.
+
+### Rotating the column secret
+
+`COLUMN_ENCRYPTION_SECRET` can be rotated **only in envelope mode** (`--column-key-mode envelope`).
+There a row's column key is a stored data key wrapped by a key-encryption key derived from the
+secret, so rotating the secret changes the wrapping and re-encrypts no column. In derived mode the
+column keys are the secret itself, so a new value is a new key for every ciphertext and the API
+refuses `COLUMN_ENCRYPTION_SECRET_PREVIOUS` and a `COLUMN_ENCRYPTION_SECRET_GENERATION` other than
+1 by name; move to envelope mode first (its seeding keeps the existing ciphertext readable) and
+rotate there.
+
+1. Move the current value to `COLUMN_ENCRYPTION_SECRET_PREVIOUS`, set `COLUMN_ENCRYPTION_SECRET` to
+   a new one, and raise `COLUMN_ENCRYPTION_SECRET_GENERATION` by one (it defaults to 1; the previous
+   secret is always one generation back, so it is never stated twice). `docker compose up -d api`.
+   Rows still naming the old generation open under the previous secret; every row written or
+   re-wrapped from now on names the new one.
+2. Re-wrap each tenant's data key under the new generation, as the owner (the
+   [`rekey` pattern above](#the-database-roles)):
+   `… rekey --rewrap-kek --tenant <id> --confirm-tenant <id>`. No column is re-encrypted and no write
+   gate applies. Run `--plan` first if you want to see the tenant's generation before writing.
+3. When every tenant has been re-wrapped, remove `COLUMN_ENCRYPTION_SECRET_PREVIOUS` and restart.
+   The boot's column-key check refuses a ring that can no longer open a stored key, naming the
+   condition, so removing it early is a refused boot rather than unreadable PHI.
+
+A tenant whose data key was *seeded* from the derived key (the migration into envelope mode) is
+still recomputable from the secret it was seeded under; `rekey` without `--rewrap-kek` moves it to a
+random key, which is what makes destroying that key bound anything.
+
+### Rotating the login pepper
+
+`CREDENTIAL_PEPPER` keys every stored password hash, and each hash records the pepper version that
+keyed it. To rotate: move the current value to `CREDENTIAL_PEPPER_RETIRED_<its version>` (the
+version is 1 if you never set one), set a new `CREDENTIAL_PEPPER`, and raise
+`CREDENTIAL_PEPPER_VERSION` (1..9999). The compose file forwards `CREDENTIAL_PEPPER_RETIRED_1`
+through `_3`. Each user's next successful sign-in re-keys their hash to the current pepper; a
+retired variable can be removed once nobody's hash is keyed by it, and a user who has not signed in
+by then needs a password set again. **Before raising the version, run `crossengin apply --plan`**
+(see [Before an upgrade that changes the schema](#before-an-upgrade-that-changes-the-schema)):
+a hash keyed above version 1 is stored as `scrypt$…$k<version>$…`, and a database whose
+`credential_hash` CHECK predates the versioned form refuses that row with `23514`, so a sign-in
+that re-keys a hash fails until the schema is current.
+
+### Turning on the subscription gate
+
+The gate refuses a tenant's entity requests on its subscription, and it is armed by configuration
+rather than by a flag of its own — so it can be armed by accident. Two sources, read from the live
+resolver and said at boot on the `[entitlement]` line:
+
+- **A license** (`--license <file>` with `--license-key`): only the tenant the license names is
+  admitted; every other tenant's entity requests answer **402** `no_subscription`, and an expired or
+  invalid license refuses that tenant too. A license wins over Stripe when both are configured.
+- **Stripe snapshots.** Setting `STRIPE_WEBHOOK_SECRET` (on `--store pg`/`pg-columns`) mounts
+  `POST /v1/webhooks/stripe`, which writes each subscription event to
+  `meta.billing_subscriptions` keyed by the subscription's `metadata.tenant_id`, **and arms the
+  gate over that table**. A tenant with **no row** there is refused **every** entity request —
+  **reads included**, not only writes — with **402** `no_subscription`; `past_due` keeps reads and
+  refuses writes. On a deployment that has never received a webhook, that is every tenant.
+
+There is no order that avoids the window entirely, because the route that writes the rows is
+mounted by the same variable that arms the gate: until the secret is set nothing writes a row, and
+once it is set a tenant without one is refused. So narrow it rather than skip it — give each
+tenant's Stripe subscription a `metadata.tenant_id` and point the Stripe endpoint at
+`https://api.<DOMAIN>/v1/webhooks/stripe` first, then set the secret at a moment you can accept
+refusals, and have Stripe deliver one subscription event per tenant straight away (resending a
+recent `customer.subscription.*` event from the Stripe dashboard does it). Check
+`select tenant_id from meta.billing_subscriptions` against your tenant list; every tenant missing
+from it is answering 402 until its event arrives. `STRIPE_API_KEY` alone
+gates nothing: it feeds the billing portal (`--billing-portal-return-url`) and usage sync
+(`--stripe-usage-sync-config`). The schema and settings routes are not gated, so an administrator
+can still sign in and see what happened.
 
 ### Clearing the foreign-key drift after an upgrade
 

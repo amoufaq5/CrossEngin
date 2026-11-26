@@ -320,14 +320,10 @@ export function withAbacAttributes(
       // A refusal passes straight through, undecorated: there is nothing to attach attributes to
       // and the wrapped resolver's verdict is final (ADR-0398).
       //
-      // Unreachable in the shipped wiring, and the reason is **not** the composition order — which
-      // the first draft of this comment got backwards. `server.ts` wraps the revocation check
-      // *outside* this decoration, so on the way in this function runs **first** and the revocation
-      // check inspects what it returns. The arm is unreachable because nothing *beneath* it
-      // refuses: its inner resolver is `buildPrincipalWiring`'s, which answers a principal or
-      // `null`. Both wrappers' refusal arms are in that state, each for its own inner resolver, and
-      // either stops being vacuous the moment a refusing resolver is composed below it — which is
-      // why this is a fact about the current wiring and not about this function.
+      // Reachable since ADR-0479: `server.ts` composes the revocation check *inside* this
+      // decoration, so a revoked principal arrives here already refused and passes through with no
+      // directory call and no attributes. (Before that increment the order was the other way round,
+      // and this arm was unreachable because nothing beneath it refused.)
       //
       // The compiler insists regardless: `principalNamesAPerson` reads `principalKind`, which a
       // refusal has not got.
@@ -371,9 +367,11 @@ export function withAbacAttributes(
  * It is a **sibling** of `withAbacAttributes` rather than a flag on it, because the two are gated by
  * different declarations — this one by `--credential-login`, that one by `--abac-policy` — and a
  * boolean switching whether a refusal happens would make one function mean two things. Composed
- * revocation-first in `node.ts`, so a revoked principal is refused before anything is attached; the
- * second `attributesFor` is a cache hit by construction, since the first call populated the entry
- * and no TTL can lapse inside one request.
+ * revocation-first in `server.ts` since ADR-0479 — this decoration inside `withAbacAttributes` — so
+ * a revoked principal is refused after **one** `attributesFor` call and is never handed attributes,
+ * and an active one costs two calls of which the second is a cache hit by construction. (This
+ * sentence claimed that order for three increments while `server.ts` composed the opposite one,
+ * ADR-0398's measurement.)
  *
  * Scoped to a principal that **names a person** for `withAbacAttributes`' reasons, which are
  * stronger here: a bare api-key shares one `DEFAULT_PRINCIPAL_ID` across the deployment (ADR-0331),

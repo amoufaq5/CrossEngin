@@ -29,6 +29,24 @@ export interface UserIdentityResolverOptions {
   readonly now?: () => Date;
 }
 
+/**
+ * The handler's resolver, plus the one write-side act it needs: forgetting a person.
+ *
+ * Still assignable to `UiUserIdentityResolver` — a function with a property is a function — so every
+ * consumer that only resolves is unchanged, while the registry routes that change a person's row can
+ * drop this process's answer at once. Before this the cache had a TTL and nothing else, so a person
+ * provisioned a moment after their console first loaded was shown as nobody for the absence TTL, and
+ * a renamed one under the old name for a minute, on the very replica that made the change.
+ */
+export interface EvictableUserIdentityResolver extends UiUserIdentityResolver {
+  /**
+   * Forget `userId` in this process. In-process only: another replica's entry still lapses on its own
+   * TTL, which is what bounds it there. An in-flight read that began before the eviction is not
+   * allowed to repopulate the entry, because what it read may be the row the write just replaced.
+   */
+  readonly evict: (userId: string) => void;
+}
+
 interface Entry {
   readonly identity: UiUserIdentity | null;
   readonly readAtMs: number;
@@ -59,12 +77,17 @@ interface Entry {
 export function userIdentityFromStore(
   reader: UserIdentityReader,
   opts: UserIdentityResolverOptions,
-): UiUserIdentityResolver {
+): EvictableUserIdentityResolver {
   const ttlMs = opts.ttlMs ?? DEFAULT_USER_IDENTITY_TTL_MS;
   const absenceTtlMs = opts.absenceTtlMs ?? DEFAULT_USER_IDENTITY_ABSENCE_TTL_MS;
   const now = opts.now ?? ((): Date => new Date());
   const entries = new Map<string, Entry>();
   const inflight = new Map<string, Promise<UiUserIdentity | null>>();
+  // Bumped by `evict`. A read records the generation it started under and stores its answer only if
+  // nothing evicted the person meanwhile — otherwise a read racing the write that triggered the
+  // eviction would put the pre-write row straight back for a whole TTL.
+  const generations = new Map<string, number>();
+  const generationOf = (userId: string): number => generations.get(userId) ?? 0;
 
   const ttlFor = (identity: UiUserIdentity | null): number =>
     identity === null ? absenceTtlMs : ttlMs;
@@ -73,22 +96,26 @@ export function userIdentityFromStore(
     userId: string,
     cached: Entry | undefined,
   ): Promise<UiUserIdentity | null> => {
+    const startedUnder = generationOf(userId);
     try {
       const row = await reader.getById(userId);
       const identity: UiUserIdentity | null =
         row === null ? null : { displayName: row.displayName, email: row.email };
-      entries.set(userId, { identity, readAtMs: now().getTime() });
+      if (generationOf(userId) === startedUnder) {
+        entries.set(userId, { identity, readAtMs: now().getTime() });
+      }
       return identity;
     } catch (error) {
       // Serve the last known answer if we have one, else answer absent — never throw. The caller
       // renders a role where a name would have been, which is what it did before this existed.
-      const servedStale = cached !== undefined;
+      // Not the pre-eviction answer once evicted: that is the value the write may have replaced.
+      const servedStale = cached !== undefined && generationOf(userId) === startedUnder;
       opts.onError(userId, error, servedStale);
       return servedStale ? cached.identity : null;
     }
   };
 
-  return async (userId: string): Promise<UiUserIdentity | null> => {
+  const resolve = async (userId: string): Promise<UiUserIdentity | null> => {
     const nowMs = now().getTime();
     const cached = entries.get(userId);
     if (cached !== undefined && nowMs - cached.readAtMs < ttlFor(cached.identity)) {
@@ -98,10 +125,20 @@ export function userIdentityFromStore(
     // console page fetches, so without it a cold cache costs one query per page load per person.
     const existing = inflight.get(userId);
     if (existing !== undefined) return existing;
-    const promise = refresh(userId, cached).finally(() => {
-      inflight.delete(userId);
+    const promise: Promise<UiUserIdentity | null> = refresh(userId, cached).finally(() => {
+      // Only this read's own slot: after an eviction a newer read may hold the key, and deleting it
+      // would let a third caller start a second concurrent read instead of joining that one.
+      if (inflight.get(userId) === promise) inflight.delete(userId);
     });
     inflight.set(userId, promise);
     return promise;
   };
+  const evict = (userId: string): void => {
+    generations.set(userId, generationOf(userId) + 1);
+    entries.delete(userId);
+    // A request arriving after the eviction must start its own read rather than join one that began
+    // before it; the joined read's answer is the one the write may have replaced.
+    inflight.delete(userId);
+  };
+  return Object.assign(resolve, { evict });
 }

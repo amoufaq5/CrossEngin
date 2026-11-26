@@ -2,7 +2,10 @@ import { ASSEMBLY_REFUSAL_REASONS } from "@crossengin/tenant-lifecycle";
 import { describe, expect, it } from "vitest";
 
 import {
+  PIPELINE_CONNECT_REFUSAL_REASONS,
   PIPELINE_INPUT_REFUSAL_REASONS,
+  PIPELINE_PREFLIGHT_REFUSAL_REASONS,
+  PIPELINE_REFUSAL_STAGES,
   SCHEMA_ERASER_REFUSAL_REASONS,
 } from "./deletion-pipeline.js";
 import {
@@ -17,7 +20,35 @@ import {
 } from "./deletion-retry.js";
 import { SHARED_TABLE_ERASURE_REFUSAL_REASONS } from "./shared-table-erasure.js";
 
+/** Every stage the map answers for, read off the map rather than restated (ADR-0477). */
+const MAPPED_STAGES = Object.keys(DELETION_REFUSAL_RETRYABILITY) as readonly (keyof typeof DELETION_REFUSAL_RETRYABILITY)[];
+
 describe("DELETION_REFUSAL_RETRYABILITY", () => {
+  it("answers every pipeline stage except `store`, which no refusal is raised from", () => {
+    // A seventh stage added to the pipeline without a map entry would otherwise classify as
+    // unknown, which is `final` — a pre-destruction refusal silently rejecting requests.
+    expect([...MAPPED_STAGES].sort()).toEqual(
+      PIPELINE_REFUSAL_STAGES.filter((s) => s !== "store").sort(),
+    );
+    expect([...MAPPED_STAGES].sort()).toEqual(Object.keys(DELETION_REFUSAL_VOCABULARY).sort());
+  });
+
+  it("releases the two wholly pre-destruction stages and the moved input check (ADR-0477)", () => {
+    expect(Object.values(DELETION_REFUSAL_RETRYABILITY.connect)).toEqual(["retry"]);
+    for (const d of Object.values(DELETION_REFUSAL_RETRYABILITY.preflight)) expect(d).toBe("retry");
+    expect(DELETION_REFUSAL_RETRYABILITY.input.declared_subsystem_unattested).toBe("retry");
+    expect(
+      deletionRefusalDisposition([{ stage: "connect", reason: "owner_connection_unavailable" }]),
+    ).toBe("retry");
+    expect(
+      deletionRefusalDisposition([{ stage: "preflight", reason: "schema_not_droppable" }]),
+    ).toBe("retry");
+    // The same cause raised by the schema eraser after the shared erasure stays final.
+    expect(deletionRefusalDisposition([{ stage: "erase", reason: "external_dependents" }])).toBe(
+      "final",
+    );
+  });
+
   it("is total over each stage's vocabulary, in both directions", () => {
     // The compiler holds the keys to the types; this holds them to the runtime arrays, so a reason
     // added to a vocabulary but typed loosely somewhere still has to be answered here.
@@ -31,7 +62,13 @@ describe("DELETION_REFUSAL_RETRYABILITY", () => {
     expect(sorted(Object.keys(DELETION_REFUSAL_RETRYABILITY.assemble))).toEqual(
       sorted(ASSEMBLY_REFUSAL_REASONS),
     );
-    for (const stage of ["input", "erase", "assemble"] as const) {
+    expect(sorted(Object.keys(DELETION_REFUSAL_RETRYABILITY.connect))).toEqual(
+      sorted(PIPELINE_CONNECT_REFUSAL_REASONS),
+    );
+    expect(sorted(Object.keys(DELETION_REFUSAL_RETRYABILITY.preflight))).toEqual(
+      sorted(PIPELINE_PREFLIGHT_REFUSAL_REASONS),
+    );
+    for (const stage of MAPPED_STAGES) {
       expect(sorted(Object.keys(DELETION_REFUSAL_RETRYABILITY[stage]))).toEqual(
         sorted(DELETION_REFUSAL_VOCABULARY[stage]),
       );
@@ -73,14 +110,16 @@ describe("DELETION_REFUSAL_RETRYABILITY", () => {
     ).toBe("final");
   });
 
-  it("releases only reasons the shared erasure or the input stage establish before writing", () => {
-    const retryable = (["input", "erase", "assemble"] as const).flatMap((stage) =>
+  it("releases only reasons established before the first destructive statement", () => {
+    const retryable = MAPPED_STAGES.flatMap((stage) =>
       Object.entries(DELETION_REFUSAL_RETRYABILITY[stage])
         .filter(([, d]) => d === "retry")
         .map(([reason]) => `${stage}/${reason}`),
     );
     const preWrite = new Set([
       ...PIPELINE_INPUT_REFUSAL_REASONS.map((r) => `input/${r}`),
+      ...PIPELINE_CONNECT_REFUSAL_REASONS.map((r) => `connect/${r}`),
+      ...PIPELINE_PREFLIGHT_REFUSAL_REASONS.map((r) => `preflight/${r}`),
       ...SHARED_TABLE_ERASURE_REFUSAL_REASONS.map((r) => `erase/${r}`),
     ]);
     expect(retryable.length).toBeGreaterThan(0);
@@ -88,7 +127,7 @@ describe("DELETION_REFUSAL_RETRYABILITY", () => {
   });
 
   it("has both dispositions in use, so neither half is a dead branch", () => {
-    const all = (["input", "erase", "assemble"] as const).flatMap((s) =>
+    const all = MAPPED_STAGES.flatMap((s) =>
       Object.values(DELETION_REFUSAL_RETRYABILITY[s]),
     );
     expect(new Set(all)).toEqual(new Set(DELETION_REFUSAL_DISPOSITIONS));

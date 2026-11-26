@@ -122,6 +122,7 @@ describe("SloRequestObserver", () => {
   it("records each execution's outcome into every registered engine", async () => {
     const clock = new FixedClock(new Date(END));
     const engine = new SloEnforcementEngine({
+      onDeclarationError: () => undefined,
       alertPolicy: policy,
       systemActorUserId: "00000000-0000-0000-0000-000000000001",
       registrations: [{ slo: sloFor(SURFACE), category: "availability", rollback: { flagId: "ff_checkout01", safeValueJson: "false" } }],
@@ -157,6 +158,7 @@ class ManualScheduler implements IntervalScheduler {
 describe("SloEvaluationScheduler", () => {
   function breachingEngine(): SloEnforcementEngine {
     const engine = new SloEnforcementEngine({
+      onDeclarationError: () => undefined,
       alertPolicy: policy,
       systemActorUserId: "00000000-0000-0000-0000-000000000001",
       registrations: [{ slo: sloFor(SURFACE), category: "availability" }],
@@ -259,6 +261,7 @@ describe("SLO enforcement on the live request stream", () => {
     const manifest = await loadBuiltinPack("erp-retail");
     const clock = new FixedClock(new Date("2026-06-03T12:00:00.000Z"));
     const engine = new SloEnforcementEngine({
+      onDeclarationError: () => undefined,
       alertPolicy: policy,
       systemActorUserId: "00000000-0000-0000-0000-000000000001",
       registrations: [{ slo: sloFor("gateway"), category: "availability" }],
@@ -309,6 +312,7 @@ describe("the pages an SLO decision planned (ADR-0326)", () => {
   /** Its own fixture: the sibling block's `breachingEngine` is scoped to that describe. */
   function breaching(): SloEnforcementEngine {
     const engine = new SloEnforcementEngine({
+      onDeclarationError: () => undefined,
       alertPolicy: policy,
       systemActorUserId: "00000000-0000-0000-0000-000000000001",
       registrations: [{ slo: sloFor(SURFACE), category: "availability" }],

@@ -20,6 +20,7 @@ import type { PgConnection } from "@crossengin/kernel-pg";
 import {
   DEFAULT_BURN_RATE_THRESHOLDS,
   DEFAULT_LATENCY_THRESHOLDS,
+  SloEnforcementEngine,
 } from "@crossengin/observability-runtime";
 import { buildErpCorePack } from "@crossengin/pack-erp-core";
 
@@ -66,7 +67,9 @@ function storedDeclarer(): PostgresIncidentDeclarer {
 
 function sloFromDefaults(persisted: boolean): IncidentLifecycleSurveyInput["slo"] {
   // `--slo-defaults`' own path: the manifest-derived config, built exactly as `node.ts` builds it.
-  const built = buildSloEnforcement(deriveSloConfig(buildErpCorePack()));
+  const built = buildSloEnforcement(deriveSloConfig(buildErpCorePack()), {
+    onDeclarationError: () => undefined,
+  });
   return { engines: built.engines, persisted, escalationGrades: built.escalationGrades };
 }
 
@@ -221,15 +224,31 @@ describe("the grades each escalator declares at come from the configs actually b
     expect(grades("deletion-evidence").every((g) => requiresPostmortem(g))).toBe(true);
   });
 
-  it("does not let buildSloEnforcement pass thresholds, so the package defaults are the live ones", () => {
-    const source = stripComments(readFileSync(join(HERE, "slo-config.ts"), "utf8"));
-    expect(source).toContain("buildPersistentSloEnforcementEngine"); // non-vacuity: the right file
-    expect(source).not.toMatch(/\bthresholds\b/);
+  it("reads the grades off the engines' own thresholds, so an injected set is described as it runs", () => {
+    // ADR-0483: this used to read the package defaults and pin, with a text fence over
+    // slo-config.ts, that no caller passed `thresholds`. It reads `declaredSeverities` now.
+    const custom = new SloEnforcementEngine({
+      alertPolicy: DEFAULT_SLO_ALERT_POLICY,
+      systemActorUserId: "00000000-0000-0000-0000-000000000001",
+      registrations: [],
+      thresholds: DEFAULT_BURN_RATE_THRESHOLDS.map((t) => ({ ...t, severity: "sev5" as const })),
+      onDeclarationError: () => undefined,
+    });
+    const s = surveyIncidentLifecycle({
+      ...NOTHING,
+      slo: {
+        engines: { availability: custom, latency: null },
+        persisted: true,
+        escalationGrades: { availability: [], latency: [] },
+      },
+    });
+    expect(s.escalators).toEqual([{ name: "slo-availability", grades: ["sev5"], storage: "stored" }]);
+    expect(formatIncidentLifecycle(s)).toContain("slo-availability at sev5;");
   });
 
   it("marks an in-memory SLO loop as never stored and derives no stored lifecycle from it", () => {
     const s = surveyIncidentLifecycle({ ...NOTHING, slo: sloFromDefaults(false) });
-    expect(s.escalators.every((e) => !e.stored)).toBe(true);
+    expect(s.escalators.every((e) => e.storage === "memory")).toBe(true);
     expect(s.writers).toEqual([]);
     expect(s.reachableEdges).toEqual([]);
     const line = formatIncidentLifecycle(s);
@@ -248,8 +267,23 @@ describe("the grades each escalator declares at come from the configs actually b
         config: deletionConfig,
       },
     });
-    expect(s.escalators[0]?.stored).toBe(false);
+    expect(s.escalators[0]?.storage).toBe("memory");
     expect(s.writers).toEqual([]);
+  });
+
+  it("says the integrity escalator's record is stored only while the store accepts it", () => {
+    // `IntegrityEscalator` wraps its declarer in a `FallbackIncidentDeclarer`: a refused
+    // declaration is held in process memory so the page still goes out. "stored" was a claim the
+    // wrapper does not make (ADR-0483).
+    const integrity = surveyIncidentLifecycle(EVERYTHING).escalators.find((e) => e.name === "integrity-proof");
+    expect(integrity?.storage).toBe("stored_unless_refused");
+    expect(formatIncidentLifecycle(surveyIncidentLifecycle(EVERYTHING))).toContain(
+      "integrity-proof at sev1 (stored when the store accepts it, held in process memory on refusal)",
+    );
+    // The deletion escalator has no fallback, so it stays plainly stored.
+    expect(surveyIncidentLifecycle(EVERYTHING).escalators.find((e) => e.name === "deletion-evidence")?.storage).toBe(
+      "stored",
+    );
   });
 });
 
@@ -275,7 +309,7 @@ describe("the reachable lifecycle is derived by running the writers", () => {
   it("prints the derived figure and every verb it is entitled to", () => {
     const line = formatIncidentLifecycle(survey);
     expect(line).toContain(
-      "incidents are declared by slo-availability at sev1/sev2/sev3, slo-latency at sev2/sev3, integrity-proof at sev1, deletion-evidence at sev1/sev2",
+      "incidents are declared by slo-availability at sev1/sev2/sev3, slo-latency at sev2/sev3, integrity-proof at sev1 (stored when the store accepts it, held in process memory on refusal), deletion-evidence at sev1/sev2",
     );
     expect(line).toContain("they reach 1 of 12 lifecycle edges (declared->cancelled, by the declarer's close-out) and the paged note and the stall-kind note and the escalation regrade move no status");
     expect(line).toContain(

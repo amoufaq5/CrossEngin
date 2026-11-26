@@ -146,6 +146,25 @@ describe("buildCursorKeySource", () => {
     }
   });
 
+  it("names the variable and both of its consumers, keeping the reason (ADR-0481)", async () => {
+    const { AI_TENANT_PSEUDONYM_FLAG } = await import("./ai-tenant-pseudonym.js");
+    try {
+      buildCursorKeySource(WEAK);
+      expect.unreachable("expected a refusal");
+    } catch (err) {
+      const message = (err as Error).message;
+      expect(message).toMatch(/^CURSOR_ENCRYPTION_SECRET \(it keys list-cursor sealing and/);
+      expect(message).toContain("the AI tenant pseudonym");
+      // The local spelling of the flag agrees with the module that owns it.
+      expect(message).toContain(`${AI_TENANT_PSEUDONYM_FLAG} off`);
+      expect(message).toContain("refused (too_short): ");
+      expect((err as ColumnSecretRefused).reason).toBe("too_short");
+      // The measured figure survives the relabel rather than being dropped with the old label.
+      expect(message).toMatch(/\d+ bytes/);
+      expect(message).not.toContain("list-cursor encryption secret refused");
+    }
+  });
+
   it("puts no part of the secret in the refusal message", () => {
     const weak = "zz".repeat(30);
     try {

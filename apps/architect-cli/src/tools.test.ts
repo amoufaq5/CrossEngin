@@ -9,6 +9,7 @@ import {
   autoApprover,
   buildToolCatalog,
   executeToolCall,
+  fileToolError,
   ToolExecutionError,
   toolsToLlmTools,
   type WriteApprovalRequest,
@@ -676,6 +677,79 @@ describe("H-29 — the file tools are confined to one root", () => {
     expect(read.description).not.toContain(root);
     expect(descriptionFor(autoApprover())).not.toContain(root);
     expect(read.description).toContain("returned to this conversation");
+  });
+
+  it("refuses a hard link to a file outside the root, on read and on write, and leaves it intact", async () => {
+    const { root, outside } = await rootWithOutside();
+    const { link } = await import("node:fs/promises");
+    await writeFile(join(outside, "m.json"), JSON.stringify(emptyManifest({ name: "Theirs", slug: "x" })));
+    await link(join(outside, "m.json"), join(root, "m.json"));
+    const approver = new RecordingApprover(true);
+    const tools = buildToolCatalog({ allowFileRead: true, allowFileWrite: true, approver, fileRootDir: root });
+    expect(await errorOf(tools, "read_file", { path: "m.json" })).toContain("refused (hard_link)");
+    const m = JSON.stringify(emptyManifest({ name: "Mine", slug: "x" }));
+    expect(await errorOf(tools, "propose_manifest_edit", { path: "m.json", new_manifest_json: m })).toContain(
+      "refused (hard_link)",
+    );
+    expect(approver.requests).toHaveLength(0);
+    expect(await readFile(join(outside, "m.json"), "utf8")).toContain("Theirs");
+  });
+
+  it("returns an errno as its code and the requested path, never the absolute path in its message", () => {
+    const err = Object.assign(new Error("EACCES: permission denied, open '/home/alice/project/m.json'"), {
+      code: "EACCES",
+    });
+    const out = fileToolError("read_file", err, "m.json");
+    expect(out).toBeInstanceOf(ToolExecutionError);
+    expect((out as Error).message).toBe("read_file: EACCES on m.json");
+    expect((out as Error).message).not.toContain("/home/alice");
+    // Not a filesystem error: left as it is, so a programming error is not dressed as an errno.
+    const plain = new TypeError("x is undefined");
+    expect(fileToolError("read_file", plain, "m.json")).toBe(plain);
+  });
+
+  it("refuses a diff too long to show in full rather than asking a person to approve part of it", async () => {
+    const { root } = await rootWithOutside();
+    const base = emptyManifest({ name: "Big", slug: "big" });
+    const entities = Array.from({ length: 40 }, (_, i) => ({
+      name: `Thing${i.toString()}`,
+      fields: [
+        { name: "label", type: { kind: "text" as const }, required: true },
+        { name: "note", type: { kind: "text" as const } },
+      ],
+    }));
+    const big = { ...base, entities } as Manifest;
+    const person: RecordingApprover & { showsDiffToPerson: boolean } = Object.assign(new RecordingApprover(true), {
+      showsDiffToPerson: true,
+    });
+    const tools = buildToolCatalog({ allowFileWrite: true, approver: person, fileRootDir: root });
+    const result = await executeToolCall(tools, {
+      id: "x",
+      name: "propose_manifest_edit",
+      input: { path: "big.json", new_manifest_json: JSON.stringify(big) },
+    });
+    const out = JSON.parse(result.output) as { applied: boolean; reason: string; diff_lines: number; max_diff_lines: number };
+    expect(out).toMatchObject({ applied: false, reason: "diff_too_large_to_review", max_diff_lines: 400 });
+    expect(out.diff_lines).toBeGreaterThan(400);
+    expect(person.requests).toHaveLength(0);
+    expect(await readdir(root)).not.toContain("big.json");
+
+    // An approver that declares nothing is treated as a person; one that declares no review writes.
+    const undeclared = new RecordingApprover(true);
+    const t2 = buildToolCatalog({ allowFileWrite: true, approver: undeclared, fileRootDir: root });
+    const r2 = await executeToolCall(t2, {
+      id: "x",
+      name: "propose_manifest_edit",
+      input: { path: "big.json", new_manifest_json: JSON.stringify(big) },
+    });
+    expect(JSON.parse(r2.output)).toMatchObject({ reason: "diff_too_large_to_review" });
+    const t3 = buildToolCatalog({ allowFileWrite: true, approver: autoApprover(), fileRootDir: root });
+    const r3 = await executeToolCall(t3, {
+      id: "x",
+      name: "propose_manifest_edit",
+      input: { path: "big.json", new_manifest_json: JSON.stringify(big) },
+    });
+    expect(JSON.parse(r3.output)).toMatchObject({ applied: true });
   });
 
   it("refuses everything when the root is the filesystem root", async () => {

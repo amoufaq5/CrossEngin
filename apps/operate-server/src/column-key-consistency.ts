@@ -266,7 +266,27 @@ export interface ColumnKeyConsistency {
   readonly findings: readonly ColumnKeyFinding[];
   /** What was established about tenants with no key row, which the consistent line has to say. */
   readonly ciphertext: KeylessCiphertextCheck;
+  /**
+   * How many examined tenants' **current** key is of each provenance, or `null` when the key rows
+   * could not be read. The fact `shreddabilityOf` answers over, which nothing read for a real row
+   * until ADR-0481: a destroyed `random` key bounds a deletion horizon and a destroyed
+   * `seeded_from_derived` one does not, so an envelope deployment is told which it holds. Counts
+   * only — never a tenant id — and a lower bound when `unexaminedTenants > 0`.
+   */
+  readonly keyProvenance: {
+    readonly counts: Readonly<Record<DataKeyProvenance, number>>;
+    readonly unexaminedTenants: number;
+  } | null;
 }
+
+/**
+ * What a destroyed key of each provenance buys, as the line says it. A total map so a third
+ * provenance is a compile error here rather than a count no sentence describes.
+ */
+const PROVENANCE_SHREDDABILITY: Readonly<Record<DataKeyProvenance, string>> = {
+  random: "shreddable",
+  seeded_from_derived: "derivable; run operate-server rekey per tenant",
+};
 
 export class ColumnKeyConfigurationRefused extends Error {
   constructor(readonly consistency: ColumnKeyConsistency) {
@@ -897,7 +917,25 @@ function assessEnvelope(ring: ColumnSecretRing, groups: readonly DataKeyRowGroup
       continue;
     }
     const opened = outcomes.filter((o) => o === "opened_matches").length;
-    if (opened === 0) {
+    if (opened === 0 && outcomes.length === 1) {
+      // One sample cannot separate the two causes (ADR-0481). "The secret is wrong" is proved only
+      // by every sample failing *and* there being more than one: with two or more, a corrupt row
+      // beside a good one is `rows_unopenable`, but with one there is nothing to disagree with —
+      // which is the shape of every per-tenant survey (`rekey`'s pre-flight) and of any generation
+      // only one tenant is at. Still a refusal, the fail-closed direction, and it names both.
+      findings.push({
+        condition: "kek_secret_mismatch",
+        tenants,
+        kekGeneration: g,
+        detail:
+          `the one data key sampled at key-encryption-key generation ${g.toString()} does not open under the ` +
+          `secret this deployment holds for that generation (${variableFor(ring, g)}), and with a single row ` +
+          "there is no second one to disagree with, so this cannot tell a corrupt row from a wrong secret; " +
+          `PHI reads and writes for that tenant fail (DataKeyUnwrapFailed). Remedy, if the secret is wrong: ` +
+          `${mismatchRemedy(ring, g)}; if the row is corrupt: restore the tenant's meta.tenant_data_keys row ` +
+          "from a backup taken before it changed",
+      });
+    } else if (opened === 0) {
       findings.push({
         condition: "kek_secret_mismatch",
         tenants,
@@ -954,9 +992,24 @@ function assessDerived(ring: ColumnSecretRing, groups: readonly DataKeyRowGroup[
     if (outcomes.length === 0) continue;
     const matched = outcomes.filter((o) => o === "opened_matches").length;
     const differed = outcomes.filter((o) => o === "opened_differs").length;
-    if (differed > 0 || (g === 1 && matched === 0)) {
+    if (differed === 0 && g === 1 && matched === 0 && outcomes.length === 1) {
+      // The single-sample case of the clause below, which is not proof: one row that does not open
+      // is a corrupt row or a wrong secret and nothing here separates them (ADR-0481).
+      findings.push({
+        condition: "derived_secret_not_seed",
+        tenants,
+        kekGeneration: g,
+        detail:
+          "the one seeded data key sampled at key-encryption-key generation 1 does not open under " +
+          `${COLUMN_ENCRYPTION_SECRET_VAR}, and with a single row there is no second one to disagree with, ` +
+          "so this cannot tell a corrupt row from a wrong secret. Remedy, if the secret is wrong: restore " +
+          `the generation-1 secret as ${COLUMN_ENCRYPTION_SECRET_VAR}; if the row is corrupt: restore the ` +
+          "tenant's meta.tenant_data_keys row from a backup taken before it changed",
+      });
+    } else if (differed > 0 || (g === 1 && matched === 0)) {
       // Generation 1 rows were wrapped by the generation-1 secret, so failing to open every sample
-      // is proof this secret is not it. Opening and differing is proof at any generation.
+      // is proof this secret is not it — when there is more than one. Opening and differing is
+      // proof at any generation, from a single row.
       findings.push({
         condition: "derived_secret_not_seed",
         tenants,
@@ -1133,7 +1186,41 @@ export function assessColumnKeyConsistency(input: {
     tenantsWithKeys: survey.readable ? tenantsIn(survey.groups) : 0,
     findings,
     ciphertext,
+    keyProvenance: survey.readable
+      ? {
+          // Spelled per member rather than built from the array and cast, so the type checks that
+          // every provenance has a count (ADR-0362: an annotation must not stand in for the check).
+          counts: {
+            random: tenantsIn(survey.groups.filter((g) => g.provenance === "random")),
+            seeded_from_derived: tenantsIn(
+              survey.groups.filter((g) => g.provenance === "seeded_from_derived"),
+            ),
+          },
+          unexaminedTenants: survey.unexaminedTenants,
+        }
+      : null,
   };
+}
+
+/**
+ * The envelope deployment's key-provenance line (ADR-0481): which tenants' keys are destroyable in
+ * a sense that bounds anything. `null` in derived mode, where no row is read for a column key, for a
+ * per-tenant survey, and when the rows could not be read at all — a census of nothing must not read
+ * as zero of each.
+ */
+export function formatKeyProvenance(c: ColumnKeyConsistency): string | null {
+  const census = c.keyProvenance;
+  // Deployment scope only: a per-tenant survey's census is one row, and `rekey` prints its own
+  // provenance (`seeded_from_derived → random`), so a second sentence there would restate it.
+  if (c.mode !== "envelope" || census === null || c.scope.kind !== "deployment") return null;
+  const parts = DATA_KEY_PROVENANCES.map(
+    (p) => `${census.counts[p].toString()} tenant(s) ${p} (${PROVENANCE_SHREDDABILITY[p]})`,
+  );
+  const unexamined =
+    census.unexaminedTenants > 0
+      ? `; ${census.unexaminedTenants.toString()} tenant(s) not examined, so these are lower bounds`
+      : "";
+  return `${linePrefix(c.scope)} key provenance — ${parts.join(", ")}${unexamined}`;
 }
 
 export interface ColumnKeyConsistencyLine {
@@ -1229,6 +1316,8 @@ export function formatColumnKeyConsistency(c: ColumnKeyConsistency): ColumnKeyCo
   } else if (c.verdict === "refuse") {
     lines.push({ level: "error", text: `${prefix} REFUSED — ${refusalSentence(c.scope)}` });
   }
+  const provenance = formatKeyProvenance(c);
+  if (provenance !== null) lines.push({ level: "info", text: provenance });
   return lines;
 }
 

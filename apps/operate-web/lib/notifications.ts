@@ -194,14 +194,16 @@ export async function listNotifications(query: NotificationQuery = {}): Promise<
 /**
  * The server's own answer to "how many of these has this viewer not seen".
  *
- * `truncated` matters: the count examines a page of the inbox rather than the whole table, so a
- * truncated answer is a floor and should render as "N+". `examined` is how many notices the figure
- * was computed over, which is what makes the floor legible.
+ * `exact` is the server saying so (ADR-0476): the figure is one SQL anti-join over every notice the
+ * viewer can see, not a count over a page, so there is no floor to render as "N+". It used to carry
+ * `truncated` and `examined` beside the count, and this client rendered "N+ unread of M examined"
+ * from them; the count no longer depends on any window, so the two fields now live only on the
+ * partition, where they describe the partition's window and nothing else (ADR-0478). `exact` is read
+ * rather than assumed, so a server a build behind — which answered a page scan — renders "N+".
  */
 export interface UnreadCount {
   readonly unread: number;
-  readonly examined: number;
-  readonly truncated: boolean;
+  readonly exact: boolean;
   readonly readThroughAt: string | null;
   /** `self` once the server resolves this credential to a recipient; `tenant` until then. */
   readonly scope: string;
@@ -212,18 +214,30 @@ function readStatePath(suffix: string): string {
   return `/api/v1/notifications${suffix}`;
 }
 
+/** One page of the partition: the server's window cap and its own listing cursor. */
+export interface UnreadPartitionWindow {
+  readonly limit?: number;
+  readonly cursor?: string;
+}
+
 /**
  * One request and one error path for both shapes of the unread answer, because the partition's
  * body is the count's body plus a `notices` key — two functions building the same URL is how two
- * spellings of one query begin.
+ * spellings of one query begin. The window is sent only for the partition: the server answers a
+ * count carrying `limit` or `cursor` with a 400, because the count is exact and takes neither.
  */
 async function requestUnread(
   channel: string | undefined,
   detail: "count" | "partition",
+  window: UnreadPartitionWindow = {},
 ): Promise<Record<string, unknown>> {
   const p = new URLSearchParams();
   if (channel !== undefined && channel.trim() !== "") p.set("channel", channel.trim());
-  if (detail === "partition") p.set("detail", "partition");
+  if (detail === "partition") {
+    p.set("detail", "partition");
+    if (window.limit !== undefined) p.set("limit", window.limit.toString());
+    if (window.cursor !== undefined && window.cursor !== "") p.set("cursor", window.cursor);
+  }
   const qs = p.toString();
   const res = await fetch(readStatePath(`/unread${qs ? `?${qs}` : ""}`), {
     headers: { accept: "application/json" },
@@ -232,13 +246,12 @@ async function requestUnread(
   return (await res.json()) as Record<string, unknown>;
 }
 
-function toUnreadCount(json: Record<string, unknown>): UnreadCount {
+/** Exported for its tests: the parse is the half a page cannot check by looking. */
+export function toUnreadCount(json: Record<string, unknown>): UnreadCount {
   const unread = json["unread"];
-  const examined = json["examined"];
   return {
     unread: typeof unread === "number" && Number.isFinite(unread) ? unread : 0,
-    examined: typeof examined === "number" && Number.isFinite(examined) ? examined : 0,
-    truncated: json["truncated"] === true,
+    exact: json["exact"] === true,
     readThroughAt: nullableStr(json["readThroughAt"]),
     scope: str(json["scope"], "tenant"),
   };
@@ -259,10 +272,18 @@ export async function fetchUnreadCount(channel?: string): Promise<UnreadCount> {
  * watermark and **fails open** on an unparseable `queuedAt`, so a client deriving read-ness from
  * `readThroughAt` would be a second implementation of that rule, disagreeing exactly on the notices
  * it is most important not to hide.
+ *
+ * `examined` and `nextCursor` describe the **partition** window and never the count: the window is
+ * a page of the listing (at most 200), and a page that lists more notices than that pages the
+ * partition with the same cursor rather than marking the rest unknown (ADR-0478).
  */
 export interface UnreadPartition extends UnreadCount {
   readonly readIds: ReadonlySet<string>;
   readonly unreadIds: ReadonlySet<string>;
+  /** How many notices the partition pages so far have covered. */
+  readonly examined: number;
+  /** Where the next partition page starts, or `null` when the partition has reached the end. */
+  readonly nextCursor: string | null;
 }
 
 function idSet(raw: unknown): ReadonlySet<string> {
@@ -272,18 +293,124 @@ function idSet(raw: unknown): ReadonlySet<string> {
   return out;
 }
 
-export async function fetchUnreadPartition(channel?: string): Promise<UnreadPartition> {
-  const json = await requestUnread(channel, "partition");
+/** Exported for its tests. */
+export function toUnreadPartition(json: Record<string, unknown>): UnreadPartition {
   const notices = json["notices"];
   const split = (notices !== null && typeof notices === "object" ? notices : {}) as Record<
     string,
     unknown
   >;
+  const examined = json["examined"];
+  const cursor = json["nextCursor"];
   return {
     ...toUnreadCount(json),
     readIds: idSet(split["read"]),
     unreadIds: idSet(split["unread"]),
+    examined: typeof examined === "number" && Number.isFinite(examined) ? examined : 0,
+    nextCursor: typeof cursor === "string" && cursor !== "" ? cursor : null,
   };
+}
+
+export async function fetchUnreadPartition(
+  channel?: string,
+  window: UnreadPartitionWindow = {},
+): Promise<UnreadPartition> {
+  return toUnreadPartition(await requestUnread(channel, "partition", window));
+}
+
+/**
+ * The partition after one more page of it, as a page that has loaded both reads it.
+ *
+ * The count, the watermark and the cursor come from `next`, which is the newer answer. The id sets
+ * are unioned, and an id `next` places is removed from the other set: a notice marked read between
+ * the two requests appears in `prev.unreadIds` and `next.readIds`, and the newer answer is the true
+ * one. `examined` adds, because the two pages are disjoint windows of one listing.
+ */
+export function mergeUnreadPartitions(prev: UnreadPartition, next: UnreadPartition): UnreadPartition {
+  const readIds = new Set<string>();
+  const unreadIds = new Set<string>();
+  for (const id of prev.readIds) if (!next.unreadIds.has(id)) readIds.add(id);
+  for (const id of prev.unreadIds) if (!next.readIds.has(id)) unreadIds.add(id);
+  for (const id of next.readIds) readIds.add(id);
+  for (const id of next.unreadIds) unreadIds.add(id);
+  return {
+    unread: next.unread,
+    exact: next.exact,
+    readThroughAt: next.readThroughAt,
+    scope: next.scope,
+    readIds,
+    unreadIds,
+    examined: prev.examined + next.examined,
+    nextCursor: next.nextCursor,
+  };
+}
+
+/** The server's partition window cap (`UNREAD_PARTITION_WINDOW_MAX`); a wider ask is a 400. */
+export const UNREAD_PARTITION_WINDOW_MAX = 200;
+
+/**
+ * The partition extended until it covers at least `atLeast` notices of the listing, or the listing
+ * ends. The page lists notices in pages and the partition pages over the same ordering with the same
+ * cursor, so covering as many notices as the page has loaded gives every loaded row an answer —
+ * where a single 200-notice window left every row past it `unexamined` (ADR-0478).
+ *
+ * Stops on a page that examined nothing, so a server answering an empty page with a cursor cannot
+ * hold this in a loop. `fetchPage` is a parameter for the tests and defaults to the real request.
+ */
+export async function fetchUnreadPartitionCovering(
+  channel: string | undefined,
+  atLeast: number,
+  from: UnreadPartition | null = null,
+  fetchPage: (channel: string | undefined, window: UnreadPartitionWindow) => Promise<UnreadPartition> = fetchUnreadPartition,
+): Promise<UnreadPartition> {
+  let acc = from;
+  for (;;) {
+    if (acc !== null && (acc.examined >= atLeast || acc.nextCursor === null)) return acc;
+    const remaining = atLeast - (acc?.examined ?? 0);
+    const limit = Math.min(UNREAD_PARTITION_WINDOW_MAX, Math.max(1, remaining));
+    const cursor = acc?.nextCursor ?? null;
+    const page = await fetchPage(channel, cursor === null ? { limit } : { limit, cursor });
+    acc = acc === null ? page : mergeUnreadPartitions(acc, page);
+    if (page.examined === 0) return acc;
+  }
+}
+
+/**
+ * The starting point for reading only the partition pages **after** `base`: its cursor, with empty
+ * id sets and nothing examined, so `fetchUnreadPartitionCovering(channel, n, seed)` answers the new
+ * pages alone and `extendPartitionOnto` can lay them over whatever the page holds by the time they
+ * land.
+ */
+export function partitionPagesAfter(base: UnreadPartition): UnreadPartition {
+  return { ...base, readIds: new Set(), unreadIds: new Set(), examined: 0 };
+}
+
+/**
+ * The partition the page holds once an extension read from `base` lands, given that the page may
+ * have moved on while it was in flight (ADR-0478 review).
+ *
+ * The pages in `added` start at `base.nextCursor`, so they continue `current` only if `current` still
+ * ends there. A single notice marked read in the meantime keeps the cursor and is kept (the merge
+ * runs over `current`, not over `base`, so that mark is not undone by an answer read before it); a
+ * re-read or another extension that moved the cursor makes `added` describe a position `current`
+ * does not end at, and laying it over would double-count or leave a gap, so `current` is kept as it
+ * is. `null` stays `null`: there is no partition to extend.
+ */
+export function extendPartitionOnto(
+  current: UnreadPartition | null,
+  base: UnreadPartition,
+  added: UnreadPartition,
+): UnreadPartition | null {
+  if (current === null || current.nextCursor !== base.nextCursor) return current;
+  return mergeUnreadPartitions(current, added);
+}
+
+/**
+ * The unread chip's text. A count the server marks exact is a figure; one it does not — a server a
+ * build behind ADR-0476 — is a floor and keeps its "+".
+ */
+export function unreadCountLabel(c: UnreadCount): string {
+  return `${c.unread.toString()}${c.exact ? "" : "+"} unread`;
 }
 
 /**
@@ -414,6 +541,46 @@ export function reviewDecisions(
   return list.filter((n) => decisionOf(n) !== null).sort(byDecidedAtDesc);
 }
 
+/**
+ * The templates `/setup` renders, asked for by name rather than filtered out of the newest page.
+ *
+ * `/setup` used to read the newest 50 in-app notices and keep the decisions and digests among them,
+ * so on a tenant whose inbox is busy with anything else a review decision fell off the page before
+ * it was rendered (ADR-0385 Q7; the scouting pass for ADR-0478 reported 0 of 253 on a busy inbox). The list route filters by `templateId`
+ * server-side, so one page per template is the honest read. Derived from `TEMPLATE_DECISIONS` so a
+ * template added there is asked for here too.
+ */
+export const SETUP_NOTICE_TEMPLATE_IDS: readonly string[] = Object.freeze([
+  ...Object.keys(TEMPLATE_DECISIONS),
+  DIGEST_TEMPLATE_ID,
+]);
+
+/**
+ * Several pages of notices as one list: de-duplicated on `dispatchId` (the pages are per template
+ * and disjoint, but a retried or overlapping read must not render a row twice), newest first.
+ */
+export function mergeNoticePages(
+  pages: ReadonlyArray<ReadonlyArray<TenantNotification>>,
+): ReadonlyArray<TenantNotification> {
+  const byId = new Map<string, TenantNotification>();
+  for (const page of pages) for (const n of page) if (!byId.has(n.dispatchId)) byId.set(n.dispatchId, n);
+  return [...byId.values()].sort(byDecidedAtDesc);
+}
+
+/**
+ * The newest `limitPerTemplate` notices of each of `SETUP_NOTICE_TEMPLATE_IDS`, merged. One failed
+ * template fails the whole read, deliberately: a page showing the approvals and silently missing the
+ * rejections would be a wrong answer, where a refusal is one the page can say.
+ */
+export async function listSetupNotices(limitPerTemplate: number): Promise<ReadonlyArray<TenantNotification>> {
+  const pages = await Promise.all(
+    SETUP_NOTICE_TEMPLATE_IDS.map((templateId) =>
+      listNotifications({ channel: "in_app", templateId, limit: limitPerTemplate }),
+    ),
+  );
+  return mergeNoticePages(pages.map((p) => p.data));
+}
+
 export const RECENT_NOTICE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
@@ -520,8 +687,8 @@ export const NOTICE_READ_STATE_TITLE: Readonly<
  */
 export const UNEXAMINED_TITLE_BY_KIND: Readonly<Record<ReadStateKind, string>> = Object.freeze({
   available:
-    "Read state unknown for this notice: it is past the window the server examined, or it arrived " +
-    "after this page read that answer. Refresh to re-ask.",
+    "Read state unknown for this notice: it arrived after this page read that answer, or the " +
+    "read-state answer has not reached it yet. Refresh to re-ask.",
   unmounted:
     "Read state unknown for this notice: this deployment does not serve notification read state " +
     "(`--read-state-routes`), so nothing has an answer and refreshing cannot produce one.",

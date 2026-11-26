@@ -1,5 +1,5 @@
 import { evaluateRefusal, type HardRefusal } from "@crossengin/ai-architect";
-import type { Manifest } from "@crossengin/kernel/manifest";
+import { fieldClassificationChanges, type Manifest } from "@crossengin/kernel/manifest";
 
 const AUDITABLE_TRAIT = "auditable";
 const ENCRYPTION_REQUIRED_CLASSES: ReadonlySet<string> = new Set(["phi", "regulated"]);
@@ -25,6 +25,13 @@ function isPackBound(manifest: Manifest): boolean {
   return (meta.compliancePacks?.length ?? 0) > 0 || (meta.extends?.length ?? 0) > 0;
 }
 
+/**
+ * Whether the entity carries the audit trail. `auditable` is a **built-in** trait, and the kernel's
+ * resolution consults its built-in fields before any custom trait of the same name, so naming the
+ * trait is the whole of what makes an entity auditable — no custom trait can confer or withdraw it.
+ * Checked again here rather than assumed (ADR-0484 re-measured it): this is the trait-resolved
+ * answer already, not a raw read.
+ */
 function isAuditable(entity: ManifestEntity): boolean {
   return entity.traits?.includes(AUDITABLE_TRAIT) ?? false;
 }
@@ -45,22 +52,21 @@ function detectAuditDisable(current: Manifest, proposed: Manifest): boolean {
   return false;
 }
 
+/**
+ * A field that was stored as ciphertext (`phi`, `regulated`) and would no longer be.
+ *
+ * Read through `fieldClassificationChanges`, which resolves **each side against its own traits** —
+ * this used to compare `before.fields` with `now.fields`, so a `phi` field contributed by a trait
+ * and moved to `internal` was not refused, while the identical change on an own field was (register
+ * P2.14, ADR-0484). The kernel already says whether the change moves the column's storage between
+ * ciphertext and plaintext; the weakening is the direction whose target is not an encrypt-at-rest
+ * class. A field present on only one side is not a classification change — dropping a column is the
+ * diff's business, and a trait removed takes its fields with it.
+ */
 function detectEncryptionWeakening(current: Manifest, proposed: Manifest): boolean {
-  const after = entitiesByName(proposed);
-  for (const before of current.entities ?? []) {
-    const now = after.get(before.name);
-    if (now === undefined) continue;
-    const nowFields = new Map(now.fields.map((f) => [f.name, f]));
-    for (const bf of before.fields) {
-      const cls = bf.classification;
-      if (cls === undefined || !ENCRYPTION_REQUIRED_CLASSES.has(cls)) continue;
-      const af = nowFields.get(bf.name);
-      if (af === undefined) continue;
-      const afterCls = af.classification;
-      if (afterCls === undefined || !ENCRYPTION_REQUIRED_CLASSES.has(afterCls)) return true;
-    }
-  }
-  return false;
+  return fieldClassificationChanges(current, proposed).some(
+    (c) => c.encryptionChanged && (c.to === null || !ENCRYPTION_REQUIRED_CLASSES.has(c.to)),
+  );
 }
 
 export interface ManifestEditRefusalResult {

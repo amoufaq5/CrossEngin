@@ -25,8 +25,26 @@ export interface Review {
   readonly reviewedAt: string | null;
   readonly reviewNotes: string | null;
   readonly providerLabel: string | null;
+  /**
+   * The principal that requested the design. `null` for a proposal stored before the server
+   * recorded it; **absent** from a server older than the field. The two are rendered differently by
+   * `designedByLabel`, because "nobody recorded it" and "this server does not say" are different
+   * facts and only the first is about the proposal (ADR-0331's distinction, at the wire).
+   */
+  readonly designedBy?: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
+}
+
+/**
+ * The "designed by" clause shown beside "reviewed by" (ADR-0435 Q3, closed by ADR-0478), or `null`
+ * when the server does not send the field and so there is nothing to say. A reviewer deciding on a
+ * proposal is the second pair of eyes; showing the first pair is what lets them see that they are
+ * not also the designer before the server's `designer_cannot_approve` tells them after the click.
+ */
+export function designedByLabel(review: Pick<Review, "designedBy">): string | null {
+  if (!("designedBy" in review) || review.designedBy === undefined) return null;
+  return review.designedBy === null || review.designedBy.trim() === "" ? "not recorded" : review.designedBy;
 }
 
 /** The detail endpoint is the only one that ships the manifest document. */

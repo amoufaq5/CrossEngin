@@ -304,10 +304,12 @@ describe("assessColumnKeyConsistency — envelope mode", () => {
   });
 
   it("names the previous variable when it is the previous secret that is wrong", () => {
+    // Two samples, so "every one failed" is evidence about the secret rather than about one row —
+    // the single-sample case is its own test below (ADR-0481).
     const c = assess({
       mode: "envelope",
       ring: ring(S2, 2, S3),
-      survey: read([group([sample(T(1), { wrapSecret: S1 })])]),
+      survey: read([group([sample(T(1), { wrapSecret: S1 }), sample(T(2), { wrapSecret: S1 })])]),
     });
     expect(c.findings[0]?.condition).toBe("kek_secret_mismatch");
     expect(c.findings[0]?.detail).toContain("(COLUMN_ENCRYPTION_SECRET_PREVIOUS)");
@@ -354,6 +356,77 @@ describe("assessColumnKeyConsistency — envelope mode", () => {
     expect(c.verdict).toBe("consistent");
     expect(c.findings.map((f) => f.condition)).toEqual(["rows_unopenable"]);
     expect(formatColumnKeyConsistency(c).find((l) => l.level === "warn")?.text).toContain("1 of 3");
+  });
+});
+
+describe("a single sample (ADR-0481)", () => {
+  it("does not call one unopenable row a wrong secret, and names both remedies", () => {
+    const c = assess({
+      mode: "envelope",
+      ring: ring(S2),
+      survey: read([group([sample(T(1), { wrapSecret: S1 })])]),
+    });
+    expect(c.verdict).toBe("refuse");
+    const detail = c.findings[0]?.detail ?? "";
+    expect(c.findings[0]?.condition).toBe("kek_secret_mismatch");
+    expect(detail).toContain("cannot tell a corrupt row from a wrong secret");
+    expect(detail).toContain("Remedy, if the secret is wrong:");
+    expect(detail).toContain("if the row is corrupt:");
+    // The conclusive sentence is the one a single sample must not carry.
+    expect(detail).not.toContain("so it is not the secret");
+  });
+
+  it("keeps the conclusive sentence when two samples both fail (the control)", () => {
+    const rows = [T(1), T(2)].map((t) => sample(t, { wrapSecret: S1 }));
+    const c = assess({ mode: "envelope", ring: ring(S2), survey: read([group(rows)]) });
+    expect(c.findings[0]?.detail).toContain("so it is not the secret");
+    expect(c.findings[0]?.detail).not.toContain("cannot tell");
+  });
+
+  it("is as careful in derived mode, where one seeded row that does not open proves nothing", () => {
+    const c = assess({
+      mode: "derived",
+      ring: ring(S2),
+      survey: read([group([sample(T(1), { wrapSecret: S1, provenance: "seeded_from_derived" })])]),
+    });
+    expect(c.findings[0]?.condition).toBe("derived_secret_not_seed");
+    expect(c.findings[0]?.detail).toContain("cannot tell a corrupt row from a wrong secret");
+  });
+});
+
+describe("the key-provenance line (ADR-0481)", () => {
+  const twoRandomOneSeeded = () =>
+    read([
+      group([sample(T(1), { wrapSecret: S1 }), sample(T(2), { wrapSecret: S1 })]),
+      group([sample(T(3), { wrapSecret: S1, provenance: "seeded_from_derived" })]),
+    ]);
+
+  it("counts each provenance and says what destroying it buys, with no tenant id", () => {
+    const c = assess({ mode: "envelope", ring: ring(S1), survey: twoRandomOneSeeded() });
+    const line = formatColumnKeyConsistency(c).find((l) => l.text.includes("key provenance"));
+    expect(line).toEqual({
+      level: "info",
+      text:
+        "column keys: key provenance — 2 tenant(s) random (shreddable), 1 tenant(s) seeded_from_derived " +
+        "(derivable; run operate-server rekey per tenant)",
+    });
+    for (const n of [1, 2, 3]) expect(line?.text).not.toContain(T(n));
+  });
+
+  it("says the counts are lower bounds when the survey did not examine every tenant", () => {
+    const c = assess({ mode: "envelope", ring: ring(S1), survey: read([group([sample(T(1), { wrapSecret: S1 })])], 4) });
+    const line = formatColumnKeyConsistency(c).find((l) => l.text.includes("key provenance"));
+    expect(line?.text).toContain("4 tenant(s) not examined, so these are lower bounds");
+  });
+
+  it("is absent in derived mode, for a tenant scope, and over an unreadable survey", () => {
+    const has = (c: ReturnType<typeof assess>) =>
+      formatColumnKeyConsistency(c).some((l) => l.text.includes("key provenance"));
+    expect(has(assess({ mode: "derived", ring: ring(S1), survey: read([]) }))).toBe(false);
+    expect(
+      has(assess({ mode: "envelope", ring: ring(S1), survey: twoRandomOneSeeded(), scope: { kind: "tenant", tenantId: T(1) } })),
+    ).toBe(false);
+    expect(has(assess({ mode: "envelope", ring: ring(S1), survey: { readable: false, reason: "x" } }))).toBe(false);
   });
 });
 
@@ -1016,8 +1089,12 @@ describe("a tenant scope (ADR-0460)", () => {
     expect(closing).toContain("REFUSED");
     expect(closing).not.toContain("booting");
     expect(closing).toContain("nothing is done for it");
-    // The remedy is the boot's own sentence, not a second spelling of it.
-    expect(lines[0]?.text).toContain("Remedy: if a new secret was meant as a rotation");
+    // The remedy is the boot's own sentence, not a second spelling of it — offered as one of two,
+    // because a per-tenant survey reads one row and one row cannot separate a wrong secret from a
+    // corrupt row (ADR-0481; this asserted the conclusive form, which one sample cannot support).
+    expect(lines[0]?.text).toContain("Remedy, if the secret is wrong: if a new secret was meant as a rotation");
+    expect(lines[0]?.text).toContain("cannot tell a corrupt row from a wrong secret");
+    expect(lines[0]?.text).toContain("if the row is corrupt: restore the tenant's meta.tenant_data_keys row");
   });
 
   it("refuses for the named tenant only — another tenant's unopenable row is not its business", async () => {

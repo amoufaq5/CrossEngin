@@ -28,6 +28,7 @@
 import { readFile } from "node:fs/promises";
 
 import {
+  SECRET_PLACEHOLDER_PREFIX,
   ed25519PublicKeyFingerprint,
   ed25519PublicKeyFromSeed,
   isEd25519PrivateSeedBase64,
@@ -91,6 +92,7 @@ export const KEY_SOURCE_EXPOSES_A_LAYER: Readonly<Record<AuditChainKeySource, bo
 
 /** Why a deployment that asked for a chain cannot have one. */
 export const AUDIT_CHAIN_REFUSALS = [
+  "unreplaced_placeholder",
   "signing_key_malformed",
   "private_key_absent",
   "public_half_mismatched",
@@ -165,16 +167,27 @@ export function resolveAuditChain(input: ResolveAuditChainInput): AuditChainReso
   const file = input.file;
   if (envSeed === "" && file === null) return { kind: "not_configured" };
 
+  // The literal before its strength (ADR-0377): a placeholder's weakness is that it is
+  // *published*, which no shape test can see. The width check below also refuses every prefixed
+  // value — `_` is outside the strict standard alphabet the seed parser accepts, measured — so what
+  // this buys is the *sentence* (the line was never replaced, which is the remedy, rather than "the
+  // wrong width") and independence from the alphabet: the day the seed parser admits base64url, a
+  // 44-character prefixed value would pass the width and this would still refuse it (ADR-0481).
+  // The value is not echoed: the prefix is all the sentence needs.
+  if (envSeed.startsWith(SECRET_PLACEHOLDER_PREFIX)) {
+    return {
+      kind: "refused",
+      refusal: "unreplaced_placeholder",
+      detail:
+        `${AUDIT_CHAIN_SIGNING_KEY_VAR} still holds the ${SECRET_PLACEHOLDER_PREFIX}… placeholder from` +
+        " deploy/.env.example, which is published; generate a seed (openssl rand -base64 32) and set it",
+    };
+  }
+
   if (envSeed !== "" && !isEd25519PrivateSeedBase64(envSeed)) {
     // The width is named and the value is not. A seed of the wrong width is the overwhelmingly
-    // likely mistake — a pasted PEM, a base64url variant, a truncated copy, an unreplaced
-    // placeholder — and saying "32 bytes of base64" is the whole remedy
-    // (`credential-auth-env.ts`' rule, same sentence).
-    //
-    // This is also why no `SECRET_PLACEHOLDER_PREFIX` check is owed here, where ADR-0377 needed one
-    // for the three secrets behind an entropy floor: a floor cannot see that a placeholder is
-    // *published*, while a seed's shape is exact, so `REPLACE_WITH_32_BYTES_OF_BASE64` is refused by
-    // width. Measured against every placeholder `deploy/.env.example` ships.
+    // likely mistake — a pasted PEM, a base64url variant, a truncated copy — and saying "32 bytes
+    // of base64" is the whole remedy (`credential-auth-env.ts`' rule, same sentence).
     return {
       kind: "refused",
       refusal: "signing_key_malformed",

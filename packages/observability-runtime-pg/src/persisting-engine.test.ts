@@ -1,8 +1,19 @@
 import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
-import { FixedClock } from "@crossengin/observability-runtime";
+import {
+  FixedClock,
+  type DeclarationErrorSink,
+  type DeclarationFailure,
+} from "@crossengin/observability-runtime";
 import { describe, expect, it, vi } from "vitest";
 import { buildPersistentSloEnforcementEngine } from "./persisting-engine.js";
 import { SLO_ENFORCEMENT_ACTION_COLUMNS } from "./enforcement-action-store.js";
+
+/** Required on the builder (ADR-0483); recorded so no engine in this file reports into silence. */
+const reportedDeclarationErrors: { error: unknown; failure: DeclarationFailure }[] = [];
+const recordDeclarationError: DeclarationErrorSink = (error, failure) => {
+  reportedDeclarationErrors.push({ error, failure });
+};
+void reportedDeclarationErrors;
 
 /** Derived from the stored column order so a new column cannot shift a literal index out from under. */
 function bound(
@@ -66,6 +77,7 @@ const policy = {
 function build(capture: Array<{ sql: string; params: readonly unknown[] | undefined }>) {
   const clock = new FixedClock(BASE);
   const persistent = buildPersistentSloEnforcementEngine(mockConnection(capture), {
+    onDeclarationError: recordDeclarationError,
     alertPolicy: policy,
     systemActorUserId: SYSTEM_ACTOR,
     registrations: [
@@ -337,6 +349,7 @@ describe("buildPersistentSloEnforcementEngine", () => {
     const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
     const clock = new FixedClock(BASE);
     const persistent = buildPersistentSloEnforcementEngine(mockConnection(capture), {
+      onDeclarationError: recordDeclarationError,
       alertPolicy: policy,
       systemActorUserId: SYSTEM_ACTOR,
       registrations: [{ slo, category: "availability", tenantId: TENANT }],
@@ -580,6 +593,7 @@ describe("buildPersistentSloEnforcementEngine — pages delivered before the row
     const capture: Captured = [];
     const clock = new FixedClock(BASE);
     const persistent = buildPersistentSloEnforcementEngine(mockConnection(capture), {
+      onDeclarationError: recordDeclarationError,
       alertPolicy: policy,
       systemActorUserId: SYSTEM_ACTOR,
       registrations: [
@@ -596,5 +610,19 @@ describe("buildPersistentSloEnforcementEngine — pages delivered before the row
     expect(
       capture.some((c) => c.sql.includes("feature_flag_kill_switches") && c.sql.includes("WHERE kill_switch_id = $1")),
     ).toBe(true);
+  });
+});
+
+describe("buildPersistentSloEnforcementEngine — construction (ADR-0483)", () => {
+  it("refuses at compile time to be built without a declaration-error sink", () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    // The persisting options extend the engine's, so the requirement reaches this builder too.
+    // @ts-expect-error onDeclarationError is required
+    const persistent = buildPersistentSloEnforcementEngine(mockConnection(capture), {
+      alertPolicy: policy,
+      systemActorUserId: SYSTEM_ACTOR,
+      registrations: [{ slo, category: "availability", tenantId: TENANT }],
+    });
+    expect(persistent.engine.declaredSeverities.length).toBeGreaterThan(0);
   });
 });

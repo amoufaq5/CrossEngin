@@ -1,4 +1,5 @@
 import {
+  PIPELINE_STAGES,
   PipelineExecutionSchema,
   type PipelineExecution,
   type StageResult,
@@ -30,6 +31,10 @@ function stage(opts: Partial<StageResult> & { stage: StageResult["stage"]; outco
   };
 }
 
+function fullStageLog(): StageResult[] {
+  return PIPELINE_STAGES.map((name) => stage({ stage: name, outcome: "pass" }));
+}
+
 function fixtureExecution(overrides: Partial<PipelineExecution> = {}): PipelineExecution {
   return {
     requestId: "req_test00000001",
@@ -40,16 +45,11 @@ function fixtureExecution(overrides: Partial<PipelineExecution> = {}): PipelineE
     finalStage: "emit_audit",
     finalOutcome: "pass",
     finalResponseStatus: 200,
-    stages: [
-      stage({ stage: "receive", outcome: "pass" }),
-      stage({
-        stage: "emit_audit",
-        outcome: "pass",
-        startedAt: "2026-05-16T12:00:00.020Z",
-        completedAt: "2026-05-16T12:00:00.025Z",
-        durationMs: 5,
-      }),
-    ],
+    // Every stage, in order — what the gateway actually records for a request it serves. This was
+    // `[receive, emit_audit]`, which no gateway can produce, and `stage_missing` (ADR-0481) is what
+    // makes the difference observable; a fixture the contract would reject is not a "well-formed
+    // execution" for a test to call clean.
+    stages: fullStageLog(),
     authOutcome: "authenticated",
     routeMatchOutcome: "matched",
     idempotencyOutcome: "no_key_required",
@@ -389,6 +389,83 @@ describe("an unreadable or unknown stage is reported, never skipped", () => {
   });
 });
 
+describe("stage_missing (ADR-0481)", () => {
+  it("flags a stage deleted out of the middle, which order and repetition both miss", () => {
+    const stages = fullStageLog().filter((s) => s.stage !== "authenticate");
+    const issues = verifyPipelineExecutionShape(fixtureExecution({ stages }));
+    expect(issues.map((i) => i.code)).toEqual(["stage_missing"]);
+    expect(issues[0]?.detail).toContain("authenticate");
+  });
+
+  it("does not flag a request a stage denied, whose later stages never ran (the control)", () => {
+    const upTo = PIPELINE_STAGES.indexOf("match_route");
+    const stages = fullStageLog().slice(0, upTo + 1);
+    stages[upTo] = stage({ stage: "match_route", outcome: "deny", responseStatus: 404 });
+    const issues = verifyPipelineExecutionShape(
+      fixtureExecution({
+        stages,
+        finalStage: "match_route",
+        finalOutcome: "deny",
+        finalResponseStatus: 404,
+      }),
+    );
+    expect(issues).toEqual([]);
+  });
+
+  it("flags a log that does not begin at receive", () => {
+    const stages = fullStageLog().slice(1);
+    const issues = verifyPipelineExecutionShape(fixtureExecution({ stages }));
+    expect(issues.map((i) => i.code)).toContain("stage_missing");
+    expect(issues.find((i) => i.code === "stage_missing")?.detail).toContain("receive");
+  });
+});
+
+describe("execution_unparseable (ADR-0481)", () => {
+  function verifyWithRow(patch: Record<string, unknown>) {
+    const state = emptyState();
+    state.executions.set("req_test00000001", fixtureExecution());
+    const conn = buildMock(state);
+    const original = conn.query as (
+      sql: string,
+      params?: readonly unknown[],
+    ) => Promise<PgQueryResult>;
+    conn.query = (async (sql: string, params?: readonly unknown[]) => {
+      const result = await original(sql, params);
+      if (sql.includes("FROM meta.gateway_pipeline_executions") && sql.includes("WHERE request_id")) {
+        return { rows: result.rows.map((r) => ({ ...r, ...patch })), rowCount: result.rowCount };
+      }
+      return result;
+    }) as PgConnection["query"];
+    return new GatewayReplayer({ conn }).verifyExecution("req_test00000001");
+  }
+
+  it("names the field path and the issue code, and never the stored value", async () => {
+    const report = await verifyWithRow({ principal_id: "not-a-uuid-SECRET" });
+    const finding = report.issues.find((i) => i.code === "execution_unparseable");
+    expect(finding?.detail).toContain("principalId: invalid_string");
+    expect(finding?.detail).not.toContain("SECRET");
+    expect(report.issues.map((i) => i.code)).toEqual(["execution_unparseable"]);
+  });
+
+  it("catches a field the hand-written walk never checked: the duration identity", async () => {
+    const report = await verifyWithRow({ total_duration_ms: 24_000 });
+    expect(report.issues.map((i) => i.code)).toContain("execution_unparseable");
+    expect(report.issues.find((i) => i.code === "execution_unparseable")?.detail).toContain(
+      "totalDurationMs: custom",
+    );
+  });
+
+  it("is silent on the row the writer would write (the control)", async () => {
+    const report = await verifyWithRow({});
+    expect(report.issues).toEqual([]);
+  });
+
+  it("is not added beside stages_unreadable, whose synthetic [] it would misreport", async () => {
+    const report = await verifyWithRow({ stages: "{not json" });
+    expect(report.issues.map((i) => i.code)).toEqual(["stages_unreadable"]);
+  });
+});
+
 describe("GATEWAY_DRIFT_CODES", () => {
   it("names every code the module can report", () => {
     expect([...GATEWAY_DRIFT_CODES]).toEqual([
@@ -404,6 +481,8 @@ describe("GATEWAY_DRIFT_CODES", () => {
       "stages_unreadable",
       "unknown_stage",
       "terminating_not_last",
+      "stage_missing",
+      "execution_unparseable",
     ]);
   });
 
@@ -476,7 +555,7 @@ describe("GatewayReplayer.getExecution", () => {
     const replayer = new GatewayReplayer({ conn: buildMock(state) });
     const ex = await replayer.getExecution("req_test00000001");
     expect(ex?.requestId).toBe("req_test00000001");
-    expect(ex?.stages).toHaveLength(2);
+    expect(ex?.stages).toHaveLength(PIPELINE_STAGES.length);
     expect(ex?.tenantId).toBe(TENANT);
   });
 

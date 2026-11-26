@@ -18,6 +18,7 @@ function record() {
     period,
     id: "33333333-3333-3333-3333-333333333333",
     recordedAt: "2026-07-01T00:00:00.000Z",
+    writer: null,
   });
 }
 
@@ -49,13 +50,29 @@ describe("PostgresUsageRecordStore.record", () => {
 describe("PostgresUsageRecordStore.record on an already-reported row", () => {
   const blocked = (sql: string) => (sql.includes("INSERT INTO") ? 0 : 1);
 
-  it("accepts a re-close carrying the same quantity", async () => {
-    const { conn } = fakePg([[{ quantity: "700.0000" }]], { writeRowCount: blocked });
+  it("accepts a re-close the database says carries the same quantity", async () => {
+    const { conn } = fakePg([[{ same: true }]], { writeRowCount: blocked });
     await expect(new PostgresUsageRecordStore(conn).record(record())).resolves.toBeUndefined();
   });
 
   it("refuses a re-close that would change a quantity Stripe was already told", async () => {
-    const { conn } = fakePg([[{ quantity: "650.0000" }]], { writeRowCount: blocked });
+    const { conn } = fakePg([[{ same: false }]], { writeRowCount: blocked });
+    await expect(new PostgresUsageRecordStore(conn).record(record())).rejects.toBeInstanceOf(UsageAlreadyReported);
+  });
+
+  it("asks the database to compare at the column's own scale (ADR-0483)", async () => {
+    // The comparison was `Number.parseFloat(stored) !== valid.quantity`: a JS double against a
+    // NUMERIC(20, 4) the write had rounded, so a re-close of 0.1 + 0.2 (stored 0.3000) read as a
+    // changed quantity. Casting the candidate to the column's type applies the same rounding.
+    const { conn, calls } = fakePg([[{ same: true }]], { writeRowCount: blocked });
+    await new PostgresUsageRecordStore(conn).record(record());
+    const compare = calls.find((c) => c.sql.includes("AS same"));
+    expect(compare?.sql).toContain("quantity = $2::NUMERIC(20, 4)");
+    expect(compare?.params).toEqual([record().idempotencyKey, 700]);
+  });
+
+  it("refuses when the row is gone between the conflict and the compare", async () => {
+    const { conn } = fakePg([[]], { writeRowCount: blocked });
     await expect(new PostgresUsageRecordStore(conn).record(record())).rejects.toBeInstanceOf(UsageAlreadyReported);
   });
 });
@@ -82,9 +99,10 @@ describe("PostgresUsageRecordStore.recordWindow", () => {
       period,
       id: "55555555-5555-5555-5555-555555555555",
       recordedAt: "2026-07-01T00:00:00.000Z",
+      writer: null,
     });
-    const inserted = await new PostgresUsageRecordStore(counted).recordWindow([record(), second]);
-    expect(inserted).toBe(2);
+    const written = await new PostgresUsageRecordStore(counted).recordWindow([record(), second]);
+    expect(written).toEqual({ inserted: 2, refused: [] });
     expect(transactions).toBe(1);
     const contexts = calls.filter((c) => c.sql.includes("set_config")).map((c) => c.params[0]);
     expect(contexts).toEqual([TENANT, OTHER]);
@@ -98,8 +116,95 @@ describe("PostgresUsageRecordStore.recordWindow", () => {
 
   it("opens no transaction for an empty window", async () => {
     const { conn, calls } = fakePg();
-    expect(await new PostgresUsageRecordStore(conn).recordWindow([])).toBe(0);
+    expect(await new PostgresUsageRecordStore(conn).recordWindow([])).toEqual({ inserted: 0, refused: [] });
     expect(calls).toHaveLength(0);
+  });
+
+  /** A fake that raises the error a real database raises for one tenant's INSERT. */
+  function refusingFor(tenantId: string, error: Error & { code?: string; constraint?: string }) {
+    const base = fakePg();
+    let insideFor: string | null = null;
+    const query = (async (sql: string, params: readonly unknown[] = []) => {
+      if (sql.includes("set_config")) insideFor = String(params[0]);
+      if (sql.includes("INSERT INTO") && insideFor === tenantId) {
+        base.calls.push({ sql, params });
+        throw error;
+      }
+      return base.conn.query(sql, params);
+    }) as typeof base.conn.query;
+    const conn = { ...base.conn, query, transaction: (async (fn: (tx: typeof base.conn) => Promise<unknown>) => fn(conn)) as typeof base.conn.transaction };
+    return { conn, calls: base.calls };
+  }
+
+  function coded(code: string, constraint?: string): Error & { code: string; constraint?: string } {
+    const e = new Error(`insert or update violates something (tenant ${OTHER}, quantity 3)`) as Error & { code: string; constraint?: string };
+    e.code = code;
+    if (constraint !== undefined) e.constraint = constraint;
+    return e;
+  }
+
+  function window() {
+    const third = usageRecordFrom({
+      tenantId: "66666666-6666-6666-6666-666666666666",
+      subscriptionId: SUB,
+      meter: "ai_call",
+      quantity: 9,
+      source: "ai_provider_calls",
+      period,
+      id: "77777777-7777-7777-7777-777777777777",
+      recordedAt: "2026-07-01T00:00:00.000Z",
+      writer: null,
+    });
+    const refused = usageRecordFrom({
+      tenantId: OTHER,
+      subscriptionId: SUB,
+      meter: "ai_call",
+      quantity: 3,
+      source: "ai_provider_calls",
+      period,
+      id: "55555555-5555-5555-5555-555555555555",
+      recordedAt: "2026-07-01T00:00:00.000Z",
+      writer: null,
+    });
+    return [record(), refused, third];
+  }
+
+  it("keeps every other tenant's record when one is refused by a constraint (ADR-0483)", async () => {
+    // One unprovisioned tenant's foreign-key refusal used to roll back every tenant's record, and
+    // since that refusal is permanent the window never wrote again.
+    const { conn, calls } = refusingFor(OTHER, coded("23503", "billing_usage_records_tenant_id_fkey"));
+    const written = await new PostgresUsageRecordStore(conn).recordWindow(window());
+    expect(written.inserted).toBe(2);
+    expect(written.refused).toHaveLength(1);
+    expect(written.refused[0]?.record.tenantId).toBe(OTHER);
+    expect(written.refused[0]?.sqlstate).toBe("23503");
+    expect(written.refused[0]?.constraint).toBe("billing_usage_records_tenant_id_fkey");
+    expect(written.refused[0]?.detail).toBe("SQLSTATE 23503 on billing_usage_records_tenant_id_fkey");
+    // The detail carries no value from the row: no tenant, no quantity.
+    expect(written.refused[0]?.detail).not.toContain(OTHER);
+    const statements = calls.map((c) => c.sql.trim().split(/\s+/).slice(0, 3).join(" "));
+    expect(statements.filter((s) => s.startsWith("SAVEPOINT"))).toHaveLength(3);
+    // RELEASE after ROLLBACK TO, so a window of many refusals does not nest a subtransaction each.
+    const rollback = statements.indexOf("ROLLBACK TO SAVEPOINT");
+    expect(rollback).toBeGreaterThan(-1);
+    expect(statements[rollback + 1]).toBe("RELEASE SAVEPOINT usage_window_record");
+    expect(statements.filter((s) => s.startsWith("RELEASE SAVEPOINT"))).toHaveLength(3);
+  });
+
+  it("treats a data exception (class 22) as a refusal of the record", async () => {
+    const { conn } = refusingFor(OTHER, coded("22003"));
+    const written = await new PostgresUsageRecordStore(conn).recordWindow(window());
+    expect(written.inserted).toBe(2);
+    expect(written.refused.map((r) => r.detail)).toEqual(["SQLSTATE 22003"]);
+  });
+
+  it("fails the whole window on an error that is not about the record", async () => {
+    // A privilege refusal or a lost connection says nothing about the record, so dropping the record
+    // would lose usage; the window is retried unchanged instead.
+    for (const error of [coded("42501"), coded("40001"), new Error("connection terminated")]) {
+      const { conn } = refusingFor(OTHER, error);
+      await expect(new PostgresUsageRecordStore(conn).recordWindow(window())).rejects.toBe(error);
+    }
   });
 });
 

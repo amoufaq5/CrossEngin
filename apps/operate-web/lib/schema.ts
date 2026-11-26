@@ -378,7 +378,9 @@ export interface InboxEntitySpec {
 
 /** Entities with at least one lifecycle transition the viewer's role may fire. */
 export function inboxEntitySpecs(schema: UiSchema | null): readonly InboxEntitySpec[] {
-  const roles = viewerRoles(schema);
+  // No role filter here: `viewerActions` already keeps only the transitions the viewer's roles may
+  // fire. A `roles` binding this function computed and never read (ADR-0478, found by
+  // `noUnusedLocals`) read as a second filter that was not there.
   const byEntity = new Map<string, { entity: UiEntitySchema; transitions: UiTransitionSchema[] }>();
   for (const { entity, transition } of viewerActions(schema)) {
     if (entity.stateField === null) continue;

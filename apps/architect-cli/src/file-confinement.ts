@@ -1,5 +1,6 @@
 import { constants } from "node:fs";
 import { lstat, open, realpath, stat, type FileHandle } from "node:fs/promises";
+import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { containsTerminalUnsafe } from "./unified-diff.js";
@@ -38,6 +39,8 @@ export const FILE_REFUSAL_REASONS = [
   "not_found",
   "too_large",
   "secret_content",
+  "hard_link",
+  "implicit_home_root",
 ] as const;
 export type FileRefusalReason = (typeof FILE_REFUSAL_REASONS)[number];
 
@@ -59,11 +62,24 @@ export interface ConfinedPath {
   readonly exists: boolean;
 }
 
+export interface FileRootOptions {
+  /**
+   * The root was not asked for — it is the working directory by default. A home directory is then
+   * refused, because chat started from `$HOME` would otherwise hand every non-hidden file there to
+   * the model's vendor with nobody having named the directory (ADR-0484). An explicit root may be
+   * the home directory; the startup line names it.
+   */
+  readonly implicit?: boolean;
+  /** The home directory to compare against; `os.homedir()` unless a test supplies one. */
+  readonly homeDir?: string;
+}
+
 /**
  * The root, resolved once. Refuses the filesystem root, because confining to `/` is not
- * confinement, and refuses a root that is not a directory.
+ * confinement, refuses a root that is not a directory, and refuses an **implicit** root that is the
+ * home directory.
  */
-export async function resolveFileRoot(dir: string): Promise<string> {
+export async function resolveFileRoot(dir: string, opts: FileRootOptions = {}): Promise<string> {
   let real: string;
   try {
     real = await realpath(resolve(dir));
@@ -83,7 +99,24 @@ export async function resolveFileRoot(dir: string): Promise<string> {
       `file root ${real} is the filesystem root, which confines nothing; pass --file-root <dir>`,
     );
   }
+  if (opts.implicit === true && (await isHomeDirectory(real, opts.homeDir ?? homedir()))) {
+    throw new FileToolRefusal(
+      "implicit_home_root",
+      `the working directory ${real} is your home directory, so the file tools would reach every non-hidden file in it; ` +
+        "run chat from the project's directory, or pass --file-root <dir> (an explicit --file-root ~ is accepted)",
+    );
+  }
   return real;
+}
+
+/** Whether `real` is the home directory, symlinks resolved on both sides; an unresolvable home is not. */
+export async function isHomeDirectory(real: string, home: string): Promise<boolean> {
+  if (home.length === 0) return false;
+  try {
+    return (await realpath(resolve(home))) === real;
+  } catch {
+    return false;
+  }
 }
 
 function within(root: string, candidate: string): string | null {
@@ -234,14 +267,16 @@ export async function confinePath(
  *
  * `requires` is a test on each match rather than lookaheads inside the pattern, which is what keeps
  * the scan linear: lookaheads over `[A-Za-z0-9_-]*` re-scan the rest of the run from every `sk-`, so
- * 450 KB of repeated `sk-` took 39 s and the 1 MiB read cap about four minutes.
+ * 450 KB of repeated `sk-` took 39 s and the 1 MiB read cap about four minutes. Like the scanner's,
+ * `requires` tests the pattern's first capture group — the key's body — and not the whole match,
+ * whose `sk-` prefix satisfied the lower-case test by itself (ADR-0484).
  */
 export const CONTENT_SECRET_PATTERNS: Readonly<
   Record<string, { readonly pattern: RegExp; readonly requires?: readonly RegExp[] }>
 > = {
   anthropic_api_key: { pattern: /sk-ant-[A-Za-z0-9_-]{32,}/g },
   openai_api_key: {
-    pattern: /\bsk-(?!ant-)(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{32,}/g,
+    pattern: /\bsk-(?!ant-)(?:proj-|svcacct-|admin-)?([A-Za-z0-9_-]{32,})/g,
     requires: [/[0-9]/, /[A-Z]/, /[a-z]/],
   },
   aws_access_key_id: { pattern: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g },
@@ -249,13 +284,19 @@ export const CONTENT_SECRET_PATTERNS: Readonly<
   slack_token: { pattern: /\bxox[abposr]-[0-9]+-[0-9A-Za-z-]{10,}/g },
   github_token: { pattern: /\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{60,})/g },
   stripe_live_key: { pattern: /\b(?:sk|rk)_live_[0-9A-Za-z]{20,}/g },
+  stripe_webhook_secret: { pattern: /\bwhsec_[A-Za-z0-9]{24,}/g },
+  aws_secret_access_key: {
+    pattern: /(?<![A-Za-z0-9])aws_?secret_?access_?key["']?\s*[:=]\s*["']?([A-Za-z0-9/+]{40})(?![A-Za-z0-9/+=])/gi,
+    requires: [/[0-9]/, /[A-Z]/, /[a-z]/],
+  },
 };
 
 /** The kind of the first credential-shaped value in `text`, or null. Never the value itself. */
 export function secretContentKind(text: string): string | null {
   for (const [kind, { pattern, requires }] of Object.entries(CONTENT_SECRET_PATTERNS)) {
     for (const match of text.matchAll(pattern)) {
-      if (requires === undefined || requires.every((r) => r.test(match[0]))) return kind;
+      const subject = match[1] ?? match[0];
+      if (requires === undefined || requires.every((r) => r.test(subject))) return kind;
     }
   }
   return null;
@@ -285,6 +326,7 @@ export async function readConfinedText(path: ConfinedPath, maxBytes: number): Pr
     if (!s.isFile()) {
       throw new FileToolRefusal("not_a_regular_file", `${path.relative} is not a regular file`);
     }
+    refuseHardLink(path, s.nlink);
     if (s.size > maxBytes) {
       throw new FileToolRefusal(
         "too_large",
@@ -304,17 +346,35 @@ export async function readConfinedText(path: ConfinedPath, maxBytes: number): Pr
   }
 }
 
+/**
+ * A path names a file, and a file can have several names. Every rule above is about the name the
+ * model gave, so a hard link inside the root to a file outside it — `notes.md` sharing an inode with
+ * `~/.ssh/config.md` — passes all of them: `realpath` does not move, because there is no link to
+ * resolve (ADR-0484). The kernel does report how many names the file has, on the descriptor already
+ * open, so the check needs no second lookup a swap could race. More than one name is refused: from
+ * inside the root this cannot tell whether the other name is inside it too, so an in-root pair is
+ * refused as well, which is the conservative direction for an exfiltration and an overwrite primitive.
+ */
+function refuseHardLink(path: ConfinedPath, nlink: number): void {
+  if (nlink > 1) {
+    throw new FileToolRefusal(
+      "hard_link",
+      `${path.relative} has ${nlink.toString()} hard links, so another name — possibly outside the file root — reaches the same file; these tools never touch it`,
+    );
+  }
+}
+
 export async function writeConfinedText(path: ConfinedPath, text: string): Promise<void> {
-  const handle = await openNoFollow(
-    path.real,
-    constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC,
-    0o644,
-  );
+  // Not O_TRUNC: truncating at open would destroy a hard-linked file's contents before the link
+  // count could refuse it. The descriptor is checked first and truncated only once it passes.
+  const handle = await openNoFollow(path.real, constants.O_WRONLY | constants.O_CREAT, 0o644);
   try {
     const s = await handle.stat();
     if (!s.isFile()) {
       throw new FileToolRefusal("not_a_regular_file", `${path.relative} is not a regular file`);
     }
+    refuseHardLink(path, s.nlink);
+    await handle.truncate(0);
     await handle.writeFile(text, "utf8");
   } finally {
     await handle.close();

@@ -20,7 +20,7 @@ import {
 import {
   decidedAtOf,
   decisionOf,
-  listNotifications,
+  listSetupNotices,
   reviewDecisions,
   type ReviewDecision,
   type TenantNotification,
@@ -75,13 +75,15 @@ export default function SetupPage() {
   // Never allowed to throw into the wizard: a notification failure degrades to a
   // muted line under the heading and leaves every other section working.
   const refreshDecisions = useCallback(() => {
-    listNotifications({ channel: "in_app", limit: DECISION_LIMIT })
-      .then((page) => {
-        setDecisions(reviewDecisions(page.data));
-        setDigests(digestNotices(page.data));
+    // One page per template rather than the newest page filtered here: on a busy tenant a decision
+    // fell off a 50-notice page before it was rendered (ADR-0418 Q5, closed by ADR-0478).
+    listSetupNotices(DECISION_LIMIT)
+      .then((notices) => {
+        setDecisions(reviewDecisions(notices));
+        setDigests(digestNotices(notices));
         setDecisionsError(null);
       })
-      .catch((e: unknown) => setDecisionsError(e instanceof Error ? e.message : String(e)))
+      .catch((e: unknown) => setDecisionsError(requestFailureSentence(e)))
       .finally(() => setDecisionsBusy(false));
   }, []);
 

@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useState } from "react";
 
 import { roleLabel, useSchema, viewerLabel } from "@/lib/schema";
-import { LOGIN_PATH } from "@/lib/session";
+import { LOGIN_PATH, signOutDestination } from "@/lib/session";
 
 /**
  * SAP-Fiori-style shell bar: a translucent, blurred top bar spanning the whole
@@ -35,12 +35,17 @@ export function ShellBar() {
   async function signOut(): Promise<void> {
     if (signingOut) return;
     setSigningOut(true);
+    let destination = LOGIN_PATH;
     try {
-      await fetch("/api/auth/logout", { method: "POST", headers: { accept: "application/json" } });
+      const res = await fetch("/api/auth/logout", { method: "POST", headers: { accept: "application/json" } });
+      // `{ok, ended}`: the cookie is cleared either way, and `ended: false` means operate-server did
+      // not revoke the session, so the login page says the token outlives this sign-out
+      // (ADR-0448 Q8, closed by ADR-0478). It used to read nothing from the body.
+      if (res.ok) destination = signOutDestination(await res.json().catch(() => null));
     } catch {
       // fall through to the navigation
     }
-    window.location.href = LOGIN_PATH;
+    window.location.href = destination;
   }
 
   return (

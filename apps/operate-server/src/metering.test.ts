@@ -1,10 +1,15 @@
-import { describe, expect, it } from "vitest";
+import { inspect } from "node:util";
+
+import { describe, expect, it, vi } from "vitest";
 import { PipelineExecutionSchema, type PipelineExecution } from "@crossengin/api-gateway";
 import { CountingUuidGenerator } from "@crossengin/billing-runtime";
 import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 
+import type { RefusedUsageRecord } from "@crossengin/billing-runtime-pg";
+
 import {
   MeteringFlushScheduler,
+  UsageRecordsRefused,
   buildRequestMetering,
   takeUsageWindow,
   meteredEventFromExecution,
@@ -18,13 +23,22 @@ const SUB = "22222222-2222-2222-2222-222222222222";
 const config = parseMeteringConfig({ tenantSubscriptions: { [TENANT]: SUB } });
 const policy = policyFromConfig(config);
 
-function fakePg(failInserts: () => boolean = () => false): { conn: PgConnection; calls: string[] } {
+/**
+ * `failInserts` answers per INSERT: `true` raises a transport error (no SQLSTATE), an `Error` is
+ * raised as given — so a test can raise what a real database raises for a refused record.
+ */
+function fakePg(failInserts: (params: readonly unknown[]) => boolean | Error = () => false): {
+  conn: PgConnection;
+  calls: string[];
+} {
   const calls: string[] = [];
   const conn: PgConnection = {
-    query: (async (sql: string) => {
+    query: (async (sql: string, params: readonly unknown[] = []) => {
       calls.push(sql);
       if (sql.includes("INSERT INTO")) {
-        if (failInserts()) throw new Error("connection reset");
+        const fail = failInserts(params);
+        if (fail instanceof Error) throw fail;
+        if (fail) throw new Error("connection reset");
         return { rows: [], rowCount: 1 } as PgQueryResult;
       }
       return { rows: [], rowCount: 0 } as PgQueryResult;
@@ -138,6 +152,7 @@ describe("RequestMeteringObserver + takeUsageWindow", () => {
       source: "integration_calls",
       recordedAt: "2026-07-01T00:00:00.000Z",
       ids: new CountingUuidGenerator(),
+      writer: "replica-a",
     });
     expect(records.map((r) => r.quantity)).toEqual([5]);
     expect(engine.engine.usage(SUB)).toEqual([]);
@@ -155,7 +170,8 @@ describe("RequestMeteringObserver + takeUsageWindow", () => {
 function scheduler(
   built: ReturnType<typeof buildRequestMetering>,
   clock: () => Date,
-  sinks: { flushes?: number[]; errors?: unknown[] } = {},
+  sinks: { flushes?: number[]; errors?: unknown[]; refused?: RefusedUsageRecord[] } = {},
+  writer = "test-writer",
 ): MeteringFlushScheduler {
   return new MeteringFlushScheduler({
     observer: built.observer,
@@ -166,6 +182,8 @@ function scheduler(
     clock,
     onFlush: (n) => sinks.flushes?.push(n),
     onError: (err) => sinks.errors?.push(err),
+    onRefused: (r) => sinks.refused?.push(...r),
+    writer,
   });
 }
 
@@ -293,6 +311,108 @@ describe("MeteringFlushScheduler", () => {
     t = new Date("2026-06-15T12:01:00.000Z");
     const [a, b] = await Promise.all([s.flushOnce(), s.flushOnce()]);
     expect(a + b).toBe(1);
+  });
+
+  // ADR-0483: two replicas cut windows over overlapping instants, and a key built from the window
+  // start alone made the second replica's insert a silent ON CONFLICT DO NOTHING.
+  it("gives two writers' windows over one span two keys", async () => {
+    const keys: string[] = [];
+    for (const writer of ["replica-a", "replica-b"]) {
+      const { conn } = fakePg();
+      const built = buildRequestMetering(conn, config);
+      const original = built.engine.usageStore.recordWindow.bind(built.engine.usageStore);
+      built.engine.usageStore.recordWindow = async (records) => {
+        for (const r of records) keys.push(r.idempotencyKey);
+        return original(records);
+      };
+      let t = new Date("2026-06-15T12:00:00.000Z");
+      const s = scheduler(built, () => t, {}, writer);
+      built.observer.observe(execution({ requestId: `req_${writer}` }));
+      t = new Date("2026-06-15T12:01:00.000Z");
+      await s.flushOnce();
+    }
+    expect(keys).toHaveLength(2);
+    expect(new Set(keys).size).toBe(2);
+    expect(keys[0]).toContain(":writer=replica-a");
+  });
+
+  it("defaults the writer to one stable id per scheduler, distinct between instances", () => {
+    const { conn } = fakePg();
+    const a = buildRequestMetering(conn, config).flushScheduler;
+    const b = buildRequestMetering(conn, config).flushScheduler;
+    expect(a.writerId()).toBe(a.writerId());
+    expect(a.writerId()).not.toBe(b.writerId());
+  });
+
+  // ADR-0483: one record the database refuses (here an unprovisioned tenant's foreign key) used to
+  // roll back the whole window and, being permanent, keep it pending for ever.
+  it("drops a refused record from pending, reports it, and writes the rest", async () => {
+    const OTHER = "44444444-4444-4444-4444-444444444444";
+    const OTHER_SUB = "55555555-5555-5555-5555-555555555555";
+    const twoTenants = parseMeteringConfig({ tenantSubscriptions: { [TENANT]: SUB, [OTHER]: OTHER_SUB } });
+    const fk = Object.assign(new Error(`insert violates fk (tenant ${OTHER})`), {
+      code: "23503",
+      constraint: "billing_usage_records_tenant_id_fkey",
+    });
+    const { conn } = fakePg((params) => (params[1] === OTHER ? fk : false));
+    const built = buildRequestMetering(conn, twoTenants);
+    let t = new Date("2026-06-15T12:00:00.000Z");
+    const refused: RefusedUsageRecord[] = [];
+    const errors: unknown[] = [];
+    const s = scheduler(built, () => t, { refused, errors });
+    built.observer.observe(execution({ requestId: "req_ref00001" }));
+    built.observer.observe(execution({ requestId: "req_ref00002", tenantId: OTHER }));
+    t = new Date("2026-06-15T12:01:00.000Z");
+    expect(await s.flushOnce()).toBe(1);
+    expect(s.pendingRecords()).toBe(0);
+    expect(errors).toEqual([]);
+    expect(refused.map((r) => [r.record.tenantId, r.sqlstate])).toEqual([[OTHER, "23503"]]);
+  });
+
+  it("logs refusals as their own line when no onRefused is given — never as a flush error, naming no tenant", async () => {
+    const OTHER = "44444444-4444-4444-4444-444444444444";
+    const twoTenants = parseMeteringConfig({
+      tenantSubscriptions: { [TENANT]: SUB, [OTHER]: "55555555-5555-5555-5555-555555555555" },
+    });
+    const fk = Object.assign(new Error("fk"), { code: "23503", constraint: "billing_usage_records_tenant_id_fkey" });
+    const { conn } = fakePg((params) => (params[1] === OTHER ? fk : false));
+    const errors: unknown[] = [];
+    const logged: unknown[][] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      logged.push(args);
+    });
+    try {
+      const built = buildRequestMetering(conn, twoTenants, { onError: (e) => errors.push(e) });
+      built.observer.observe(execution({ requestId: "req_ref00003", tenantId: OTHER }));
+      await built.flushScheduler.flushOnce();
+      // The scheduler's own clock is real, so give the window a span before flushing again.
+      await new Promise((r) => setTimeout(r, 5));
+      await built.flushScheduler.flushOnce();
+    } finally {
+      spy.mockRestore();
+    }
+    // `onError` means "a window did not write"; this one did, minus a dropped record (ADR-0483).
+    expect(errors).toEqual([]);
+    expect(logged).toHaveLength(1);
+    const line = String(logged[0]?.[0]);
+    expect(line).toMatch(/^\[metering\] 1 usage record\(s\) refused by the database and dropped/);
+    expect(line).toContain("SQLSTATE 23503 on billing_usage_records_tenant_id_fkey");
+    expect(line).not.toContain(OTHER);
+  });
+
+  it("keeps the refused rows off an inspected UsageRecordsRefused, which carries tenant ids", () => {
+    const OTHER = "44444444-4444-4444-4444-444444444444";
+    const refused = [
+      {
+        record: { tenantId: OTHER, meter: "ai_call", quantity: 7 } as unknown as RefusedUsageRecord["record"],
+        sqlstate: "23503",
+        constraint: "c",
+        detail: "SQLSTATE 23503 on c",
+      },
+    ];
+    const err = new UsageRecordsRefused(refused);
+    expect(err.refused).toBe(refused);
+    expect(inspect(err, { depth: 10 })).not.toContain(OTHER);
   });
 
   it("always builds a scheduler, defaulting the interval, since nothing else ever flushed", () => {

@@ -9,6 +9,7 @@ import { Topbar } from "@/components/Topbar";
 import { requestFailureSentence } from "@/lib/request-failure";
 import {
   approveReview,
+  designedByLabel,
   getReview,
   listReviews,
   rejectReview,
@@ -453,12 +454,16 @@ function DetailPanel({
             <span className="text-ink-muted">
               by {review.reviewedBy ?? "—"}
               {review.reviewedAt ? ` · ${formatWhen(review.reviewedAt)}` : ""}
+              {designedByLabel(review) !== null ? ` · designed by ${designedByLabel(review) ?? ""}` : ""}
             </span>
           </div>
           {review.reviewNotes && <p className="mt-2 text-ink">{review.reviewNotes}</p>}
         </div>
       ) : (
         <div className="space-y-2">
+          {designedByLabel(review) !== null && (
+            <p className="text-sm text-ink-muted">Designed by {designedByLabel(review)}</p>
+          )}
           <label className="label" htmlFor={`notes-${review.id}`}>
             Review notes
           </label>

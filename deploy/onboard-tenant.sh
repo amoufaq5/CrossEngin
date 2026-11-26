@@ -4,6 +4,13 @@
 #
 #   ./onboard-tenant.sh <slug> "<Company name>" <email> "<Display name>" [role]
 #   NO_STARTER_CHART=1 ./onboard-tenant.sh ...     # a company bringing its own chart of accounts
+#   ./onboard-tenant.sh --existing <tenant-id> <email> "<Display name>" [role]
+#                                                  # one more person in a workspace that already exists
+#
+# --existing creates no tenant and no starter chart (the workspace has whatever chart its admin chose):
+# it checks the tenant exists and is active, then provisions the user with a membership in it, stops
+# before the password if the server warns that the role is not one the tenant's manifest declares, and
+# sets the password exactly as the first form does (ADR-0479).
 #
 # Run it on the VM from crossengin/deploy, so .env is beside it. It talks to the API on the loopback
 # port the compose file publishes (127.0.0.1:8787) with the bootstrap key in .env, which is the
@@ -23,29 +30,49 @@
 # sign-in, so tell the customer to change it at /account, and send it over a channel you trust.
 set -euo pipefail
 
-if [ "$#" -lt 4 ]; then
+usage() {
   echo "usage: $0 <slug> \"<Company name>\" <email> \"<Display name>\" [role]" >&2
+  echo "       $0 --existing <tenant-id> <email> \"<Display name>\" [role]" >&2
   echo "  slug: lowercase letters, digits and '-', 2-49 characters, starting with a letter" >&2
+  echo "  tenant-id: the uuid of a workspace that already exists (Platform -> Tenants)" >&2
   echo "  role: one of the pack's roles; default erp_admin (the customer's own administrator)" >&2
-  echo "  NO_STARTER_CHART=1 skips the starter chart of accounts" >&2
+  echo "  NO_STARTER_CHART=1 skips the starter chart of accounts (the first form only)" >&2
   exit 2
+}
+
+EXISTING=""
+if [ "${1:-}" = "--existing" ]; then
+  [ "$#" -ge 4 ] || usage
+  EXISTING=$2
+  EMAIL=$3
+  DISPLAY=$4
+  ROLE=${5:-erp_admin}
+  SLUG=""
+  if ! printf '%s' "$EXISTING" | grep -Eqi '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'; then
+    echo "--existing takes a tenant id (a uuid), not a slug" >&2
+    exit 2
+  fi
+else
+  [ "$#" -ge 4 ] || usage
+  SLUG=$1
+  NAME=$2
+  EMAIL=$3
+  DISPLAY=$4
+  ROLE=${5:-erp_admin}
 fi
-SLUG=$1
-NAME=$2
-EMAIL=$3
-DISPLAY=$4
-ROLE=${5:-erp_admin}
 TIER=${TIER:-small}       # small | enterprise | regulated | on-prem
 REGION=${REGION:-eu}      # eu | us | me | ap | sa
 API=${API:-http://127.0.0.1:8787}
 
-case "$SLUG" in
-  [a-z]*) ;;
-  *) echo "slug must start with a lowercase letter" >&2; exit 2 ;;
-esac
-if ! printf '%s' "$SLUG" | grep -Eq '^[a-z][a-z0-9-]{1,48}$'; then
-  echo "slug must be 2-49 characters of lowercase letters, digits and '-'" >&2
-  exit 2
+if [ -z "$EXISTING" ]; then
+  case "$SLUG" in
+    [a-z]*) ;;
+    *) echo "slug must start with a lowercase letter" >&2; exit 2 ;;
+  esac
+  if ! printf '%s' "$SLUG" | grep -Eq '^[a-z][a-z0-9-]{1,48}$'; then
+    echo "slug must be 2-49 characters of lowercase letters, digits and '-'" >&2
+    exit 2
+  fi
 fi
 
 if [ -z "${ADMIN:-}" ]; then
@@ -57,6 +84,7 @@ fi
 # Every JSON body is built by python3 (present on Ubuntu) rather than by string pasting, so a name
 # with a quote in it cannot break the request — or change what it asks for.
 tenant_id() { python3 -c 'import json,sys; print(json.load(sys.stdin)["tenant"]["id"])'; }
+tenant_field() { python3 -c 'import json,sys; print(json.load(sys.stdin)["tenant"][sys.argv[1]])' "$1"; }
 role_warnings() { python3 -c 'import json,sys; print("; ".join(w["detail"] for w in json.load(sys.stdin).get("roleWarnings", [])))'; }
 # The chart report in words, then a last line `complete` or `incomplete` for the script to branch on.
 # The wording follows the console's (apps/operate-web/lib/platform.ts, describeStarterChart), so the
@@ -156,6 +184,20 @@ post() {
   rm -f "$out"
 }
 
+get() {
+  local path=$1 out status
+  out=$(mktemp)
+  status=$(curl -sS -o "$out" -w '%{http_code}' "$API$path" -H @"$HDR")
+  if [ "${status:0:1}" != "2" ]; then
+    echo "GET $path answered $status:" >&2
+    cat "$out" >&2; echo >&2
+    rm -f "$out"
+    return 1
+  fi
+  cat "$out"
+  rm -f "$out"
+}
+
 # A failure after the tenant exists leaves it behind (there is no tenant delete on this stack), and a
 # re-run refuses the taken slug. Say what was created and how to finish by hand instead of leaving
 # an operator to work it out.
@@ -163,6 +205,15 @@ TENANT_ID=""
 USER_ID=""
 resume_hint() {
   [ -n "$TENANT_ID" ] || return 0
+  if [ -n "$EXISTING" ]; then
+    echo >&2
+    if [ -n "$USER_ID" ]; then
+      echo "The user was created in '$SLUG' ($TENANT_ID): $USER_ID ($EMAIL), with no password." >&2
+      echo "Finish in the console: Platform -> Tenants -> $SLUG -> Members (fix the role if warned)," >&2
+      echo "then Platform -> Users -> Set password." >&2
+    fi
+    return 0
+  fi
   echo >&2
   echo "The tenant '$SLUG' was created ($TENANT_ID) before the failure; this script cannot be re-run" >&2
   echo "for it. Finish in the console: Platform -> Tenants -> $SLUG -> Members (grant a membership)," >&2
@@ -170,11 +221,24 @@ resume_hint() {
   if [ -n "$USER_ID" ]; then echo "The user was also created: $USER_ID ($EMAIL)." >&2; fi
 }
 
-TENANT_BODY=$(python3 -c 'import json,sys; print(json.dumps({"slug":sys.argv[1],"name":sys.argv[2],"tier":sys.argv[3],"region":sys.argv[4]}))' \
-  "$SLUG" "$NAME" "$TIER" "$REGION")
-TENANT_JSON=$(post /v1/platform/tenants "$TENANT_BODY")
-TENANT_ID=$(printf '%s' "$TENANT_JSON" | tenant_id)
-echo "tenant   $SLUG  ($TENANT_ID)"
+if [ -n "$EXISTING" ]; then
+  # Read first, so a mistyped id or a suspended workspace is refused before a user is minted for it.
+  TENANT_JSON=$(get "/v1/platform/tenants/$EXISTING")
+  TENANT_ID=$(printf '%s' "$TENANT_JSON" | tenant_id)
+  SLUG=$(printf '%s' "$TENANT_JSON" | tenant_field slug)
+  STATUS=$(printf '%s' "$TENANT_JSON" | tenant_field status)
+  if [ "$STATUS" != "active" ]; then
+    echo "tenant $SLUG ($TENANT_ID) is $STATUS; a login there would authorize nothing, so nothing was created" >&2
+    exit 1
+  fi
+  echo "tenant   $SLUG  ($TENANT_ID, existing)"
+else
+  TENANT_BODY=$(python3 -c 'import json,sys; print(json.dumps({"slug":sys.argv[1],"name":sys.argv[2],"tier":sys.argv[3],"region":sys.argv[4]}))' \
+    "$SLUG" "$NAME" "$TIER" "$REGION")
+  TENANT_JSON=$(post /v1/platform/tenants "$TENANT_BODY")
+  TENANT_ID=$(printf '%s' "$TENANT_JSON" | tenant_id)
+  echo "tenant   $SLUG  ($TENANT_ID)"
+fi
 
 NEW_USER_ID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || python3 -c 'import uuid; print(uuid.uuid4())')
 USER_BODY=$(python3 -c 'import json,sys; print(json.dumps({"user":{"id":sys.argv[1],"email":sys.argv[2],"displayName":sys.argv[3]},"membership":{"tenantId":sys.argv[4],"primaryRole":sys.argv[5],"secondaryRoles":[],"status":"active"}}))' \
@@ -226,7 +290,9 @@ chart_hint() {
 HINT
 }
 echo
-if [ "${NO_STARTER_CHART:-}" = "1" ]; then
+if [ -n "$EXISTING" ]; then
+  echo "chart    not touched (--existing): the workspace keeps the chart of accounts it already has"
+elif [ "${NO_STARTER_CHART:-}" = "1" ]; then
   echo "chart    skipped (NO_STARTER_CHART=1): the workspace starts with no ledger accounts"
 elif CHART_JSON=$(post "/v1/platform/tenants/$TENANT_ID/starter-chart" '{}'); then
   CHART=$(printf '%s' "$CHART_JSON" | chart_summary)

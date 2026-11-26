@@ -551,6 +551,11 @@ export function formatChainTruncation(check: ChainTruncationCheck): readonly str
  * So the state is *named* rather than resolved: the command reports it, and exits 0, because a
  * genuinely new scope has nothing wrong with it and the repo's exit vocabulary has no third value
  * (2 is a usage error). What it no longer does is print the word an operator reads as "verified".
+ *
+ * Since ADR-0481 the command also reads the deployment's newest baseline verdict, so the state is
+ * named only where **no** prior verified verdict exists: a destroyed scope whose verdicts survive is
+ * refuted by them (`verifyChainVerdict`), and what is left unresolvable is a scope whose verdicts
+ * went too.
  */
 export function verificationExaminedNothing(
   signaturesChecked: number,

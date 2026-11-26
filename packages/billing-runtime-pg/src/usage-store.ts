@@ -57,6 +57,43 @@ export class UsageAlreadyReported extends Error {
   }
 }
 
+const WINDOW_SAVEPOINT = "usage_window_record";
+
+/**
+ * A record the database refused **on its own account** — never a transport or session failure.
+ * `detail` names the SQLSTATE and the constraint, and never a value from the row (ADR-0373's rule:
+ * the record carries tenant and quantity, and a refusal line is read by more people than the row).
+ */
+export interface RefusedUsageRecord {
+  readonly record: UsageRecord;
+  readonly sqlstate: string;
+  readonly constraint: string | null;
+  readonly detail: string;
+}
+
+export interface UsageWindowWrite {
+  /** Rows the window added; a record already stored under its key adds none. */
+  readonly inserted: number;
+  /** Records the database refused; re-sending cannot succeed until somebody changes the database. */
+  readonly refused: readonly RefusedUsageRecord[];
+}
+
+/** SQLSTATE classes that are a statement about the record rather than the session. */
+const RECORD_REFUSAL_CLASSES: ReadonlySet<string> = new Set(["22", "23"]);
+
+function recordRefusalOf(err: unknown): Omit<RefusedUsageRecord, "record"> | null {
+  if (typeof err !== "object" || err === null) return null;
+  const code = (err as { code?: unknown }).code;
+  if (typeof code !== "string" || !RECORD_REFUSAL_CLASSES.has(code.slice(0, 2))) return null;
+  const raw = (err as { constraint?: unknown }).constraint;
+  const constraint = typeof raw === "string" && raw.length > 0 ? raw : null;
+  return {
+    sqlstate: code,
+    constraint,
+    detail: constraint === null ? `SQLSTATE ${code}` : `SQLSTATE ${code} on ${constraint}`,
+  };
+}
+
 /** `markSynced` named a key no row carries. */
 export class UsageRecordAbsent extends Error {
   constructor(readonly idempotencyKey: string) {
@@ -111,55 +148,86 @@ export class PostgresUsageRecordStore {
         ],
       );
       if (written.rowCount > 0) return;
-      const existing = await tx.query<{ quantity: string }>(
-        `SELECT quantity::TEXT AS quantity FROM ${SCHEMA}.${TABLE} WHERE idempotency_key = $1`,
-        [valid.idempotencyKey],
+      // Compared in SQL, at the column's own scale (ADR-0483). It read `quantity::TEXT` and compared
+      // `Number.parseFloat(stored) !== valid.quantity`, a JS double against a `NUMERIC(20, 4)` the
+      // row was rounded into on write — so a re-close of `0.1 + 0.2` (stored `0.3000`) was refused as
+      // a changed quantity Stripe had already been told. Casting the candidate to the column's type
+      // applies the same rounding the original write did, so "unchanged" means unchanged as stored.
+      const existing = await tx.query<{ same: boolean }>(
+        `SELECT quantity = $2::NUMERIC(20, 4) AS same FROM ${SCHEMA}.${TABLE} WHERE idempotency_key = $1`,
+        [valid.idempotencyKey, valid.quantity],
       );
-      const stored = existing.rows[0]?.quantity;
-      if (stored === undefined || Number.parseFloat(stored) !== valid.quantity) {
+      if (existing.rows[0]?.same !== true) {
         throw new UsageAlreadyReported(valid.idempotencyKey);
       }
     });
   }
 
   /**
-   * Writes one flush window's records **in one transaction**, each under its own tenant's context,
-   * and never updates: a record is immutable once written, so a retry of the same window — the same
-   * records, the same keys — is a no-op rather than an overwrite. All-or-nothing is the point: a flush
-   * that wrote some subscriptions and failed on the next would otherwise leave the caller unable to
-   * tell which half to retry.
+   * Writes one flush window's records in one transaction, each under its own tenant's context and
+   * **each behind its own savepoint**, and never updates: a record is immutable once written, so a
+   * retry of the same window — the same records, the same keys — is a no-op rather than an
+   * overwrite.
+   *
+   * It was all-or-nothing, on the argument that a flush writing some subscriptions and failing on
+   * the next would leave the caller unable to tell which half to retry. That argument is false here
+   * (ADR-0451 Q1, closed by ADR-0483): every insert is `ON CONFLICT (idempotency_key) DO NOTHING`, so
+   * re-running a window that half-landed is already exact. What all-or-nothing actually bought was
+   * that **one record's refusal rolled back every tenant's** — one unprovisioned tenant's foreign-key
+   * refusal (`23503`) kept the whole window pending, and since that refusal stands until an operator
+   * provisions the tenant, every later tick failed the same way and no tenant was billed meanwhile —
+   * every later window queued behind the first.
+   *
+   * A refusal **of the record** — SQLSTATE class 22 (data exception) or 23 (integrity constraint) —
+   * rolls back to that record's savepoint and is returned in `refused`; the caller drops it, because
+   * re-sending it cannot succeed until somebody changes the database (a tenant provisioned, a CHECK
+   * widened). Any other error is not about the record (a lost connection, a serialization failure,
+   * a privilege) and propagates, failing the whole window so it is retried unchanged. `RELEASE`
+   * follows `ROLLBACK TO`, because the savepoint survives the rollback and a window of many
+   * refusals would otherwise nest a subtransaction per record (ADR-0360's rule).
    */
-  async recordWindow(records: readonly UsageRecord[]): Promise<number> {
-    if (records.length === 0) return 0;
+  async recordWindow(records: readonly UsageRecord[]): Promise<UsageWindowWrite> {
+    if (records.length === 0) return { inserted: 0, refused: [] };
     const valid = records.map((r) => UsageRecordSchema.parse(r));
     return this.conn.transaction(async (tx) => {
       let inserted = 0;
+      const refused: RefusedUsageRecord[] = [];
       for (const record of valid) {
-        await setTenantContextWithin(tx, record.tenantId);
-        const result = await tx.query(
-          `INSERT INTO ${SCHEMA}.${TABLE} (
-             id, tenant_id, subscription_id, meter, period_start, period_end,
-             quantity, source, recorded_at, idempotency_key, record
-           )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
-           ON CONFLICT (idempotency_key) DO NOTHING`,
-          [
-            record.id,
-            record.tenantId,
-            record.subscriptionId,
-            record.meter,
-            record.period.start,
-            record.period.end,
-            record.quantity,
-            record.source,
-            record.recordedAt,
-            record.idempotencyKey,
-            JSON.stringify(record),
-          ],
-        );
-        inserted += result.rowCount;
+        await tx.query(`SAVEPOINT ${WINDOW_SAVEPOINT}`);
+        try {
+          await setTenantContextWithin(tx, record.tenantId);
+          const result = await tx.query(
+            `INSERT INTO ${SCHEMA}.${TABLE} (
+               id, tenant_id, subscription_id, meter, period_start, period_end,
+               quantity, source, recorded_at, idempotency_key, record
+             )
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
+             ON CONFLICT (idempotency_key) DO NOTHING`,
+            [
+              record.id,
+              record.tenantId,
+              record.subscriptionId,
+              record.meter,
+              record.period.start,
+              record.period.end,
+              record.quantity,
+              record.source,
+              record.recordedAt,
+              record.idempotencyKey,
+              JSON.stringify(record),
+            ],
+          );
+          await tx.query(`RELEASE SAVEPOINT ${WINDOW_SAVEPOINT}`);
+          inserted += result.rowCount;
+        } catch (err) {
+          const refusal = recordRefusalOf(err);
+          if (refusal === null) throw err;
+          await tx.query(`ROLLBACK TO SAVEPOINT ${WINDOW_SAVEPOINT}`);
+          await tx.query(`RELEASE SAVEPOINT ${WINDOW_SAVEPOINT}`);
+          refused.push({ record, ...refusal });
+        }
       }
-      return inserted;
+      return { inserted, refused };
     });
   }
 

@@ -59,7 +59,14 @@ function problemOf(text: string): { readonly code: string | null; readonly detai
   return { code, detail };
 }
 
-export type RequestFailureKind = "unreachable" | "role_refused" | "not_served" | "refused";
+export const REQUEST_FAILURE_KINDS = [
+  "unreachable",
+  "malformed_response",
+  "role_refused",
+  "not_served",
+  "refused",
+] as const;
+export type RequestFailureKind = (typeof REQUEST_FAILURE_KINDS)[number];
 
 export interface RequestFailure {
   readonly kind: RequestFailureKind;
@@ -71,6 +78,13 @@ export interface RequestFailure {
  * `status`; `ApiError`, `PlatformError`, `ReviewError` and `DesignError` also carry `code`. Read
  * structurally rather than by class so the four modules need no common base.
  *
+ * - **A `SyntaxError` with no status**: a response *did* come back — every `lib/` module checks
+ *   `res.ok` before `await res.json()`, so this is a 2xx (or a parseable-status error body read
+ *   twice) whose body is not JSON. Telling that reader "is operate-server running?" is the wrong
+ *   remedy for the one case where the server demonstrably answered, which is why it has its own
+ *   kind (ADR-0478, closing ADR-0418 Q2). Checked before the outage arm and keyed on the class:
+ *   `JSON.parse` and `Response.json()` throw `SyntaxError` and nothing else does, while a failed
+ *   `fetch` throws `TypeError`, which stays `unreachable`.
  * - **No status** (or status 0, `setup`'s wrapper for a non-HTTP failure): no response came back,
  *   so nothing contradicts an outage. This includes a programming error, which is the cost of having
  *   no better discriminator in the browser.
@@ -84,6 +98,9 @@ export interface RequestFailure {
  */
 export function classifyRequestFailure(err: unknown): RequestFailure {
   const message = err instanceof Error ? err.message : String(err);
+  if (err instanceof SyntaxError && !("status" in err)) {
+    return { kind: "malformed_response", detail: message };
+  }
   if (!(err instanceof Error) || !("status" in err) || typeof err.status !== "number" || err.status === 0) {
     return { kind: "unreachable", detail: message };
   }
@@ -98,6 +115,8 @@ export function classifyRequestFailure(err: unknown): RequestFailure {
 
 const SENTENCE: Readonly<Record<RequestFailureKind, (detail: string) => string>> = {
   unreachable: (detail) => `${trimEnd(detail)}. Is operate-server running?`,
+  malformed_response: (detail) =>
+    `the API answered, but with a body this page could not read (${trimEnd(detail)}). Reload the page; if it persists, the console and the API may be different versions.`,
   role_refused: (detail) => `your role does not grant this (${trimEnd(detail)}).`,
   not_served: () => "this deployment does not serve it.",
   refused: (detail) => `${trimEnd(detail)}.`,

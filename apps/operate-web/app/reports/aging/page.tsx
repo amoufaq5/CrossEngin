@@ -5,33 +5,49 @@ import { useEffect, useState } from "react";
 import { Topbar } from "@/components/Topbar";
 import { boundedReadNotice } from "@/lib/bounded-read";
 import { fetchAging } from "@/lib/api";
-import { AGING_BUCKETS, type AgingReport, type AgingResponse } from "@/lib/aging";
+import {
+  AGING_BUCKETS,
+  agingAsOfRefusal,
+  earliestAgingAsOf,
+  type AgingReport,
+  type AgingResponse,
+} from "@/lib/aging";
 import { formatCell } from "@/lib/format";
-import { requestFailureSentence } from "@/lib/request-failure";
+import { classifyRequestFailure, requestFailureSentence } from "@/lib/request-failure";
 
 export default function AgingPage() {
   const [data, setData] = useState<AgingResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [forbidden, setForbidden] = useState(false);
-  // Empty string = "today" (server clock); a YYYY-MM-DD value pulls a back-dated snapshot.
+  // Empty string = "today" (server clock); a YYYY-MM-DD value ages today's open documents at a later
+  // date. A past date is refused by the server (ADR-0475), so the picker does not offer one.
   const [asOf, setAsOf] = useState("");
+  // The server's own date, from an answer to a request without `asOf` — the bound it enforces.
+  const [serverToday, setServerToday] = useState<string | null>(null);
+  const [asOfRefusal, setAsOfRefusal] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
     setLoading(true);
     setError(null);
     setForbidden(false);
+    setAsOfRefusal(null);
     fetchAging(asOf || undefined)
       .then((res) => {
         if (!alive) return;
         setData(res);
+        if (asOf === "") setServerToday(res.asOf);
         setLoading(false);
       })
       .catch((e: unknown) => {
         if (!alive) return;
-        const msg = e instanceof Error ? e.message : String(e);
-        if (msg.startsWith("403")) setForbidden(true);
+        // The role panel only for a role refusal. A 403 from the tenant-status gate ("Workspace
+        // unavailable") used to land here too, because this read `message.startsWith("403")`, and
+        // told a suspended tenant's finance user they lacked a role (ADR-0418 Q8, closed by ADR-0478).
+        const refusal = agingAsOfRefusal(e);
+        if (refusal !== null) setAsOfRefusal(refusal);
+        else if (classifyRequestFailure(e).kind === "role_refused") setForbidden(true);
         else setError(requestFailureSentence(e));
         setLoading(false);
       });
@@ -60,6 +76,7 @@ export default function AgingPage() {
             <input
               type="date"
               value={asOf}
+              min={earliestAgingAsOf(serverToday)}
               onChange={(e) => setAsOf(e.target.value)}
               className="rounded-lg border border-line bg-white px-3 py-1.5 text-sm font-normal normal-case text-ink"
             />
@@ -75,7 +92,18 @@ export default function AgingPage() {
           )}
         </div>
 
+        <p className="-mt-4 mb-6 text-xs text-ink-faint">
+          Today or a later date: the report ages today&apos;s open documents, so it cannot say what was
+          open on a past date.
+        </p>
+
         {loading && <p className="text-sm text-ink-muted">Loading aging report…</p>}
+
+        {asOfRefusal !== null && (
+          <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+            {asOfRefusal}
+          </div>
+        )}
 
         {forbidden && (
           <div className="rounded-xl border border-line bg-surface-soft px-4 py-10 text-center text-sm text-ink-muted">
@@ -95,7 +123,7 @@ export default function AgingPage() {
           </div>
         )}
 
-        {data && !forbidden && !error && (
+        {data && !forbidden && !error && asOfRefusal === null && (
           <div className="space-y-10">
             {sections.map(({ key, label, report }) => (
               <AgingSection key={key} label={label} report={report} />

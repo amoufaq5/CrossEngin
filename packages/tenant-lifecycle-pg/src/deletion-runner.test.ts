@@ -363,16 +363,67 @@ describe("runOne", () => {
     expect(h.transitions[1]?.fields["lastAttemptRefusal"]).toBeUndefined();
   });
 
-  it("rejects a runner whose capabilities leave a subsystem unattested, rather than looping on it", async () => {
-    // The runner always passes no attestations, so a non-performed subsystem declared `erases`
-    // refuses every attempt identically — after both erasures. Released, it would erase and roll
-    // back every tick; it is said at boot instead and rejected here.
+  it("still rejects the assembler's subsystem_unattested, which is now only a backstop", async () => {
+    // Since ADR-0477 the pipeline refuses this fact at `input`, before the transaction opens, as
+    // `declared_subsystem_unattested` — retryable, because nothing ran (the next test). The
+    // assembler's own refusal survives behind it and arrives after both erasures, so it stays
+    // `final`: releasing it would erase and roll back every tick.
     const h = harness({
       runThrows: new DeletionPipelineAborted([
         { stage: "assemble", reason: "subsystem_unattested", detail: "backups" },
       ]),
     });
     expect((await h.runner.runOne(requestOf())).outcome).toBe("rejected");
+  });
+
+  // ADR-0477: the three pre-destruction refusals that used to strand or reject a request. Each is
+  // released through the same path, keeping the verification and the deadline and recording the
+  // attempt; none restores the tenant, because the deletion is still owed.
+  it.each([
+    {
+      name: "a transaction that never opened (returned)",
+      behaviour: {
+        outcome: {
+          ok: false,
+          refusals: [
+            { stage: "connect", reason: "owner_connection_unavailable", detail: "SQLSTATE 28P01" },
+          ],
+        } as DeleteTenantOutcome,
+      },
+      line: "connect/owner_connection_unavailable",
+    },
+    {
+      name: "an unattested declared subsystem (returned, input stage)",
+      behaviour: {
+        outcome: {
+          ok: false,
+          refusals: [{ stage: "input", reason: "declared_subsystem_unattested", detail: "backups" }],
+        } as DeleteTenantOutcome,
+      },
+      line: "input/declared_subsystem_unattested",
+    },
+    {
+      name: "a preflight that threw (a DeletionPipelineAborted raised before the first DELETE)",
+      behaviour: {
+        runThrows: new DeletionPipelineAborted([
+          { stage: "preflight", reason: "preflight_failed", detail: "SQLSTATE 57014" },
+        ]),
+      },
+      line: "preflight/preflight_failed",
+    },
+  ])("releases $name back to verified", async ({ behaviour, line }) => {
+    const restored: string[] = [];
+    const h = harness(behaviour, {
+      restoreTenantAfterRejection: async ({ tenantId }) => {
+        restored.push(tenantId);
+      },
+    });
+    const result = await h.runner.runOne(requestOf());
+    expect(result.outcome).toBe("refused_retryable");
+    expect(h.transitions.map((t) => t.to)).toEqual(["in_progress", "verified"]);
+    expect(h.transitions[1]?.fields["lastAttemptRefusal"]).toBe(line);
+    expect(h.transitions[1]?.fields["rejectedReason"]).toBeUndefined();
+    expect(restored).toEqual([]);
   });
 
   it("restores the tenant once a final refusal commits the request rejected", async () => {

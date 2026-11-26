@@ -25,6 +25,8 @@ import {
   runVersion,
   type RunContext,
 } from "./commands.js";
+import { ManifestSchema } from "@crossengin/kernel/manifest";
+
 import { emptyManifest, type Manifest } from "./manifest-io.js";
 
 function buffers(
@@ -201,6 +203,37 @@ describe("runDiff", () => {
     expect(code).toBe(0);
     const parsedResult = JSON.parse(out()) as { diff: Record<string, unknown> };
     expect(parsedResult.diff).toBeDefined();
+  });
+
+  it("reports a change confined to workflows, which the old entity-only counter called no change", async () => {
+    const dir = await tempDir();
+    const a = join(dir, "a.json");
+    const b = join(dir, "b.json");
+    const entity = { name: "Ticket", fields: [{ name: "state", type: { kind: "enum", values: ["open", "closed"] } }] };
+    const base = { ...emptyManifest({ name: "T", slug: "t" }), entities: [entity] };
+    await writeManifest(a, ManifestSchema.parse(base));
+    await writeManifest(b, ManifestSchema.parse({
+      ...base,
+      workflows: {
+        ticket_lifecycle: {
+          kind: "entityLifecycle",
+          entity: "Ticket",
+          stateField: "state",
+          initialState: "open",
+          states: [{ name: "open" }, { name: "closed" }],
+          transitions: [{ name: "close", from: "open", to: "closed" }],
+        },
+      },
+    }));
+    const { ctx, out } = buffers();
+    expect(await runDiff(parsed("diff", a, b), ctx)).toBe(0);
+    expect(out()).not.toContain("(no changes)");
+    expect(out()).toMatch(/workflows \[served\]: (section added|\+1 -0 ~0)/);
+    const json = buffers();
+    expect(await runDiff(parsed("diff", a, b, "--format=json"), json.ctx)).toBe(0);
+    const payload = JSON.parse(json.out()) as { sections: { section: string; reachNote: string }[] };
+    expect(payload.sections.map((s) => s.section)).toEqual(["workflows"]);
+    expect(payload.sections[0]!.reachNote.length).toBeGreaterThan(0);
   });
 
   it("returns exit 2 when paths are missing", async () => {
@@ -457,6 +490,30 @@ describe("runChat", () => {
     const code = await runChat(parsed("chat", "--prompt=hi", "--allow-file-read", "--file-root=/"), ctx);
     expect(code).toBe(2);
     expect(err()).toContain("is the filesystem root");
+  });
+
+  it("refuses an implicit file root that is the home directory, and names an explicit one", async () => {
+    // os.homedir() reads $HOME, so pointing it at the working directory makes the implicit root home.
+    const saved = process.env["HOME"];
+    process.env["HOME"] = process.cwd();
+    try {
+      const refused = buffers({ env: { ANTHROPIC_API_KEY: "sk-test" }, providerOverride: new StubProvider([]) });
+      expect(await runChat(parsed("chat", "--prompt=hi", "--allow-file-read"), refused.ctx)).toBe(2);
+      expect(refused.err()).toContain("is your home directory");
+      expect(refused.err()).toContain("--file-root");
+
+      const provider = new StubProvider([
+        { kind: "text", text: "ack" },
+        { kind: "usage_final", usage: { inputTokens: 1, outputTokens: 1, cost: 0 } },
+      ]);
+      const named = buffers({ env: { ANTHROPIC_API_KEY: "sk-test" }, providerOverride: provider });
+      const home = await realpath(process.cwd());
+      expect(await runChat(parsed("chat", "--prompt=hi", "--allow-file-read", `--file-root=${process.cwd()}`), named.ctx)).toBe(0);
+      expect(named.err()).toContain(`[tools] file root: ${home} — your home directory, as --file-root asked`);
+    } finally {
+      if (saved === undefined) delete process.env["HOME"];
+      else process.env["HOME"] = saved;
+    }
   });
 
   it("refuses a bare or empty --file-root rather than falling back to the working directory", async () => {

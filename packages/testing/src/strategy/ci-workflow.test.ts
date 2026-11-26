@@ -12,6 +12,7 @@ import {
   FAST_CI_BUDGET_MINUTES,
   CI_AUDIT_EXCEPTIONS,
   CI_MEASURED_STEP_SECONDS,
+  CI_JOB_TIMEOUT_MINUTES,
   measuredJobSeconds,
 } from "./ci.js";
 import {
@@ -110,8 +111,8 @@ describe("the vocabulary", () => {
   });
 
   it("names the allow-lists it compares against", () => {
-    expect(CI_WORKFLOW_TOP_LEVEL_KEYS).toEqual(["name", "on", "jobs"]);
-    expect(CI_JOB_YAML_KEYS).toEqual(["runs-on", "steps"]);
+    expect(CI_WORKFLOW_TOP_LEVEL_KEYS).toEqual(["name", "on", "permissions", "concurrency", "jobs"]);
+    expect(CI_JOB_YAML_KEYS).toEqual(["runs-on", "timeout-minutes", "steps"]);
     expect(Object.isFrozen(CI_WORKFLOW_TOP_LEVEL_KEYS)).toBe(true);
     expect(Object.isFrozen(CI_JOB_YAML_KEYS)).toBe(true);
   });
@@ -157,7 +158,8 @@ describe("the shipped workflow", () => {
     // CLAUDE.md instructs verifying `apps/operate-web` separately with `npx next build` and
     // `npx tsc --noEmit`; measured from its own package.json, that is redundant — it has a `build`
     // and a `typecheck` script, so `pnpm -r build` and `pnpm -r typecheck` already cover it. Only
-    // the *test* sweep excludes it, because it has no vitest config and no tests.
+    // its tests run in the test sweep like every other member's since ADR-0478 gave it a runner, so
+    // no step names it.
     const web = JSON.parse(
       readFileSync(join(REPO_ROOT, "apps", "operate-web", "package.json"), "utf8"),
     ) as { readonly scripts?: Readonly<Record<string, string>> };
@@ -336,9 +338,10 @@ describe("the reader refuses rather than guessing", () => {
   it("skips the body of an undeclared top-level key rather than refusing it", () => {
     // So `workflow_key_undeclared` is reachable for a key WITH a body as well as a bare one. A
     // refusal there would make the finding a judgement with no case left (ADR-0375).
-    const text = mutate("jobs:\n", "permissions:\n  contents: read\njobs:\n");
+    // `defaults:` and not `permissions:`, which this test used until ADR-0482 declared it.
+    const text = mutate("\njobs:\n", "\ndefaults:\n  run:\n    shell: bash\njobs:\n");
     const parsed = parseCiWorkflow(text);
-    expect(parsed.topLevelKeys).toContain("permissions");
+    expect(parsed.topLevelKeys).toContain("defaults");
     expect(addedKinds(text)).toEqual(["workflow_key_undeclared"]);
   });
 
@@ -668,5 +671,114 @@ describe("the dependency audit's exceptions", () => {
     expect(auditExceptionDisagreements(bad, inputs)).toEqual([
       `${first.advisory} is dev_tooling_not_shipped through @crossengin/nonexistent, which is not a workspace member`,
     ]);
+  });
+});
+
+describe("the token's scopes, the concurrency group and the job timeouts are declared (ADR-0482)", () => {
+  it("reads the three blocks off the shipped file, so the agreement is not vacuous", () => {
+    const parsed = readCiWorkflow();
+    expect(parsed.permissions).toEqual(new Map([["contents", "read"]]));
+    expect(parsed.concurrency?.get("group")).toBe("ci-${{ github.ref }}");
+    expect(parsed.concurrency?.get("cancel-in-progress")).toBe("true");
+    expect(parsed.jobs.length).toBe(CI_PIPELINE.jobs.length);
+    for (const job of parsed.jobs) expect(job.timeoutMinutes, job.id).toBe(String(CI_JOB_TIMEOUT_MINUTES));
+    expect(CI_PIPELINE.permissions).toEqual({ contents: "read" });
+  });
+
+  it("reports a workflow that drops the permissions block", () => {
+    expect(addedKinds(mutate("permissions:\n  contents: read\n\n", ""))).toEqual(["permissions_differ"]);
+  });
+
+  it("reports a widened or an added scope", () => {
+    expect(addedKinds(mutate("  contents: read\n", "  contents: write\n"))).toEqual(["permissions_differ"]);
+    expect(addedKinds(mutate("  contents: read\n", "  contents: read\n  packages: write\n"))).toEqual([
+      "permissions_differ",
+    ]);
+  });
+
+  it("reports a declared block the workflow has dropped and one the declaration has dropped", () => {
+    const parsed = readCiWorkflow();
+    expect(kinds(auditCiWorkflow({ ...CI_PIPELINE, permissions: null }, parsed))).toEqual(["permissions_differ"]);
+    expect(kinds(auditCiWorkflow({ ...CI_PIPELINE, concurrency: null }, parsed))).toEqual(["concurrency_differ"]);
+  });
+
+  it("reports a concurrency group or cancellation that is not the declared one", () => {
+    expect(addedKinds(mutate("  cancel-in-progress: true\n", "  cancel-in-progress: false\n"))).toEqual([
+      "concurrency_differ",
+    ]);
+    expect(addedKinds(mutate("  group: ci-${{ github.ref }}\n", "  group: ci\n"))).toEqual(["concurrency_differ"]);
+  });
+
+  it("reports a job whose timeout was removed or changed", () => {
+    const once = (from: string, to: string): string => {
+      expect(WORKFLOW_TEXT.includes(from)).toBe(true);
+      return WORKFLOW_TEXT.replace(from, to);
+    };
+    expect(addedKinds(once("    timeout-minutes: 45\n", ""))).toEqual(["job_timeout_differs"]);
+    expect(addedKinds(once("    timeout-minutes: 45\n", "    timeout-minutes: 600\n"))).toEqual([
+      "job_timeout_differs",
+    ]);
+  });
+
+  it("refuses a scalar permissions or concurrency rather than reading it as an empty map", () => {
+    expect(() => parseCiWorkflow(mutate("permissions:\n  contents: read\n", "permissions: read-all\n"))).toThrow(
+      /permissions: scalar/,
+    );
+    expect(() => parseCiWorkflow(mutate("permissions:\n  contents: read\n", "permissions:\n    contents: read\n"))).toThrow(
+      /inside the permissions: block/,
+    );
+  });
+
+  it("refuses a timeout at or below a job's measured target, because it would fail a healthy run", () => {
+    const job = CI_PIPELINE.jobs[0];
+    expect(job).toBeDefined();
+    if (job === undefined) return;
+    const parse = (timeoutMinutes: number) =>
+      CiPipelineSchema.safeParse({ ...CI_PIPELINE, jobs: [{ ...job, timeoutMinutes }] });
+    expect(parse(job.targetMinutes).success).toBe(false);
+    expect(parse(job.targetMinutes + 1).success).toBe(true);
+    for (const j of CI_PIPELINE.jobs) expect(CI_JOB_TIMEOUT_MINUTES).toBeGreaterThan(j.targetMinutes);
+  });
+});
+
+describe("the Node pin has one more reader", () => {
+  it("names the major in .nvmrc that the workflow, the engines floor and the image agree on", () => {
+    // A developer's `nvm use` reads this file and nothing else; without it the local Node is
+    // whatever was installed last, which is the drift the three pins above exist to prevent.
+    const nvmrc = readFileSync(join(REPO_ROOT, ".nvmrc"), "utf8").trim();
+    expect(nvmrc).toBe("22");
+    let compared = 0;
+    for (const job of readCiWorkflow().jobs) {
+      const setup = job.steps.find((st) => st.rendered === "uses actions/setup-node@v4");
+      if (setup === undefined) continue;
+      expect(setup.inputs.get("node-version"), job.id).toBe(nvmrc);
+      compared += 1;
+    }
+    // A floor, so a renamed or re-versioned setup step cannot make the comparison vacuous.
+    expect(compared).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe("an excused package may not be a direct runtime dependency (ADR-0482)", () => {
+  it("refuses dev_tooling_not_shipped when another member lists the package itself", () => {
+    const inputs = readAuditExceptionInputs();
+    const vitest = CI_AUDIT_EXCEPTIONS.filter((e) => e.package === "vitest" && e.reason === "dev_tooling_not_shipped");
+    expect(vitest.length).toBeGreaterThanOrEqual(1);
+    const leaked = {
+      ...inputs,
+      members: inputs.members.map((m) =>
+        m.name === "@crossengin/operate-server" ? { ...m, dependencies: [...m.dependencies, "vitest"] } : m,
+      ),
+    };
+    const findings = auditExceptionDisagreements(CI_AUDIT_EXCEPTIONS, leaked);
+    expect(findings).toEqual(
+      vitest.map((e) => `${e.advisory} is dev_tooling_not_shipped, but @crossengin/operate-server lists vitest in its own dependencies`).sort(),
+    );
+  });
+
+  it("allows the member the exception is declared through to list it, since that is the declaration", () => {
+    const testing = readAuditExceptionInputs().members.find((m) => m.name === "@crossengin/testing");
+    expect(testing?.dependencies).toContain("vitest");
+    expect(auditExceptionDisagreements()).toEqual([]);
   });
 });

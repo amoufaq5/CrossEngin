@@ -1,9 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useState, type FormEvent, type ReactElement } from "react";
+import { useEffect, useState, type FormEvent, type ReactElement } from "react";
 
-import { NEXT_PARAM, REQUEST_ACCESS_PATH, safeNextPath } from "@/lib/session";
+import { NEXT_PARAM, REQUEST_ACCESS_PATH, safeNextPath, signOutNotice } from "@/lib/session";
 
 /**
  * One generic failure. The API refuses to distinguish an unknown email from a wrong password
@@ -18,6 +18,11 @@ export default function LoginPage(): ReactElement {
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Read after mount, from `window.location`, for the same static-prerender reason as `next` below.
+  const [signedOutNotice, setSignedOutNotice] = useState<string | null>(null);
+  useEffect(() => {
+    setSignedOutNotice(signOutNotice(window.location.search));
+  }, []);
 
   async function submit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
@@ -74,6 +79,12 @@ export default function LoginPage(): ReactElement {
         <form onSubmit={(e) => void submit(e)} className="card p-6">
           <h1 className="text-lg font-bold text-ink">Sign in</h1>
           <p className="mt-1 text-xs text-ink-faint">Use your workspace credentials.</p>
+
+          {signedOutNotice !== null && (
+            <p className="mt-4 rounded-md bg-amber-50 p-3 text-xs text-amber-800" role="status">
+              {signedOutNotice}
+            </p>
+          )}
 
           <div className="mt-5 space-y-5">
             <div>

@@ -1,5 +1,4 @@
-// CSV serialization for the list export. Pure and import-free, so it is testable from outside this
-// app (packages/testing/src/operate-web.test.ts) — operate-web has no test runner of its own.
+// CSV serialization for the list export. Pure and import-free; tested by `csv.test.ts` beside it.
 
 /**
  * The first characters a spreadsheet reads as the start of a formula (OWASP's CSV-injection list):

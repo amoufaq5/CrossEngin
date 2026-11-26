@@ -1,13 +1,16 @@
 import type { PgConfig, PgConnection } from "@crossengin/kernel-pg";
 import {
   DEFAULT_TENANT_SCHEMA_PREFIX,
+  TENANT_SCHEMA_LOCK_SQL,
   isTenantSchemaName,
+  probeCascadeCollateral,
   tenantSchemaName,
 } from "@crossengin/operate-runtime-pg";
 import {
   probeErasureConfinement,
   RETAINED_SHARED_TABLES,
   type BootSchemaErasureTarget,
+  type PipelinePreflightWithin,
 } from "@crossengin/tenant-lifecycle-pg";
 
 /**
@@ -285,12 +288,95 @@ export async function tenantSchemaDroppable(
   tenantId: string,
   prefix: string = DEFAULT_TENANT_SCHEMA_PREFIX,
 ): Promise<boolean> {
+  return (await schemaDropStanding(conn, tenantSchemaName(tenantId, prefix))) !== "not_droppable";
+}
+
+/**
+ * The one spelling of *can this connection's role drop that schema*, for both readers
+ * (`tenantSchemaDroppable` and the deletion preflight, ADR-0477). Three-valued because the preflight
+ * must tell an absent schema from a droppable one — it trial-drops only a schema that exists — while
+ * the route's boolean folds absent into droppable.
+ */
+async function schemaDropStanding(
+  conn: PgConnection,
+  schema: string,
+): Promise<"absent" | "droppable" | "not_droppable"> {
   const result = await conn.query<{ droppable: unknown }>(
     "SELECT pg_has_role(n.nspowner, 'USAGE') AS droppable FROM pg_namespace n WHERE n.nspname = $1",
-    [tenantSchemaName(tenantId, prefix)],
+    [schema],
   );
   const row = result.rows[0];
-  return row === undefined || yes(row.droppable);
+  if (row === undefined) return "absent";
+  return yes(row.droppable) ? "droppable" : "not_droppable";
+}
+
+/**
+ * The deletion pipeline's preflight (ADR-0477): the schema erasure's deployment-fixable refusals,
+ * asked inside the deletion's transaction **before the shared-table erasure's first `DELETE`**.
+ *
+ * Before this, three of them could only be met *after* the shared erasure had run: a role that cannot
+ * `DROP SCHEMA` raised `42501` mid-transaction (an unknown throw, so the runner left the request
+ * `in_progress` for a human), and an external dependent or a refused schema name was a schema-eraser
+ * refusal typed `final`, so a view an operator could drop rejected the request outright. Asked here
+ * they are `preflight` refusals, retryable by `DELETION_REFUSAL_RETRYABILITY`'s rule — nothing has
+ * been destroyed — so the request is released and the next run proceeds once the cause is fixed.
+ *
+ * The same per-tenant xact lock the eraser takes is taken first, so the answer holds until the drop:
+ * an advisory lock taken twice in one transaction is held once, and nothing else can re-create or
+ * re-depend on the schema in between. The eraser's own checks still run and stay `final`. Writes
+ * nothing that commits — the trial cascade runs in a savepoint and is rolled back by
+ * `probeCascadeCollateral` itself. No detail names an object, a role or the schema: the detail
+ * reaches a log line and the runner's report, and an object name is the deployment's, not the
+ * caller's.
+ *
+ * `prefix` must be the one both `deleteTenantAtomically` call sites resolve the schema with; neither
+ * passes one, so the default is the right answer and a deployment that changes it changes both.
+ */
+export function buildDeletionPreflight(
+  prefix: string = DEFAULT_TENANT_SCHEMA_PREFIX,
+): PipelinePreflightWithin {
+  return async (tx, tenantId) => {
+    // A prefix the derivation refuses throws; the eraser would raise the same throw after the
+    // shared erasure had deleted, so it is answered here as the configuration fault it is. The
+    // membership check after it is the eraser's own question, asked of the name it will drop.
+    let schema: string;
+    try {
+      schema = tenantSchemaName(tenantId, prefix);
+    } catch {
+      schema = "";
+    }
+    if (schema === "" || !isTenantSchemaName(schema, prefix)) {
+      return [
+        {
+          reason: "schema_name_refused",
+          detail: "the tenant's schema name, as this deployment's prefix derives it, is not one the schema eraser will drop",
+        },
+      ];
+    }
+    await tx.query(TENANT_SCHEMA_LOCK_SQL, [schema]);
+    const standing = await schemaDropStanding(tx, schema);
+    // No schema: the eraser answers `alreadyAbsent`, which is not a refusal (a boot-manifest tenant).
+    if (standing === "absent") return [];
+    if (standing === "not_droppable") {
+      return [
+        {
+          reason: "schema_not_droppable",
+          detail:
+            "the deletion connection's role neither owns nor inherits the owner of the tenant's schema, so DROP SCHEMA would be refused; grant the schema owner's role to the deletion role, or connect the deletion as the owner",
+        },
+      ];
+    }
+    const collateral = await probeCascadeCollateral(tx, schema);
+    if (collateral.length > 0) {
+      return [
+        {
+          reason: "external_dependents",
+          detail: `dropping the tenant's schema would cascade to ${collateral.length} object(s) outside it; the schema-erasure survey (mounted by --tenant-erasure-routes) names them, or drop what depends on the schema`,
+        },
+      ];
+    }
+    return [];
+  };
 }
 
 /** The deletion role deploy/ provisions (deploy/postgres/roles/eraser-role.sql, ADR-0458). */

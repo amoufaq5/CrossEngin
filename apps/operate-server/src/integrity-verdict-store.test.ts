@@ -21,6 +21,8 @@ function anchorVerdictOf(verdict: string): AuditAnchorVerdict {
 
 import {
   PostgresIntegrityVerdictStore,
+  StoredVerdictUnreadable,
+  attestedWitnessFrom,
   canonicalStoredReport,
   integrityVerdictPayloadSha256,
   decodeIntegrityVerdictCursor,
@@ -1041,6 +1043,51 @@ describe("integrity-verdict-store — re-validation on read", () => {
     const row = rowFor(stored, { report: "{not json" });
     const store = new PostgresIntegrityVerdictStore(scriptedConn(row));
     await expect(store.getByVerdictId(String(row["verdict_id"]), { kind: "all" })).rejects.toThrow();
+  });
+
+  // ADR-0481. node-postgres hands a `TIMESTAMPTZ` of 'infinity' back as the number `Infinity`, and
+  // the old `isoOf` turned that into a bare `RangeError: Invalid time value` naming nothing.
+  it("refuses an infinite verified_at by name, field and code, never by value", async () => {
+    const stored = storedIntegrityReportFor(reportFor());
+    const row = rowFor(stored, { verified_at: Number.POSITIVE_INFINITY });
+    const store = new PostgresIntegrityVerdictStore(scriptedConn(row));
+    const err = await store
+      .getByVerdictId(String(row["verdict_id"]), { kind: "all" })
+      .then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(StoredVerdictUnreadable);
+    expect(err).not.toBeInstanceOf(RangeError);
+    const message = (err as Error).message;
+    expect(message).toContain(String(row["verdict_id"]));
+    expect(message).toContain("verifiedAt: invalid_string");
+    expect(message).not.toMatch(/Infinity/);
+    expect((err as StoredVerdictUnreadable).verdictId).toBe(row["verdict_id"]);
+  });
+
+  it("refuses an infinite created_at the same way, since the same mapper parses it", async () => {
+    const stored = storedIntegrityReportFor(reportFor());
+    const row = rowFor(stored, { created_at: Number.NEGATIVE_INFINITY });
+    const store = new PostgresIntegrityVerdictStore(scriptedConn(row));
+    await expect(store.getByVerdictId(String(row["verdict_id"]), { kind: "all" })).rejects.toThrow(
+      /createdAt: invalid_string/,
+    );
+  });
+
+  it("names the verdict as unidentified when the id column itself is not text", async () => {
+    const stored = storedIntegrityReportFor(reportFor());
+    const row = rowFor(stored, { verdict_id: 42, verified_at: Number.POSITIVE_INFINITY });
+    const store = new PostgresIntegrityVerdictStore(scriptedConn(row));
+    await expect(store.latest({ kind: "all" })).rejects.toThrow(/<unidentified>/);
+  });
+
+  it("routes an infinite baseline into the memory axis as unreadable rather than throwing", async () => {
+    const stored = storedIntegrityReportFor(reportFor());
+    const row = rowFor(stored, { verified_at: Number.POSITIVE_INFINITY });
+    const read = await attestedWitnessFrom(
+      { latestBaseline: () => new PostgresIntegrityVerdictStore(scriptedConn(row)).latest({ kind: "all" }) },
+      null,
+    );
+    expect(read.kind).toBe("unreadable");
+    expect(read.kind === "unreadable" ? read.detail : "").toContain("verifiedAt: invalid_string");
   });
 
   it("refuses a row carrying a verdict the CHECK constraint does not allow", async () => {

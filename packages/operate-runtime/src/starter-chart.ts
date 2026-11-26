@@ -1,3 +1,6 @@
+import { rbacCheck, type Principal, type RoleDefinition, type RoleName } from "@crossengin/auth";
+import type { Manifest } from "@crossengin/kernel/manifest";
+
 import {
   FINANCE_ACCOUNT_CODE_KEYS,
   functionalCurrencyOf,
@@ -511,4 +514,73 @@ async function danglingSettings(
 
 function sortCodes(codes: readonly string[]): string[] {
   return [...codes].sort((a, b) => a.localeCompare(b));
+}
+
+/**
+ * Whether the `--job-actor-role` principal can write the starter chart on this manifest, asked at
+ * boot (ADR-0480, ADR-0465 Q8). The chart's accounts are written **through the create handler** as
+ * that principal, so a role the manifest does not grant `LedgerAccount` create refuses every account
+ * — and before this nothing said so until the first approval came back `refused`.
+ *
+ * The question is the handler's own: `rbacCheck` over the manifest's permissions and roles, for a
+ * principal holding the actor's roles as the system writer presents them (the first primary, the
+ * rest secondary; ADR-0369). The settings arm is **not** a grant question: the starter chart fills
+ * the finance settings through the settings store directly, not through `PUT /v1/admin/settings`,
+ * so the admin-role grant that route checks does not apply to it and naming it here would describe
+ * a refusal that cannot happen. The reads go through the store as well. So `LedgerAccount` create is
+ * the whole of what the role decides.
+ */
+export type StarterChartActorCapability =
+  | { readonly kind: "not_served" }
+  | { readonly kind: "can_create"; readonly roles: readonly string[] }
+  | { readonly kind: "cannot_create"; readonly roles: readonly string[]; readonly reason: string };
+
+export function starterChartActorCapability(manifest: Manifest, roles: readonly string[]): StarterChartActorCapability {
+  if (!(manifest.entities ?? []).some((e) => e.name === STARTER_CHART_ENTITY)) return { kind: "not_served" };
+  const [primary, ...secondary] = roles;
+  if (primary === undefined) {
+    return { kind: "cannot_create", roles, reason: "no job actor role is configured" };
+  }
+  const decision = rbacCheck({
+    principal: {
+      kind: "system",
+      tenantId: "" as Principal["tenantId"],
+      userId: null,
+      primaryRole: primary as RoleName,
+      secondaryRoles: secondary as RoleName[],
+      // A system actor is no person and carries no attributes; an obligation on the grant is then
+      // undischargeable, which is the answer the create handler would give it too.
+      abacAttributes: null,
+      mfaProofAgeSeconds: null,
+    },
+    permissions: manifest.permissions ?? {},
+    roles: new Map<RoleName, RoleDefinition>(Object.entries(manifest.roles ?? {}) as [RoleName, RoleDefinition][]),
+    entity: STARTER_CHART_ENTITY,
+    operation: "create",
+  });
+  return decision.allowed ? { kind: "can_create", roles } : { kind: "cannot_create", roles, reason: decision.reason ?? "not granted" };
+}
+
+/** The boot line for {@link starterChartActorCapability}, said either way. */
+export function formatStarterChartActorCapability(cap: StarterChartActorCapability): {
+  readonly level: "info" | "warn";
+  readonly line: string;
+} {
+  switch (cap.kind) {
+    case "not_served":
+      return { level: "info", line: `[starter-chart] this manifest declares no ${STARTER_CHART_ENTITY}, so no starter chart is written` };
+    case "can_create":
+      return {
+        level: "info",
+        line: `[starter-chart] the job actor role(s) ${cap.roles.join(", ")} may create ${STARTER_CHART_ENTITY}, so an approval can write the starter chart`,
+      };
+    case "cannot_create":
+      return {
+        level: "warn",
+        line:
+          `[starter-chart] the job actor role(s) ${cap.roles.length > 0 ? cap.roles.join(", ") : "(none)"} may not create ` +
+          `${STARTER_CHART_ENTITY} (${cap.reason}), so every starter chart is refused; pass a --job-actor-role ` +
+          `this manifest grants ${STARTER_CHART_ENTITY} create`,
+      };
+  }
 }

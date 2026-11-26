@@ -189,18 +189,23 @@ describe("which grades close through the pure executor, and on what inputs", () 
     expect(needsPm.length).toBeLessThan(SEVERITIES.length);
   });
 
-  it("accepts a postmortem id that names no stored postmortem — the executor checks presence, not existence", () => {
-    // Free text that is not even in the postmortem table's own id shape (`^PM-[0-9]{4}-[0-9]{4,8}$`):
-    // `IncidentRecordSchema.postmortemId` is `z.string().min(1)`, so a close can cite a record
-    // nobody wrote. Pinned so wiring a close route before `PostgresPostmortemStore` has a caller is
-    // visibly the falsely-true direction rather than a quiet one.
+  it("refuses a postmortem id outside the postmortem table's own shape, and checks shape not existence", () => {
+    // Rewritten, not deleted (ADR-0372): this test pinned `"anything"` as accepted, which was the
+    // defect — `IncidentRecordSchema.postmortemId` was `z.string().min(1)` while the postmortem
+    // table's id is `^PM-[0-9]{4}-[0-9]{4,8}$`. The contract shares that regex now (ADR-0483).
     const ex = new IncidentExecutor({ clock: new FixedClock(new Date(T0)) });
+    expect(() =>
+      ex.attachPostmortem(declaredIncident(), { postmortemId: "anything", actorUserId: ACTOR, at: AFTER }),
+    ).toThrow();
+    // A well-shaped id that names no stored postmortem is still accepted: existence is a store
+    // question, so wiring a close route before `PostgresPostmortemStore` has a caller still needs
+    // its own check.
     const attached = ex.attachPostmortem(declaredIncident(), {
-      postmortemId: "anything",
+      postmortemId: "PM-2026-0001",
       actorUserId: ACTOR,
       at: AFTER,
     });
-    expect(attached.postmortemId).toBe("anything");
+    expect(attached.postmortemId).toBe("PM-2026-0001");
   });
 });
 

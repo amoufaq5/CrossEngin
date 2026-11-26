@@ -9,6 +9,7 @@ import { REQUIRED_JWT_CLAIMS } from "@crossengin/api-gateway-runtime";
 import { REGIONS } from "@crossengin/residency";
 import { PackCompatibilitySchema, PackPublisherRegistry, parsePackPublisherSpec } from "@crossengin/marketplace";
 import {
+  DEFAULT_DEADLINE_WARNING_DAYS,
   DEFAULT_DELETION_GRACE_DAYS,
   DELETION_SUBSYSTEMS,
   SUBSYSTEM_DISPOSITIONS,
@@ -24,6 +25,7 @@ import {
 } from "@crossengin/types/meta-schema";
 
 import { COLUMN_ENCRYPTION_SECRET_VAR } from "./column-encryption.js";
+import { DEFAULT_DEADLINE_DAYS } from "./deletion-request-routes.js";
 import {
   httpListenerSettingForFlag,
   parseHttpListenerSetting,
@@ -2758,6 +2760,16 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     throw new CliUsageError("--jwt-issuer and --jwt-audience are required when a JWKS is configured");
   }
 
+  // ADR-0479. Silently inert is worse than absent: with no JWKS no foreign token is verified, so
+  // there is no IdP scope for the flag to let through, and an operator who passed it believes an
+  // IdP's platform roles are honoured.
+  if (idpPlatformRoles && jwksKeys.length === 0 && jwksFile === null && jwksUrl === null) {
+    throw new CliUsageError(
+      "--idp-platform-roles requires a JWKS (--jwks-key, --jwks-file or --jwks-url): with none, no" +
+        " foreign token is verified, so there is no IdP scope for it to let through",
+    );
+  }
+
   if (jwtOptionalClaims.length > 0) {
     // Refused for an unknown name rather than ignored, because the flag's whole effect is to
     // *remove* a check: a typo would be read as "relaxed nothing", which is the safe answer by
@@ -2820,6 +2832,20 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       if (value !== null) {
         throw new CliUsageError(`${flag} requires --credential-login`);
       }
+    }
+  }
+
+  // ADR-0477: a warning horizon at or past the deadline window makes every pending request read
+  // `approaching` from the moment it is submitted, so the sweep's warning says nothing.
+  {
+    const warning = deletionWarningDays ?? DEFAULT_DEADLINE_WARNING_DAYS;
+    const deadline = deletionRequestDeadlineDays ?? DEFAULT_DEADLINE_DAYS;
+    if (warning >= deadline - 1) {
+      throw new CliUsageError(
+        `--deletion-warning-days (${warning.toString()}) must be less than ` +
+          `--deletion-request-deadline-days (${deadline.toString()}) minus 1, or every request ` +
+          "reads approaching from submission",
+      );
     }
   }
 
@@ -3557,6 +3583,11 @@ Options:
   --jwks-refresh-ms <n> Background JWKS refresh interval (with --jwks-url; >=1000)
   --jwt-issuer <iss>   Expected JWT issuer (required with a JWKS)
   --jwt-audience <aud> Expected JWT audience (required with a JWKS)
+  --jwt-optional-claim <claim>
+                       Accept a bearer token that OMITS this claim (repeatable; one of
+                       ${REQUIRED_JWT_CLAIMS.join(", ")}). Every one is required by default, and a
+                       present-but-unusable value is refused either way. The boot line
+                       names what each relaxation costs. Needs --credential-login or a JWKS
   --credential-login   Mount POST /v1/auth/token, which turns a password into a session
                        token the gateway's own JWKS stage verifies. Needs a Postgres
                        store, --jwt-issuer, --jwt-audience, and ${CREDENTIAL_PEPPER_VAR}
@@ -4268,7 +4299,7 @@ Scope (exactly one, no default):
   --all-tenants        Every active tenant from meta.tenants, one pass each, plus the platform
   --platform           The platform (null-tenant) scope only
 
-Subsystems (repeatable; default is every subsystem the chosen scope can serve):
+Subsystems (repeatable; default is every wired subsystem the chosen scope can serve — an explicit --subsystem runs as asked):
   dr, slo, access_reviews, gateway, incidents, workflow
 
   Not every subsystem can serve every scope, and this is read off the catalog rather than chosen:

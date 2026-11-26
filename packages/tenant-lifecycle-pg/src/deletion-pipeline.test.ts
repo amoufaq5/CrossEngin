@@ -20,6 +20,7 @@ import {
   type BootSchemaDeletionInput,
   type SchemaEraserWithin,
 } from "./deletion-pipeline.js";
+import { deletionRefusalDisposition } from "./deletion-retry.js";
 import { PostgresLifecycleEventStore } from "./lifecycle-event-store.js";
 import {
   RETAINED_SHARED_TABLES,
@@ -532,22 +533,26 @@ describe("deleteTenantAtomically", () => {
     expect(out.erasedSharedTables.rowCount).toBe(9);
   });
 
-  it("refuses when another required subsystem did not attest, and destroys nothing", async () => {
+  it("refuses an unattested required subsystem before the transaction opens (ADR-0477)", async () => {
+    // A **behaviour change**: this was `assemble/subsystem_unattested`, raised after both erasures
+    // as a throw, so the shared rows were deleted and rolled back and the request rejected — for a
+    // fact the capability declaration and the attestation list settle before anything opens.
     const h = harness({}, { sharedRows: SHARED_ROWS });
-    const err = await deleteTenantAtomically(
+    const out = await deleteTenantAtomically(
       h.conn,
       h.store,
       h.erase,
       inputOf({ capabilities: { ...CAPABILITIES, object_storage: "erases", backups: "erases" } }),
-    ).catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(DeletionPipelineAborted);
-    const refusals = (err as DeletionPipelineAborted).refusals;
-    expect(refusals.every((r) => r.stage === "assemble")).toBe(true);
-    expect(refusals.map((r) => r.reason)).toContain("subsystem_unattested");
-    // Destruction happened inside the transaction and must be undone: committing it would leave
-    // destroyed data with no record of its destruction.
-    expect(h.sql()).toContain("ROLLBACK");
-    expect(h.sql().some((s) => s === "COMMIT")).toBe(false);
+    );
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.refusals.map((r) => `${r.stage}/${r.reason}`)).toEqual([
+      "input/declared_subsystem_unattested",
+    ]);
+    expect(out.refusals[0]?.detail).toContain("object_storage, backups");
+    // Nothing at all reached the connection: no BEGIN, so no DELETE.
+    expect(h.sql()).toEqual([]);
+    expect(deletionRefusalDisposition(out.refusals)).toBe("retry");
   });
 
   it("accepts another subsystem that attested it found nothing", async () => {
@@ -782,8 +787,113 @@ describe("deleteTenantAtomically", () => {
     expect(out.erasedSharedTables.statutoryRetained).toBeNull();
   });
 
-  it("declares its four stages", () => {
-    expect([...PIPELINE_REFUSAL_STAGES]).toEqual(["input", "erase", "assemble", "store"]);
+  it("returns connect/owner_connection_unavailable when the transaction never opens (ADR-0477)", async () => {
+    // What `pool.connect()` does with a wrong password: it rejects before `BEGIN`, so the callback
+    // never runs. Before, that escaped as an unknown throw and the runner stranded the request.
+    const h = harness({}, { sharedRows: SHARED_ROWS });
+    const failing: PgConnection = {
+      ...h.conn,
+      transaction: (async () => {
+        throw Object.assign(new Error('password authentication failed for user "crossengin_eraser"'), {
+          code: "28P01",
+        });
+      }) as PgConnection["transaction"],
+    };
+    const out = await deleteTenantAtomically(failing, h.store, h.erase, inputOf());
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.refusals.map((r) => `${r.stage}/${r.reason}`)).toEqual([
+      "connect/owner_connection_unavailable",
+    ]);
+    // The SQLSTATE and never the message, which names the role.
+    expect(out.refusals[0]?.detail).toContain("SQLSTATE 28P01");
+    expect(out.refusals[0]?.detail).not.toContain("crossengin_eraser");
+    expect(deletionRefusalDisposition(out.refusals)).toBe("retry");
+  });
+
+  it("re-raises a throw once the transaction has opened, which proves nothing about destruction", async () => {
+    const h = harness({}, { sharedRows: SHARED_ROWS, eraseThrows: true });
+    const err = await deleteTenantAtomically(h.conn, h.store, h.erase, inputOf()).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(DeletionPipelineAborted);
+    expect((err as Error).message).toBe("drop exploded");
+  });
+
+  it("asks the preflight before the first DELETE and returns its refusal having deleted nothing (ADR-0477)", async () => {
+    const h = harness({}, { sharedRows: SHARED_ROWS });
+    const asked: string[] = [];
+    const out = await deleteTenantAtomically(
+      h.conn,
+      h.store,
+      h.erase,
+      inputOf({
+        preflight: async (tx, tenantId) => {
+          asked.push(tenantId);
+          await tx.query("-- preflight probe");
+          return [{ reason: "schema_not_droppable", detail: "role cannot drop t_abc" }];
+        },
+      }),
+    );
+    expect(asked).toEqual([TENANT]);
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.refusals).toEqual([
+      { stage: "preflight", reason: "schema_not_droppable", detail: "role cannot drop t_abc" },
+    ]);
+    // The recorded statements are the whole proof: the preflight ran, and no DELETE and no DROP
+    // followed it. Mutation-checked: moving the preflight below the shared erasure fails here.
+    const order = h.sql();
+    expect(order).toContain("-- preflight probe");
+    expect(order.some((s) => s.startsWith("WITH deleted AS (DELETE FROM"))).toBe(false);
+    expect(order.some((s) => s.startsWith("DROP SCHEMA"))).toBe(false);
+    expect(order.some((s) => s.includes("row_security_active"))).toBe(false);
+    expect(deletionRefusalDisposition(out.refusals)).toBe("retry");
+  });
+
+  it("converts a preflight throw into a proven rollback, never a stranded unknown", async () => {
+    const h = harness({}, { sharedRows: SHARED_ROWS });
+    const err = await deleteTenantAtomically(
+      h.conn,
+      h.store,
+      h.erase,
+      inputOf({
+        preflight: async () => {
+          throw Object.assign(new Error('permission denied for schema "t_abc"'), { code: "42501" });
+        },
+      }),
+    ).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DeletionPipelineAborted);
+    const refusals = (err as DeletionPipelineAborted).refusals;
+    expect(refusals.map((r) => `${r.stage}/${r.reason}`)).toEqual(["preflight/preflight_failed"]);
+    expect(refusals[0]?.detail).toContain("SQLSTATE 42501");
+    expect(refusals[0]?.detail).not.toContain("t_abc");
+    expect(h.sql()).toContain("ROLLBACK");
+    expect(h.sql().some((s) => s.startsWith("WITH deleted AS (DELETE FROM"))).toBe(false);
+    expect(deletionRefusalDisposition(refusals)).toBe("retry");
+  });
+
+  it("goes on to erase when the preflight answers nothing", async () => {
+    const h = harness({}, { sharedRows: SHARED_ROWS });
+    const out = await deleteTenantAtomically(
+      h.conn,
+      h.store,
+      h.erase,
+      inputOf({ preflight: async () => [] }),
+    );
+    expect(out.ok).toBe(true);
+  });
+
+  it("declares its six stages, the two new ones both before the first destructive statement", () => {
+    expect([...PIPELINE_REFUSAL_STAGES]).toEqual([
+      "input",
+      "connect",
+      "preflight",
+      "erase",
+      "assemble",
+      "store",
+    ]);
   });
 });
 

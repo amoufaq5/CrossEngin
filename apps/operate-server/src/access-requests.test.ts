@@ -516,6 +516,10 @@ function harness(opts: {
   declared?: readonly string[];
   shed?: boolean;
   chartThrows?: unknown;
+  /** What the in-transaction lock reads, by the database's clock; default the request, live. */
+  locked?: { status: string; live: boolean } | null;
+  /** The attached user's status under `FOR SHARE`; default the `existing` status. */
+  lockedUserStatus?: string | null;
 } = {}): Harness {
   const h: Harness = {
     events: [],
@@ -543,6 +547,12 @@ function harness(opts: {
       get: async () => (opts.request === undefined ? record() : opts.request),
       list: async () => ({ data: [record()], nextCursor: null }),
       counts: async () => ({ pending: 1, approved: 0, rejected: 0, total: 1 }),
+      lockPendingWithin: async () => {
+        h.acts.push("lockRequest");
+        if (opts.locked !== undefined) return opts.locked;
+        const r = opts.request === undefined ? record() : opts.request;
+        return r === null ? null : { status: r.status, live: true };
+      },
       markApprovedWithin: async () => {
         h.acts.push("markApproved");
         return opts.markLands ?? true;
@@ -572,6 +582,11 @@ function harness(opts: {
         opts.existing === undefined || opts.existing === null
           ? null
           : ({ ...opts.existing } as unknown as Awaited<ReturnType<AccessRequestRoutesContext["users"]["getByEmail"]>>),
+      lockUserWithin: async () => {
+        h.acts.push("lockUser");
+        if (opts.lockedUserStatus !== undefined) return opts.lockedUserStatus;
+        return opts.existing?.status ?? null;
+      },
       provisionWithin: async (_tx, input, membership) => {
         h.acts.push(`provision:${input.email}`);
         return {
@@ -785,6 +800,7 @@ describe("approve", () => {
     expect(out.headers?.["cache-control"]).toBe("no-store");
     expect(h.acts).toEqual([
       "tenant",
+      "lockRequest",
       // Set by the approval itself before anything RLS-confined is written.
       `context:${TENANT}`,
       "recordCreation",
@@ -845,6 +861,139 @@ describe("approve", () => {
       password: PASSWORD,
     });
     expect(expired.body).toEqual({ error: "expired" });
+  });
+
+  describe("concurrent approvals (ADR-0479)", () => {
+    /** A transaction that answers only the tenant-context statement, as the harness's own does. */
+    const TX_PLACEHOLDER = {
+      query: async (sql: string) => {
+        if (/set_config\('app\.current_tenant_id'/.test(sql)) return { rows: [], rowCount: 0 };
+        throw new Error(`unexpected SQL on the approval transaction: ${sql}`);
+      },
+    } as unknown as PgConnection;
+
+    it("locks the request row first in the transaction, before any write", async () => {
+      const h = harness();
+      const out = await approve(h, { password: PASSWORD });
+      expect(out.status).toBe(201);
+      // `tenant` is the INSERT `create` performs before its callback; inside the callback the lock
+      // precedes the context, the creation record and every other write.
+      expect(h.acts.slice(0, 3)).toEqual(["tenant", "lockRequest", `context:${TENANT}`]);
+    });
+
+    it("rolls back and 409s not_pending when the lock finds the request already decided", async () => {
+      const h = harness({ locked: { status: "approved", live: true } });
+      const out = await approve(h, { password: PASSWORD });
+      expect(out.status).toBe(409);
+      expect(out.body).toEqual({ error: "not_pending" });
+      expect(h.committed).toBe(false);
+      expect(h.acts).not.toContain("markApproved");
+      expect(h.acts).not.toContain("recordCreation");
+    });
+
+    it("409s expired when the database's clock says lapsed though the server's did not", async () => {
+      const h = harness({ locked: { status: "pending", live: false } });
+      const out = await approve(h, { password: PASSWORD });
+      expect(out.body).toEqual({ error: "expired" });
+      expect(h.committed).toBe(false);
+    });
+
+    it("maps a duplicate-tenant loser to not_pending when the row is no longer pending", async () => {
+      // The same-slug race: the loser's tenant INSERT waits on the winner's unique index and fails
+      // before it ever reaches its lock. Re-reading the row is what turns the collision into the
+      // decision it really is.
+      const decided = record({ status: "approved", decidedAt: AT, decidedBy: OPERATOR });
+      let reads = 0;
+      const h = harness({ createThrows: new DuplicateTenantError("acme") });
+      const ctx = {
+        ...h.ctx,
+        store: { ...h.ctx.store, get: async () => (reads++ === 0 ? record() : decided) },
+      };
+      const out = await approve({ ...h, ctx }, { password: PASSWORD });
+      expect(out.status).toBe(409);
+      expect(out.body).toEqual({ error: "not_pending" });
+    });
+
+    it("409s user_not_active and rolls back when the attached user was retired before the lock", async () => {
+      const h = harness({
+        existing: { id: USER, email: "ada@acme.test", status: "active" },
+        lockedUserStatus: "suspended",
+      });
+      const out = await approve(h, { attachExistingUser: true, confirmedExistingOwner: true });
+      expect(out.status).toBe(409);
+      expect(out.body).toMatchObject({ error: "user_not_active", existingUser: { id: USER, status: "suspended" } });
+      expect(h.committed).toBe(false);
+      expect(h.acts).not.toContain(`grant:${USER}`);
+    });
+
+    it("answers the collision's own code, not an unclassified throw, when the re-read itself fails", async () => {
+      let reads = 0;
+      const h = harness({ createThrows: new DuplicateTenantError("acme") });
+      const ctx = {
+        ...h.ctx,
+        store: {
+          ...h.ctx.store,
+          get: async () => {
+            if (reads++ === 0) return record();
+            throw new Error("connection reset");
+          },
+        },
+      };
+      const out = await approve({ ...h, ctx }, { password: PASSWORD });
+      expect(out.status).toBe(409);
+      expect(out.body).toMatchObject({ error: "tenant_exists" });
+    });
+
+    it("keeps tenant_exists when the collision is with some other tenant and the request is still pending", async () => {
+      const h = harness({ createThrows: new DuplicateTenantError("acme") });
+      const out = await approve(h, { password: PASSWORD });
+      expect(out.body).toMatchObject({ error: "tenant_exists" });
+    });
+
+    it("serialises two approvals on the row: exactly one 201 and one 409 not_pending", async () => {
+      // A fake that models the lock: `lockPendingWithin` waits for the row, then reads the newest
+      // committed status (READ COMMITTED's re-check after the lock). This pins the outcome and NOT
+      // the lock: `markApprovedWithin`'s row guard alone also yields 201 + 409 here, which is what
+      // the ADR measured. The lock is fenced by "rolls back and 409s not_pending when the lock finds
+      // the request already decided" above, which fails when the lock's check is removed.
+      const row = { status: "pending" };
+      let held: Promise<void> = Promise.resolve();
+      const both = [harness(), harness()].map((h) => {
+        let release: () => void = () => undefined;
+        const ctx: AccessRequestRoutesContext = {
+          ...h.ctx,
+          tenants: {
+            create: async (input, within) => {
+              const t = tenantRecord(input.slug);
+              try {
+                await within?.(TX_PLACEHOLDER, t);
+              } finally {
+                release();
+              }
+              return t;
+            },
+          },
+          store: {
+            ...h.ctx.store,
+            lockPendingWithin: async () => {
+              const prior = held;
+              held = new Promise<void>((r) => (release = r));
+              await prior;
+              return { status: row.status, live: true };
+            },
+            markApprovedWithin: async () => {
+              if (row.status !== "pending") return false;
+              row.status = "approved";
+              return true;
+            },
+          },
+        };
+        return approve({ ...h, ctx }, { password: PASSWORD });
+      });
+      const outs = await Promise.all(both);
+      expect(outs.map((o) => o.status).sort()).toEqual([201, 409]);
+      expect(outs.find((o) => o.status === 409)?.body).toEqual({ error: "not_pending" });
+    });
   });
 
   it("needs a slug, refuses a reserved one, and refuses an undeclared role", async () => {

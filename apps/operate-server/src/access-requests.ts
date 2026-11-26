@@ -422,6 +422,26 @@ export class PostgresAccessRequestStore {
   }
 
   /**
+   * Locks one request row inside the approval's transaction and answers what it holds **now**, by the
+   * database's clock (ADR-0479). `FOR UPDATE` under READ COMMITTED re-reads the newest committed
+   * version once the lock is granted, so a second approval that waited on the first sees the first's
+   * decision rather than the `pending` it read before either began, and `expires_at > now()` is the
+   * same clock `markApprovedWithin`'s guard uses — the server's clock and the database's cannot
+   * disagree about whether the request is live. `null` is no row.
+   */
+  async lockPendingWithin(
+    tx: PgConnection,
+    id: string,
+  ): Promise<{ readonly status: string; readonly live: boolean } | null> {
+    const result = await tx.query<{ readonly status: unknown; readonly live: unknown }>(
+      `SELECT status, expires_at > now() AS live FROM ${this.table} WHERE id = $1::uuid FOR UPDATE`,
+      [id],
+    );
+    const row = result.rows[0];
+    return row === undefined ? null : { status: String(row.status), live: row.live === true };
+  }
+
+  /**
    * Marks a request approved inside the approval's own transaction. The guard is the row itself
    * (ADR-0321): a concurrent decision, or an expiry, wins it and this answers `false`, which the
    * caller turns into a rollback of the whole onboarding.
@@ -726,10 +746,13 @@ export type AccessRequestOrigin = NonNullable<TenantCreationEvent["origin"]>;
 export interface AccessRequestRoutesContext {
   readonly store: Pick<
     PostgresAccessRequestStore,
-    "get" | "list" | "counts" | "markApprovedWithin" | "reject" | "rejectAllPending"
+    "get" | "list" | "counts" | "lockPendingWithin" | "markApprovedWithin" | "reject" | "rejectAllPending"
   >;
   readonly tenants: Pick<PostgresTenantStore, "create">;
-  readonly users: Pick<PostgresUserStore, "getByEmail" | "provisionWithin" | "grantMembershipWithin">;
+  readonly users: Pick<
+    PostgresUserStore,
+    "getByEmail" | "lockUserWithin" | "provisionWithin" | "grantMembershipWithin"
+  >;
   readonly credentials: Pick<PostgresCredentialStore, "setCredentialWithin">;
   readonly settings: Pick<PostgresSettingsStore, "putWithin">;
   readonly principalRoles: (principal: ResolvedPrincipal | null) => PrincipalRoles;
@@ -1010,6 +1033,22 @@ class ApprovalLost extends Error {
   }
 }
 
+/** The request lapsed by the database's clock between the precheck and the lock (ADR-0479). */
+class ApprovalExpired extends Error {
+  constructor() {
+    super("the access request expired before it could be approved");
+    this.name = "ApprovalExpired";
+  }
+}
+
+/** The existing user an approval attaches stopped being active before the lock (ADR-0479). */
+class ApprovalUserChanged extends Error {
+  constructor(readonly status: string | null) {
+    super("the existing user this approval attaches changed while it was being approved");
+    this.name = "ApprovalUserChanged";
+  }
+}
+
 /** The creation record could not be written, so nothing is created (ADR-0313). */
 class ApprovalUnrecordable extends Error {
   constructor(readonly underlying: unknown) {
@@ -1092,6 +1131,9 @@ function buildApproveHandler(ctx: AccessRequestRoutesContext): Handler {
     if (request === null) return json(404, { error: "access_request_not_found" });
     if (request.status !== "pending") return json(409, { error: "not_pending", status: request.status });
     const now = (ctx.clock ?? ((): Date => new Date()))();
+    // An early refusal only: it saves a tenant INSERT for a request plainly lapsed. The decision is
+    // made inside the transaction by the database's clock (`lockPendingWithin`), so a request this
+    // clock calls live and the database calls lapsed is still refused `expired` (ADR-0479).
     if (Date.parse(request.expiresAt) <= now.getTime()) return json(409, { error: "expired" });
 
     // 3. Effective values: the operator's edits win over what the customer asked for.
@@ -1258,6 +1300,19 @@ function buildApproveHandler(ctx: AccessRequestRoutesContext): Handler {
     let tenant: TenantRecord;
     try {
       tenant = await ctx.tenants.create(tenantInput, async (tx, created) => {
+        // ADR-0479: the request row is locked and re-read first, so two concurrent approvals are
+        // serialised on it and the loser decides from what the winner committed, by the database's
+        // clock. (The tenant INSERT before this callback can still meet a concurrent same-slug
+        // INSERT first; that loser is mapped back to `not_pending` below by re-reading the row.)
+        const locked = await ctx.store.lockPendingWithin(tx, request.id);
+        if (locked === null || locked.status !== "pending") throw new ApprovalLost();
+        if (!locked.live) throw new ApprovalExpired();
+        if (existing !== null) {
+          // FOR SHARE: the user being attached must still be active when the membership lands, and
+          // must stay so until this transaction commits.
+          const status = await ctx.users.lockUserWithin(tx, existing.id);
+          if (status !== "active") throw new ApprovalUserChanged(status);
+        }
         await setTenantContextWithin(tx, created.id);
         try {
           await ctx.recordCreation(tx, { tenant: created, principalId: principal.principalId, at, origin });
@@ -1306,6 +1361,36 @@ function buildApproveHandler(ctx: AccessRequestRoutesContext): Handler {
       }
       if (err instanceof ApprovalLost) {
         return recordRefusal(ctx, recorded, "not_pending", json(409, { error: "not_pending" }));
+      }
+      if (err instanceof ApprovalExpired) {
+        return recordRefusal(ctx, recorded, "expired", json(409, { error: "expired" }));
+      }
+      if (err instanceof ApprovalUserChanged) {
+        return recordRefusal(
+          ctx,
+          recorded,
+          "user_not_active",
+          json(409, { error: "user_not_active", existingUser: { id: existing?.id ?? null, status: err.status } }),
+        );
+      }
+      // A concurrent approval of the same request that won the tenant (or user) INSERT before this
+      // one reached its lock surfaces here as a duplicate, not as a lost decision. Re-read the row:
+      // if it is no longer pending, the honest answer is the decision, not the collision.
+      if (
+        err instanceof DuplicateTenantError ||
+        err instanceof DuplicateUserError ||
+        err instanceof DuplicateMembershipError
+      ) {
+        // A failed re-read falls through to the collision's own code rather than escaping as an
+        // unclassified 500: the transaction has rolled back either way, so nothing was created and
+        // the 409 below is still true of this attempt, only less specific about why.
+        const now = await ctx.store.get(request.id).catch((reread: unknown) => {
+          console.error("[access-request] could not re-read the request after a duplicate:", reread);
+          return undefined;
+        });
+        if (now === null || (now !== undefined && now.status !== "pending")) {
+          return recordRefusal(ctx, recorded, "not_pending", json(409, { error: "not_pending" }));
+        }
       }
       if (err instanceof DuplicateTenantError) {
         return recordRefusal(ctx, recorded, "tenant_exists", json(409, { error: "tenant_exists", slug }));
