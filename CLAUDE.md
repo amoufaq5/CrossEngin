@@ -22,11 +22,11 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 147 meta-schema tables, 24,985 tests**, all green, no
+**87 packages + 3 apps, 147 meta-schema tables, 25,347 tests**, all green, no
 type errors — and since ADR-0382 that is **checked by CI and a pre-commit hook** rather than only
 when someone runs the sweep by hand. The test figure moves every increment, so re-derive it from a
-sweep rather than quoting this line: `pnpm -r test` and sum the `Tests N passed` lines (88 packages
-report; `apps/operate-web` has none).
+sweep rather than quoting this line: `pnpm -r test` and sum the `Tests N passed` lines (all 89 members
+report, `apps/operate-web` included since ADR-0478).
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
 - **Phase 3** (ADR-0077, P1–P8: serving app → distributed workers → web renderer
@@ -16264,7 +16264,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 470 records; 391 Accepted, 79 Proposed (the
+title or status change cannot drift. 478 records; 399 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

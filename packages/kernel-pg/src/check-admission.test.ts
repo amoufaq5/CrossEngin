@@ -257,7 +257,8 @@ describe("declaredAdmissionChecks over the real catalog", () => {
     const unclassified = all.filter((d) => d.shape === "unclassified");
     const instantRanges = unclassified.filter((d) => d.expression === instantRangeCheck(d.column));
     // 37 from ADR-0402, plus ADR-0464's four on `meta.access_requests`, plus ADR-0481's two on
-    // `meta.audit_integrity_verdicts` (`verified_at`, `created_at`).
+    // `meta.audit_integrity_verdicts` (`verified_at`, `created_at`), plus ADR-0477's nine on
+    // `meta.gdpr_deletion_requests`.
     expect(instantRanges.length).toBe(52);
     // ADR-0464's six text-length bounds use the catalog's `char_length(x) BETWEEN …` idiom, which
     // this taxonomy leaves unclassified like the nine siblings already in the tail. Named rather
@@ -276,8 +277,25 @@ describe("declaredAdmissionChecks over the real catalog", () => {
       "message",
       "terms_version",
     ]);
+    // ADR-0477's four non-empty-text checks on `meta.gdpr_deletion_requests`, named for the same
+    // reason.
+    const deletionRequestLengths = unclassified.filter(
+      (d) =>
+        d.table === "meta.gdpr_deletion_requests" &&
+        d.expression === `char_length(${d.column}) >= 1`,
+    );
+    expect(deletionRequestLengths.map((d) => d.column).sort()).toEqual([
+      "deadline_extension_reason",
+      "deferral_reason",
+      "last_attempt_refusal",
+      "rejected_reason",
+      "verified_by",
+    ]);
     expect(
-      unclassified.length - instantRanges.length - accessRequestLengths.length,
+      unclassified.length -
+        instantRanges.length -
+        accessRequestLengths.length -
+        deletionRequestLengths.length,
     ).toBeLessThan(25);
   });
 
